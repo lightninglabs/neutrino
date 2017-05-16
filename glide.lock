@@ -1,0 +1,101 @@
+hash: b7e337c4fe1bd91e10d51e936e9be5e10be39d5687aafdf0e47c83bd33f001c3
+updated: 2017-01-11T20:24:15.024651319-05:00
+imports:
+- name: github.com/boltdb/bolt
+  version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
+- name: github.com/btcsuite/btcd
+  version: a84dbfc7b767914025c0f172fc29eb79f1f21aaf
+  repo: ssh://git@github.com/companyzero/btcdln
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - chaincfg/chainhash
+  - database
+  - txscript
+  - wire
+- name: github.com/btcsuite/btclog
+  version: 73889fb79bd687870312b6e40effcecffbd57d30
+- name: github.com/btcsuite/btcrpcclient
+  version: e15bd09b466511d8836c4017bc4cbc2e0ff05f82
+  repo: ssh://git@github.com/companyzero/btcrpcclientln
+- name: github.com/btcsuite/btcutil
+  version: f814b35f15362b1122f55bd9034b6275552cc2f7
+  repo: ssh://git@github.com/companyzero/btcutilln
+  subpackages:
+  - base58
+  - gcs
+  - gcs/builder
+  - hdkeychain
+- name: github.com/btcsuite/btcwallet
+  version: 8af0920d616ad6ff3d31e0d548fa39265796fed4
+  repo: ssh://git@github.com/companyzero/btcwalletln
+  subpackages:
+  - waddrmgr
+  - wallet/txauthor
+  - walletdb
+  - walletdb/bdb
+- name: github.com/btcsuite/go-socks
+  version: 4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f
+  subpackages:
+  - socks
+- name: github.com/btcsuite/golangcrypto
+  version: 53f62d9b43e87a6c56975cf862af7edf33a8d0df
+  subpackages:
+  - nacl/secretbox
+  - pbkdf2
+  - poly1305
+  - ripemd160
+  - salsa20/salsa
+  - scrypt
+  - ssh/terminal
+- name: github.com/btcsuite/seelog
+  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
+- name: github.com/aakselrod/btctestlog
+  version: 0d2cd69a47eb61cfb6386d4a960af491152fd53d
+- name: github.com/btcsuite/websocket
+  version: 31079b6807923eb23992c421b114992b95131b55
+- name: github.com/golang/protobuf
+  version: 8ee79997227bf9b34611aee7946ae64735e6fd93
+  subpackages:
+  - proto
+- name: github.com/jessevdk/go-flags
+  version: 1679536dcc895411a9f5848d9a0250be7856448c
+- name: golang.org/x/net
+  version: 60c41d1de8da134c05b7b40154a9a82bf5b7edb9
+  subpackages:
+  - context
+  - http2
+  - http2/hpack
+  - idna
+  - internal/timeseries
+  - lex/httplex
+  - trace
+- name: golang.org/x/sys
+  version: d75a52659825e75fff6158388dddc6a5b04f9ba5
+  subpackages:
+  - unix
+- name: golang.org/x/text
+  version: 44f4f658a783b0cee41fe0a23b8fc91d9c120558
+  subpackages:
+  - secure/bidirule
+  - transform
+  - unicode/bidi
+  - unicode/norm
+- name: google.golang.org/grpc
+  version: b7f1379d3cbbbeb2ca3405852012e237aa05459e
+  subpackages:
+  - codes
+  - credentials
+  - grpclog
+  - internal
+  - metadata
+  - naming
+  - peer
+  - transport
+testImports:
+- name: github.com/davecgh/go-spew
+  version: 346938d642f2ec3594ed81d874461961cd0faa76
+  subpackages:
+  - spew
