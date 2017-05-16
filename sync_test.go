@@ -38,7 +38,7 @@ var (
 	// log messages from the tests themselves as well. Keep in mind some
 	// log messages may not appear in order due to use of multiple query
 	// goroutines in the tests.
-	logLevel    = btclog.TraceLvl
+	logLevel    = btclog.Off
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 	// Don't set this too high for your platform, or the tests will miss
@@ -465,6 +465,10 @@ func TestSetup(t *testing.T) {
 	if err != nil || foundTx == nil || *(foundTx.Hash()) != tx1.TxHash() {
 		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
 			tx1.TxHash(), err)
+	}
+	if foundTx.Index() != 1 {
+		t.Fatalf("Index of found transaction incorrect: want 1, got %d",
+			foundTx.Index())
 	}
 
 	// Call GetUtxo for our output in tx1 to see if it's spent.
