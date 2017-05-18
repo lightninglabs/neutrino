@@ -466,13 +466,28 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
 			tx1.TxHash(), err)
 	}
-	if foundTx.Index() != 1 {
+	// Check that we got the right transaction index.
+	blockHash, err := svc.GetBlockHashByHeight(801)
+	if err != nil {
+		t.Fatalf("Couldn't get block hash for block 801: %s", err)
+	}
+	block, err := h1.Node.GetBlock(&blockHash)
+	if err != nil {
+		t.Fatalf("Couldn't get block %s via RPC: %s", blockHash, err)
+	}
+	ourIndex := 0
+	for i, tx := range block.Transactions {
+		if tx.TxHash() == tx1.TxHash() {
+			ourIndex = i
+		}
+	}
+	if foundTx.Index() != ourIndex {
 		t.Fatalf("Index of found transaction incorrect: want 1, got %d",
 			foundTx.Index())
 	}
 
 	// Call GetUtxo for our output in tx1 to see if it's spent.
-	ourIndex := 1 << 30 // Should work on 32-bit systems
+	ourIndex = 1 << 30 // Should work on 32-bit systems
 	for i, txo := range tx1.TxOut {
 		if bytes.Equal(txo.PkScript, script1) {
 			ourIndex = i
@@ -820,7 +835,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"header synchronization.", syncTimeout)
 		}
 		if haveBest.Height > knownBestHeight {
-			return fmt.Errorf("Synchronized to the wrong chain.")
+			return fmt.Errorf("synchronized to the wrong chain")
 		}
 		time.Sleep(syncUpdate)
 		total += syncUpdate
@@ -832,7 +847,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	}
 	// Check if we're current.
 	if !svc.IsCurrent() {
-		return fmt.Errorf("ChainService doesn't see itself as current!")
+		return fmt.Errorf("the ChainService doesn't see itself as " +
+			"current")
 	}
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
