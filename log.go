@@ -1,7 +1,9 @@
 package neutrino
 
 import (
+	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btclog"
 )
@@ -29,4 +31,6 @@ func UseLogger(logger btclog.Logger) {
 	log = logger
 	blockchain.UseLogger(logger)
 	txscript.UseLogger(logger)
+	peer.UseLogger(logger)
+	addrmgr.UseLogger(logger)
 }
