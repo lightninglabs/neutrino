@@ -57,6 +57,7 @@ type forAllPeersMsg struct {
 // goroutines related to peer state.
 func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 	switch msg := querymsg.(type) {
+
 	case getConnCountMsg:
 		nconnected := int32(0)
 		state.forAllPeers(func(sp *serverPeer) {
@@ -106,6 +107,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			Permanent: msg.permanent,
 		})
 		msg.reply <- nil
+
 	case removeNodeMsg:
 		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *serverPeer) {
 			// Keep group counts ok since we remove from
@@ -118,6 +120,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		} else {
 			msg.reply <- errors.New("peer not found")
 		}
+
 	case getOutboundGroup:
 		count, ok := state.outboundGroups[msg.key]
 		if ok {
@@ -125,6 +128,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		} else {
 			msg.reply <- 0
 		}
+
 	// Request a list of the persistent (added) peers.
 	case getAddedNodesMsg:
 		// Respond with a slice of the relavent peers.
@@ -133,6 +137,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			peers = append(peers, sp)
 		}
 		msg.reply <- peers
+
 	case disconnectNodeMsg:
 		// Check outbound peers.
 		found := disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
@@ -154,6 +159,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		}
 
 		msg.reply <- errors.New("peer not found")
+
 	case forAllPeersMsg:
 		// TODO: Remove this when it's unnecessary due to wider use of
 		// queryPeers.

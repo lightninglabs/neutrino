@@ -47,6 +47,8 @@ func (s *SPVChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 
 // GetBlock replicates the RPC client's GetBlock command.
 func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
+	// TODO(roasbeef): add a block cache?
+	//  * which evication strategy? depends on use case
 	block, err := s.cs.GetBlockFromNetwork(*hash)
 	if err != nil {
 		return nil, err

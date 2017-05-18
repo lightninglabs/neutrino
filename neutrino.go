@@ -25,12 +25,13 @@ import (
 )
 
 // These are exported variables so they can be changed by users.
+//
 // TODO: Export functional options for these as much as possible so they can be
 // changed call-to-call.
 var (
-	// ConnectionRetryInterval is the base amount of time to wait in between
-	// retries when connecting to persistent peers.  It is adjusted by the
-	// number of retries such that there is a retry backoff.
+	// ConnectionRetryInterval is the base amount of time to wait in
+	// between retries when connecting to persistent peers.  It is adjusted
+	// by the number of retries such that there is a retry backoff.
 	ConnectionRetryInterval = time.Second * 5
 
 	// UserAgentName is the user agent name and is used to help identify
@@ -117,8 +118,8 @@ type cfhRequest struct {
 	stopHash chainhash.Hash
 }
 
-// serverPeer extends the peer to maintain state shared by the server and
-// the blockmanager.
+// serverPeer extends the peer to maintain state shared by the server and the
+// blockmanager.
 type serverPeer struct {
 	// The following variables must only be used atomically
 	feeFilter int64
@@ -134,14 +135,16 @@ type serverPeer struct {
 	knownAddresses map[string]struct{}
 	banScore       connmgr.DynamicBanScore
 	quit           chan struct{}
-	// The following slice of channels is used to subscribe to messages from
-	// the peer. This allows broadcast to multiple subscribers at once,
-	// allowing for multiple queries to be going to multiple peers at any
-	// one time. The mutex is for subscribe/unsubscribe functionality.
+
+	// The following map of subcribers is used to subscribe to messages
+	// from the peer. This allows broadcast to multiple subscribers at
+	// once, allowing for multiple queries to be going to multiple peers at
+	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
 	recvSubscribers map[spMsgSubscription]struct{}
 	mtxSubscribers  sync.RWMutex
+
 	// These are only necessary until the cfheaders logic is refactored as
 	// a query client.
 	requestedCFHeaders map[cfhRequest]int
@@ -220,6 +223,7 @@ func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
 // locator and stop hash to the connected peer.
 func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 	stopHash *chainhash.Hash, ext bool) error {
+
 	msg := wire.NewMsgGetCFHeaders()
 	msg.HashStop = *stopHash
 	for _, hash := range locator {
@@ -228,6 +232,7 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 			return err
 		}
 	}
+
 	msg.Extended = ext
 	sp.QueueMessage(msg, nil)
 	return nil
@@ -331,6 +336,7 @@ func (sp *serverPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
 	notFound := wire.NewMsgNotFound()
 
 	length := len(msg.InvList)
+
 	// A decaying ban score increase is applied to prevent exhausting resources
 	// with unusually large inventory queries.
 	// Requesting more than the maximum inventory vector length within a short
@@ -413,7 +419,7 @@ func (sp *serverPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 // OnReject is invoked when a peer receives a reject bitcoin message and is
 // used to notify the server about a rejected transaction.
 func (sp *serverPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
-
+	// TODO(roaseef): log?
 }
 
 // OnCFHeaders is invoked when a peer receives a cfheaders bitcoin message and
@@ -478,7 +484,9 @@ func (sp *serverPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 // the bytes received by the server.
 func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	err error) {
+
 	sp.server.AddBytesReceived(uint64(bytesRead))
+
 	// Send a message to each subscriber. Each message gets its own
 	// goroutine to prevent blocking on the mutex lock.
 	// TODO: Flood control.
@@ -782,12 +790,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.blockManager = bm
 
-	// Only setup a function to return new addresses to connect to when
-	// not running in connect-only mode.  The simulation network is always
-	// in connect-only mode since it is only intended to connect to
-	// specified peers and actively avoid advertising and connecting to
-	// discovered peers in order to prevent it from becoming a public test
-	// network.
+	// Only setup a function to return new addresses to connect to when not
+	// running in connect-only mode.  The simulation network is always in
+	// connect-only mode since it is only intended to connect to specified
+	// peers and actively avoid advertising and connecting to discovered
+	// peers in order to prevent it from becoming a public test network.
 	var newAddressFunc func() (net.Addr, error)
 	if s.chainParams.Net != chaincfg.SimNetParams.Net {
 		newAddressFunc = func() (net.Addr, error) {
@@ -1054,6 +1061,8 @@ func disconnectPeer(peerList map[int32]*serverPeer, compareFunc func(*serverPeer
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propigated to other nodes and eventually mined.
 func (s *ChainService) PublishTransaction(tx *wire.MsgTx) error {
+	// TODO(roasbeef): pipe through querying interface
+
 	/*_, err := s.rpcClient.SendRawTransaction(tx, false)
 	return err*/
 	return nil

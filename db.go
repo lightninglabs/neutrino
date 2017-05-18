@@ -65,7 +65,7 @@ func uint64ToBytes(number uint64) []byte {
 // be called by dbViewOption functions.
 type dbUpdateOption func(bucket walletdb.ReadWriteBucket) error
 
-// dbViewOption is a funciton type for the kind of data to be fetched from DB.
+// dbViewOption is a function type for the kind of data to be fetched from DB.
 // These can call each other and can be called by dbUpdateOption functions;
 // however, they cannot call dbUpdateOption functions.
 type dbViewOption func(bucket walletdb.ReadBucket) error
@@ -152,6 +152,7 @@ func putBlock(header wire.BlockHeader, height uint32) dbUpdateOption {
 
 // putFilter stores the provided filter, keyed to the block hash, in the
 // appropriate filter bucket in the database.
+// TODO(roasbeef): no longer needed as putExtFilter and putBasicFilter exist
 func (s *ChainService) putFilter(blockHash chainhash.Hash, bucketName []byte,
 	filter *gcs.Filter) error {
 	return s.dbUpdate(putFilter(blockHash, bucketName, filter))
@@ -385,6 +386,8 @@ func rollBackLastBlock(bs *waddrmgr.BlockStamp) dbUpdateOption {
 
 // GetBlockByHash retrieves the block header, filter, and filter tip, based on
 // the provided block hash, from the database.
+//
+// TODO(roasbeef): should be renamed, actually gets header
 func (s *ChainService) GetBlockByHash(blockHash chainhash.Hash) (
 	wire.BlockHeader, uint32, error) {
 	var header wire.BlockHeader
@@ -522,32 +525,36 @@ func blockLocatorFromHash(hash chainhash.Hash,
 	return func(bucket walletdb.ReadBucket) error {
 		// Append the initial hash
 		*locator = append(*locator, &hash)
-		// If hash isn't found in DB or this is the genesis block, return
-		// the locator as is
+
+		// If hash isn't found in DB or this is the genesis block,
+		// return the locator as is
 		var header wire.BlockHeader
 		var height uint32
 		err := getBlockByHash(hash, &header, &height)(bucket)
-		if (err != nil) || (height == 0) {
+		if err != nil || height == 0 {
 			return nil
 		}
 
 		decrement := uint32(1)
-		for (height > 0) && (len(*locator) < wire.MaxBlockLocatorsPerMsg) {
-			// Decrement by 1 for the first 10 blocks, then double the
-			// jump until we get to the genesis hash
+		for height > 0 && len(*locator) < wire.MaxBlockLocatorsPerMsg {
+			// Decrement by 1 for the first 10 blocks, then double
+			// the jump until we get to the genesis hash
 			if len(*locator) > 10 {
 				decrement *= 2
 			}
+
 			if decrement > height {
 				height = 0
 			} else {
 				height -= decrement
 			}
+
 			var blockHash chainhash.Hash
 			err := getBlockHashByHeight(height, &blockHash)(bucket)
 			if err != nil {
 				return nil
 			}
+
 			*locator = append(*locator, &blockHash)
 		}
 		return nil
