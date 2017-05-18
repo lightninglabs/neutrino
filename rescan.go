@@ -736,7 +736,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 	// As this is meant to fetch UTXO's, the options MUST specify at least
 	// a single outpoint.
 	if len(ro.watchOutPoints) != 1 {
-		return nil, nil, fmt.Errorf("Must pass exactly one OutPoint.")
+		return nil, nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 	watchList := [][]byte{
 		builder.OutPointToFilterEntry(ro.watchOutPoints[0]),
