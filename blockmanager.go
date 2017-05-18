@@ -768,7 +768,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					" to database: %s", err)
 				// Should we panic here?
 			}
+
 			hmsg.peer.UpdateLastBlockHeight(node.height)
+			b.progressLogger.LogBlockHeight(blockHeader, node.height)
 
 			// Finally initialize the header ->
 			// map[filterHash]*peer map for filter header
@@ -1041,8 +1043,6 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, false)
 		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, true)
 	})
-
-	b.progressLogger.LogBlockHeight(msg.Headers[len(msg.Headers)-1], finalHeight)
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
