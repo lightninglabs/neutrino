@@ -634,7 +634,11 @@ func (s *ChainService) createSPVNS() error {
 
 	spvBucket, err := tx.CreateTopLevelBucket(spvBucketName)
 	if err != nil {
-		return fmt.Errorf("failed to create main bucket: %s", err)
+		if err != walletdb.ErrBucketExists {
+			return fmt.Errorf("failed to create main bucket: %s", err)
+		}
+
+		spvBucket = tx.ReadWriteBucket(spvBucketName)
 	}
 
 	_, err = spvBucket.CreateBucketIfNotExists(blockHeaderBucketName)
