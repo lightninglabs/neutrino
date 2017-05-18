@@ -166,8 +166,8 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	bm := blockManager{
 		server:              s,
 		requestedBlocks:     make(map[chainhash.Hash]struct{}),
-		progressLogger:      newBlockProgressLogger("Processed", log),
 		peerChan:            make(chan interface{}, MaxPeers*3),
+		progressLogger:      newBlockProgressLogger("Processed", log),
 		intChan:             make(chan interface{}, 1),
 		headerList:          list.New(),
 		reorgList:           list.New(),
@@ -1042,10 +1042,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, true)
 	})
 
+	b.progressLogger.LogBlockHeight(msg.Headers[len(msg.Headers)-1], finalHeight)
+
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if !b.current() || b.server.chainParams.Net ==
-		chaincfg.SimNetParams.Net {
+	if !b.current() || b.server.chainParams.Net == chaincfg.SimNetParams.Net {
+
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
@@ -1227,6 +1229,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		"block %s: %d of %d", msg.earliestNode.header.BlockHash(),
 		numHeaders, connCount)
 	if numHeaders < connCount {
+		log.Infof("waiting for more")
 		time.Sleep(WaitForMoreCFHeaders)
 	}
 
@@ -1281,6 +1284,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 						"extended: %t", node.height,
 						len(blockMap[headerHash]),
 						msg.extended)
+
 					// Notify subscribers of a connected
 					// block.
 					// TODO: Rethink this so we're not

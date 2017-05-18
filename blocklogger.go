@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcutil"
 )
 
 // blockProgressLogger provides periodic logging for other services in order
@@ -13,7 +13,6 @@ import (
 // blocks. Ex: syncing to best chain, indexing all blocks, etc.
 type blockProgressLogger struct {
 	receivedLogBlocks int64
-	receivedLogTx     int64
 	lastBlockLogTime  time.Time
 
 	subsystemLogger btclog.Logger
@@ -36,12 +35,14 @@ func newBlockProgressLogger(progressMessage string, logger btclog.Logger) *block
 // LogBlockHeight logs a new block height as an information message to show
 // progress to the user. In order to prevent spam, it limits logging to one
 // message every 10 seconds with duration and totals included.
-func (b *blockProgressLogger) LogBlockHeight(block *btcutil.Block) {
+func (b *blockProgressLogger) LogBlockHeight(header *wire.BlockHeader, height int32) {
 	b.Lock()
 	defer b.Unlock()
 
 	b.receivedLogBlocks++
-	b.receivedLogTx += int64(len(block.MsgBlock().Transactions))
+
+	// TODO(roasbeef): have diff logger for fetching blocks to can eye ball
+	// false positive
 
 	now := time.Now()
 	duration := now.Sub(b.lastBlockLogTime)
@@ -58,16 +59,11 @@ func (b *blockProgressLogger) LogBlockHeight(block *btcutil.Block) {
 	if b.receivedLogBlocks == 1 {
 		blockStr = "block"
 	}
-	txStr := "transactions"
-	if b.receivedLogTx == 1 {
-		txStr = "transaction"
-	}
-	b.subsystemLogger.Infof("%s %d %s in the last %s (%d %s, height %d, %s)",
-		b.progressAction, b.receivedLogBlocks, blockStr, tDuration, b.receivedLogTx,
-		txStr, block.Height(), block.MsgBlock().Header.Timestamp)
+	b.subsystemLogger.Infof("%s %d %s in the last %s (height %d, %s)",
+		b.progressAction, b.receivedLogBlocks, blockStr, tDuration,
+		height, header.Timestamp)
 
 	b.receivedLogBlocks = 0
-	b.receivedLogTx = 0
 	b.lastBlockLogTime = now
 }
 
