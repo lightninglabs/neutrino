@@ -124,6 +124,7 @@ type blockManager struct {
 	started         int32
 	shutdown        int32
 	requestedBlocks map[chainhash.Hash]struct{}
+	progressLogger  *blockProgressLogger
 	syncPeer        *serverPeer
 	syncPeerMutex   sync.Mutex
 
@@ -165,6 +166,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	bm := blockManager{
 		server:              s,
 		requestedBlocks:     make(map[chainhash.Hash]struct{}),
+		progressLogger:      newBlockProgressLogger("Processed", log),
 		peerChan:            make(chan interface{}, MaxPeers*3),
 		intChan:             make(chan interface{}, 1),
 		headerList:          list.New(),
