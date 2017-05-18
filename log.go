@@ -1,6 +1,10 @@
 package neutrino
 
-import "github.com/btcsuite/btclog"
+import (
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btclog"
+)
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
@@ -23,4 +27,6 @@ func DisableLog() {
 // using btclog.
 func UseLogger(logger btclog.Logger) {
 	log = logger
+	blockchain.UseLogger(logger)
+	txscript.UseLogger(logger)
 }
