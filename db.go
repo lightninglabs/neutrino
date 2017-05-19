@@ -307,7 +307,7 @@ func getHeader(blockHash chainhash.Hash, bucketName []byte,
 	return func(bucket walletdb.ReadBucket) error {
 		headerBucket := bucket.NestedReadBucket(bucketName)
 		headerBytes := headerBucket.Get(blockHash[:])
-		if len(filterTip) == 0 {
+		if headerBytes == nil {
 			return fmt.Errorf("failed to get filter header")
 		}
 		calcFilterTip, err := chainhash.NewHash(headerBytes)
