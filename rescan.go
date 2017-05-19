@@ -630,27 +630,38 @@ func (ro *rescanOptions) notifyBlock(block *btcutil.Block) ([]*btcutil.Tx,
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
 	running    uint32
-	updateChan chan<- *updateOptions
+	updateChan chan *updateOptions
+
+	options []RescanOption
+
+	chain *ChainService
 }
 
 // NewRescan returns a rescan object that runs in another goroutine and has an
 // updateable filter. It returns the long-running rescan object, and a channel
-// which returns any error on termination of the rescan process.
-func (s *ChainService) NewRescan(options ...RescanOption) (Rescan, <-chan error) {
-	updChan := make(chan *updateOptions)
-	errChan := make(chan error)
-	rescan := Rescan{
+// which returns any error on termination of the rescan prcess.
+func (s *ChainService) NewRescan(options ...RescanOption) Rescan {
+	return Rescan{
 		running:    1,
-		updateChan: updChan,
+		options:    options,
+		updateChan: make(chan *updateOptions),
+		chain:      s,
 	}
+}
+
+// Start kicks off hte rescan goroutine, which will begin to scan the chain
+// according to the specified rescan options.
+func (r *Rescan) Start() <-chan error {
+	errChan := make(chan error)
 
 	go func() {
-		err := s.Rescan(append(options, updateChan(updChan))...)
-		atomic.StoreUint32(&rescan.running, 0)
+		rescanArgs := append(r.options, updateChan(r.updateChan))
+		err := r.chain.Rescan(rescanArgs...)
+		atomic.StoreUint32(&r.running, 0)
 		errChan <- err
 	}()
 
-	return rescan, errChan
+	return errChan
 }
 
 // updateOptions are a set of functional parameters for Update.

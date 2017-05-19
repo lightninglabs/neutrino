@@ -1220,7 +1220,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
 	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (neutrino.Rescan,
 	<-chan error) {
-	rescan, errChan := svc.NewRescan(
+	rescan := svc.NewRescan(
 		neutrino.QuitChan(quit),
 		neutrino.WatchAddrs(addr),
 		neutrino.StartBlock(startBlock),
@@ -1313,6 +1313,9 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
 				},
 			}),
 	)
+
+	errChan := rescan.Start()
+
 	return rescan, errChan
 }
 
