@@ -835,19 +835,23 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		}
 	}
 
-	// Create a connection manager.
-	if MaxPeers < TargetOutbound {
-		TargetOutbound = MaxPeers
-	}
-	cmgr, err := connmgr.New(&connmgr.Config{
+	cmgrCfg := &connmgr.Config{
 		RetryDuration:  ConnectionRetryInterval,
 		TargetOutbound: uint32(TargetOutbound),
 		Dial: func(addr net.Addr) (net.Conn, error) {
 			return net.Dial(addr.Network(), addr.String())
 		},
-		OnConnection:  s.outboundPeerConnected,
-		GetNewAddress: newAddressFunc,
-	})
+		OnConnection: s.outboundPeerConnected,
+	}
+	if len(cfg.ConnectPeers) == 0 {
+		cmgrCfg.GetNewAddress = newAddressFunc
+	}
+
+	// Create a connection manager.
+	if MaxPeers < TargetOutbound {
+		TargetOutbound = MaxPeers
+	}
+	cmgr, err := connmgr.New(cmgrCfg)
 	if err != nil {
 		return nil, err
 	}
