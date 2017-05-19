@@ -641,6 +641,15 @@ func (s *ChainService) createSPVNS() error {
 		spvBucket = tx.ReadWriteBucket(spvBucketName)
 	}
 
+	createDate := spvBucket.Get(dbCreateDateName)
+	if createDate != nil {
+		log.Info("Wallet SPV namespace already created.")
+		tx.Rollback()
+		return nil
+	}
+
+	log.Info("Creating wallet SPV namespace.")
+
 	_, err = spvBucket.CreateBucketIfNotExists(blockHeaderBucketName)
 	if err != nil {
 		return fmt.Errorf("failed to create block header bucket: %s",
@@ -670,14 +679,6 @@ func (s *ChainService) createSPVNS() error {
 		return fmt.Errorf("failed to create extended header "+
 			"bucket: %s", err)
 	}
-
-	createDate := spvBucket.Get(dbCreateDateName)
-	if createDate != nil {
-		log.Info("Wallet SPV namespace already created.")
-		return nil
-	}
-
-	log.Info("Creating wallet SPV namespace.")
 
 	basicFilter, err := builder.BuildBasicFilter(
 		s.chainParams.GenesisBlock)
