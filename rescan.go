@@ -283,9 +283,15 @@ rescanLoop:
 				if err != nil {
 					return err
 				}
-				if rewound {
-					current = false
+
+				// If we didn't need to rewind, then we'll
+				// continue our normal loop so we don't send a
+				// duplicate notification.
+				if !rewound {
+					continue rescanLoop
 				}
+
+				current = false
 
 			case header := <-blockConnected:
 				// Only deal with the next block from what we
@@ -494,6 +500,11 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 				curHeader)
 		}
 
+		// We just disconnected a block above, so we're now in rewind
+		// mode. We set this to true here so we properly send
+		// notifications even if it was just a 1 block rewind.
+		rewound = true
+
 		// Don't rewind past the last block we need to disconnect,
 		// because otherwise we connect the last known good block
 		// without ever disconnecting it.
@@ -511,7 +522,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 		curStamp.Height = int32(height)
 		curStamp.Hash = curHeader.BlockHash()
 
-		rewound = true
 	}
 
 	return rewound, nil
