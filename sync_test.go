@@ -503,14 +503,14 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't find the index of our output in transaction"+
 			" %s", tx1.TxHash())
 	}
-	txo, redeemingTx, err := svc.GetUtxo(
+	spendReport, err := svc.GetUtxo(
 		neutrino.WatchOutPoints(ourOutPoint),
 		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
 	}
-	if !bytes.Equal(txo.PkScript, script1) {
+	if !bytes.Equal(spendReport.Output.PkScript, script1) {
 		t.Fatalf("UTXO's script doesn't match expected script for %s",
 			ourOutPoint)
 	}
@@ -710,17 +710,17 @@ func TestSetup(t *testing.T) {
 	}
 
 	// Check and make sure the previous UTXO is now spent.
-	txo, redeemingTx, err = svc.GetUtxo(
+	spendReport, err = svc.GetUtxo(
 		neutrino.WatchOutPoints(ourOutPoint),
 		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
 	}
-	if redeemingTx.TxHash() != authTx1.Tx.TxHash() {
+	if spendReport.SpendingTx.TxHash() != authTx1.Tx.TxHash() {
 		t.Fatalf("Redeeming transaction doesn't match expected "+
 			"transaction: want %s, got %s", authTx1.Tx.TxHash(),
-			redeemingTx.TxHash())
+			spendReport.SpendingTx.TxHash())
 	}
 
 	// Test that we can get blocks and cfilters via P2P and decide which are

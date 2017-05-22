@@ -521,7 +521,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 		*curHeader = header
 		curStamp.Height = int32(height)
 		curStamp.Hash = curHeader.BlockHash()
-
 	}
 
 	return rewound, nil
@@ -735,6 +734,39 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 	return nil
 }
 
+// SpendReport is a struct which describes the current spentness state of a
+// particular output. In the case that an output is spent, then the spending
+// transaction and related details will be populated. Otherwise, only the
+// target unspent output in the chain will be returned.
+type SpendReport struct {
+	// SpendingTx is the transaction that spent the output that a spend
+	// report was requested for.
+	//
+	// NOTE: This field will only be populated if the target output has
+	// been spent.
+	SpendingTx *wire.MsgTx
+
+	// SpendingTxIndex is the input index of the transaction above which
+	// spends the target output.
+	//
+	// NOTE: This field will only be populated if the target output has
+	// been spent.
+	SpendingInputIndex uint32
+
+	// SpendingTxHeight is the hight of the block that included the
+	// transaction  above which spent the target output.
+	//
+	// NOTE: This field will only be populated if the target output has
+	// been spent.
+	SpendingTxHeight uint32
+
+	// Output is the raw output of the target outpoint.
+	//
+	// NOTE: This field will only be populated if the target is still
+	// unspent.
+	Output *wire.TxOut
+}
+
 // GetUtxo gets the appropriate TxOut or errors if it's spent. The option
 // WatchOutPoints (with a single outpoint) is required. StartBlock can be used
 // to give a hint about which block the transaction is in, and TxIdx can be
@@ -742,7 +774,7 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 // is 0, first normal transaction is 1, etc.).
 //
 // TODO(roasbeef): WTB utxo-commitments
-func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgTx, error) {
+func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	// Before we start we'll fetch the set of default options, and apply
 	// any user specified options in a functional manner.
 	ro := defaultRescanOptions()
@@ -757,7 +789,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 	// As this is meant to fetch UTXO's, the options MUST specify at least
 	// a single outpoint.
 	if len(ro.watchOutPoints) != 1 {
-		return nil, nil, fmt.Errorf("must pass exactly one OutPoint")
+		return nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 	watchList := [][]byte{
 		builder.OutPointToFilterEntry(ro.watchOutPoints[0]),
@@ -771,7 +803,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 		Height: int32(curHeight),
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Find our earliest possible block.
@@ -807,7 +839,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 		filter, err := s.GetCFilter(curStamp.Hash, false,
 			ro.queryOptions...)
 		if err != nil {
-			return nil, nil, fmt.Errorf("Couldn't get basic "+
+			return nil, fmt.Errorf("Couldn't get basic "+
 				"filter for block %d (%s)", curStamp.Height,
 				curStamp.Hash)
 		}
@@ -817,7 +849,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 			matched, err = filter.MatchAny(filterKey, watchList)
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		// If the regular filter didn't match, then we'll also fetch
@@ -827,7 +859,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 			filter, err = s.GetCFilter(curStamp.Hash, true,
 				ro.queryOptions...)
 			if err != nil {
-				return nil, nil, fmt.Errorf("Couldn't get "+
+				return nil, fmt.Errorf("Couldn't get "+
 					"extended filter for block %d (%s)",
 					curStamp.Height, curStamp.Hash)
 			}
@@ -844,10 +876,10 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 			block, err := s.GetBlockFromNetwork(curStamp.Hash,
 				ro.queryOptions...)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if block == nil {
-				return nil, nil, fmt.Errorf("Couldn't get "+
+				return nil, fmt.Errorf("Couldn't get "+
 					"block %d (%s)", curStamp.Height,
 					curStamp.Hash)
 			}
@@ -855,9 +887,13 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 			// If we've spent the output in this block, return an
 			// error stating that the output is spent.
 			for _, tx := range block.Transactions() {
-				for _, ti := range tx.MsgTx().TxIn {
+				for i, ti := range tx.MsgTx().TxIn {
 					if ti.PreviousOutPoint == ro.watchOutPoints[0] {
-						return nil, tx.MsgTx(), nil
+						return &SpendReport{
+							SpendingTx:         tx.MsgTx(),
+							SpendingInputIndex: uint32(i),
+							SpendingTxHeight:   uint32(curStamp.Height),
+						}, nil
 					}
 				}
 			}
@@ -867,8 +903,9 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 			for _, tx := range block.Transactions() {
 				if *(tx.Hash()) == ro.watchOutPoints[0].Hash {
 					outputs := tx.MsgTx().TxOut
-					txOut := outputs[ro.watchOutPoints[0].Index]
-					return txOut, nil, nil
+					return &SpendReport{
+						Output: outputs[ro.watchOutPoints[0].Index],
+					}, nil
 				}
 			}
 		}
@@ -876,7 +913,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 		// Otherwise, iterate backwards until we've gone too far.
 		curStamp.Height--
 		if curStamp.Height < ro.startBlock.Height {
-			return nil, nil, fmt.Errorf("Couldn't find "+
+			return nil, fmt.Errorf("Couldn't find "+
 				"transaction %s",
 				ro.watchOutPoints[0].Hash)
 		}
@@ -885,7 +922,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, *wire.MsgT
 		// backwards.
 		header, err := s.GetBlockByHeight(uint32(curStamp.Height))
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		curStamp.Hash = header.BlockHash()
 	}
