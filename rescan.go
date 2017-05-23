@@ -818,7 +818,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	if (ro.startBlock.Hash == chainhash.Hash{}) {
 		if ro.startBlock.Height == 0 {
 			ro.startBlock.Hash = *s.chainParams.GenesisHash
-		} else {
+		} else if ro.startBlock.Height < int32(curHeight) {
 			header, err := s.GetBlockByHeight(
 				uint32(ro.startBlock.Height))
 			if err == nil {
@@ -827,6 +827,9 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 				ro.startBlock.Hash = *s.chainParams.GenesisHash
 				ro.startBlock.Height = 0
 			}
+		} else {
+			ro.startBlock.Height = int32(curHeight)
+			ro.startBlock.Hash = curHeader.BlockHash()
 		}
 	}
 	log.Tracef("Starting scan for output spend from known block %d (%s) "+
