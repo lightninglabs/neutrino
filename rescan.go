@@ -387,9 +387,11 @@ rescanLoop:
 			}
 		}
 
-		// If a set of transactions is specified, then we'll also fetch
-		// the extended filter to see if anything matches as well.
-		if len(ro.watchTxIDs) > 0 {
+		// If the regular filter didn't match, and a set of
+		// transactions is specified, then we'll also fetch the
+		// extended filter to see if anything actually matches for this
+		// block.
+		if !matched && len(ro.watchTxIDs) > 0 {
 			eFilter, err = s.GetCFilter(curStamp.Hash, true)
 			if err != nil {
 				return err
