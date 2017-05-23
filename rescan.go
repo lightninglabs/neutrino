@@ -913,9 +913,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		// Otherwise, iterate backwards until we've gone too far.
 		curStamp.Height--
 		if curStamp.Height < ro.startBlock.Height {
-			return nil, fmt.Errorf("Couldn't find "+
-				"transaction %s",
-				ro.watchOutPoints[0].Hash)
+			return nil, nil
 		}
 
 		// Fetch the previous header so we can continue our walk
