@@ -249,9 +249,9 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	blockConnected := make(chan wire.BlockHeader)
 	blockDisconnected := make(chan wire.BlockHeader)
 	subscription := blockSubscription{
-		onConnectBasic: blockConnected,
-		onDisconnect:   blockDisconnected,
-		quit:           ro.quit,
+		onConnectExt: blockConnected,
+		onDisconnect: blockDisconnected,
+		quit:         ro.quit,
 	}
 
 	// Loop through blocks, one at a time. This relies on the underlying
