@@ -164,13 +164,6 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		ro.watchList = append(ro.watchList, txid[:])
 	}
 
-	// If after processing all the passed elements that would be eligible,
-	// we don't have any thing to watch, then we'll exit early.
-	if len(ro.watchList) == 0 {
-		return fmt.Errorf("Rescan must specify addresses and/or " +
-			"outpoints and/or TXIDs to watch")
-	}
-
 	// Check that we have either an end block or a quit channel.
 	if ro.endBlock != nil {
 		// If the end block hash is non-nil, then we'll query the
