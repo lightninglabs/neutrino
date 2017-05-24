@@ -714,6 +714,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	maxTimestamp := b.server.timeSource.AdjustedTime().
 		Add(maxTimeOffset)
 
+	// We'll attempt to write the entire batch of validated headers
+	// atomically in order to improve peformance.
+	headerWriteBatch := make([]*headerNode, 0, len(msg.Headers))
+
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
 	receivedCheckpoint := false
@@ -749,25 +753,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				return
 			}
 
-			// With the header validated, will store it in the
-			// database persistently.
 			node.height = prevNode.height + 1
 			finalHeight = node.height
-			err = b.server.putBlock(*blockHeader, uint32(node.height))
-			if err != nil {
-				log.Criticalf("Couldn't write block to "+
-					"database: %s", err)
-				// Should we panic here?
-			}
 
-			// We'll also record the current tip of our best known
-			// chain, and the best height that this peer knows of.
-			err = b.server.putMaxBlockHeight(uint32(node.height))
-			if err != nil {
-				log.Criticalf("Couldn't write max block height"+
-					" to database: %s", err)
-				// Should we panic here?
-			}
+			// This header checks out, so we'll add it to our write
+			// batch.
+			headerWriteBatch = append(headerWriteBatch, &node)
 
 			hmsg.peer.UpdateLastBlockHeight(node.height)
 			b.progressLogger.LogBlockHeight(blockHeader, node.height)
@@ -943,6 +934,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				// Should we panic here?
 			}
 
+			// TODO(roasbeef): should be atomic update
 			err = b.server.putBlock(*blockHeader, backHeight+1)
 			if err != nil {
 				log.Criticalf("Couldn't write block to "+
@@ -1010,6 +1002,37 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			}
 			break
 		}
+	}
+
+	log.Tracef("Writing header batch of %v block headers",
+		len(headerWriteBatch))
+
+	// With all the headers in this batch validated, we'll write them all
+	// in a single transaction such that this entire batch is atomic.
+	tx, err := b.server.db.BeginReadWriteTx()
+	if err != nil {
+		panic(fmt.Sprintf("unable to start db transaction: %v", err))
+	}
+	bucket := tx.ReadWriteBucket(spvBucketName)
+
+	// With each of these headers validated, we'll store them in the
+	// database, marking the height of each entry.
+	for _, headerNode := range headerWriteBatch {
+		err := putBlock(*headerNode.header, uint32(headerNode.height))(bucket)
+		if err != nil {
+			tx.Rollback()
+			panic(fmt.Sprintf("unable to write block header: %v", err))
+		}
+	}
+
+	// Finally also record the current tip of our best known chain.
+	err = putMaxBlockHeight(uint32(finalHeight))(bucket)
+	if err != nil {
+		tx.Rollback()
+		panic(fmt.Sprintf("unable to update max height: %v", err))
+	}
+	if err := tx.Commit(); err != nil {
+		panic(fmt.Sprintf("unable to commit write batch: %v", err))
 	}
 
 	// When this header is a checkpoint, switch to fetching the blocks for
@@ -1189,13 +1212,13 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	ready := false
 
 	headerMap := b.basicHeaders
-	writeFunc := b.server.putBasicHeader
+	writeFunc := putBasicHeader
 	readFunc := b.server.GetBasicHeader
 	lastCFHeaderHeight := &b.lastBasicCFHeaderHeight
 	pendingMsgs := &b.numBasicCFHeadersMsgs
 	if msg.extended {
 		headerMap = b.extendedHeaders
-		writeFunc = b.server.putExtHeader
+		writeFunc = putExtHeader
 		readFunc = b.server.GetExtHeader
 		lastCFHeaderHeight = &b.lastExtCFHeaderHeight
 		pendingMsgs = &b.numExtCFHeadersMsgs
@@ -1246,6 +1269,13 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		return
 	}
 
+	type headerTriple struct {
+		headerHash chainhash.Hash
+		filterHash chainhash.Hash
+		header     *wire.BlockHeader
+	}
+	var headerWriteBatch []headerTriple
+
 	// At this point, we've got all the cfheaders messages we're going to
 	// get for the range of headers described by the passed message. We now
 	// iterate through all of those headers, looking for conflicts. If we
@@ -1278,33 +1308,20 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			case 1:
 				// This will only cycle once
 				for headerHash := range blockMap {
-					writeFunc(hash, headerHash)
-					log.Tracef("Wrote header for block %d "+
+					log.Tracef("Accepted header for block %d "+
 						"with %d cfheaders messages, "+
 						"extended: %t", node.height,
 						len(blockMap[headerHash]),
 						msg.extended)
 
-					// Notify subscribers of a connected
-					// block.
-					// TODO: Rethink this so we're not
-					// interrupting block processing for
-					// notifications if the client messes
-					// up channel handling.
-					b.server.mtxSubscribers.RLock()
-					for sub := range b.server.blockSubscribers {
-						channel := sub.onConnectBasic
-						if msg.extended {
-							channel = sub.onConnectExt
-						}
-						if channel != nil {
-							select {
-							case channel <- *header:
-							case <-sub.quit:
-							}
-						}
-					}
-					b.server.mtxSubscribers.RUnlock()
+					// Add the accepted header to the current write batch.
+					headerWriteBatch = append(headerWriteBatch,
+						headerTriple{
+							headerHash: hash,
+							filterHash: headerHash,
+							header:     header,
+						})
+
 				}
 				*lastCFHeaderHeight = node.height
 			// This is when we have conflicting information from
@@ -1323,14 +1340,65 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		//b.headerList.Remove(elToRemove)
 		//b.startHeader = el
 
-		// If we've reached the end, we can return
+		// If we've reached the end, we can exit and write out batch
+		// (if any).
 		if hash == stopHash {
 			log.Tracef("Finished processing cfheaders messages up "+
 				"to height %d/hash %s, extended: %t",
 				node.height, hash, msg.extended)
-			return
+			break
 		}
 	}
+
+	log.Tracef("Writing fitler batch of %v filter headers",
+		len(headerWriteBatch))
+
+	// With all the headers in this batch validated, we'll write them all
+	// in a single transaction such that this entire batch is atomic.
+	tx, err := b.server.db.BeginReadWriteTx()
+	if err != nil {
+		tx.Rollback()
+		panic(fmt.Sprintf("unable to start db transaction: %v", err))
+	}
+	bucket := tx.ReadWriteBucket(spvBucketName)
+
+	// Writ eeach of the new headers to the database with their proper
+	// filter hash and header hash.
+	for _, headerGroup := range headerWriteBatch {
+		err := writeFunc(headerGroup.headerHash,
+			headerGroup.filterHash)(bucket)
+		if err != nil {
+			tx.Rollback()
+			panic(fmt.Sprintf("unable to write header: %v", err))
+		}
+
+	}
+
+	// With all the headers in the batch written, we'll now write
+	// everything to disk in an atomic batch.
+	if err := tx.Commit(); err != nil {
+		panic(fmt.Sprintf("unable to commit write batch: %v", err))
+	}
+
+	// Notify subscribers of a connected block.
+	go func() {
+		b.server.mtxSubscribers.RLock()
+		for _, headerGroup := range headerWriteBatch {
+			for sub := range b.server.blockSubscribers {
+				channel := sub.onConnectBasic
+				if msg.extended {
+					channel = sub.onConnectExt
+				}
+				if channel != nil {
+					select {
+					case channel <- *headerGroup.header:
+					case <-sub.quit:
+					}
+				}
+			}
+		}
+		b.server.mtxSubscribers.RUnlock()
+	}()
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
