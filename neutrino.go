@@ -563,6 +563,9 @@ type ChainService struct {
 	blockSubscribers  map[blockSubscription]struct{}
 	mtxSubscribers    sync.RWMutex
 
+	// TODO: Add a map for more granular exclusion?
+	mtxCFilter sync.Mutex
+
 	userAgentName    string
 	userAgentVersion string
 }

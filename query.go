@@ -324,6 +324,10 @@ checkResponses:
 // filter.
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 	options ...QueryOption) (*gcs.Filter, error) {
+	// Only get one CFilter at a time to avoid redundancy from mutliple
+	// rescans running at once.
+	s.mtxCFilter.Lock()
+	defer s.mtxCFilter.Unlock()
 
 	// Based on if extended is true or not, we'll set up our set of
 	// querying, and db-write functions.
