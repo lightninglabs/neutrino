@@ -203,8 +203,18 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	}
 
 	// Track our position in the chain.
-	var curHeader wire.BlockHeader
-	curStamp := *ro.startBlock
+	var (
+		curHeader wire.BlockHeader
+		curStamp  waddrmgr.BlockStamp
+	)
+	if ro.startBlock == nil {
+		bs, err := s.SyncedTo()
+		if err != nil {
+			return err
+		}
+		ro.startBlock = bs
+	}
+	curStamp = *ro.startBlock
 
 	// To find our starting block, either the start hash should be set, or
 	// the start height should be set. If neither is, then we'll be
