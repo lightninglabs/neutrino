@@ -43,8 +43,8 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string, *BlockHeaderStor
 	return cleanUp, db, tempDir, hStore, nil
 }
 
-func createTestBlockHeaderChain(numHeaders uint32) []*BlockHeader {
-	blockHeaders := make([]*BlockHeader, numHeaders)
+func createTestBlockHeaderChain(numHeaders uint32) []BlockHeader {
+	blockHeaders := make([]BlockHeader, numHeaders)
 	prevHeader := &chaincfg.SimNetParams.GenesisBlock.Header
 	for i := uint32(1); i <= numHeaders; i++ {
 		bitcoinHeader := &wire.BlockHeader{
@@ -54,7 +54,7 @@ func createTestBlockHeaderChain(numHeaders uint32) []*BlockHeader {
 			PrevBlock: prevHeader.BlockHash(),
 		}
 
-		blockHeaders[i-1] = &BlockHeader{
+		blockHeaders[i-1] = BlockHeader{
 			BlockHeader: bitcoinHeader,
 			Height:      i,
 		}
@@ -245,10 +245,10 @@ func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderSt
 	return cleanUp, db, tempDir, hStore, nil
 }
 
-func createTestFilterHeaderChain(numHeaders uint32) []*FilterHeader {
-	filterHeaders := make([]*FilterHeader, numHeaders)
+func createTestFilterHeaderChain(numHeaders uint32) []FilterHeader {
+	filterHeaders := make([]FilterHeader, numHeaders)
 	for i := uint32(1); i <= numHeaders; i++ {
-		filterHeaders[i-1] = &FilterHeader{
+		filterHeaders[i-1] = FilterHeader{
 			HeaderHash: chainhash.DoubleHashH([]byte{byte(i)}),
 			FilterHash: sha256.Sum256([]byte{byte(i)}),
 			Height:     i,

@@ -110,7 +110,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	// If the size of the file is zero, then this means that we haven't yet
 	// written the initial genesis header to disk, so we'll do so now.
 	if fileInfo.Size() == 0 {
-		genesisHeader := &BlockHeader{
+		genesisHeader := BlockHeader{
 			BlockHeader: &netParams.GenesisBlock.Header,
 			Height:      0,
 		}
@@ -194,6 +194,12 @@ func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader
 	return h.readHeader(int64(height))
 }
 
+// HeightFromHash returns the height of a particualr block header given its
+// hash.
+func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) {
+	return h.heightFromHash(hash)
+}
+
 // RollbackLastBlock rollsback both the index, and on-disk header file by a
 // _single_ header. This method is meant to be used in the case of re-org which
 // disconnects the latest block header from the end of the main chain. The
@@ -248,7 +254,7 @@ func (b *BlockHeader) toIndexEntry() headerEntry {
 
 // WriteHeaders writes a set of headers to disk and updates the index in a
 // single atomic transaction.
-func (h *BlockHeaderStore) WriteHeaders(hdrs ...*BlockHeader) error {
+func (h *BlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	// First, we'll allocate enough bytes to write all the headers. This
 	// slice will be re-used to serialize each header.
 	headerBytes := make([]byte, 0, 80)
@@ -516,7 +522,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 			)
 		}
 
-		genesisHeader := &FilterHeader{
+		genesisHeader := FilterHeader{
 			HeaderHash: *netParams.GenesisHash,
 			FilterHash: genesisFilterHash,
 			Height:     0,
@@ -609,7 +615,7 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 // WriteHeaders writes a batch of filter headers to persistent storage. The
 // headers themselves are appended to the flat file, and then the index updated
 // to reflect the new entires.
-func (f *FilterHeaderStore) WriteHeaders(hdrs ...*FilterHeader) error {
+func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	for _, header := range hdrs {
 		if err := f.appendRaw(header.FilterHash[:]); err != nil {
 			return err
