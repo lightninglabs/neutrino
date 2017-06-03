@@ -165,16 +165,21 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 // FetchHeader attempts to retrieve a block header determined by the passed
 // block height.
-func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader, error) {
+func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
 	// First, we'll query the index to obtain the block height of the
 	// passed block hash.
 	height, err := h.heightFromHash(hash)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// With the height known, we can now read the header from disk.
-	return h.readHeader(int64(height))
+	header, err := h.readHeader(int64(height))
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return header, height, nil
 }
 
 // FetchHeaderByHeight attempts to retrieve a target block header based on a

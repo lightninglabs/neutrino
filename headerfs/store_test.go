@@ -124,7 +124,7 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 		}
 
 		blockHash := header.BlockHash()
-		dbHeader, err = bhs.FetchHeader(&blockHash)
+		dbHeader, _, err = bhs.FetchHeader(&blockHash)
 		if err != nil {
 			t.Fatalf("unable to fetch header by hash: %v", err)
 		}
