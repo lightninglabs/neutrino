@@ -357,25 +357,17 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 		// First, we'll fetch the root bucket, in order to use that to
 		// fetch the bucket that houses the header index.
 		rootBucket := tx.ReadBucket(indexBucket)
-		blockHeaderIndex := rootBucket.NestedReadBucket(bitcoinBucket)
 
-		// With the header bucket retrieved, we'll now use a cursor to
-		// seek to the _last_ element. As the BlockHeaderStore has
-		// already been initialized, this should match up with the
-		// header at the tip of the header file.
-		cursor := blockHeaderIndex.ReadCursor()
-		chainTip, _ := cursor.Last()
-
-		// Next, we'll create a locator from this so we can extract the
-		// block height from this index entry.
-		var tipLoc headerLocator
-		copy(tipLoc[:], chainTip[:])
+		// With the header bucket retrieved, we'll now fetch the chain
+		// tip so we can start our backwards scan.
+		tipHash := rootBucket.Get(bitcoinTip)
+		tipHeightBytes := rootBucket.Get(tipHash)
 
 		// With the height extracted, we'll now read the _last_ block
 		// header within the file before we kick off our connectivity
 		// loop.
-		height := int64(tipLoc.height())
-		header, err := h.readHeader(height)
+		tipHeight := int64(binary.BigEndian.Uint32(tipHeightBytes))
+		header, err := h.readHeader(tipHeight)
 		if err != nil {
 			return err
 		}
@@ -385,7 +377,7 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 		// index entries are also accurate. To do this, we start from a
 		// height of one before our current tip.
 		var newHeader *wire.BlockHeader
-		for height := int64(tipLoc.height()) - 1; height > 0; height-- {
+		for height := int64(tipHeight) - 1; height > 0; height-- {
 			// First, read the block header for this block height,
 			// and also compute the block hash for it.
 			newHeader, err = h.readHeader(height)
@@ -395,31 +387,22 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 			}
 			newHeaderHash := newHeader.BlockHash()
 
-			// With the header retrieved, we'll now move back our
-			// cursor one spot so we can fetch the previous index
-			// entry which should match up with this height.
-			prevLocBytes, _ := cursor.Prev()
-			var prevLoc headerLocator
-			copy(prevLoc[:], prevLocBytes)
+			// With the header retrieved, we'll now fetch the
+			// height for this current header hash to ensure the
+			// on-disk state and the index matches up properly.
+			indexHeightBytes := rootBucket.Get(newHeaderHash[:])
+			if indexHeightBytes == nil {
+				return fmt.Errorf("index and on-disk file out of sync "+
+					"at height: %v", height)
+			}
+			indexHeight := int64(binary.BigEndian.Uint32(indexHeightBytes))
 
 			// With the index entry retrieved, we'll now assert
 			// that the height matches up with our current height
 			// in this backwards walk.
-			if int64(prevLoc.height()) != height {
+			if int64(indexHeight) != height {
 				return fmt.Errorf("index height isn't monotonically " +
 					"increasing")
-			}
-
-			// Next, we'll perform similar check and ensure that
-			// the entry for this height has a hash which is equal
-			// to the hash of this block header.
-			locHash, err := prevLoc.hash()
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(newHeaderHash[:], locHash[:]) {
-				return fmt.Errorf("index and on-disk file out of sync "+
-					"at height: %v", height)
 			}
 
 			// Finally, we'll assert that this new header is
