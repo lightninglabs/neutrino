@@ -467,10 +467,11 @@ func TestSetup(t *testing.T) {
 			tx1.TxHash(), err)
 	}
 	// Check that we got the right transaction index.
-	blockHash, err := svc.GetBlockHashByHeight(801)
+	blockHeader, err := svc.BlockHeaders.FetchHeaderByHeight(801)
 	if err != nil {
 		t.Fatalf("Couldn't get block hash for block 801: %s", err)
 	}
+	blockHash := blockHeader.BlockHash()
 	block, err := h1.Node.GetBlock(&blockHash)
 	if err != nil {
 		t.Fatalf("Couldn't get block %s via RPC: %s", blockHash, err)
@@ -871,8 +872,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Timed out after %v waiting for "+
 				"cfheaders synchronization.", syncTimeout)
 		}
-		haveBasicHeader, _ = svc.GetBasicHeader(*knownBestHash)
-		haveExtHeader, _ = svc.GetExtHeader(*knownBestHash)
+		haveBasicHeader, _ = svc.RegFilterHeaders.FetchHeader(knownBestHash)
+		haveExtHeader, _ = svc.ExtFilterHeaders.FetchHeader(knownBestHash)
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 	}
@@ -886,18 +887,18 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	// database to see if we've missed anything or messed anything
 	// up.
 	for i := int32(0); i <= haveBest.Height; i++ {
-		head, err := svc.GetBlockByHeight(uint32(i))
+		head, err := svc.BlockHeaders.FetchHeaderByHeight(uint32(i))
 		if err != nil {
 			return fmt.Errorf("Couldn't read block by "+
 				"height: %s", err)
 		}
 		hash := head.BlockHash()
-		haveBasicHeader, err = svc.GetBasicHeader(hash)
+		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(&hash)
 		if err != nil {
 			return fmt.Errorf("Couldn't get basic header "+
 				"for %d (%s) from DB", i, hash)
 		}
-		haveExtHeader, err = svc.GetExtHeader(hash)
+		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(&hash)
 		if err != nil {
 			return fmt.Errorf("Couldn't get extended "+
 				"header for %d (%s) from DB", i, hash)
@@ -1003,7 +1004,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			}()
 			defer wg.Done()
 			// Get block header from database.
-			blockHeader, err := svc.GetBlockByHeight(height)
+			blockHeader, err := svc.BlockHeaders.FetchHeaderByHeight(height)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get block "+
 					"header by height %d: %s", height, err)
@@ -1093,8 +1094,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get previous basic filter header from the database.
-			prevHeader, err := svc.GetBasicHeader(
-				blockHeader.PrevBlock)
+			prevHeader, err := svc.RegFilterHeaders.FetchHeader(
+				&blockHeader.PrevBlock)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
 					"filter header for block %d (%s) from "+
@@ -1103,7 +1104,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get current basic filter header from the database.
-			curHeader, err := svc.GetBasicHeader(blockHash)
+			curHeader, err := svc.RegFilterHeaders.FetchHeader(&blockHash)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
 					"filter header for block %d (%s) from "+
@@ -1164,8 +1165,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			}
 			// Get previous extended filter header from the
 			// database.
-			prevHeader, err = svc.GetExtHeader(
-				blockHeader.PrevBlock)
+			prevHeader, err = svc.ExtFilterHeaders.FetchHeader(
+				&blockHeader.PrevBlock)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
 					"filter header for block %d (%s) from "+
@@ -1174,7 +1175,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get current basic filter header from the database.
-			curHeader, err = svc.GetExtHeader(blockHash)
+			curHeader, err = svc.ExtFilterHeaders.FetchHeader(&blockHash)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
 					"filter header for block %d (%s) from "+
