@@ -185,9 +185,6 @@ func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 // FetchHeaderByHeight attempts to retrieve a target block header based on a
 // block height.
 func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader, error) {
-	// TODO(roasbeef): don't actually need height -> hash index in
-	// database?
-
 	// For this query, we don't need to consult the index, and can instead
 	// just seek into the flat file based on the target height and return
 	// the full header.
@@ -203,8 +200,7 @@ func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 // RollbackLastBlock rollsback both the index, and on-disk header file by a
 // _single_ header. This method is meant to be used in the case of re-org which
 // disconnects the latest block header from the end of the main chain. The
-// information about the header which has been truncated will be returned if
-// the operation is a success.
+// information about the new header tip after truncation is returned.
 func (h *BlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	// First, we'll obtain the latest height that the index knows of.
 	_, chainTipHeight, err := h.chainTip()
@@ -213,24 +209,27 @@ func (h *BlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	}
 
 	// With this height obtained, we'll use it to read the latest header
-	// from disk before we truncate the file.
-	header, err := h.readHeader(int64(chainTipHeight))
+	// from disk, so we can populate our return value which requires the
+	// prev header hash.
+	bestHeader, err := h.readHeader(int64(chainTipHeight))
 	if err != nil {
 		return nil, err
 	}
+	prevHeaderHash := bestHeader.PrevBlock
 
 	// Now that we have the information we need to return from this
-	// function, we can now truncate both the header file and the index.
+	// function, we can now truncate the header file, and then use the hash
+	// of the prevHeader to set the proper index chain tip.
 	if err := h.singleTruncate(); err != nil {
 		return nil, err
 	}
-	if err := h.truncateIndex(); err != nil {
+	if err := h.truncateIndex(&prevHeaderHash, true); err != nil {
 		return nil, err
 	}
 
 	return &waddrmgr.BlockStamp{
-		Height: int32(chainTipHeight),
-		Hash:   header.BlockHash(),
+		Height: int32(chainTipHeight) - 1,
+		Hash:   prevHeaderHash,
 	}, nil
 }
 
@@ -632,18 +631,19 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 // RollbackLastBlock rollsback both the index, and on-disk header file by a
 // _single_ filter header. This method is meant to be used in the case of
 // re-org which disconnects the latest filter header from the end of the main
-// chain. The information about the header which has been truncated will be
-// returned if the operation is a success.
-func (f *FilterHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
+// chain. The information about the latest header tip after truncation is
+// returnd.
+func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error) {
 	// First, we'll obtain the latest height that the index knows of.
 	_, chainTipHeight, err := f.chainTip()
 	if err != nil {
 		return nil, err
 	}
 
-	// With this height obtained, we'll use it to read the latest header
-	// from disk before we truncate the file.
-	header, err := f.readHeader(int64(chainTipHeight))
+	// With this height obtained, we'll use it to read what will be the new
+	// chain tip from disk.
+	newHeightTip := chainTipHeight - 1
+	newHeaderTip, err := f.readHeader(int64(newHeightTip))
 	if err != nil {
 		return nil, err
 	}
@@ -653,12 +653,13 @@ func (f *FilterHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	if err := f.singleTruncate(); err != nil {
 		return nil, err
 	}
-	if err := f.truncateIndex(); err != nil {
+	if err := f.truncateIndex(newTip, false); err != nil {
 		return nil, err
 	}
 
+	// TODO(roasbeef): return chain hash also?
 	return &waddrmgr.BlockStamp{
-		Height: int32(chainTipHeight),
-		Hash:   *header,
+		Height: int32(newHeightTip),
+		Hash:   *newHeaderTip,
 	}, nil
 }
