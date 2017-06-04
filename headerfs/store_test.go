@@ -3,6 +3,7 @@ package headerfs
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -144,11 +145,11 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to rollback chain: %v", err)
 	}
-	if lastHeader.Height != uint32(blockStamp.Height) {
+	if secondToLastHeader.Height != uint32(blockStamp.Height) {
 		t.Fatalf("chain tip doesn't match: expected %v, got %v",
-			lastHeader.Height, blockStamp.Height)
+			secondToLastHeader.Height, blockStamp.Height)
 	}
-	headerHash := lastHeader.BlockHash()
+	headerHash := secondToLastHeader.BlockHash()
 	if !bytes.Equal(headerHash[:], blockStamp.Hash[:]) {
 		t.Fatalf("header hashes don't match: expected %v, got %v",
 			headerHash, blockStamp.Hash)
@@ -190,7 +191,8 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 	// Next, in order to simulate a partial write, we'll roll back the
 	// internal index by 5 blocks.
 	for i := 0; i < 5; i++ {
-		if err := bhs.truncateIndex(); err != nil {
+		newTip := blockHeaders[len(blockHeaders)-i-1].PrevBlock
+		if err := bhs.truncateIndex(&newTip, true); err != nil {
 			t.Fatalf("unable to truncate index: %v", err)
 		}
 	}
@@ -274,6 +276,25 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 	const numHeaders = 100
 	blockHeaders := createTestFilterHeaderChain(numHeaders)
 
+	// We simulate the expected behavior of the block headers being written
+	// to disk before the filter headers are.
+	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		for _, header := range blockHeaders {
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.Height)
+			err := rootBucket.Put(header.HeaderHash[:], heightBytes[:])
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatalf("unable to pre-load block index: %v", err)
+	}
+
 	// With all the headers inserted, we'll now insert them into the
 	// database in a single batch.
 	if err := fhs.WriteHeaders(blockHeaders...); err != nil {
@@ -326,17 +347,17 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 	// header inserted, and the current chain tip should be the second to
 	// last header inserted.
 	secondToLastHeader := blockHeaders[len(blockHeaders)-2]
-	blockStamp, err := fhs.RollbackLastBlock()
+	blockStamp, err := fhs.RollbackLastBlock(&secondToLastHeader.HeaderHash)
 	if err != nil {
 		t.Fatalf("unable to rollback chain: %v", err)
 	}
-	if lastHeader.Height != uint32(blockStamp.Height) {
+	if secondToLastHeader.Height != uint32(blockStamp.Height) {
 		t.Fatalf("chain tip doesn't match: expected %v, got %v",
-			lastHeader.Height, blockStamp.Height)
+			secondToLastHeader.Height, blockStamp.Height)
 	}
-	if !bytes.Equal(lastHeader.FilterHash[:], blockStamp.Hash[:]) {
+	if !bytes.Equal(secondToLastHeader.FilterHash[:], blockStamp.Hash[:]) {
 		t.Fatalf("header hashes don't match: expected %v, got %v",
-			lastHeader.FilterHash, blockStamp.Hash)
+			secondToLastHeader.FilterHash, blockStamp.Hash)
 	}
 	tipHeader, tipHeight, err = fhs.ChainTip()
 	if err != nil {
@@ -365,9 +386,29 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 		t.Fatalf("unable to create new block header store: %v", err)
 	}
 
-	// First we'll generate a test header chain of length 10, inserting it
-	// into the header store.
 	blockHeaders := createTestFilterHeaderChain(10)
+
+	// We simulate the expected behavior of the block headers being written
+	// to disk before the filter headers are.
+	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		for _, header := range blockHeaders {
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.Height)
+			err := rootBucket.Put(header.HeaderHash[:], heightBytes[:])
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatalf("unable to pre-load block index: %v", err)
+	}
+
+	// Next, we'll insert the filter header chain itself in to the
+	// database.
 	if err := fhs.WriteHeaders(blockHeaders...); err != nil {
 		t.Fatalf("unable to write block headers: %v", err)
 	}
@@ -375,7 +416,8 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	// Next, in order to simulate a partial write, we'll roll back the
 	// internal index by 5 blocks.
 	for i := 0; i < 5; i++ {
-		if err := fhs.truncateIndex(); err != nil {
+		newTip := blockHeaders[len(blockHeaders)-i-2].HeaderHash
+		if err := fhs.truncateIndex(&newTip, true); err != nil {
 			t.Fatalf("unable to truncate index: %v", err)
 		}
 	}
@@ -402,3 +444,5 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 			prevHeaderHash, tipHash[:])
 	}
 }
+
+// TODO(roasbeef): combined re-org scenarios
