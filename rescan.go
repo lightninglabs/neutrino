@@ -169,7 +169,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		// If the end block hash is non-nil, then we'll query the
 		// database to find out the stop height.
 		if (ro.endBlock.Hash != chainhash.Hash{}) {
-			_, height, err := s.GetBlockByHash(ro.endBlock.Hash)
+			_, height, err := s.BlockHeaders.FetchHeader(&ro.endBlock.Hash)
 			if err != nil {
 				ro.endBlock.Hash = chainhash.Hash{}
 			} else {
@@ -182,7 +182,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		// stopping hash.
 		if (ro.endBlock.Hash == chainhash.Hash{}) {
 			if ro.endBlock.Height != 0 {
-				header, err := s.GetBlockByHeight(
+				header, err := s.BlockHeaders.FetchHeaderByHeight(
 					uint32(ro.endBlock.Height))
 				if err == nil {
 					ro.endBlock.Hash = header.BlockHash()
@@ -208,7 +208,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		curStamp  waddrmgr.BlockStamp
 	)
 	if ro.startBlock == nil {
-		bs, err := s.SyncedTo()
+		bs, err := s.BestSnapshot()
 		if err != nil {
 			return err
 		}
@@ -220,9 +220,9 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// the start height should be set. If neither is, then we'll be
 	// starting from the gensis block.
 	if (curStamp.Hash != chainhash.Hash{}) {
-		header, height, err := s.GetBlockByHash(curStamp.Hash)
+		header, height, err := s.BlockHeaders.FetchHeader(&curStamp.Hash)
 		if err == nil {
-			curHeader = header
+			curHeader = *header
 			curStamp.Height = int32(height)
 		} else {
 			curStamp.Hash = chainhash.Hash{}
@@ -232,10 +232,10 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		if curStamp.Height == 0 {
 			curStamp.Hash = *s.chainParams.GenesisHash
 		} else {
-			header, err := s.GetBlockByHeight(
+			header, err := s.BlockHeaders.FetchHeaderByHeight(
 				uint32(curStamp.Height))
 			if err == nil {
-				curHeader = header
+				curHeader = *header
 				curStamp.Hash = curHeader.BlockHash()
 			} else {
 				curHeader = s.chainParams.GenesisBlock.Header
@@ -326,12 +326,12 @@ rescanLoop:
 							curStamp.Height,
 							curHeader.Timestamp)
 					}
-					header, _, err := s.GetBlockByHash(
-						header.PrevBlock)
+					header, _, err := s.BlockHeaders.FetchHeader(
+						&header.PrevBlock)
 					if err != nil {
 						return err
 					}
-					curHeader = header
+					curHeader = *header
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
 				}
@@ -341,8 +341,9 @@ rescanLoop:
 			// Since we're not current, we try to manually advance
 			// the block. If we fail, we mark outselves as current
 			// and follow notifications.
-			header, err := s.GetBlockByHeight(uint32(
-				curStamp.Height + 1))
+			header, err := s.BlockHeaders.FetchHeaderByHeight(
+				uint32(curStamp.Height + 1),
+			)
 			if err != nil {
 				log.Tracef("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
@@ -352,7 +353,7 @@ rescanLoop:
 				s.subscribeBlockMsg(subscription)
 				continue rescanLoop
 			}
-			curHeader = header
+			curHeader = *header
 			curStamp.Height++
 			curStamp.Hash = header.BlockHash()
 		}
@@ -487,7 +488,7 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	}
 
 	var (
-		header  wire.BlockHeader
+		header  *wire.BlockHeader
 		height  uint32
 		rewound bool
 		err     error
@@ -518,12 +519,14 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 		}
 
 		// Rewind and continue.
-		header, height, err = ro.chain.GetBlockByHash(curHeader.PrevBlock)
+		header, height, err = ro.chain.BlockHeaders.FetchHeader(
+			&curHeader.PrevBlock,
+		)
 		if err != nil {
 			return rewound, err
 		}
 
-		*curHeader = header
+		*curHeader = *header
 		curStamp.Height = int32(height)
 		curStamp.Hash = curHeader.BlockHash()
 	}
@@ -802,7 +805,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	}
 
 	// Track our position in the chain.
-	curHeader, curHeight, err := s.LatestBlock()
+	curHeader, curHeight, err := s.BlockHeaders.ChainTip()
 	curStamp := &waddrmgr.BlockStamp{
 		Hash:   curHeader.BlockHash(),
 		Height: int32(curHeight),
@@ -813,7 +816,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 	// Find our earliest possible block.
 	if (ro.startBlock.Hash != chainhash.Hash{}) {
-		_, height, err := s.GetBlockByHash(ro.startBlock.Hash)
+		_, height, err := s.BlockHeaders.FetchHeader(&ro.startBlock.Hash)
 		if err == nil {
 			ro.startBlock.Height = int32(height)
 		} else {
@@ -824,7 +827,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		if ro.startBlock.Height == 0 {
 			ro.startBlock.Hash = *s.chainParams.GenesisHash
 		} else if ro.startBlock.Height < int32(curHeight) {
-			header, err := s.GetBlockByHeight(
+			header, err := s.BlockHeaders.FetchHeaderByHeight(
 				uint32(ro.startBlock.Height))
 			if err == nil {
 				ro.startBlock.Hash = header.BlockHash()
@@ -926,7 +929,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 		// Fetch the previous header so we can continue our walk
 		// backwards.
-		header, err := s.GetBlockByHeight(uint32(curStamp.Height))
+		header, err := s.BlockHeaders.FetchHeaderByHeight(uint32(curStamp.Height))
 		if err != nil {
 			return nil, err
 		}

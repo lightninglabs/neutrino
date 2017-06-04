@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/lightninglabs/neutrino/filterdb"
 )
 
 var (
@@ -331,18 +332,16 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 
 	// Based on if extended is true or not, we'll set up our set of
 	// querying, and db-write functions.
-	getFilter := s.GetBasicFilter
-	getHeader := s.GetBasicHeader
-	putFilter := s.putBasicFilter
+	getHeader := s.RegFilterHeaders.FetchHeader
+	filterType := filterdb.RegularFilter
 	if extended {
-		getFilter = s.GetExtFilter
-		getHeader = s.GetExtHeader
-		putFilter = s.putExtFilter
+		getHeader = s.ExtFilterHeaders.FetchHeader
+		filterType = filterdb.ExtendedFilter
 	}
 
 	// First check the database to see if we already have this filter. If
 	// so, then we can return it an exit early.
-	filter, err := getFilter(blockHash)
+	filter, err := s.FilterDB.FetchFilter(&blockHash, filterType)
 	if err == nil && filter != nil {
 		return filter, nil
 	}
@@ -354,7 +353,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 	// In order to verify the authenticity of the filter, we'll fetch the
 	// target block header so we can retrieve the hash of the prior block,
 	// which is required to fetch the filter header for that block.
-	block, _, err := s.GetBlockByHash(blockHash)
+	block, _, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -366,12 +365,12 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 	// In addition to fetching the block header, we'll fetch the filter
 	// headers (for this particular filter type) from the database. These
 	// are required in order to verify the authenticity of the filter.
-	curHeader, err := getHeader(blockHash)
+	curHeader, err := getHeader(&blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
 			"from database", blockHash)
 	}
-	prevHeader, err := getHeader(block.PrevBlock)
+	prevHeader, err := getHeader(&block.PrevBlock)
 	if err != nil {
 		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
 			"from database", blockHash)
@@ -447,7 +446,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 
 	// If we've found a filter, write it to the database for next time.
 	if filter != nil {
-		if putFilter(blockHash, filter); err != nil {
+		err := s.FilterDB.PutFilter(&blockHash, filter, filterType)
+		if err != nil {
 			return nil, err
 		}
 
@@ -469,7 +469,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block s we can't
 	// request it.
-	blockHeader, height, err := s.GetBlockByHash(blockHash)
+	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
 		return nil, fmt.Errorf("Couldn't get header for block %s "+
 			"from database", blockHash)

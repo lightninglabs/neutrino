@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 const (
@@ -184,12 +185,12 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	}
 
 	// Initialize the next checkpoint based on the current height.
-	header, height, err := s.LatestBlock()
+	header, height, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.resetHeaderState(&header, int32(height))
+	bm.resetHeaderState(header, int32(height))
 
 	return &bm, nil
 }
@@ -285,11 +286,11 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *serverPeer) {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
-		header, height, err := b.server.LatestBlock()
+		header, height, err := b.server.BlockHeaders.ChainTip()
 		if err != nil {
 			return
 		}
-		b.resetHeaderState(&header, int32(height))
+		b.resetHeaderState(header, int32(height))
 		b.startSync(peers)
 	}
 }
@@ -502,7 +503,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		// peer failed to send.
 		b.requestedBlocks = make(map[chainhash.Hash]struct{})
 
-		locator, err := b.server.LatestBlockLocator()
+		locator, err := b.server.BlockHeaders.LatestBlockLocator()
 		if err != nil {
 			log.Errorf("Failed to get block locator for the "+
 				"latest block: %s", err)
@@ -554,7 +555,7 @@ func (b *blockManager) startSync(peers *list.List) {
 // still have blocks to check
 func (b *blockManager) current() bool {
 	// Figure out the latest block we know.
-	header, height, err := b.server.LatestBlock()
+	header, height, err := b.server.BlockHeaders.ChainTip()
 	if err != nil {
 		return false
 	}
@@ -635,9 +636,9 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	// If our chain is current and a peer announces a block we already
 	// know of, then update their current block height.
 	if lastBlock != -1 && b.current() {
-		_, blkHeight, err := b.server.GetBlockByHash(invVects[lastBlock].Hash)
+		height, err := b.server.BlockHeaders.HeightFromHash(&invVects[lastBlock].Hash)
 		if err == nil {
-			imsg.peer.UpdateLastBlockHeight(int32(blkHeight))
+			imsg.peer.UpdateLastBlockHeight(int32(height))
 		}
 	}
 
@@ -669,7 +670,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 			locator = append(locator, &lastHash)
 
 			// Add locator from the database as backup.
-			knownLocator, err := b.server.LatestBlockLocator()
+			knownLocator, err := b.server.BlockHeaders.LatestBlockLocator()
 			if err == nil {
 				locator = append(locator, knownLocator...)
 			}
@@ -716,7 +717,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// We'll attempt to write the entire batch of validated headers
 	// atomically in order to improve peformance.
-	headerWriteBatch := make([]*headerNode, 0, len(msg.Headers))
+	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
@@ -758,7 +759,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 			// This header checks out, so we'll add it to our write
 			// batch.
-			headerWriteBatch = append(headerWriteBatch, &node)
+			headerWriteBatch = append(headerWriteBatch, headerfs.BlockHeader{
+				BlockHeader: blockHeader,
+				Height:      uint32(node.height),
+			})
 
 			hmsg.peer.UpdateLastBlockHeight(node.height)
 			b.progressLogger.LogBlockHeight(blockHeader, node.height)
@@ -804,7 +808,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 			// Check if this block is known. If so, we continue to
 			// the next one.
-			_, _, err := b.server.GetBlockByHash(blockHash)
+			_, _, err := b.server.BlockHeaders.FetchHeader(&blockHash)
 			if err == nil {
 				continue
 			}
@@ -816,8 +820,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// these headers. Otherwise, the headers don't connect
 			// to anything we know and we should disconnect the
 			// peer.
-			backHead, backHeight, err := b.server.GetBlockByHash(
-				blockHeader.PrevBlock)
+			backHead, backHeight, err := b.server.BlockHeaders.FetchHeader(
+				&blockHeader.PrevBlock,
+			)
 			if err != nil {
 				log.Warnf("Received block header that does not"+
 					" properly connect to the chain from"+
@@ -849,7 +854,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// the known good chain.
 			b.reorgList.Init()
 			b.reorgList.PushBack(&headerNode{
-				header: &backHead,
+				header: backHead,
 				height: int32(backHeight),
 			})
 			totalWork := big.NewInt(0)
@@ -880,14 +885,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// This should NEVER be nil because the most recent
 			// block is always pushed back by resetHeaderState
 			knownEl := b.headerList.Back()
-			var knownHead wire.BlockHeader
+			var knownHead *wire.BlockHeader
 			for j := uint32(prevNode.height); j > backHeight; j-- {
 				if knownEl != nil {
-					knownHead = *knownEl.Value.(*headerNode).header
+					knownHead = knownEl.Value.(*headerNode).header
 					knownEl = knownEl.Prev()
 				} else {
-					knownHead, _, err = b.server.GetBlockByHash(
-						knownHead.PrevBlock)
+					knownHead, _, err = b.server.BlockHeaders.FetchHeader(
+						&knownHead.PrevBlock)
 					if err != nil {
 						log.Criticalf("Can't get block"+
 							"header for hash %s: "+
@@ -929,26 +934,22 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.syncPeerMutex.Unlock()
 			_, err = b.server.rollBackToHeight(backHeight)
 			if err != nil {
-				log.Criticalf("Rollback failed: %s",
-					err)
+				panic(fmt.Sprintf("Rollback failed: %s", err))
 				// Should we panic here?
 			}
 
-			// TODO(roasbeef): should be atomic update
-			err = b.server.putBlock(*blockHeader, backHeight+1)
+			hdrs := headerfs.BlockHeader{
+				BlockHeader: blockHeader,
+				Height:      backHeight + 1,
+			}
+			err = b.server.BlockHeaders.WriteHeaders(hdrs)
 			if err != nil {
 				log.Criticalf("Couldn't write block to "+
 					"database: %s", err)
 				// Should we panic here?
 			}
-			err = b.server.putMaxBlockHeight(backHeight + 1)
-			if err != nil {
-				log.Criticalf("Couldn't write max block height"+
-					" to database: %s", err)
-				// Should we panic here?
-			}
 
-			b.resetHeaderState(&backHead, int32(backHeight))
+			b.resetHeaderState(backHead, int32(backHeight))
 			b.headerList.PushBack(&headerNode{
 				header: blockHeader,
 				height: int32(backHeight + 1),
@@ -1009,30 +1010,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// With all the headers in this batch validated, we'll write them all
 	// in a single transaction such that this entire batch is atomic.
-	tx, err := b.server.db.BeginReadWriteTx()
+	err := b.server.BlockHeaders.WriteHeaders(headerWriteBatch...)
 	if err != nil {
-		panic(fmt.Sprintf("unable to start db transaction: %v", err))
-	}
-	bucket := tx.ReadWriteBucket(spvBucketName)
-
-	// With each of these headers validated, we'll store them in the
-	// database, marking the height of each entry.
-	for _, headerNode := range headerWriteBatch {
-		err := putBlock(*headerNode.header, uint32(headerNode.height))(bucket)
-		if err != nil {
-			tx.Rollback()
-			panic(fmt.Sprintf("unable to write block header: %v", err))
-		}
-	}
-
-	// Finally also record the current tip of our best known chain.
-	err = putMaxBlockHeight(uint32(finalHeight))(bucket)
-	if err != nil {
-		tx.Rollback()
-		panic(fmt.Sprintf("unable to update max height: %v", err))
-	}
-	if err := tx.Commit(); err != nil {
-		panic(fmt.Sprintf("unable to commit write batch: %v", err))
+		panic(fmt.Sprintf("unable to write block header: %v", err))
 	}
 
 	// When this header is a checkpoint, switch to fetching the blocks for
@@ -1212,16 +1192,14 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	ready := false
 
 	headerMap := b.basicHeaders
-	writeFunc := putBasicHeader
-	readFunc := b.server.GetBasicHeader
 	lastCFHeaderHeight := &b.lastBasicCFHeaderHeight
 	pendingMsgs := &b.numBasicCFHeadersMsgs
+	headerStore := b.server.RegFilterHeaders
 	if msg.extended {
 		headerMap = b.extendedHeaders
-		writeFunc = putExtHeader
-		readFunc = b.server.GetExtHeader
 		lastCFHeaderHeight = &b.lastExtCFHeaderHeight
 		pendingMsgs = &b.numExtCFHeadersMsgs
+		headerStore = b.server.ExtFilterHeaders
 	}
 
 	stopHash := msg.earliestNode.header.PrevBlock
@@ -1269,12 +1247,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		return
 	}
 
-	type headerTriple struct {
-		headerHash chainhash.Hash
-		filterHash chainhash.Hash
-		header     *wire.BlockHeader
-	}
-	var headerWriteBatch []headerTriple
+	var headerWriteBatch []headerfs.FilterHeader
+	var processedHeaders []*wire.BlockHeader
 
 	// At this point, we've got all the cfheaders messages we're going to
 	// get for the range of headers described by the passed message. We now
@@ -1293,7 +1267,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			// This should only happen if the filter has already
 			// been written to the database.
 			case 0:
-				if _, err := readFunc(hash); err != nil {
+				_, err := headerStore.FetchHeader(&hash)
+				if err != nil {
 					// We don't have the filter stored in
 					// the DB, there's something wrong.
 					log.Warnf("Somehow we have 0 cfheaders"+
@@ -1316,11 +1291,12 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 
 					// Add the accepted header to the current write batch.
 					headerWriteBatch = append(headerWriteBatch,
-						headerTriple{
-							headerHash: hash,
-							filterHash: headerHash,
-							header:     header,
+						headerfs.FilterHeader{
+							HeaderHash: hash,
+							FilterHash: headerHash,
+							Height:     uint32(node.height),
 						})
+					processedHeaders = append(processedHeaders, header)
 
 				}
 				*lastCFHeaderHeight = node.height
@@ -1355,35 +1331,15 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 
 	// With all the headers in this batch validated, we'll write them all
 	// in a single transaction such that this entire batch is atomic.
-	tx, err := b.server.db.BeginReadWriteTx()
+	err := headerStore.WriteHeaders(headerWriteBatch...)
 	if err != nil {
-		tx.Rollback()
-		panic(fmt.Sprintf("unable to start db transaction: %v", err))
-	}
-	bucket := tx.ReadWriteBucket(spvBucketName)
-
-	// Writ eeach of the new headers to the database with their proper
-	// filter hash and header hash.
-	for _, headerGroup := range headerWriteBatch {
-		err := writeFunc(headerGroup.headerHash,
-			headerGroup.filterHash)(bucket)
-		if err != nil {
-			tx.Rollback()
-			panic(fmt.Sprintf("unable to write header: %v", err))
-		}
-
-	}
-
-	// With all the headers in the batch written, we'll now write
-	// everything to disk in an atomic batch.
-	if err := tx.Commit(); err != nil {
-		panic(fmt.Sprintf("unable to commit write batch: %v", err))
+		panic(fmt.Sprintf("unable to write header: %v", err))
 	}
 
 	// Notify subscribers of a connected block.
 	go func() {
 		b.server.mtxSubscribers.RLock()
-		for _, headerGroup := range headerWriteBatch {
+		for _, header := range processedHeaders {
 			for sub := range b.server.blockSubscribers {
 				channel := sub.onConnectBasic
 				if msg.extended {
@@ -1391,7 +1347,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 				}
 				if channel != nil {
 					select {
-					case channel <- *headerGroup.header:
+					case channel <- *header:
 					case <-sub.quit:
 					}
 				}
@@ -1479,8 +1435,9 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 	// Get the block node at the previous retarget (targetTimespan days
 	// worth of blocks).
-	firstNode, err := b.server.GetBlockByHeight(
-		uint32(lastNode.height + 1 - b.blocksPerRetarget))
+	firstNode, err := b.server.BlockHeaders.FetchHeaderByHeight(
+		uint32(lastNode.height + 1 - b.blocksPerRetarget),
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -1559,13 +1516,14 @@ func (b *blockManager) findPrevTestNetDifficulty(hList *list.List) (uint32, erro
 		if el != nil {
 			iterNode = el.Value.(*headerNode).header
 		} else {
-			node, err := b.server.GetBlockByHeight(
-				uint32(iterHeight))
+			node, err := b.server.BlockHeaders.FetchHeaderByHeight(
+				uint32(iterHeight),
+			)
 			if err != nil {
 				log.Errorf("GetBlockByHeight: %s", err)
 				return 0, err
 			}
-			iterNode = &node
+			iterNode = node
 		}
 	}
 

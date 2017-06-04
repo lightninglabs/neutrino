@@ -22,6 +22,8 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // These are exported variables so they can be changed by users.
@@ -537,6 +539,16 @@ type blockSubscription struct {
 	quit           <-chan struct{}
 }
 
+// Config is a struct detailing the configuration of the chain service.
+type Config struct {
+	DataDir      string
+	Database     walletdb.DB
+	Namespace    []byte
+	ChainParams  chaincfg.Params
+	ConnectPeers []string
+	AddPeers     []string
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -546,7 +558,11 @@ type ChainService struct {
 	started       int32
 	shutdown      int32
 
-	db                walletdb.DB
+	FilterDB         filterdb.FilterDatabase
+	BlockHeaders     *headerfs.BlockHeaderStore
+	RegFilterHeaders *headerfs.FilterHeaderStore
+	ExtFilterHeaders *headerfs.FilterHeaderStore
+
 	chainParams       chaincfg.Params
 	addrManager       *addrmgr.AddrManager
 	connManager       *connmgr.ConnManager
@@ -570,195 +586,6 @@ type ChainService struct {
 	userAgentVersion string
 }
 
-// BanPeer bans a peer that has already been connected to the server by ip.
-func (s *ChainService) BanPeer(sp *serverPeer) {
-	s.banPeers <- sp
-}
-
-// AddPeer adds a new peer that has already been connected to the server.
-func (s *ChainService) AddPeer(sp *serverPeer) {
-	s.newPeers <- sp
-}
-
-// AddBytesSent adds the passed number of bytes to the total bytes sent counter
-// for the server.  It is safe for concurrent access.
-func (s *ChainService) AddBytesSent(bytesSent uint64) {
-	atomic.AddUint64(&s.bytesSent, bytesSent)
-}
-
-// AddBytesReceived adds the passed number of bytes to the total bytes received
-// counter for the server.  It is safe for concurrent access.
-func (s *ChainService) AddBytesReceived(bytesReceived uint64) {
-	atomic.AddUint64(&s.bytesReceived, bytesReceived)
-}
-
-// NetTotals returns the sum of all bytes received and sent across the network
-// for all peers.  It is safe for concurrent access.
-func (s *ChainService) NetTotals() (uint64, uint64) {
-	return atomic.LoadUint64(&s.bytesReceived),
-		atomic.LoadUint64(&s.bytesSent)
-}
-
-// pushTxMsg sends a tx message for the provided transaction hash to the
-// connected peer.  An error is returned if the transaction hash is not known.
-func (s *ChainService) pushTxMsg(sp *serverPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
-	// Attempt to fetch the requested transaction from the pool.  A
-	// call could be made to check for existence first, but simply trying
-	// to fetch a missing transaction results in the same behavior.
-	/*	tx, err := s.txMemPool.FetchTransaction(hash)
-		if err != nil {
-			log.Tracef("Unable to fetch tx %v from transaction "+
-				"pool: %v", hash, err)
-
-			if doneChan != nil {
-				doneChan <- struct{}{}
-			}
-			return err
-		}
-
-		// Once we have fetched data wait for any previous operation to finish.
-		if waitChan != nil {
-			<-waitChan
-		}
-
-		sp.QueueMessage(tx.MsgTx(), doneChan) */
-
-	return nil
-}
-
-// rollBackToHeight rolls back all blocks until it hits the specified height.
-// It sends notifications along the way.
-func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp,
-	error) {
-	bs, err := s.SyncedTo()
-	if err != nil {
-		return nil, err
-	}
-	for uint32(bs.Height) > height {
-		header, _, err := s.GetBlockByHash(bs.Hash)
-		if err != nil {
-			return nil, err
-		}
-		bs, err = s.rollBackLastBlock()
-		if err != nil {
-			return nil, err
-		}
-		// Now we send the block disconnected notifications.
-		// TODO: Rethink this so we don't send notifications
-		// outside the package directly from here, and so we
-		// don't end up halting in the middle of processing
-		// blocks if a client mishandles a channel while still
-		// guaranteeing in-order delivery.
-		s.mtxSubscribers.RLock()
-		for sub := range s.blockSubscribers {
-			if sub.onDisconnect != nil {
-				select {
-				case sub.onDisconnect <- header:
-				case <-sub.quit:
-				}
-			}
-		}
-		s.mtxSubscribers.RUnlock()
-	}
-	return bs, nil
-}
-
-// peerHandler is used to handle peer operations such as adding and removing
-// peers to and from the server, banning peers, and broadcasting messages to
-// peers.  It must be run in a goroutine.
-func (s *ChainService) peerHandler() {
-	// Start the address manager and block manager, both of which are needed
-	// by peers.  This is done here since their lifecycle is closely tied
-	// to this handler and rather than adding more channels to sychronize
-	// things, it's easier and slightly faster to simply start and stop them
-	// in this handler.
-	s.addrManager.Start()
-	s.blockManager.Start()
-
-	state := &peerState{
-		persistentPeers: make(map[int32]*serverPeer),
-		outboundPeers:   make(map[int32]*serverPeer),
-		banned:          make(map[string]time.Time),
-		outboundGroups:  make(map[string]int),
-	}
-
-	if !DisableDNSSeed {
-		// Add peers discovered through DNS to the address manager.
-		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
-			net.LookupIP, func(addrs []*wire.NetAddress) {
-				// Bitcoind uses a lookup of the dns seeder here. This
-				// is rather strange since the values looked up by the
-				// DNS seed lookups will vary quite a lot.
-				// to replicate this behaviour we put all addresses as
-				// having come from the first one.
-				s.addrManager.AddAddresses(addrs, addrs[0])
-			})
-	}
-	go s.connManager.Start()
-
-out:
-	for {
-		select {
-		// New peers connected to the server.
-		case p := <-s.newPeers:
-			s.handleAddPeerMsg(state, p)
-
-		// Disconnected peers.
-		case p := <-s.donePeers:
-			s.handleDonePeerMsg(state, p)
-
-		// Block accepted in mainchain or orphan, update peer height.
-		case umsg := <-s.peerHeightsUpdate:
-			s.handleUpdatePeerHeights(state, umsg)
-
-		// Peer to ban.
-		case p := <-s.banPeers:
-			s.handleBanPeerMsg(state, p)
-
-		case qmsg := <-s.query:
-			s.handleQuery(state, qmsg)
-
-		case <-s.quit:
-			// Disconnect all peers on server shutdown.
-			state.forAllPeers(func(sp *serverPeer) {
-				log.Tracef("Shutdown peer %s", sp)
-				sp.Disconnect()
-			})
-			break out
-		}
-	}
-
-	s.connManager.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
-
-	// Drain channels before exiting so nothing is left waiting around
-	// to send.
-cleanup:
-	for {
-		select {
-		case <-s.newPeers:
-		case <-s.donePeers:
-		case <-s.peerHeightsUpdate:
-		case <-s.query:
-		default:
-			break cleanup
-		}
-	}
-	s.wg.Done()
-	log.Tracef("Peer handler done")
-}
-
-// Config is a struct detailing the configuration of the chain service.
-type Config struct {
-	DataDir      string
-	Database     walletdb.DB
-	Namespace    []byte
-	ChainParams  chaincfg.Params
-	ConnectPeers []string
-	AddPeers     []string
-}
-
 // NewChainService returns a new chain service configured to connect to the
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
@@ -774,7 +601,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		query:             make(chan interface{}),
 		quit:              make(chan struct{}),
 		peerHeightsUpdate: make(chan updatePeerHeightsMsg),
-		db:                cfg.Database,
 		timeSource:        blockchain.NewMedianTime(),
 		services:          Services,
 		userAgentName:     UserAgentName,
@@ -782,7 +608,25 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		blockSubscribers:  make(map[blockSubscription]struct{}),
 	}
 
-	err := s.createSPVNS()
+	var err error
+
+	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(cfg.DataDir,
+		cfg.Database, &cfg.ChainParams)
+	if err != nil {
+		return nil, err
+	}
+	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(cfg.DataDir,
+		cfg.Database, headerfs.RegularFilter, &cfg.ChainParams)
+	if err != nil {
+		return nil, err
+	}
+	s.ExtFilterHeaders, err = headerfs.NewFilterHeaderStore(cfg.DataDir,
+		cfg.Database, headerfs.ExtendedFilter, &cfg.ChainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -878,6 +722,210 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	return &s, nil
+}
+
+// BestSnapshot retrieves the most recent block's height and hash.
+func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
+	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.BlockStamp{
+		Height: int32(bestHeight),
+		Hash:   bestHeader.BlockHash(),
+	}, nil
+}
+
+// BanPeer bans a peer that has already been connected to the server by ip.
+func (s *ChainService) BanPeer(sp *serverPeer) {
+	s.banPeers <- sp
+}
+
+// AddPeer adds a new peer that has already been connected to the server.
+func (s *ChainService) AddPeer(sp *serverPeer) {
+	s.newPeers <- sp
+}
+
+// AddBytesSent adds the passed number of bytes to the total bytes sent counter
+// for the server.  It is safe for concurrent access.
+func (s *ChainService) AddBytesSent(bytesSent uint64) {
+	atomic.AddUint64(&s.bytesSent, bytesSent)
+}
+
+// AddBytesReceived adds the passed number of bytes to the total bytes received
+// counter for the server.  It is safe for concurrent access.
+func (s *ChainService) AddBytesReceived(bytesReceived uint64) {
+	atomic.AddUint64(&s.bytesReceived, bytesReceived)
+}
+
+// NetTotals returns the sum of all bytes received and sent across the network
+// for all peers.  It is safe for concurrent access.
+func (s *ChainService) NetTotals() (uint64, uint64) {
+	return atomic.LoadUint64(&s.bytesReceived),
+		atomic.LoadUint64(&s.bytesSent)
+}
+
+// pushTxMsg sends a tx message for the provided transaction hash to the
+// connected peer.  An error is returned if the transaction hash is not known.
+func (s *ChainService) pushTxMsg(sp *serverPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
+	// Attempt to fetch the requested transaction from the pool.  A
+	// call could be made to check for existence first, but simply trying
+	// to fetch a missing transaction results in the same behavior.
+	/*	tx, err := s.txMemPool.FetchTransaction(hash)
+		if err != nil {
+			log.Tracef("Unable to fetch tx %v from transaction "+
+				"pool: %v", hash, err)
+
+			if doneChan != nil {
+				doneChan <- struct{}{}
+			}
+			return err
+		}
+
+		// Once we have fetched data wait for any previous operation to finish.
+		if waitChan != nil {
+			<-waitChan
+		}
+
+		sp.QueueMessage(tx.MsgTx(), doneChan) */
+
+	return nil
+}
+
+// rollBackToHeight rolls back all blocks until it hits the specified height.
+// It sends notifications along the way.
+func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
+	bs, err := s.BestSnapshot()
+	if err != nil {
+		return nil, err
+	}
+
+	for uint32(bs.Height) > height {
+		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
+		if err != nil {
+			return nil, err
+		}
+
+		newTip := &header.PrevBlock
+		_, err = s.RegFilterHeaders.RollbackLastBlock(newTip)
+		if err != nil {
+			return nil, err
+		}
+		_, err = s.ExtFilterHeaders.RollbackLastBlock(newTip)
+		if err != nil {
+			return nil, err
+		}
+
+		bs, err = s.BlockHeaders.RollbackLastBlock()
+		if err != nil {
+			return nil, err
+		}
+
+		// Now we send the block disconnected notifications.
+		// TODO: Rethink this so we don't send notifications
+		// outside the package directly from here, and so we
+		// don't end up halting in the middle of processing
+		// blocks if a client mishandles a channel while still
+		// guaranteeing in-order delivery.
+		s.mtxSubscribers.RLock()
+		for sub := range s.blockSubscribers {
+			if sub.onDisconnect != nil {
+				select {
+				case sub.onDisconnect <- *header:
+				case <-sub.quit:
+				}
+			}
+		}
+		s.mtxSubscribers.RUnlock()
+	}
+	return bs, nil
+}
+
+// peerHandler is used to handle peer operations such as adding and removing
+// peers to and from the server, banning peers, and broadcasting messages to
+// peers.  It must be run in a goroutine.
+func (s *ChainService) peerHandler() {
+	// Start the address manager and block manager, both of which are needed
+	// by peers.  This is done here since their lifecycle is closely tied
+	// to this handler and rather than adding more channels to sychronize
+	// things, it's easier and slightly faster to simply start and stop them
+	// in this handler.
+	s.addrManager.Start()
+	s.blockManager.Start()
+
+	state := &peerState{
+		persistentPeers: make(map[int32]*serverPeer),
+		outboundPeers:   make(map[int32]*serverPeer),
+		banned:          make(map[string]time.Time),
+		outboundGroups:  make(map[string]int),
+	}
+
+	if !DisableDNSSeed {
+		// Add peers discovered through DNS to the address manager.
+		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
+			net.LookupIP, func(addrs []*wire.NetAddress) {
+				// Bitcoind uses a lookup of the dns seeder here. This
+				// is rather strange since the values looked up by the
+				// DNS seed lookups will vary quite a lot.
+				// to replicate this behaviour we put all addresses as
+				// having come from the first one.
+				s.addrManager.AddAddresses(addrs, addrs[0])
+			})
+	}
+	go s.connManager.Start()
+
+out:
+	for {
+		select {
+		// New peers connected to the server.
+		case p := <-s.newPeers:
+			s.handleAddPeerMsg(state, p)
+
+		// Disconnected peers.
+		case p := <-s.donePeers:
+			s.handleDonePeerMsg(state, p)
+
+		// Block accepted in mainchain or orphan, update peer height.
+		case umsg := <-s.peerHeightsUpdate:
+			s.handleUpdatePeerHeights(state, umsg)
+
+		// Peer to ban.
+		case p := <-s.banPeers:
+			s.handleBanPeerMsg(state, p)
+
+		case qmsg := <-s.query:
+			s.handleQuery(state, qmsg)
+
+		case <-s.quit:
+			// Disconnect all peers on server shutdown.
+			state.forAllPeers(func(sp *serverPeer) {
+				log.Tracef("Shutdown peer %s", sp)
+				sp.Disconnect()
+			})
+			break out
+		}
+	}
+
+	s.connManager.Stop()
+	s.blockManager.Stop()
+	s.addrManager.Stop()
+
+	// Drain channels before exiting so nothing is left waiting around
+	// to send.
+cleanup:
+	for {
+		select {
+		case <-s.newPeers:
+		case <-s.donePeers:
+		case <-s.peerHeightsUpdate:
+		case <-s.query:
+		default:
+			break cleanup
+		}
+	}
+	s.wg.Done()
+	log.Tracef("Peer handler done")
 }
 
 // addrStringToNetAddr takes an address in the form of 'host:port' and returns
