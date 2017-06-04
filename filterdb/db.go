@@ -31,7 +31,7 @@ type FilterType uint8
 const (
 	// RegularFilter is the filter type of regular filters which contain
 	// outputs and pkScript data pushes.
-	RegularFilter = iota
+	RegularFilter FilterType = iota
 
 	// ExtendedFilter is the filter type of extended filters which contain
 	// txids, and witness data.
