@@ -46,6 +46,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	// write into the database.
 	const numHeaders = 100
 	headerEntries := make(headerBatch, numHeaders)
+	headerIndex := make(map[uint32]headerEntry)
 	for i := uint32(0); i < numHeaders; i++ {
 		var header headerEntry
 		if _, err := rand.Read(header.hash[:]); err != nil {
@@ -54,6 +55,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 		header.height = i
 
 		headerEntries[i] = header
+		headerIndex[i] = header
 	}
 
 	// With the headers constructed, we'll write them to disk in a single
@@ -68,7 +70,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to obtain chain tip: %v", err)
 	}
-	lastEntry := headerEntries[len(headerEntries)-1]
+	lastEntry := headerIndex[numHeaders-1]
 	if dbHeight != lastEntry.height {
 		t.Fatalf("height doesn't match: expected %v, got %v",
 			lastEntry.height, dbHeight)
@@ -89,20 +91,12 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 			t.Fatalf("height doesn't match: expected %v, got %v",
 				headerEntry.height, height)
 		}
-
-		hash, err := hIndex.hashFromHeight(headerEntry.height)
-		if err != nil {
-			t.Fatalf("unable to retreive hash: %v", err)
-		}
-		if !bytes.Equal(hash[:], headerEntry.hash[:]) {
-			t.Fatalf("hashes don't match: expected %v, got %v",
-				headerEntry.hash[:], hash[:])
-		}
 	}
 
 	// Next if we trunate the index by one, then we should end up at the
 	// second to last entry for the tip.
-	if err := hIndex.truncateIndex(); err != nil {
+	newTip := headerIndex[numHeaders-2]
+	if err := hIndex.truncateIndex(&newTip.hash, true); err != nil {
 		t.Fatalf("unable to truncate index: %v", err)
 	}
 
@@ -112,7 +106,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to obtain chain tip: %v", err)
 	}
-	lastEntry = headerEntries[len(headerEntries)-2]
+	lastEntry = headerIndex[numHeaders-2]
 	if dbHeight != lastEntry.height {
 		t.Fatalf("height doesn't match: expected %v, got %v",
 			lastEntry.height, dbHeight)

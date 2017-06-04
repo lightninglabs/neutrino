@@ -16,17 +16,22 @@ var (
 	// contains the indexes for the various header types.
 	indexBucket = []byte("header-index")
 
-	// bitcoinHeader is the bucket in which the index for regular bitcoin
-	// headers are stored.
-	bitcoinBucket = []byte("bitcoin")
+	// bitcoinTip is the key which tracks the "tip" of the block header
+	// chain. The value of this key will be the current block hash of the
+	// best known chain that we're synced to.
+	bitcoinTip = []byte("bitcoin")
 
-	// regFitler is the bucket where the index for regular (basic) filter
-	// headers are stored.
-	regFitlerBucket = []byte("regular")
+	// regFilterTip is the key which tracks the "tip" of the regular
+	// compact filter header chain. The value of this key will be the
+	// current block hash of the best known chain that the headers for
+	// regular filter are synced to.
+	regFilterTip = []byte("regular")
 
-	// extFilter is the bucket where the index for extended filter headers
-	// are stored.
-	extFilterBucket = []byte("ext")
+	// extFilterTip is the key which tracks the "tip" of the extended
+	// compact filter header chain. The value of this key will be the
+	// current block hash of the best known chain that the headers for
+	// extended filter are synced to.
+	extFilterTip = []byte("ext")
 )
 
 var (
@@ -57,29 +62,6 @@ const (
 	ExtendedFilter
 )
 
-// headerLocator is 36-byte identifier used within the index solely as the key,
-// meaning no actual values are stored within the index. The format of a
-// serialized headerLocator is: height || hash. The height is serialized in a
-// big-endian format. With this details, we ensure that all writes during
-// normal initial block sync are simply _sequential_ writes, speeding up write
-// performance, as this entails a pure appends to a leaf of a B+Tree.
-// Additionally, this format serves as the only key needed to create an index,
-// as it's possible to map hash -> height, and height -> hash with this index
-// with proper use of database cursors.
-//
-// TODO(roasbeef): instead do hash -> {blockIndex, regFilterIndex, extFilterIndex}
-type headerLocator [4 + 32]byte
-
-// height returns the concrete height specified by the headerLocator.
-func (h *headerLocator) height() uint32 {
-	return binary.BigEndian.Uint32(h[:4])
-}
-
-// hash returns the deserialized height specified by the headerLocator.
-func (h *headerLocator) hash() (*chainhash.Hash, error) {
-	return chainhash.NewHash(h[4:])
-}
-
 // headerIndex is an index stored within the database that allows for random
 // access into the on-disk header file. This, in conjunction with a flat file
 // of headers consists of header database. The keys have been specifically
@@ -98,23 +80,7 @@ func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) 
 	// necessary for functioning of the index. If these buckets has already
 	// been created, then we can exit early.
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		indexBucket, err := tx.CreateTopLevelBucket(indexBucket)
-		if err != nil {
-			return err
-		}
-
-		_, err = indexBucket.CreateBucketIfNotExists(bitcoinBucket)
-		if err != nil {
-			return err
-		}
-
-		_, err = indexBucket.CreateBucketIfNotExists(regFitlerBucket)
-		if err != nil {
-			return err
-		}
-
-		_, err = indexBucket.CreateBucketIfNotExists(regFitlerBucket)
-		if err != nil {
+		if _, err := tx.CreateTopLevelBucket(indexBucket); err != nil {
 			return err
 		}
 
@@ -137,19 +103,6 @@ type headerEntry struct {
 	height uint32
 }
 
-// toLocator returns the serialized headerLocator which maps to this particular
-// header entry.
-func (h *headerEntry) toLocator() headerLocator {
-	var loc headerLocator
-
-	// The on-disk format of a header locator: is height || hash, this
-	// ensures that all writes using headerLocator sequentially ordered.
-	binary.BigEndian.PutUint32(loc[:], h.height)
-	copy(loc[4:], h.hash[:])
-
-	return loc
-}
-
 // headerBatch is a batch of header entries to be written to disk.
 //
 // NOTE: The entries within a batch SHOULD be properly sorted by height in
@@ -165,11 +118,11 @@ func (h headerBatch) Len() int {
 
 // Less reports where the entry with index i should sort before the entry with
 // index j. As we want to ensure the items are written in sequential order,
-// items with the lowest height should come first in the batch.
+// items with the "first" hash.
 //
 // NOTE: This is part of the sort.Interface implementation.
 func (h headerBatch) Less(i, j int) bool {
-	return h[i].height < h[j].height
+	return bytes.Compare(h[i].hash[:], h[j].hash[:]) < 0
 }
 
 // Swap swaps the elements with indexes i and j.
@@ -188,126 +141,45 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
-		var bucket walletdb.ReadWriteBucket
+		var tipKey []byte
 
 		// Based on the specified index type of this instance of the
-		// index, we'll grab the appropriate bucket.
+		// index, we'll grab the key that tracks the tip of the chain
+		// so we can update the index once all the header entries have
+		// been updated.
+		// TODO(roasbeef): only need block tip?
 		switch h.indexType {
 		case Block:
-			bucket = rootBucket.NestedReadWriteBucket(bitcoinBucket)
+			tipKey = bitcoinTip
 		case RegularFilter:
-			bucket = rootBucket.NestedReadWriteBucket(regFitlerBucket)
+			tipKey = regFilterTip
 		case ExtendedFilter:
-			bucket = rootBucket.NestedReadWriteBucket(extFilterBucket)
+			tipKey = extFilterTip
 		}
 
-		// Each each item within the batch, we'll convert the entry
-		// into a locator, and insert it into the target bucket.
+		var (
+			chainTipHash   chainhash.Hash
+			chainTipHeight uint32
+		)
+
 		for _, header := range batch {
-			headerloc := header.toLocator()
-			err := bucket.Put(headerloc[:], nil)
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.height)
+			err := rootBucket.Put(header.hash[:], heightBytes[:])
 			if err != nil {
 				return err
 			}
+
+			// TODO(roasbeef): need to remedy if side-chain
+			// tracking added
+			if header.height >= chainTipHeight {
+				chainTipHash = header.hash
+				chainTipHeight = header.height
+			}
 		}
 
-		return nil
+		return rootBucket.Put(tipKey, chainTipHash[:])
 	})
-}
-
-// truncateIndex deletes the _last_ index entry within the index. This is to be
-// used in the case of a reorganization that ends up disconnected the tip of
-// the chain from the best chain.
-func (h *headerIndex) truncateIndex() error {
-	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
-
-		var bucket walletdb.ReadWriteBucket
-
-		// Based on the specified index type of this instance of the
-		// index, we'll grab the appropriate bucket.
-		switch h.indexType {
-		case Block:
-			bucket = rootBucket.NestedReadWriteBucket(bitcoinBucket)
-		case RegularFilter:
-			bucket = rootBucket.NestedReadWriteBucket(regFitlerBucket)
-		case ExtendedFilter:
-			bucket = rootBucket.NestedReadWriteBucket(extFilterBucket)
-		}
-
-		// Using the bucket, we'll obtain a cursor so we can seek to
-		// the end of the key space.
-		cursor := bucket.ReadWriteCursor()
-
-		// With the cursor obtained, we'll seek to the _last_ entry,
-		// then delete it, thereby truncating the index chain by a
-		// single block.
-		_, _ = cursor.Last()
-		return cursor.Delete()
-	})
-}
-
-// hashFromHeight returns the hash of the header at the specified height.
-func (h *headerIndex) hashFromHeight(height uint32) (*chainhash.Hash, error) {
-	var hash *chainhash.Hash
-	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		rootBucket := tx.ReadBucket(indexBucket)
-
-		var bucket walletdb.ReadBucket
-
-		// Based on the specified index type of this instance of the
-		// index, we'll grab the appropriate bucket.
-		switch h.indexType {
-		case Block:
-			bucket = rootBucket.NestedReadBucket(bitcoinBucket)
-		case RegularFilter:
-			bucket = rootBucket.NestedReadBucket(regFitlerBucket)
-		case ExtendedFilter:
-			bucket = rootBucket.NestedReadBucket(extFilterBucket)
-		}
-
-		// With the proper bucket grabbed, we'll obtain a cursor so we
-		// can jump around in the key space.
-		cursor := bucket.ReadCursor()
-
-		// Next, we'll construct the key prefix for our desired entry:
-		// height || zeroes
-		var heightBytes [4]byte
-		binary.BigEndian.PutUint32(heightBytes[:], height)
-
-		// We'll then convert that into the full header locator leaving
-		// the latter bytes blank.
-		var targetKey headerLocator
-		copy(targetKey[:], heightBytes[:])
-
-		// WIth the key construted, we can now seek to the target key.
-		indexKey, _ := cursor.Seek(targetKey[:])
-
-		// As a sanity check, if the entry is within the database, it
-		// should share the same prefix.
-		if !bytes.HasPrefix(indexKey[:], heightBytes[:]) {
-			return ErrHeightNotFound
-		}
-
-		// If the check above passes, then we have the proper hash that
-		// matches this height, so we'll go ahead an extract the hash
-		// object from it.
-		var loc headerLocator
-		copy(loc[:], indexKey[:])
-		headerHash, err := loc.hash()
-		if err != nil {
-			return err
-		}
-
-		hash = headerHash
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return hash, nil
 }
 
 // heightFromHash returns the height of the entry that matches the specified
@@ -318,49 +190,15 @@ func (h *headerIndex) heightFromHash(hash *chainhash.Hash) (uint32, error) {
 	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
 		rootBucket := tx.ReadBucket(indexBucket)
 
-		var bucket walletdb.ReadBucket
-
-		// Based on the specified index type of this instance of the
-		// index, we'll grab the appropriate bucket.
-		//
-		// TODO(roasbeef): factor out
-		switch h.indexType {
-		case Block:
-			bucket = rootBucket.NestedReadBucket(bitcoinBucket)
-		case RegularFilter:
-			bucket = rootBucket.NestedReadBucket(regFitlerBucket)
-		case ExtendedFilter:
-			bucket = rootBucket.NestedReadBucket(extFilterBucket)
+		heightBytes := rootBucket.Get(hash[:])
+		if heightBytes == nil {
+			// If the hash wasn't found, then we don't know of this
+			// hash within the index.
+			return ErrHashNotFound
 		}
 
-		// TODO(roasbeef): replace with a manual binary search
-		// implementation
-		//  * atm is O(N)
-
-		// As boltdb is unable to do suffix searches with the exposed
-		// API, we'll do a backwards scan for the target header hash.
-		cursor := bucket.ReadCursor()
-		for indexKey, _ := cursor.Last(); indexKey != nil; indexKey, _ = cursor.Prev() {
-			// With the cursor seeked, if this key has a matching
-			// suffix, then we can exit our search here as we've
-			// found the key.
-			if !bytes.HasSuffix(indexKey[:], hash[:]) {
-				continue
-			}
-
-			// If the above check passes, then we've found the
-			// proper index entry and can extract the height from
-			// it.
-			var loc headerLocator
-			copy(loc[:], indexKey[:])
-			height = loc.height()
-
-			return nil
-		}
-
-		// If the hash wasn't found, then we don't know of this hash
-		// within the index.
-		return ErrHashNotFound
+		height = binary.BigEndian.Uint32(heightBytes)
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -379,36 +217,34 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
 		rootBucket := tx.ReadBucket(indexBucket)
 
-		var bucket walletdb.ReadBucket
+		var tipKey []byte
 
 		// Based on the specified index type of this instance of the
-		// index, we'll grab the appropriate bucket.
+		// index, we'll grab the particualr key that tracks the chain
+		// tip.
 		switch h.indexType {
 		case Block:
-			bucket = rootBucket.NestedReadBucket(bitcoinBucket)
+			tipKey = bitcoinTip
 		case RegularFilter:
-			bucket = rootBucket.NestedReadBucket(regFitlerBucket)
+			tipKey = regFilterTip
 		case ExtendedFilter:
-			bucket = rootBucket.NestedReadBucket(extFilterBucket)
+			tipKey = extFilterTip
 		}
 
-		// Obtain the cursor, and seek it to the _last_ entry. This
-		// will be the entry with the largest height
-		cursor := bucket.ReadCursor()
-		indexKey, _ := cursor.Last()
+		// Now that we have the particular tip key for this header
+		// type, we'll fetch the hash for this tip, then using that
+		// we'll fetch the height that corresponds to that hash.
+		tipHashBytes := rootBucket.Get(tipKey)
+		tipHeightBytes := rootBucket.Get(tipHashBytes)
 
-		// Once we have the full key, then we can tract both the height
-		// and the hash to return to the caller.
-		var loc headerLocator
-		copy(loc[:], indexKey[:])
-
-		tipHeight = loc.height()
-
-		hash, err := loc.hash()
+		// With the height fetched, we can now populate our return
+		// parameters.
+		h, err := chainhash.NewHash(tipHashBytes)
 		if err != nil {
 			return err
 		}
-		tipHash = hash
+		tipHash = h
+		tipHeight = binary.BigEndian.Uint32(tipHeightBytes)
 
 		return nil
 	})
@@ -417,4 +253,42 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 	}
 
 	return tipHash, tipHeight, nil
+}
+
+// truncateIndex truncates the index for a particluar header type by a single
+// header entry. The passed newTip pointer should point to the hash of the new
+// chain tip. Optionally, if the entry is to be deleted as well, then the
+// delete flag should be set to true.
+func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
+	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		var tipKey []byte
+
+		// Based on the specified index type of this instance of the
+		// index, we'll grab the key that tracks the tip of the chain
+		// we need to update.
+		switch h.indexType {
+		case Block:
+			tipKey = bitcoinTip
+		case RegularFilter:
+			tipKey = regFilterTip
+		case ExtendedFilter:
+			tipKey = extFilterTip
+		}
+
+		// If the delete flag is set, then we'll also delete this entry
+		// from the database as the primary index (block headers) is
+		// being rolled back.
+		if delete {
+			prevTipHash := rootBucket.Get(tipKey)
+			if err := rootBucket.Delete(prevTipHash); err != nil {
+				return err
+			}
+		}
+
+		// With the now stale entry deleted, we'll update the chain tip
+		// to point to the new hash.
+		return rootBucket.Put(tipKey, newTip[:])
+	})
 }
