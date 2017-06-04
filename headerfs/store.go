@@ -2,6 +2,7 @@ package headerfs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,14 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
+
+// headerBufPool is a pool of bytes.Buffer that will be re-used by the various
+// headerStore implementations to batch their header writes to disk. By
+// utilizing this variable we can minimize the total number of allocations when
+// writing headers to disk.
+var headerBufPool = sync.Pool{
+	New: func() interface{} { return new(bytes.Buffer) },
+}
 
 // headerStore combines a on-disk set of headers within a flat file in addition
 // to a databse which indexes tghat flat file. Together, these two abstractions
@@ -254,23 +263,25 @@ func (b *BlockHeader) toIndexEntry() headerEntry {
 // WriteHeaders writes a set of headers to disk and updates the index in a
 // single atomic transaction.
 func (h *BlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
-	// First, we'll allocate enough bytes to write all the headers. This
-	// slice will be re-used to serialize each header.
-	headerBytes := make([]byte, 0, 80)
-	headerWriter := bytes.NewBuffer(headerBytes)
+	// First, we'll grab a buffer from the write buffer pool so we an
+	// reduce our total number of allocations, and also write the headers
+	// in a single swoop.
+	headerBuf := headerBufPool.Get().(*bytes.Buffer)
+	headerBuf.Reset()
+	defer headerBufPool.Put(headerBuf)
 
-	// First, we'll write out all the passed headers in series into the
-	// flat header file.
+	// Next, we'll write out all the passed headers in series into the
+	// buffer we just extracted from the pool.
 	for _, header := range hdrs {
-		if err := header.Serialize(headerWriter); err != nil {
+		if err := header.Serialize(headerBuf); err != nil {
 			return err
 		}
+	}
 
-		if err := h.appendRaw(headerWriter.Bytes()); err != nil {
-			return err
-		}
-
-		headerWriter.Reset()
+	// With all the headers written to the buffer, we'll now write out the
+	// entire batch in a single write call.
+	if err := h.appendRaw(headerBuf.Bytes()); err != nil {
+		return err
 	}
 
 	// Once those are written, we'll then collate all the headers into
@@ -317,12 +328,13 @@ func (h *BlockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (blockchai
 			height -= decrement
 		}
 
-		blockHash, err := h.hashFromHeight(height)
+		blockHeader, err := h.FetchHeaderByHeight(height)
 		if err != nil {
 			return locator, err
 		}
+		headerHash := blockHeader.BlockHash()
 
-		locator = append(locator, blockHash)
+		locator = append(locator, &headerHash)
 	}
 
 	return locator, nil
@@ -472,9 +484,13 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		fStore,
 	}
 
+	// TODO(roasbeef): also reconsile with block header state due to way
+	// roll back works atm
+
 	// If the size of the file is zero, then this means that we haven't yet
 	// written the initial genesis header to disk, so we'll do so now.
 	if fileInfo.Size() == 0 {
+
 		var genesisFilterHash chainhash.Hash
 		switch filterType {
 		case RegularFilter:
@@ -598,18 +614,31 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 // headers themselves are appended to the flat file, and then the index updated
 // to reflect the new entires.
 func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
+	// First, we'll grab a buffer from the write buffer pool so we an
+	// reduce our total number of allocations, and also write the headers
+	// in a single swoop.
+	headerBuf := headerBufPool.Get().(*bytes.Buffer)
+	headerBuf.Reset()
+	defer headerBufPool.Put(headerBuf)
+
+	// Next, we'll write out all the passed headers in series into the
+	// buffer we just extracted from the pool.
 	for _, header := range hdrs {
-		if err := f.appendRaw(header.FilterHash[:]); err != nil {
+		if _, err := headerBuf.Write(header.FilterHash[:]); err != nil {
 			return err
 		}
 	}
 
-	headerLocs := make([]headerEntry, len(hdrs))
-	for i, header := range hdrs {
-		headerLocs[i] = header.toIndexEntry()
+	// With all the headers written to the buffer, we'll now write out the
+	// entire batch in a single write call.
+	if err := f.appendRaw(headerBuf.Bytes()); err != nil {
+		return err
 	}
 
-	return f.addHeaders(headerLocs)
+	// As the block headers should already be written, we only need to
+	// update the tip pointer for this particular header type.
+	newTip := hdrs[len(hdrs)-1].toIndexEntry().hash
+	return f.truncateIndex(&newTip, false)
 }
 
 // ChainTip returns the latest filter header and height known to the
