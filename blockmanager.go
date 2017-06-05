@@ -1007,6 +1007,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	log.Tracef("Writing header batch of %v block headers",
 		len(headerWriteBatch))
+	if len(headerWriteBatch) == 0 {
+		log.Warnf("Headers message does not connect to main chain")
+		return
+	}
 
 	// With all the headers in this batch validated, we'll write them all
 	// in a single transaction such that this entire batch is atomic.
@@ -1326,7 +1330,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		}
 	}
 
-	log.Tracef("Writing fitler batch of %v filter headers",
+	log.Tracef("Writing filter batch of %v filter headers",
 		len(headerWriteBatch))
 
 	// With all the headers in this batch validated, we'll write them all
