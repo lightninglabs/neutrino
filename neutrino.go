@@ -269,7 +269,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
 	peerServices := sp.Services()
-	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness &&
+	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
 		peerServices&wire.SFNodeCF != wire.SFNodeCF {
 
 		log.Infof("Disconnecting peer %v, cannot serve compact "+
