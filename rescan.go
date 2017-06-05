@@ -383,7 +383,7 @@ rescanLoop:
 
 		// If we found the basic filter, and the fitler isn't "nil",
 		// then we'll check the items in the watch list against it.
-		if bFilter != nil && bFilter.N() != 0 {
+		if bFilter != nil && bFilter.N() != 0 && len(ro.watchList) != 0 {
 			// We see if any relevant transactions match.
 			matched, err = bFilter.MatchAny(key, ro.watchList)
 			if err != nil {
@@ -401,7 +401,7 @@ rescanLoop:
 				return err
 			}
 		}
-		if eFilter != nil && eFilter.N() != 0 {
+		if eFilter != nil && eFilter.N() != 0 && len(ro.watchList) != 0 {
 			// We see if any relevant transactions match.
 			// TODO(roasbeef): should instead only match the txids?
 			matched, err = eFilter.MatchAny(key, ro.watchList)
