@@ -366,67 +366,75 @@ rescanLoop:
 				curStamp.Height, curHeader.Timestamp)
 		}
 
-		// Now we need to see if it matches the rescan's filters, so we
-		// get the basic filter from the DB or network.
-		var (
-			block            *btcutil.Block
-			relevantTxs      []*btcutil.Tx
-			bFilter, eFilter *gcs.Filter
-			err              error
-		)
-		key := builder.DeriveKey(&curStamp.Hash)
-		matched := false
-		bFilter, err = s.GetCFilter(curStamp.Hash, false)
-		if err != nil {
-			return err
-		}
+		var relevantTxs []*btcutil.Tx
 
-		// If we found the basic filter, and the fitler isn't "nil",
-		// then we'll check the items in the watch list against it.
-		if bFilter != nil && bFilter.N() != 0 && len(ro.watchList) != 0 {
-			// We see if any relevant transactions match.
-			matched, err = bFilter.MatchAny(key, ro.watchList)
+		// We'll only need to check the filter if the watvh list is
+		// non-empty.
+		if len(ro.watchList) != 0 {
+			// If we have a non-empty watch list, then w we need to
+			// see if it matches the rescan's filters, so we get
+			// the basic filter from the DB or network.
+			var (
+				block            *btcutil.Block
+				bFilter, eFilter *gcs.Filter
+				err              error
+			)
+			key := builder.DeriveKey(&curStamp.Hash)
+			matched := false
+			bFilter, err = s.GetCFilter(curStamp.Hash, false)
 			if err != nil {
 				return err
 			}
-		}
 
-		// If the regular filter didn't match, and a set of
-		// transactions is specified, then we'll also fetch the
-		// extended filter to see if anything actually matches for this
-		// block.
-		if !matched && len(ro.watchTxIDs) > 0 {
-			eFilter, err = s.GetCFilter(curStamp.Hash, true)
-			if err != nil {
-				return err
+			// If we found the basic filter, and the fitler isn't
+			// "nil", then we'll check the items in the watch list
+			// against it.
+			if bFilter != nil && bFilter.N() != 0 {
+				// We see if any relevant transactions match.
+				matched, err = bFilter.MatchAny(key, ro.watchList)
+				if err != nil {
+					return err
+				}
 			}
-		}
-		if eFilter != nil && eFilter.N() != 0 && len(ro.watchList) != 0 {
-			// We see if any relevant transactions match.
-			// TODO(roasbeef): should instead only match the txids?
-			matched, err = eFilter.MatchAny(key, ro.watchList)
-			if err != nil {
-				return err
-			}
-		}
 
-		if matched {
-			// We've matched. Now we actually get the block and
-			// cycle through the transactions to see which ones are
-			// relevant.
-			block, err = s.GetBlockFromNetwork(curStamp.Hash,
-				ro.queryOptions...)
-			if err != nil {
-				return err
+			// If the regular filter didn't match, and a set of
+			// transactions is specified, then we'll also fetch the
+			// extended filter to see if anything actually matches
+			// for this block.
+			if !matched && len(ro.watchTxIDs) > 0 {
+				eFilter, err = s.GetCFilter(curStamp.Hash, true)
+				if err != nil {
+					return err
+				}
 			}
-			if block == nil {
-				return fmt.Errorf("Couldn't get block %d "+
-					"(%s) from network", curStamp.Height,
-					curStamp.Hash)
+			if eFilter != nil && eFilter.N() != 0 {
+				// We see if any relevant transactions match.
+				// TODO(roasbeef): should instead only match
+				// the txids?
+				matched, err = eFilter.MatchAny(key, ro.watchList)
+				if err != nil {
+					return err
+				}
 			}
-			relevantTxs, err = ro.notifyBlock(block)
-			if err != nil {
-				return err
+
+			if matched {
+				// We've matched. Now we actually get the block and
+				// cycle through the transactions to see which ones are
+				// relevant.
+				block, err = s.GetBlockFromNetwork(curStamp.Hash,
+					ro.queryOptions...)
+				if err != nil {
+					return err
+				}
+				if block == nil {
+					return fmt.Errorf("Couldn't get block %d "+
+						"(%s) from network", curStamp.Height,
+						curStamp.Hash)
+				}
+				relevantTxs, err = ro.notifyBlock(block)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
