@@ -268,6 +268,18 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	// Signal the block manager this peer is a new sync candidate.
 	sp.server.blockManager.NewPeer(sp)
 
+	// Check to see if the peer supports the latest protocol version and
+	// service bits required to service us. If not, then we'll disconnect
+	// so we can find compatible peers.
+	peerServices := sp.Services()
+	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness &&
+		peerServices&wire.SFNodeCF != wire.SFNodeCF {
+
+		log.Infof("Disconnecting peer %v, cannot serve compact "+
+			"filters", sp)
+		sp.Disconnect()
+	}
+
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections.  This is skipped when running
 	// on the simulation test network since it is only intended to connect
