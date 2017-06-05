@@ -265,9 +265,6 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	// the local clock to keep the network time in sync.
 	sp.server.timeSource.AddTimeSample(sp.Addr(), msg.Timestamp)
 
-	// Signal the block manager this peer is a new sync candidate.
-	sp.server.blockManager.NewPeer(sp)
-
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
@@ -278,7 +275,11 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 		log.Infof("Disconnecting peer %v, cannot serve compact "+
 			"filters", sp)
 		sp.Disconnect()
+		return
 	}
+
+	// Signal the block manager this peer is a new sync candidate.
+	sp.server.blockManager.NewPeer(sp)
 
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections.  This is skipped when running
