@@ -1342,7 +1342,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 
 	// Notify subscribers of a connected block.
 	go func() {
-		b.server.mtxSubscribers.RLock()
+		b.server.mtxSubscribers.Lock()
 		for _, header := range processedHeaders {
 			for sub := range b.server.blockSubscribers {
 				channel := sub.onConnectBasic
@@ -1357,7 +1357,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 				}
 			}
 		}
-		b.server.mtxSubscribers.RUnlock()
+		b.server.mtxSubscribers.Unlock()
 	}()
 }
 
