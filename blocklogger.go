@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/roasbeef/btcd/wire"
 	"github.com/btcsuite/btclog"
+	"github.com/roasbeef/btcd/wire"
 )
 
 // blockProgressLogger provides periodic logging for other services in order

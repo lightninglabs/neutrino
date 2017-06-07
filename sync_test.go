@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/aakselrod/btctestlog"
+	"github.com/btcsuite/btclog"
+	"github.com/lightninglabs/neutrino"
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg"
@@ -20,7 +22,6 @@ import (
 	"github.com/roasbeef/btcd/rpctest"
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
-	"github.com/btcsuite/btclog"
 	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/gcs"
@@ -29,7 +30,6 @@ import (
 	"github.com/roasbeef/btcwallet/wallet/txauthor"
 	"github.com/roasbeef/btcwallet/walletdb"
 	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
-	"github.com/lightninglabs/neutrino"
 )
 
 var (
