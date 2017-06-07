@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/roasbeef/btcd/blockchain"
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 const (
@@ -1304,6 +1304,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 
 				}
 				*lastCFHeaderHeight = node.height
+				delete(headerMap, hash)
 			// This is when we have conflicting information from
 			// multiple peers.
 			// TODO: Handle this case as an adversarial condition.
@@ -1315,10 +1316,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			b.mapMutex.Unlock()
 		}
 
-		//elToRemove := el
 		el = el.Next()
-		//b.headerList.Remove(elToRemove)
-		//b.startHeader = el
 
 		// If we've reached the end, we can exit and write out batch
 		// (if any).
@@ -1359,6 +1357,21 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		}
 		b.server.mtxSubscribers.Unlock()
 	}()
+
+	// Clean up any block headers in the header list for which we've already
+	// downloaded all of the filter headers, both basic and extended. Leave
+	// at least one as an anchor.
+	minHeight := b.lastBasicCFHeaderHeight
+	if b.lastExtCFHeaderHeight < minHeight {
+		minHeight = b.lastExtCFHeaderHeight
+	}
+	el = b.headerList.Front()
+	for el.Value.(*headerNode).height < minHeight {
+		elToRemove := el
+		el = el.Next()
+		b.headerList.Remove(elToRemove)
+		b.startHeader = el
+	}
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
