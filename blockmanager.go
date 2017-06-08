@@ -470,6 +470,76 @@ func (b *blockManager) startSync(peers *list.List) {
 			"latest block: %s", err)
 		return
 	}
+
+	// Get the latest cfheaders committed to storage to make sure that they
+	// are caught up to the best known block header. If not, the first thing
+	// we have to do is catch them up. If there was a reorg in the meantime,
+	// this won't work past the height of the common block between the known
+	// and the new correct chain but the reorg code will re-request the
+	// cfheaders after the block headers get reorganized. This does make
+	// the assumption that the difference between the filter header tips and
+	// the block header tip is 2000 or fewer blocks. This is a good
+	// assumption based on how we request headers; however, should be
+	// improved when the blockmanager code is refactored to use the query
+	// API.
+	_, bestRegHeight, err := b.server.RegFilterHeaders.ChainTip()
+	if err != nil {
+		log.Errorf("Failed to get height for the latest regular "+
+			"filter header: %s", err)
+		return
+	}
+	_, bestExtHeight, err := b.server.ExtFilterHeaders.ChainTip()
+	if err != nil {
+		log.Errorf("Failed to get height for the latest extended "+
+			"filter header: %s", err)
+		return
+	}
+	// We fill the header list all the way back to the first header with
+	// unknown cfheaders.
+	minHeight := bestRegHeight
+	if bestExtHeight < minHeight {
+		minHeight = bestExtHeight
+	}
+	maxHeight := b.headerList.Front().Value.(*headerNode).height
+	var bestRegHash, bestExtHash chainhash.Hash
+	for height := maxHeight - 1; height >= int32(minHeight); height-- {
+		header, err := b.server.BlockHeaders.FetchHeaderByHeight(uint32(height))
+		if err != nil {
+			log.Errorf("Failed to get block header for height %d: "+
+				"%s", height, err)
+		}
+		if height == int32(bestRegHeight) {
+			bestRegHash = header.BlockHash()
+		}
+		if height == int32(bestExtHeight) {
+			bestExtHash = header.BlockHash()
+		}
+		b.mapMutex.Lock()
+		b.basicHeaders[header.BlockHash()] = make(
+			map[chainhash.Hash][]*serverPeer,
+		)
+		b.extendedHeaders[header.BlockHash()] = make(
+			map[chainhash.Hash][]*serverPeer,
+		)
+		b.mapMutex.Unlock()
+		node := headerNode{header: header, height: height}
+		b.headerList.PushFront(&node)
+	}
+	if int32(bestRegHeight) < best.Height {
+		log.Infof("Catching up regular filter headers from %d(%s) to "+
+			"%d(%s)", bestRegHeight, bestRegHash, best.Height,
+			best.Hash)
+		b.sendGetcfheaders(&bestRegHash, &best.Hash,
+			int(best.Height)-int(bestRegHeight), false)
+	}
+	if int32(bestExtHeight) < best.Height {
+		log.Infof("Catching up extended filter headers from %d(%s) to "+
+			"%d(%s)", bestExtHeight, bestExtHash, best.Height,
+			best.Hash)
+		b.sendGetcfheaders(&bestExtHash, &best.Hash,
+			int(best.Height)-int(bestExtHeight), true)
+	}
+
 	var bestPeer *serverPeer
 	var enext *list.Element
 	for e := peers.Front(); e != nil; e = enext {
@@ -1026,30 +1096,11 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	}
 
 	// Send getcfheaders to each peer based on these headers.
-	cfhLocator := blockchain.BlockLocator([]*chainhash.Hash{
-		&msg.Headers[0].PrevBlock,
-	})
 	cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
-	cfhCount := len(msg.Headers)
-	cfhReqB := cfhRequest{
-		extended: false,
-		stopHash: cfhStopHash,
-	}
-	cfhReqE := cfhRequest{
-		extended: true,
-		stopHash: cfhStopHash,
-	}
-	b.server.ForAllPeers(func(sp *serverPeer) {
-		// Should probably use better isolation for this but we're in
-		// the same package. One of the things to clean up when we do
-		// more general cleanup.
-		sp.mtxReqCFH.Lock()
-		sp.requestedCFHeaders[cfhReqB] = cfhCount
-		sp.requestedCFHeaders[cfhReqE] = cfhCount
-		sp.mtxReqCFH.Unlock()
-		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, false)
-		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, true)
-	})
+	b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
+		len(msg.Headers), false)
+	b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
+		len(msg.Headers), true)
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
@@ -1069,6 +1120,27 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			return
 		}
 	}
+}
+
+// sendGetcfheaders sends a getcfheaders message to all peers with the
+// specified start block and hash block and for the specified type of header.
+func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
+	count int, extended bool) {
+	// Send getcfheaders to each peer based on these headers.
+	cfhLocator := blockchain.BlockLocator([]*chainhash.Hash{startBlock})
+	cfhReq := cfhRequest{
+		extended: extended,
+		stopHash: *endBlock,
+	}
+	b.server.ForAllPeers(func(sp *serverPeer) {
+		// Should probably use better isolation for this but we're in
+		// the same package. One of the things to clean up when we do
+		// more general cleanup.
+		sp.mtxReqCFH.Lock()
+		sp.requestedCFHeaders[cfhReq] = count
+		sp.mtxReqCFH.Unlock()
+		sp.pushGetCFHeadersMsg(cfhLocator, endBlock, extended)
+	})
 }
 
 // QueueCFHeaders adds the passed headers message and peer to the block
