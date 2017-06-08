@@ -5,6 +5,7 @@ package neutrino
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/roasbeef/btcd/btcjson"
@@ -660,6 +661,9 @@ type Rescan struct {
 	options []RescanOption
 
 	chain *ChainService
+
+	errMtx sync.Mutex
+	err    error
 }
 
 // NewRescan returns a rescan object that runs in another goroutine and has an
@@ -683,6 +687,9 @@ func (r *Rescan) Start() <-chan error {
 		rescanArgs := append(r.options, updateChan(r.updateChan))
 		err := r.chain.Rescan(rescanArgs...)
 		atomic.StoreUint32(&r.running, 0)
+		r.errMtx.Lock()
+		r.err = err
+		r.errMtx.Unlock()
 		errChan <- err
 	}()
 
@@ -739,8 +746,13 @@ func Rewind(height uint32) UpdateOption {
 func (r *Rescan) Update(options ...UpdateOption) error {
 	running := atomic.LoadUint32(&r.running)
 	if running != 1 {
-		return fmt.Errorf("Rescan is already done and cannot be " +
-			"updated.")
+		errStr := "Rescan is already done and cannot be updated."
+		r.errMtx.Lock()
+		if r.err != nil {
+			errStr += fmt.Sprintf(" It returned error: %s", r.err)
+		}
+		r.errMtx.Unlock()
+		return fmt.Errorf(errStr)
 	}
 	uo := defaultUpdateOptions()
 	for _, option := range options {
