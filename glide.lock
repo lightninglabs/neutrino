@@ -26,7 +26,7 @@ imports:
   - scrypt
   - ssh/terminal
 - name: github.com/btcsuite/seelog
-  version: ae8891d029dd3c269dcfd6f261ad23e761acd99f
+  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
