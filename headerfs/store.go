@@ -441,12 +441,12 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 	_, tipHeight, err := h.chainTip()
 	if err != nil {
-		return nil, 0, nil
+		return nil, 0, err
 	}
 
 	latestHeader, err := h.readHeader(int64(tipHeight))
 	if err != nil {
-		return nil, 0, nil
+		return nil, 0, err
 	}
 
 	return latestHeader, tipHeight, nil
@@ -646,12 +646,12 @@ func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 	_, tipHeight, err := f.chainTip()
 	if err != nil {
-		return nil, 0, nil
+		return nil, 0, err
 	}
 
 	latestHeader, err := f.readHeader(int64(tipHeight))
 	if err != nil {
-		return nil, 0, nil
+		return nil, 0, err
 	}
 
 	return latestHeader, tipHeight, nil
