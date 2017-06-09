@@ -59,7 +59,7 @@ imports:
 - name: github.com/roasbeef/btcrpcclient
   version: 9a7826550df8071460e2f5dd6ed9139dcbf260b8
 - name: github.com/roasbeef/btcutil
-  version: a259eaf2ec1b54653cdd67848a41867f280797ee
+  version: 9dedd698f8c71bde3d1466d7117f538472bb79e4
   subpackages:
   - base58
   - gcs
