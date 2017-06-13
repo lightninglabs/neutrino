@@ -664,6 +664,8 @@ type Rescan struct {
 
 	errMtx sync.Mutex
 	err    error
+
+	wg sync.WaitGroup
 }
 
 // NewRescan returns a rescan object that runs in another goroutine and has an
@@ -678,18 +680,30 @@ func (s *ChainService) NewRescan(options ...RescanOption) Rescan {
 	}
 }
 
-// Start kicks off hte rescan goroutine, which will begin to scan the chain
+// WaitForShutdown waits until all goroutines associated with the rescan have
+// exited. This method is to be called once the passed quitchan (if any) has
+// been closed.
+func (r *Rescan) WaitForShutdown() {
+	r.wg.Wait()
+}
+
+// Start kicks off the rescan goroutine, which will begin to scan the chain
 // according to the specified rescan options.
 func (r *Rescan) Start() <-chan error {
 	errChan := make(chan error)
 
+	r.wg.Add(1)
 	go func() {
 		rescanArgs := append(r.options, updateChan(r.updateChan))
 		err := r.chain.Rescan(rescanArgs...)
+
+		r.wg.Done()
 		atomic.StoreUint32(&r.running, 0)
+
 		r.errMtx.Lock()
 		r.err = err
 		r.errMtx.Unlock()
+
 		errChan <- err
 	}()
 
