@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aakselrod/btctestlog"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino"
 	"github.com/roasbeef/btcd/btcec"
@@ -33,14 +32,15 @@ import (
 )
 
 var (
-	// Try btclog.InfoLvl for output like you'd see in normal operation, or
-	// btclog.TraceLvl to help debug code. Anything but btclog.Off turns on
-	// log messages from the tests themselves as well. Keep in mind some
-	// log messages may not appear in order due to use of multiple query
-	// goroutines in the tests.
-	logLevel    = btclog.Off
+	// Try btclog.LevelInfo for output like you'd see in normal operation,
+	// or btclog.LevelTrace to help debug code. Anything but
+	// btclog.LevelOff turns on log messages from the tests themselves as
+	// well. Keep in mind some log messages may not appear in order due to
+	// use of multiple query goroutines in the tests.
+	logLevel    = btclog.LevelOff
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
+
 	// Don't set this too high for your platform, or the tests will miss
 	// messages.
 	// TODO: Make this a benchmark instead.
@@ -50,6 +50,7 @@ var (
 	queryOptions    = []neutrino.QueryOption{
 	//neutrino.NumRetries(5),
 	}
+
 	// The logged sequence of events we want to see. The value of i
 	// represents the block for which a loop is generating a log entry,
 	// given for readability only.
@@ -229,16 +230,17 @@ func newSecSource(params *chaincfg.Params) *secSource {
 	}
 }
 
+type testLogger struct {
+	t *testing.T
+}
+
 func TestSetup(t *testing.T) {
 	// Set up logging.
-	logger, err := btctestlog.NewTestLogger(t)
-	if err != nil {
-		t.Fatalf("Could not set up logger: %s", err)
-	}
-	chainLogger := btclog.NewSubsystemLogger(logger, "CHAIN: ")
+	logger := btclog.NewBackend(os.Stdout)
+	chainLogger := logger.Logger("CHAIN")
 	chainLogger.SetLevel(logLevel)
 	neutrino.UseLogger(chainLogger)
-	rpcLogger := btclog.NewSubsystemLogger(logger, "RPCC: ")
+	rpcLogger := logger.Logger("RPCC")
 	rpcLogger.SetLevel(logLevel)
 	btcrpcclient.UseLogger(rpcLogger)
 
@@ -820,7 +822,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	if err != nil {
 		return err
 	}
-	if logLevel != btclog.Off {
+	if logLevel != btclog.LevelOff {
 		t.Logf("Syncing to %d (%s)", knownBestHeight, knownBestHash)
 	}
 	var haveBest *waddrmgr.BlockStamp
@@ -877,7 +879,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 	}
-	if logLevel != btclog.Off {
+	if logLevel != btclog.LevelOff {
 		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
 			haveBest.Hash)
 	}
@@ -955,7 +957,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			rescanMtx.RUnlock()
 			return err
 		}
-		if logLevel != btclog.Off {
+		if logLevel != btclog.LevelOff {
 			t.Logf("Rescan caught up to block %d", rescanHeight)
 		}
 		if rescanHeight == haveBest.Height {
@@ -1207,7 +1209,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				"blocks, filters, and filter headers.")
 		}
 	}
-	if logLevel != btclog.Off {
+	if logLevel != btclog.LevelOff {
 		t.Logf("Finished checking %d blocks and their cfilters",
 			haveBest.Height)
 	}
