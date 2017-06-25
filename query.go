@@ -573,10 +573,11 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				if response.Hash == tx.TxHash() &&
 					!strings.Contains(response.Reason,
 						"already have transaction") {
-					err = log.Errorf("Transaction %s "+
+					err = fmt.Errorf("Transaction %s "+
 						"rejected by %s: %s",
 						tx.TxHash(), sp.Addr(),
 						response.Reason)
+					log.Errorf(err.Error())
 					close(quit)
 				}
 			}
