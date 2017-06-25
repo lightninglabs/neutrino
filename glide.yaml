@@ -3,7 +3,7 @@ import:
 - package: github.com/boltdb/bolt
   version: ^1.3.0
 - package: github.com/roasbeef/btcd
-  version: 4d38357cee3ed3843cd81a347e1573f037e0301e
+  version: 34fdda7d41cc47d9456550fd1147a77db89f601a
   subpackages:
   - blockchain
   - btcec
@@ -14,7 +14,7 @@ import:
   - wire
 - package: github.com/btcsuite/btclog
 - package: github.com/roasbeef/btcrpcclient
-  version: 9a7826550df8071460e2f5dd6ed9139dcbf260b8
+  version: d0f4db8b4dad0ca3d569b804f21247c3dd96acbb
 - package: github.com/roasbeef/btcutil
   version: a259eaf2ec1b54653cdd67848a41867f280797ee
   subpackages:
