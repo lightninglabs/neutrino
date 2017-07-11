@@ -1,14 +1,12 @@
-hash: bd18cdb51362296affe0ae5378e5e92cc27291f448e8b0524b0ec5695c621cfe
-updated: 2017-06-25T10:29:46.445412282+01:00
+hash: 923f5b590cd1daeffaf2e4a64b85c41ce606b2aee963a7310efa0d072a89856a
+updated: 2017-07-11T16:14:28.656355577-07:00
 imports:
-- name: github.com/aakselrod/btctestlog
-  version: 0d2cd69a47eb61cfb6386d4a960af491152fd53d
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 - name: github.com/btcsuite/btclog
-  version: 96c2a91a67da03552a5e6554fe3ccbfbc7f860be
+  version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 - name: github.com/btcsuite/fastsha256
   version: 637e656429416087660c84436a2a035d69d54e2e
 - name: github.com/btcsuite/go-socks
@@ -66,7 +64,7 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: github.com/roasbeef/btcwallet
-  version: 619ff8707c1d656061ab68db882205c4f63e19df
+  version: 9f9f54a1d9e362530b132e5757f657ce804bab1b
   subpackages:
   - internal/helpers
   - internal/zero

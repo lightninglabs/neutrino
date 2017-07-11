@@ -23,7 +23,7 @@ import:
   - gcs/builder
   - hdkeychain
 - package: github.com/roasbeef/btcwallet
-  version: 619ff8707c1d656061ab68db882205c4f63e19df
+  version: 9f9f54a1d9e362530b132e5757f657ce804bab1b
   subpackages:
   - waddrmgr
   - wallet/txauthor
@@ -36,7 +36,6 @@ import:
   - scrypt
   - ssh/terminal
 - package: github.com/btcsuite/seelog
-- package: github.com/aakselrod/btctestlog
 - package: github.com/btcsuite/websocket
 - package: github.com/golang/protobuf
   subpackages:
