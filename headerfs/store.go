@@ -614,6 +614,13 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 // headers themselves are appended to the flat file, and then the index updated
 // to reflect the new entires.
 func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
+	// If there are 0 headers to be written, return immediately. This
+	// prevents the newTip assignment from panicking because of an index
+	// of -1.
+	if len(hdrs) == 0 {
+		return nil
+	}
+
 	// First, we'll grab a buffer from the write buffer pool so we an
 	// reduce our total number of allocations, and also write the headers
 	// in a single swoop.
