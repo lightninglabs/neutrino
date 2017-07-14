@@ -500,19 +500,16 @@ func (b *blockManager) startSync(peers *list.List) {
 	if bestExtHeight < minHeight {
 		minHeight = bestExtHeight
 	}
+	maxminHeight := bestRegHeight
+	if bestExtHeight > maxminHeight {
+		maxminHeight = bestExtHeight
+	}
 	maxHeight := b.headerList.Front().Value.(*headerNode).height
-	var bestRegHash, bestExtHash chainhash.Hash
 	for height := maxHeight - 1; height >= int32(minHeight); height-- {
 		header, err := b.server.BlockHeaders.FetchHeaderByHeight(uint32(height))
 		if err != nil {
 			log.Errorf("Failed to get block header for height %d: "+
 				"%s", height, err)
-		}
-		if height == int32(bestRegHeight) {
-			bestRegHash = header.BlockHash()
-		}
-		if height == int32(bestExtHeight) {
-			bestExtHash = header.BlockHash()
 		}
 		b.mapMutex.Lock()
 		b.basicHeaders[header.BlockHash()] = make(
@@ -525,19 +522,74 @@ func (b *blockManager) startSync(peers *list.List) {
 		node := headerNode{header: header, height: height}
 		b.headerList.PushFront(&node)
 	}
-	if int32(bestRegHeight) < best.Height {
-		log.Infof("Catching up regular filter headers from %d(%s) to "+
-			"%d(%s)", bestRegHeight, bestRegHash, best.Height,
-			best.Hash)
-		b.sendGetcfheaders(&bestRegHash, &best.Hash,
-			int(best.Height)-int(bestRegHeight), false)
+	if bestRegHeight < uint32(best.Height) {
+		log.Infof("Catching up regular filter headers from %d to %d",
+			bestRegHeight, best.Height)
 	}
-	if int32(bestExtHeight) < best.Height {
-		log.Infof("Catching up extended filter headers from %d(%s) to "+
-			"%d(%s)", bestExtHeight, bestExtHash, best.Height,
-			best.Hash)
-		b.sendGetcfheaders(&bestExtHash, &best.Hash,
-			int(best.Height)-int(bestExtHeight), true)
+	if bestExtHeight < uint32(best.Height) {
+		log.Infof("Catching up extended filter headers from %d to %d",
+			bestExtHeight, best.Height)
+	}
+	for i := minHeight; i < maxminHeight; {
+		startHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(i)
+		if err != nil {
+			log.Errorf("Failed to get block header for height %d: "+
+				"%s", i, err)
+			break
+		}
+		startHash := startHeader.BlockHash()
+		endHeight := i
+		fType := false
+		if endHeight < bestRegHeight {
+			// We're catching extended headers up to regular headers
+			// so we set the header type to extended.
+			fType = true
+			if endHeight+wire.MaxCFHeadersPerMsg > bestRegHeight {
+				endHeight = bestRegHeight
+			} else {
+				endHeight += wire.MaxCFHeadersPerMsg
+			}
+		}
+		if endHeight < bestExtHeight {
+			// We're catching regular headers up to extended headers
+			// so we set the header type to regular.
+			fType = false
+			if endHeight+wire.MaxCFHeadersPerMsg > bestRegHeight {
+				endHeight = bestExtHeight
+			} else {
+				endHeight += wire.MaxCFHeadersPerMsg
+			}
+		}
+		if endHeight > uint32(best.Height) {
+			endHeight = uint32(best.Height)
+		}
+		endHeader, err := b.server.BlockHeaders.
+			FetchHeaderByHeight(endHeight)
+		endHash := endHeader.BlockHash()
+		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
+			fType)
+		i = endHeight
+	}
+	for i := maxminHeight; i < uint32(best.Height); {
+		startHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(i)
+		if err != nil {
+			log.Errorf("Failed to get block header for height %d: "+
+				"%s", i, err)
+			break
+		}
+		startHash := startHeader.BlockHash()
+		endHeight := i + wire.MaxCFHeadersPerMsg
+		if endHeight > uint32(best.Height) {
+			endHeight = uint32(best.Height)
+		}
+		endHeader, err := b.server.BlockHeaders.
+			FetchHeaderByHeight(endHeight)
+		endHash := endHeader.BlockHash()
+		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
+			false)
+		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
+			true)
+		i = endHeight
 	}
 
 	var bestPeer *serverPeer
@@ -1207,13 +1259,13 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 	respLen := len(headerList)
 
 	// Find the block header matching the last filter header, if any.
-	el := b.headerList.Back()
+	el := b.headerList.Front()
 	for el != nil {
 		if el.Value.(*headerNode).header.BlockHash() ==
 			cfhmsg.cfheaders.StopHash {
 			break
 		}
-		el = el.Prev()
+		el = el.Next()
 	}
 
 	// If nothing matched, there's nothing more to do.
