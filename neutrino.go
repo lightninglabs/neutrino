@@ -931,6 +931,7 @@ cleanup:
 		select {
 		case <-s.newPeers:
 		case <-s.donePeers:
+		case <-s.banPeers:
 		case <-s.peerHeightsUpdate:
 		case <-s.query:
 		default:

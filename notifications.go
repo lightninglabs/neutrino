@@ -175,34 +175,51 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 func (s *ChainService) ConnectedCount() int32 {
 	replyChan := make(chan int32)
 
-	s.query <- getConnCountMsg{reply: replyChan}
+	select {
+	case s.query <- getConnCountMsg{reply: replyChan}:
+		return <-replyChan
+	case <-s.quit:
+		return 0
+	}
 
-	return <-replyChan
 }
 
 // OutboundGroupCount returns the number of peers connected to the given
 // outbound group key.
 func (s *ChainService) OutboundGroupCount(key string) int {
 	replyChan := make(chan int)
-	s.query <- getOutboundGroup{key: key, reply: replyChan}
-	return <-replyChan
+
+	select {
+	case s.query <- getOutboundGroup{key: key, reply: replyChan}:
+		return <-replyChan
+	case <-s.quit:
+		return 0
+	}
 }
 
 // AddedNodeInfo returns an array of btcjson.GetAddedNodeInfoResult structures
 // describing the persistent (added) nodes.
 func (s *ChainService) AddedNodeInfo() []*serverPeer {
 	replyChan := make(chan []*serverPeer)
-	s.query <- getAddedNodesMsg{reply: replyChan}
-	return <-replyChan
+
+	select {
+	case s.query <- getAddedNodesMsg{reply: replyChan}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
+	}
 }
 
 // Peers returns an array of all connected peers.
 func (s *ChainService) Peers() []*serverPeer {
 	replyChan := make(chan []*serverPeer)
 
-	s.query <- getPeersMsg{reply: replyChan}
-
-	return <-replyChan
+	select {
+	case s.query <- getPeersMsg{reply: replyChan}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
+	}
 }
 
 // DisconnectNodeByAddr disconnects a peer by target address. Both outbound and
@@ -211,12 +228,15 @@ func (s *ChainService) Peers() []*serverPeer {
 func (s *ChainService) DisconnectNodeByAddr(addr string) error {
 	replyChan := make(chan error)
 
-	s.query <- disconnectNodeMsg{
+	select {
+	case s.query <- disconnectNodeMsg{
 		cmp:   func(sp *serverPeer) bool { return sp.Addr() == addr },
 		reply: replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
 	}
-
-	return <-replyChan
 }
 
 // DisconnectNodeByID disconnects a peer by target node id. Both outbound and
@@ -225,12 +245,15 @@ func (s *ChainService) DisconnectNodeByAddr(addr string) error {
 func (s *ChainService) DisconnectNodeByID(id int32) error {
 	replyChan := make(chan error)
 
-	s.query <- disconnectNodeMsg{
+	select {
+	case s.query <- disconnectNodeMsg{
 		cmp:   func(sp *serverPeer) bool { return sp.ID() == id },
 		reply: replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
 	}
-
-	return <-replyChan
 }
 
 // RemoveNodeByAddr removes a peer from the list of persistent peers if
@@ -238,12 +261,15 @@ func (s *ChainService) DisconnectNodeByID(id int32) error {
 func (s *ChainService) RemoveNodeByAddr(addr string) error {
 	replyChan := make(chan error)
 
-	s.query <- removeNodeMsg{
+	select {
+	case s.query <- removeNodeMsg{
 		cmp:   func(sp *serverPeer) bool { return sp.Addr() == addr },
 		reply: replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
 	}
-
-	return <-replyChan
 }
 
 // RemoveNodeByID removes a peer by node ID from the list of persistent peers
@@ -251,12 +277,15 @@ func (s *ChainService) RemoveNodeByAddr(addr string) error {
 func (s *ChainService) RemoveNodeByID(id int32) error {
 	replyChan := make(chan error)
 
-	s.query <- removeNodeMsg{
+	select {
+	case s.query <- removeNodeMsg{
 		cmp:   func(sp *serverPeer) bool { return sp.ID() == id },
 		reply: replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
 	}
-
-	return <-replyChan
 }
 
 // ConnectNode adds `addr' as a new outbound peer. If permanent is true then the
@@ -265,9 +294,16 @@ func (s *ChainService) RemoveNodeByID(id int32) error {
 func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 	replyChan := make(chan error)
 
-	s.query <- connectNodeMsg{addr: addr, permanent: permanent, reply: replyChan}
-
-	return <-replyChan
+	select {
+	case s.query <- connectNodeMsg{
+		addr:      addr,
+		permanent: permanent,
+		reply:     replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return nil
+	}
 }
 
 // ForAllPeers runs a closure over all peers (outbound and persistent) to which
@@ -275,7 +311,8 @@ func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 // ForAllPeers method doesn't return anything as the closure passed to it
 // doesn't return anything.
 func (s *ChainService) ForAllPeers(closure func(sp *serverPeer)) {
-	s.query <- forAllPeersMsg{
-		closure: closure,
+	select {
+	case s.query <- forAllPeersMsg{closure: closure}:
+	case <-s.quit:
 	}
 }
