@@ -1,5 +1,5 @@
-hash: 923f5b590cd1daeffaf2e4a64b85c41ce606b2aee963a7310efa0d072a89856a
-updated: 2017-07-11T16:14:28.656355577-07:00
+hash: bd4c50efc9b4c4af55b5f474175559f4f44b79e78e9dc4afad9449e0e4399a95
+updated: 2017-07-14T17:44:33.566096919-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -64,7 +64,7 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: github.com/roasbeef/btcwallet
-  version: 9f9f54a1d9e362530b132e5757f657ce804bab1b
+  version: 14f1a03bda72692c17e3f8931710b90ba62bde8b
   subpackages:
   - internal/helpers
   - internal/zero

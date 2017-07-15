@@ -23,7 +23,7 @@ import:
   - gcs/builder
   - hdkeychain
 - package: github.com/roasbeef/btcwallet
-  version: 9f9f54a1d9e362530b132e5757f657ce804bab1b
+  version: 14f1a03bda72692c17e3f8931710b90ba62bde8b
   subpackages:
   - waddrmgr
   - wallet/txauthor
