@@ -702,7 +702,15 @@ func (b *blockManager) current() bool {
 	// If our time source (median times of all the connected peers) is at
 	// least 24 hours ahead of our best known block, we aren't current.
 	minus24Hours := b.server.timeSource.AdjustedTime().Add(-24 * time.Hour)
-	return !header.Timestamp.Before(minus24Hours)
+	if header.Timestamp.Before(minus24Hours) {
+		return false
+	}
+
+	// If we have a syncPeer and the peer reported a higher known block
+	// height on connect than we know the peer already has, we're probably
+	// not current. If the peer is lying to us, other code will disconnect
+	// it and then we'll re-check and notice that we're actually current.
+	return b.SyncPeer().LastBlock() >= b.SyncPeer().StartingHeight()
 }
 
 // IsCurrent returns whether or not the block manager believes it is synced with
