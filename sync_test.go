@@ -5,6 +5,7 @@ package neutrino_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -532,6 +533,9 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err := checkRescanStatus()
+	if err != nil {
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
 	if numTXs != 1 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 1, got:"+
 			" %d", numTXs)
@@ -736,7 +740,8 @@ func TestSetup(t *testing.T) {
 
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2. This includes the transactions sent via
-	// svc.SendTransaction earlier, so we'll have to
+	// svc.SendTransaction earlier, so we'll have to check that the rescan
+	// status has updated for the correct number of transactions.
 	_, err = h2.Node.Generate(5)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit blocks: %s", err)
@@ -856,13 +861,13 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, false)
-	if err != nil {
+	if err != nil || len(knownBasicHeader.HeaderHashes) < 1 {
 		return fmt.Errorf("Couldn't get latest basic header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
 	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, true)
-	if err != nil {
+	if err != nil || len(knownExtHeader.HeaderHashes) < 1 {
 		return fmt.Errorf("Couldn't get latest extended header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
@@ -874,8 +879,24 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Timed out after %v waiting for "+
 				"cfheaders synchronization.", syncTimeout)
 		}
-		haveBasicHeader, _ = svc.RegFilterHeaders.FetchHeader(knownBestHash)
-		haveExtHeader, _ = svc.ExtFilterHeaders.FetchHeader(knownBestHash)
+		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(knownBestHash)
+		if err != nil {
+			if err == io.EOF {
+				haveBasicHeader = &chainhash.Hash{}
+				continue
+			}
+			return fmt.Errorf("Couldn't get regular filter header"+
+				" for %s: %s", knownBestHash, err)
+		}
+		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(knownBestHash)
+		if err != nil {
+			if err == io.EOF {
+				haveExtHeader = &chainhash.Hash{}
+				continue
+			}
+			return fmt.Errorf("Couldn't get extended filter header"+
+				" for %s: %s", knownBestHash, err)
+		}
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 	}
@@ -943,6 +964,11 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	// At this point, we know we have good cfheaders. Now we wait for the
 	// rescan, if one is going, to catch up.
 	for {
+		if total > syncTimeout {
+			rescanMtx.RUnlock()
+			return fmt.Errorf("Timed out after %v waiting for "+
+				"rescan to catch up.", syncTimeout)
+		}
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 		rescanMtx.RLock()
@@ -954,8 +980,10 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		}
 		_, rescanHeight, err := checkRescanStatus()
 		if err != nil {
-			rescanMtx.RUnlock()
-			return err
+			// If there's an error, that means the
+			// FilteredBlockConnected notifications are still
+			// catching up to the BlockConnected notifications.
+			continue
 		}
 		if logLevel != btclog.LevelOff {
 			t.Logf("Rescan caught up to block %d", rescanHeight)
@@ -963,11 +991,6 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		if rescanHeight == haveBest.Height {
 			rescanMtx.RUnlock()
 			break
-		}
-		if total > syncTimeout {
-			rescanMtx.RUnlock()
-			return fmt.Errorf("Timed out after %v waiting for "+
-				"rescan to catch up.", syncTimeout)
 		}
 		rescanMtx.RUnlock()
 	}
@@ -1343,8 +1366,10 @@ func checkRescanStatus() (int, int32, error) {
 			"between notifications.")
 	}
 	if curBlockHeight != curFilteredBlockHeight {
-		return 0, 0, fmt.Errorf("Conflicting block height between " +
-			"notifications.")
+		return 0, 0, fmt.Errorf("Conflicting block height between "+
+			"notifications: onBlockConnected=%d, "+
+			"onFilteredBlockConnected=%d.", curBlockHeight,
+			curFilteredBlockHeight)
 	}
 	return txCount[0], curBlockHeight, nil
 }
