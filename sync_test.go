@@ -904,6 +904,39 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
 			haveBest.Hash)
 	}
+	// At this point, we know we have good cfheaders. Now we wait for the
+	// rescan, if one is going, to catch up.
+	for {
+		if total > syncTimeout {
+			return fmt.Errorf("Timed out after %v waiting for "+
+				"rescan to catch up.", syncTimeout)
+		}
+		time.Sleep(syncUpdate)
+		total += syncUpdate
+		rescanMtx.RLock()
+		// We don't want to do this if we haven't started a rescan
+		// yet.
+		if len(gotLog) == 0 {
+			rescanMtx.RUnlock()
+			break
+		}
+		_, rescanHeight, err := checkRescanStatus()
+		if err != nil {
+			// If there's an error, that means the
+			// FilteredBlockConnected notifications are still
+			// catching up to the BlockConnected notifications.
+			rescanMtx.RUnlock()
+			continue
+		}
+		if logLevel != btclog.LevelOff {
+			t.Logf("Rescan caught up to block %d", rescanHeight)
+		}
+		if rescanHeight == haveBest.Height {
+			rescanMtx.RUnlock()
+			break
+		}
+		rescanMtx.RUnlock()
+	}
 	// At this point, we know the latest cfheader is stored in the
 	// ChainService database. We now compare each cfheader the
 	// harness knows about to what's stored in the ChainService
@@ -960,39 +993,6 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				haveExtHeader,
 				knownExtHeader.HeaderHashes[0])
 		}
-	}
-	// At this point, we know we have good cfheaders. Now we wait for the
-	// rescan, if one is going, to catch up.
-	for {
-		if total > syncTimeout {
-			rescanMtx.RUnlock()
-			return fmt.Errorf("Timed out after %v waiting for "+
-				"rescan to catch up.", syncTimeout)
-		}
-		time.Sleep(syncUpdate)
-		total += syncUpdate
-		rescanMtx.RLock()
-		// We don't want to do this if we haven't started a rescan
-		// yet.
-		if len(gotLog) == 0 {
-			rescanMtx.RUnlock()
-			break
-		}
-		_, rescanHeight, err := checkRescanStatus()
-		if err != nil {
-			// If there's an error, that means the
-			// FilteredBlockConnected notifications are still
-			// catching up to the BlockConnected notifications.
-			continue
-		}
-		if logLevel != btclog.LevelOff {
-			t.Logf("Rescan caught up to block %d", rescanHeight)
-		}
-		if rescanHeight == haveBest.Height {
-			rescanMtx.RUnlock()
-			break
-		}
-		rescanMtx.RUnlock()
 	}
 	return nil
 }
