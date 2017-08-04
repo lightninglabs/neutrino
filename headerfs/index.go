@@ -134,6 +134,11 @@ func (h headerBatch) Swap(i, j int) {
 
 // addHeaders writes a batch of header entries in a single atomic batch
 func (h *headerIndex) addHeaders(batch headerBatch) error {
+	// If we're writing a 0-length batch, make no changes and return.
+	if len(batch) == 0 {
+		return nil
+	}
+
 	// In order to ensure optimal write performance, we'll ensure that the
 	// items are sorted before insertion into the database.
 	sort.Sort(batch)
