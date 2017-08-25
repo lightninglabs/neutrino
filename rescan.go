@@ -10,9 +10,9 @@ import (
 
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/rpcclient"
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
@@ -23,7 +23,7 @@ import (
 type rescanOptions struct {
 	chain          *ChainService
 	queryOptions   []QueryOption
-	ntfn           btcrpcclient.NotificationHandlers
+	ntfn           rpcclient.NotificationHandlers
 	startBlock     *waddrmgr.BlockStamp
 	endBlock       *waddrmgr.BlockStamp
 	watchAddrs     []btcutil.Address
@@ -53,7 +53,7 @@ func QueryOptions(options ...QueryOption) RescanOption {
 
 // NotificationHandlers specifies notification handlers for the rescan. These
 // will always run in the same goroutine as the caller.
-func NotificationHandlers(ntfn btcrpcclient.NotificationHandlers) RescanOption {
+func NotificationHandlers(ntfn rpcclient.NotificationHandlers) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.ntfn = ntfn
 	}

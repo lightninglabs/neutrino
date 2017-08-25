@@ -19,10 +19,10 @@ import (
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/rpcclient"
 	"github.com/roasbeef/btcd/rpctest"
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
@@ -243,7 +243,7 @@ func TestSetup(t *testing.T) {
 	neutrino.UseLogger(chainLogger)
 	rpcLogger := logger.Logger("RPCC")
 	rpcLogger.SetLevel(logLevel)
-	btcrpcclient.UseLogger(rpcLogger)
+	rpcclient.UseLogger(rpcLogger)
 
 	// Create a btcd SimNet node and generate 500 blocks
 	h1, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
@@ -440,7 +440,7 @@ func TestSetup(t *testing.T) {
 		neutrino.StartBlock(&startBlock),
 		neutrino.EndBlock(&endBlock),
 		neutrino.WatchTxIDs(tx1.TxHash()),
-		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
+		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnFilteredBlockConnected: func(height int32,
 				header *wire.BlockHeader,
 				relevantTxs []*btcutil.Tx) {
@@ -1251,7 +1251,7 @@ func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
 		neutrino.WatchAddrs(addr),
 		neutrino.StartBlock(startBlock),
 		neutrino.NotificationHandlers(
-			btcrpcclient.NotificationHandlers{
+			rpcclient.NotificationHandlers{
 				OnBlockConnected: func(
 					hash *chainhash.Hash,
 					height int32, time time.Time) {
