@@ -706,6 +706,11 @@ func (b *blockManager) current() bool {
 		return false
 	}
 
+	// If we have no sync peer, we can assume we're current for now.
+	if b.syncPeer == nil {
+		return true
+	}
+
 	// If we have a syncPeer and the peer reported a higher known block
 	// height on connect than we know the peer already has, we're probably
 	// not current. If the peer is lying to us, other code will disconnect
