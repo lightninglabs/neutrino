@@ -1,5 +1,5 @@
-hash: 3fbbf1e80f5f2df10adcdfe001d1948e98a367e0c52136c2ceeca857f3520680
-updated: 2017-08-24T17:39:56.151096309-07:00
+hash: ef7b4f6d9a0ae5bbfbfc21511171da86b93b9eda003c3cdcd0da2d3e774a9f00
+updated: 2017-08-29T15:18:26.175636003-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -26,7 +26,7 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
-  version: adab96458c51a58dc1783b3335dcce5461522e75
+  version: a476722483882dd40b8111f0eb64e1d7f43f56e4
   subpackages:
   - spew
 - name: github.com/golang/protobuf
@@ -38,7 +38,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/roasbeef/btcd
-  version: ee68739ba4ed83f244b115bec0e176f5711b3e7a
+  version: 4b411f0e78f1faa96ae650d886170d018c1835bf
   subpackages:
   - addrmgr
   - blockchain
@@ -74,15 +74,15 @@ imports:
   - walletdb
   - walletdb/bdb
 - name: golang.org/x/crypto
-  version: eb71ad9bd329b5ac0fd0148dd99bd62e8be8e035
+  version: 81e90905daefcd6fd217b62423c0908922eadb30
   subpackages:
   - ripemd160
 - name: golang.org/x/net
-  version: 57efc9c3d9f91fb3277f8da1cff370539c4d3dc5
+  version: 66aacef3dd8a676686c7ae3716979581e8b03c47
   subpackages:
   - context
 - name: golang.org/x/sys
-  version: 07c182904dbd53199946ba614a412c61d3c548f5
+  version: ab9e364efd8b52800ff7ee48a9ffba4e0ed78dfb
   subpackages:
   - unix
 - name: google.golang.org/grpc
