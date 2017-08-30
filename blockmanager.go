@@ -251,6 +251,26 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *serverPeer) {
 	// Add the peer as a candidate to sync from.
 	peers.PushBack(sp)
 
+	// If we're current with our sync peer and the new peer is advertising
+	// a higher block than the newest one we know of, request headers from
+	// the new peer.
+	_, height, err := b.server.BlockHeaders.ChainTip()
+	if err != nil {
+		log.Criticalf("Couldn't retrieve block header chain tip: %s",
+			err)
+		return
+	}
+	if b.current() && height < uint32(sp.StartingHeight()) {
+		locator, err := b.server.BlockHeaders.LatestBlockLocator()
+		if err != nil {
+			log.Criticalf("Couldn't retrieve latest block "+
+				"locator: %s", err)
+			return
+		}
+		stopHash := &chainhash.Hash{}
+		sp.PushGetHeadersMsg(locator, stopHash)
+	}
+
 	// Start syncing by choosing the best candidate if needed.
 	b.startSync(peers)
 }
@@ -1142,35 +1162,32 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	log.Tracef("Writing header batch of %v block headers",
 		len(headerWriteBatch))
-	if len(headerWriteBatch) == 0 {
-		log.Warnf("Headers message does not connect to main chain")
-		return
+	if len(headerWriteBatch) > 0 {
+		// With all the headers in this batch validated, we'll write
+		// them all in a single transaction such that this entire batch
+		// is atomic.
+		err := b.server.BlockHeaders.WriteHeaders(headerWriteBatch...)
+		if err != nil {
+			panic(fmt.Sprintf("unable to write block header: %v",
+				err))
+		}
+
+		// Send getcfheaders to each peer based on these headers.
+		cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
+		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
+			len(msg.Headers), false)
+		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
+			len(msg.Headers), true)
 	}
 
-	// With all the headers in this batch validated, we'll write them all
-	// in a single transaction such that this entire batch is atomic.
-	err := b.server.BlockHeaders.WriteHeaders(headerWriteBatch...)
-	if err != nil {
-		panic(fmt.Sprintf("unable to write block header: %v", err))
-	}
-
-	// When this header is a checkpoint, switch to fetching the blocks for
-	// all of the headers since the last checkpoint.
+	// When this header is a checkpoint, find the next checkpoint.
 	if receivedCheckpoint {
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
 	}
 
-	// Send getcfheaders to each peer based on these headers.
-	cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
-	b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-		len(msg.Headers), false)
-	b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-		len(msg.Headers), true)
-
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
 	if !b.current() || b.server.chainParams.Net == chaincfg.SimNetParams.Net {
-
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
