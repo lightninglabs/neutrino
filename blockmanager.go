@@ -54,13 +54,6 @@ type newPeerMsg struct {
 	peer *serverPeer
 }
 
-// blockMsg packages a bitcoin block message and the peer it came from together
-// so the block handler has access to that information.
-type blockMsg struct {
-	block *btcutil.Block
-	peer  *serverPeer
-}
-
 // invMsg packages a bitcoin inv message and the peer it came from together
 // so the block handler has access to that information.
 type invMsg struct {
