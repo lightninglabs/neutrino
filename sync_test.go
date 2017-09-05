@@ -523,6 +523,11 @@ func TestSetup(t *testing.T) {
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
 	quitRescan := make(chan struct{})
+	defer func() {
+		if quitRescan != nil {
+			close(quitRescan)
+		}
+	}()
 	startBlock = waddrmgr.BlockStamp{Height: 795}
 	rescan, errChan := startRescan(t, svc, addr1, &startBlock, quitRescan)
 	if err != nil {
@@ -774,6 +779,7 @@ func TestSetup(t *testing.T) {
 
 	close(quitRescan)
 	err = <-errChan
+	quitRescan = nil
 	if err != nil {
 		t.Fatalf("Rescan ended with error: %s", err)
 	}
