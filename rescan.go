@@ -274,7 +274,7 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				s.unsubscribeBlockMsgs(subscription)
+				s.unsubscribeBlockMsgs(&subscription)
 				return nil
 
 			// An update mesage has just come across, if it points
@@ -351,7 +351,7 @@ rescanLoop:
 					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
-				s.subscribeBlockMsg(subscription)
+				s.subscribeBlockMsg(&subscription)
 				continue rescanLoop
 			}
 			curHeader = *header

@@ -543,15 +543,6 @@ func (sp *serverPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 	sp.server.AddBytesSent(uint64(bytesWritten))
 }
 
-// blockSubscription allows a client to subscribe to and unsubscribe from block
-// connect and disconnect notifications.
-type blockSubscription struct {
-	onConnectBasic chan<- wire.BlockHeader
-	onConnectExt   chan<- wire.BlockHeader
-	onDisconnect   chan<- wire.BlockHeader
-	quit           <-chan struct{}
-}
-
 // Config is a struct detailing the configuration of the chain service.
 type Config struct {
 	DataDir      string
@@ -589,7 +580,7 @@ type ChainService struct {
 	quit              chan struct{}
 	timeSource        blockchain.MedianTimeSource
 	services          wire.ServiceFlag
-	blockSubscribers  map[blockSubscription]struct{}
+	blockSubscribers  map[*blockSubscription]struct{}
 	mtxSubscribers    sync.RWMutex
 
 	// TODO: Add a map for more granular exclusion?
@@ -618,7 +609,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		services:          Services,
 		userAgentName:     UserAgentName,
 		userAgentVersion:  UserAgentVersion,
-		blockSubscribers:  make(map[blockSubscription]struct{}),
+		blockSubscribers:  make(map[*blockSubscription]struct{}),
 	}
 
 	var err error
@@ -836,21 +827,10 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		}
 
 		// Now we send the block disconnected notifications.
-		// TODO: Rethink this so we don't send notifications
-		// outside the package directly from here, and so we
-		// don't end up halting in the middle of processing
-		// blocks if a client mishandles a channel while still
-		// guaranteeing in-order delivery.
-		s.mtxSubscribers.RLock()
-		for sub := range s.blockSubscribers {
-			if sub.onDisconnect != nil {
-				select {
-				case sub.onDisconnect <- *header:
-				case <-sub.quit:
-				}
-			}
-		}
-		s.mtxSubscribers.RUnlock()
+		s.sendSubscribedMsg(&blockMessage{
+			msgType: disconnect,
+			header:  header,
+		})
 	}
 	return bs, nil
 }
@@ -1250,20 +1230,4 @@ func (s *ChainService) Stop() error {
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
 	return s.blockManager.IsCurrent()
-}
-
-// subscribeBlockMsg handles adding block subscriptions to the ChainService.
-// TODO: Rethink this.
-func (s *ChainService) subscribeBlockMsg(subscription blockSubscription) {
-	s.mtxSubscribers.Lock()
-	defer s.mtxSubscribers.Unlock()
-	s.blockSubscribers[subscription] = struct{}{}
-}
-
-// unsubscribeBlockMsgs handles removing block subscriptions from the
-// ChainService.
-func (s *ChainService) unsubscribeBlockMsgs(subscription blockSubscription) {
-	s.mtxSubscribers.Lock()
-	defer s.mtxSubscribers.Unlock()
-	delete(s.blockSubscribers, subscription)
 }

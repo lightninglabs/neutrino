@@ -1486,24 +1486,16 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	}
 
 	// Notify subscribers of a connected block.
-	go func() {
-		b.server.mtxSubscribers.Lock()
-		for _, header := range processedHeaders {
-			for sub := range b.server.blockSubscribers {
-				channel := sub.onConnectBasic
-				if msg.extended {
-					channel = sub.onConnectExt
-				}
-				if channel != nil {
-					select {
-					case channel <- *header:
-					case <-sub.quit:
-					}
-				}
-			}
-		}
-		b.server.mtxSubscribers.Unlock()
-	}()
+	msgType := connectBasic
+	if msg.extended {
+		msgType = connectExt
+	}
+	for _, header := range processedHeaders {
+		b.server.sendSubscribedMsg(&blockMessage{
+			msgType: msgType,
+			header:  header,
+		})
+	}
 
 	// Clean up any block headers in the header list for which we've already
 	// downloaded all of the filter headers, both basic and extended. Leave
