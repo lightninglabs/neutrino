@@ -301,11 +301,13 @@ rescanLoop:
 				// Only deal with the next block from what we
 				// know about. Otherwise, it's in the future.
 				if header.PrevBlock != curStamp.Hash {
+					log.Debugf("Rescan got out of order block %s with prevblock %s", header.BlockHash(), header.PrevBlock)
 					continue rescanLoop
 				}
 				curHeader = header
 				curStamp.Hash = header.BlockHash()
 				curStamp.Height++
+				log.Tracef("Rescan got block %d (%s)", curStamp.Height, curStamp.Hash)
 
 			case header := <-blockDisconnected:
 				// Only deal with it if it's the current block
