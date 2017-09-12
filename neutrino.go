@@ -585,6 +585,14 @@ type ChainService struct {
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
 
+	// These are only necessary until the block subscription logic is
+	// refactored out into its own package and we can have different message
+	// types sent in the notifications.
+	//
+	// TODO(aakselrod): Get rid of this when doing the refactoring above.
+	reorgedBlockHeaders map[chainhash.Hash]*wire.BlockHeader
+	mtxReorgHeader      sync.RWMutex
+
 	userAgentName    string
 	userAgentVersion string
 }
@@ -596,19 +604,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	amgr := addrmgr.New(cfg.DataDir, net.LookupIP)
 
 	s := ChainService{
-		chainParams:       cfg.ChainParams,
-		addrManager:       amgr,
-		newPeers:          make(chan *serverPeer, MaxPeers),
-		donePeers:         make(chan *serverPeer, MaxPeers),
-		banPeers:          make(chan *serverPeer, MaxPeers),
-		query:             make(chan interface{}),
-		quit:              make(chan struct{}),
-		peerHeightsUpdate: make(chan updatePeerHeightsMsg),
-		timeSource:        blockchain.NewMedianTime(),
-		services:          Services,
-		userAgentName:     UserAgentName,
-		userAgentVersion:  UserAgentVersion,
-		blockSubscribers:  make(map[*blockSubscription]struct{}),
+		chainParams:         cfg.ChainParams,
+		addrManager:         amgr,
+		newPeers:            make(chan *serverPeer, MaxPeers),
+		donePeers:           make(chan *serverPeer, MaxPeers),
+		banPeers:            make(chan *serverPeer, MaxPeers),
+		query:               make(chan interface{}),
+		quit:                make(chan struct{}),
+		peerHeightsUpdate:   make(chan updatePeerHeightsMsg),
+		timeSource:          blockchain.NewMedianTime(),
+		services:            Services,
+		userAgentName:       UserAgentName,
+		userAgentVersion:    UserAgentVersion,
+		blockSubscribers:    make(map[*blockSubscription]struct{}),
+		reorgedBlockHeaders: make(map[chainhash.Hash]*wire.BlockHeader),
 	}
 
 	var err error
@@ -824,6 +833,21 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		if err != nil {
 			return nil, err
 		}
+
+		// Notifications are asynchronous, so we include the previous
+		// header in the disconnected notification in case we're rolling
+		// back farther and the notification subscriber needs it but
+		// can't read it before it's deleted from the store.
+		//
+		// TODO(aakselrod): Get rid of this when subscriptions are
+		// factored out into their own package.
+		lastHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
+		if err != nil {
+			return nil, err
+		}
+		s.mtxReorgHeader.Lock()
+		s.reorgedBlockHeaders[header.PrevBlock] = lastHeader
+		s.mtxReorgHeader.Unlock()
 
 		// Now we send the block disconnected notifications.
 		s.sendSubscribedMsg(&blockMessage{

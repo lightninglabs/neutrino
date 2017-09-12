@@ -329,11 +329,8 @@ rescanLoop:
 							curStamp.Height,
 							curHeader.Timestamp)
 					}
-					header, _, err := s.BlockHeaders.FetchHeader(
-						&header.PrevBlock)
-					if err != nil {
-						return err
-					}
+					header := s.getReorgTip(
+						header.PrevBlock)
 					curHeader = *header
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
@@ -971,4 +968,15 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		}
 		curStamp.Hash = header.BlockHash()
 	}
+}
+
+// getReorgTip gets a block header from the chain service's cache. This is only
+// required until the block subscription API is factored out into its own
+// package.
+//
+// TODO(aakselrod): Get rid of this as described above.
+func (s *ChainService) getReorgTip(hash chainhash.Hash) *wire.BlockHeader {
+	s.mtxReorgHeader.RLock()
+	defer s.mtxReorgHeader.RUnlock()
+	return s.reorgedBlockHeaders[hash]
 }
