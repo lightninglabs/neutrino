@@ -535,10 +535,12 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err := checkRescanStatus()
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 1 {
@@ -551,12 +553,14 @@ func TestSetup(t *testing.T) {
 	h1.Node.Generate(124)
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
 	// Connect/sync/disconnect h2 to make it reorg to the h1 chain.
 	err = csd([]*rpctest.Harness{h1, h2})
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync h2 to h1: %s", err)
 	}
 
@@ -644,6 +648,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
@@ -681,6 +686,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
@@ -697,6 +703,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
@@ -718,6 +725,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
@@ -753,6 +761,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h2)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
@@ -769,6 +778,7 @@ func TestSetup(t *testing.T) {
 	}
 	err = waitForSync(t, svc, h1)
 	if err != nil {
+		checkErrChan(t, errChan)
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
@@ -823,6 +833,17 @@ func csd(harnesses []*rpctest.Harness) error {
 		}
 	}
 	return rpctest.JoinNodes(harnesses, rpctest.Blocks)
+}
+
+// checkErrChan tries to read the passed error channel if possible and logs the
+// error it found, if any. This is useful to help troubleshoot any timeouts
+// during a rescan.
+func checkErrChan(t *testing.T, errChan <-chan error) {
+	select {
+	case err := <-errChan:
+		t.Logf("Got error from rescan: %s", err)
+	default:
+	}
 }
 
 // waitForSync waits for the ChainService to sync to the current chain state.
