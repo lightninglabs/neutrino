@@ -132,7 +132,6 @@ type serverPeer struct {
 	server         *ChainService
 	persistent     bool
 	continueHash   *chainhash.Hash
-	relayMtx       sync.Mutex
 	requestQueue   []*wire.InvVect
 	knownAddresses map[string]struct{}
 	banScore       connmgr.DynamicBanScore
