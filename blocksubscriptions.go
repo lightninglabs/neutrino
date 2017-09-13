@@ -69,13 +69,22 @@ func (s *ChainService) sendSubscribedMsg(bm *blockMessage) {
 // subscribeBlockMsg handles adding block subscriptions to the ChainService.
 // TODO(aakselrod): move this to its own package and refactor so that we're
 // not modifying an object held by the caller.
-func (s *ChainService) subscribeBlockMsg(subscription *blockSubscription) {
-	subscription.notifyBlock = make(chan *blockMessage)
-	subscription.intQuit = make(chan struct{})
+func (s *ChainService) subscribeBlockMsg(onConnectBasic, onConnectExt,
+	onDisconnect chan<- wire.BlockHeader,
+	quit <-chan struct{}) *blockSubscription {
 	s.mtxSubscribers.Lock()
 	defer s.mtxSubscribers.Unlock()
-	s.blockSubscribers[subscription] = struct{}{}
+	subscription := blockSubscription{
+		onConnectBasic: onConnectBasic,
+		onConnectExt:   onConnectExt,
+		onDisconnect:   onDisconnect,
+		quit:           quit,
+		notifyBlock:    make(chan *blockMessage),
+		intQuit:        make(chan struct{}),
+	}
+	s.blockSubscribers[&subscription] = struct{}{}
 	go subscription.subscriptionHandler()
+	return &subscription
 }
 
 // unsubscribeBlockMsgs handles removing block subscriptions from the

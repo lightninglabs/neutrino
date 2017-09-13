@@ -252,11 +252,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// Listen for notifications.
 	blockConnected := make(chan wire.BlockHeader)
 	blockDisconnected := make(chan wire.BlockHeader)
-	subscription := blockSubscription{
-		onConnectExt: blockConnected,
-		onDisconnect: blockDisconnected,
-		quit:         ro.quit,
-	}
+	var subscription *blockSubscription
 
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
@@ -274,7 +270,7 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				s.unsubscribeBlockMsgs(&subscription)
+				s.unsubscribeBlockMsgs(subscription)
 				return nil
 
 			// An update mesage has just come across, if it points
@@ -350,7 +346,9 @@ rescanLoop:
 					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
-				s.subscribeBlockMsg(&subscription)
+				subscription = s.subscribeBlockMsg(nil,
+					blockConnected, blockDisconnected,
+					ro.quit)
 				continue rescanLoop
 			}
 			curHeader = *header
