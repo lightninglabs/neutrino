@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
@@ -25,6 +26,7 @@ type rescanOptions struct {
 	queryOptions   []QueryOption
 	ntfn           rpcclient.NotificationHandlers
 	startBlock     *waddrmgr.BlockStamp
+	startTime      time.Time
 	endBlock       *waddrmgr.BlockStamp
 	watchAddrs     []btcutil.Address
 	watchOutPoints []wire.OutPoint
@@ -63,10 +65,22 @@ func NotificationHandlers(ntfn rpcclient.NotificationHandlers) RescanOption {
 // no such hash (zero hash avoids lookup), the height is checked next. If the
 // height is 0 or the start block isn't specified, starts from the genesis
 // block. This block is assumed to already be known, and no notifications will
-// be sent for this block.
+// be sent for this block. The rescan uses the latter of StartBlock and
+// StartTime.
 func StartBlock(startBlock *waddrmgr.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.startBlock = startBlock
+	}
+}
+
+// StartTime specifies the start time. The time is compared to the timestamp of
+// each block, and the rescan only begins once the first block crosses that
+// timestamp. When using this, it is advisable to use a margin of error and
+// start rescans slightly earlier than required. The rescan uses the latter of
+// StartBlock and StartTime.
+func StartTime(startTime time.Time) RescanOption {
+	return func(ro *rescanOptions) {
+		ro.startTime = startTime
 	}
 }
 
@@ -196,7 +210,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		ro.endBlock = &waddrmgr.BlockStamp{}
 	}
 
-	// If we don't havee a quit channel, and the end height is still
+	// If we don't have a quit channel, and the end height is still
 	// unspecified, then we'll exit out here.
 	if ro.quit == nil && ro.endBlock.Height == 0 {
 		return fmt.Errorf("Rescan request must specify a quit channel" +
@@ -248,6 +262,14 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 
 	log.Tracef("Starting rescan from known block %d (%s)", curStamp.Height,
 		curStamp.Hash)
+
+	// Compare the start time to the start block. If the start time is
+	// later, cycle through blocks until we find a block timestamp later
+	// than the start time, and begin filter download at that block. Since
+	// time is non-monotonic between blocks, we look for the first block to
+	// trip the switch, and download filters from there, rather than
+	// checking timestamps at each block.
+	scanning := ro.startTime.Before(curHeader.Timestamp)
 
 	// Listen for notifications.
 	blockConnected := make(chan wire.BlockHeader)
@@ -366,10 +388,15 @@ rescanLoop:
 
 		var relevantTxs []*btcutil.Tx
 
-		// We'll only need to check the filter if the watvh list is
-		// non-empty.
-		if len(ro.watchList) != 0 {
-			// If we have a non-empty watch list, then w we need to
+		// If we're not scanning yet, see if we need to start.
+		if !scanning {
+			scanning = ro.startTime.Before(curHeader.Timestamp)
+		}
+
+		// We'll only need to check the filter if the watch list is
+		// non-empty and we're scanning.
+		if len(ro.watchList) != 0 && scanning {
+			// If we have a non-empty watch list, then we need to
 			// see if it matches the rescan's filters, so we get
 			// the basic filter from the DB or network.
 			var (
@@ -384,7 +411,7 @@ rescanLoop:
 				return err
 			}
 
-			// If we found the basic filter, and the fitler isn't
+			// If we found the basic filter, and the filter isn't
 			// "nil", then we'll check the items in the watch list
 			// against it.
 			if bFilter != nil && bFilter.N() != 0 {
