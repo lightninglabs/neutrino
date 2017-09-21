@@ -714,7 +714,7 @@ func (r *Rescan) WaitForShutdown() {
 // Start kicks off the rescan goroutine, which will begin to scan the chain
 // according to the specified rescan options.
 func (r *Rescan) Start() <-chan error {
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 
 	r.wg.Add(1)
 	go func() {
