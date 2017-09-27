@@ -500,9 +500,41 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 					"(%s) from network", curStamp.Height,
 					curStamp.Hash)
 			}
-			relevantTxs, err = ro.notifyBlock(block)
-			if err != nil {
-				return err
+
+			blockHeader := block.MsgBlock().Header
+			blockDetails := btcjson.BlockDetails{
+				Height: block.Height(),
+				Hash:   block.Hash().String(),
+				Time:   blockHeader.Timestamp.Unix(),
+			}
+
+			relevantTxs = make([]*btcutil.Tx, 0, len(block.Transactions()))
+			for txIdx, tx := range block.Transactions() {
+				txDetails := blockDetails
+				txDetails.Index = txIdx
+
+				relevant := ro.watchingTxID(tx)
+
+				if ro.spendsWatchedOutpoint(tx) {
+					relevant = true
+					if ro.ntfn.OnRedeemingTx != nil {
+						ro.ntfn.OnRedeemingTx(tx, &txDetails)
+					}
+				}
+
+				// Even though the transaction may already be known as relevant
+				// and there might not be a notification callback, we need to
+				// call paysWatchedAddr anyway as it updates the rescan options.
+				if ro.paysWatchedAddr(tx) {
+					relevant = true
+					if ro.ntfn.OnRecvTx != nil {
+						ro.ntfn.OnRecvTx(tx, &txDetails)
+					}
+				}
+
+				if relevant {
+					relevantTxs = append(relevantTxs, tx)
+				}
 			}
 		}
 	}
@@ -579,111 +611,67 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	return rewound, nil
 }
 
-// notifyBlock notifies listeners based on the block filter. It writes back to
-// the outPoints argument the updated list of outpoints to monitor based on
-// matched addresses.
-//
-// TODO(roasbeef): add an option to just allow callers to request the entire
-// block
-func (ro *rescanOptions) notifyBlock(block *btcutil.Block) ([]*btcutil.Tx,
-	error) {
-
-	var relevantTxs []*btcutil.Tx
-	blockHeader := block.MsgBlock().Header
-	details := btcjson.BlockDetails{
-		Height: block.Height(),
-		Hash:   block.Hash().String(),
-		Time:   blockHeader.Timestamp.Unix(),
-	}
-
-	// Scan the entire block to see if we have any items that actually
-	// match the current filter.
-	for txIdx, tx := range block.Transactions() {
-		relevant := false
-		txDetails := details
-		txDetails.Index = txIdx
-
-		// First, we'll scan the txids, if we have a match then we add
-		// the transaction as relevant and break out early.
-		for _, hash := range ro.watchTxIDs {
-			if hash == *(tx.Hash()) {
-				relevant = true
-				break
-			}
-		}
-
-		// Next we'll examine the txins to see if the transactions in
-		// the block spend any of our watched outpoints.
-		for _, in := range tx.MsgTx().TxIn {
-			// TODO(roasbeef): would still want to send relevant tx
-			// notification?
-			if relevant {
-				break
-			}
-
-			for _, op := range ro.watchOutPoints {
-				if in.PreviousOutPoint == op {
-					relevant = true
-					if ro.ntfn.OnRedeemingTx != nil {
-						ro.ntfn.OnRedeemingTx(tx,
-							&txDetails)
-					}
-					break
-				}
-			}
-		}
-
-		// Finally, we'll examine all the created outputs to check if
-		// it matches our watched push datas.
-		for outIdx, out := range tx.MsgTx().TxOut {
-			pushedData, err := txscript.PushedData(out.PkScript)
-			if err != nil {
-				continue
-			}
-
-			for _, addr := range ro.watchAddrs {
-				if relevant {
-					break
-				}
-
-				for _, data := range pushedData {
-					if !bytes.Equal(data, addr.ScriptAddress()) {
-						continue
-					}
-
-					relevant = true
-
-					// If this output matches, then we'll
-					// update the filter by also watching
-					// this created outpoint for the event
-					// in the future that it's spent.
-					hash := tx.Hash()
-					outPoint := wire.OutPoint{
-						Hash:  *hash,
-						Index: uint32(outIdx),
-					}
-					ro.watchOutPoints = append(
-						ro.watchOutPoints,
-						outPoint)
-					ro.watchList = append(
-						ro.watchList,
-						builder.OutPointToFilterEntry(
-							outPoint))
-					if ro.ntfn.OnRecvTx != nil {
-						ro.ntfn.OnRecvTx(tx, &txDetails)
-					}
-				}
-			}
-		}
-
-		// If the transaction was relevant then add it to the set of
-		// relevant transactions.
-		if relevant {
-			relevantTxs = append(relevantTxs, tx)
+// watchingTxID returns whether the transaction matches the filter based
+// directly on its hash.
+func (ro *rescanOptions) watchingTxID(tx *btcutil.Tx) bool {
+	for _, hash := range ro.watchTxIDs {
+		if hash == *tx.Hash() {
+			return true
 		}
 	}
+	return false
+}
 
-	return relevantTxs, nil
+// spendsWatchedOutpoint returns whether the transaction matches the filter by
+// spending a watched outpoint.
+func (ro *rescanOptions) spendsWatchedOutpoint(tx *btcutil.Tx) bool {
+	for _, in := range tx.MsgTx().TxIn {
+		for _, op := range ro.watchOutPoints {
+			if in.PreviousOutPoint == op {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// paysWatchedAddr returns whether the transaction matches the filter by having
+// an output paying to a watched address. If that is the case, this also updates
+// the filter to watch the newly created output going forward.
+func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) bool {
+	anyMatchingOutputs := false
+
+txOutLoop:
+	for outIdx, out := range tx.MsgTx().TxOut {
+		pushedData, err := txscript.PushedData(out.PkScript)
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range ro.watchAddrs {
+			for _, data := range pushedData {
+				if !bytes.Equal(data, addr.ScriptAddress()) {
+					continue
+				}
+
+				anyMatchingOutputs = true
+
+				// Update the filter by also watching this created outpoint
+				// for the event in the future that it's spent.
+				hash := tx.Hash()
+				outPoint := wire.OutPoint{
+					Hash:  *hash,
+					Index: uint32(outIdx),
+				}
+				ro.watchOutPoints = append(ro.watchOutPoints, outPoint)
+				ro.watchList = append(ro.watchList,
+					builder.OutPointToFilterEntry(outPoint))
+
+				continue txOutLoop
+			}
+		}
+	}
+	return anyMatchingOutputs
 }
 
 // Rescan is an object that represents a long-running rescan/notification
