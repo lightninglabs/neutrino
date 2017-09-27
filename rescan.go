@@ -20,6 +20,9 @@ import (
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
 
+// numFilterTypes describes the number of filter types we're downloading.
+const numFilterTypes = 2
+
 // rescanOptions holds the set of functional parameters for Rescan.
 type rescanOptions struct {
 	chain          *ChainService
@@ -272,9 +275,53 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	scanning := ro.startTime.Before(curHeader.Timestamp)
 
 	// Listen for notifications.
-	blockConnected := make(chan wire.BlockHeader)
+	blockConnectedBas := make(chan wire.BlockHeader)
+	blockConnectedExt := make(chan wire.BlockHeader)
 	blockDisconnected := make(chan wire.BlockHeader)
+	gotCFHeader := make(map[chainhash.Hash]map[uint8]struct{}, 2000)
 	var subscription *blockSubscription
+	blockConnected := false
+
+	// Only connect a block when all of the known filter header types for
+	// it have been downloaded and when we get its notification in the
+	// correct order.
+	maybeConnectBlock := func(header wire.BlockHeader, cftype uint8) {
+		blockHash := header.BlockHash()
+
+		// Update and check the number of filters we have for the block.
+		if gotCFHeader[blockHash] == nil {
+			gotCFHeader[blockHash] = make(map[uint8]struct{},
+				numFilterTypes)
+		}
+		gotCFHeader[blockHash][cftype] = struct{}{}
+		if len(gotCFHeader[blockHash]) < numFilterTypes {
+			blockConnected = false
+			return
+		}
+
+		// If this block isn't next, then we don't do anything with it
+		// at the moment. We've already recorded that it has enough
+		// filters to be connected, though.
+		if header.PrevBlock != curStamp.Hash {
+			log.Debugf("Rescan got out of order block %s with "+
+				"prevblock %s", header.BlockHash(),
+				header.PrevBlock)
+			blockConnected = false
+			return
+		}
+
+		// Now, we update the current info and let the notifications
+		// happen.
+		curHeader = header
+		curStamp.Hash = blockHash
+		curStamp.Height++
+		delete(gotCFHeader, blockHash)
+		blockConnected = true
+		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
+			curStamp.Hash)
+
+		return
+	}
 
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
@@ -292,7 +339,6 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				s.unsubscribeBlockMsgs(subscription)
 				return nil
 
 			// An update mesage has just come across, if it points
@@ -300,8 +346,8 @@ rescanLoop:
 			// rewind a bit in order to provide the client all its
 			// requested client.
 			case update := <-ro.update:
-				rewound, err := ro.updateFilter(update, &curStamp,
-					&curHeader)
+				rewound, err := ro.updateFilter(update,
+					&curStamp, &curHeader)
 				if err != nil {
 					return err
 				}
@@ -315,17 +361,20 @@ rescanLoop:
 
 				current = false
 
-			case header := <-blockConnected:
-				// Only deal with the next block from what we
-				// know about. Otherwise, it's in the future.
-				if header.PrevBlock != curStamp.Hash {
-					log.Debugf("Rescan got out of order block %s with prevblock %s", header.BlockHash(), header.PrevBlock)
+			// In the case of notifications about filter headers
+			// being received, we ensure we have enough headers to
+			// connect the block, and make sure the blocks are
+			// connected in order.
+			case header := <-blockConnectedBas:
+				maybeConnectBlock(header, 0)
+				if !blockConnected {
 					continue rescanLoop
 				}
-				curHeader = header
-				curStamp.Hash = header.BlockHash()
-				curStamp.Height++
-				log.Tracef("Rescan got block %d (%s)", curStamp.Height, curStamp.Hash)
+			case header := <-blockConnectedExt:
+				maybeConnectBlock(header, 1)
+				if !blockConnected {
+					continue rescanLoop
+				}
 
 			case header := <-blockDisconnected:
 				// Only deal with it if it's the current block
@@ -368,9 +417,10 @@ rescanLoop:
 					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
-				subscription = s.subscribeBlockMsg(nil,
-					blockConnected, blockDisconnected,
-					ro.quit)
+				subscription = s.subscribeBlockMsg(
+					blockConnectedBas, blockConnectedExt,
+					blockDisconnected, ro.quit)
+				defer s.unsubscribeBlockMsgs(subscription)
 				continue rescanLoop
 			}
 			curHeader = *header
