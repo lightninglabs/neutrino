@@ -292,7 +292,6 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				s.unsubscribeBlockMsgs(subscription)
 				return nil
 
 			// An update mesage has just come across, if it points
@@ -306,14 +305,15 @@ rescanLoop:
 					return err
 				}
 
-				// If we didn't need to rewind, then we'll
-				// continue our normal loop so we don't send a
-				// duplicate notification.
-				if !rewound {
-					continue rescanLoop
-				}
+				if rewound {
+					log.Tracef("Rewound to block %d (%s), no longer current",
+						curStamp.Height, curStamp.Hash)
 
-				current = false
+					current = false
+					s.unsubscribeBlockMsgs(subscription)
+					subscription = nil
+				}
+				continue rescanLoop
 
 			case header := <-blockConnected:
 				// Only deal with the next block from what we
@@ -369,8 +369,13 @@ rescanLoop:
 				current = true
 				// Subscribe to block notifications.
 				subscription = s.subscribeBlockMsg(nil,
-					blockConnected, blockDisconnected,
-					ro.quit)
+					blockConnected, blockDisconnected, nil)
+				defer func() {
+					if subscription != nil {
+						s.unsubscribeBlockMsgs(subscription)
+						subscription = nil
+					}
+				}()
 				continue rescanLoop
 			}
 			curHeader = *header
@@ -543,13 +548,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 		// mode. We set this to true here so we properly send
 		// notifications even if it was just a 1 block rewind.
 		rewound = true
-
-		// Don't rewind past the last block we need to disconnect,
-		// because otherwise we connect the last known good block
-		// without ever disconnecting it.
-		if curStamp.Height == int32(update.rewind+1) {
-			break
-		}
 
 		// Rewind and continue.
 		header, height, err = ro.chain.BlockHeaders.FetchHeader(
