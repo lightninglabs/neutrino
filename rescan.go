@@ -15,7 +15,6 @@ import (
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
@@ -443,54 +442,16 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 		// If we have a non-empty watch list, then we need to
 		// see if it matches the rescan's filters, so we get
 		// the basic filter from the DB or network.
-		var (
-			block            *btcutil.Block
-			bFilter, eFilter *gcs.Filter
-			err              error
-		)
-		key := builder.DeriveKey(&curStamp.Hash)
-		matched := false
-		bFilter, err = s.GetCFilter(curStamp.Hash, false)
+		matched, err := s.blockFilterMatches(ro, &curStamp.Hash)
 		if err != nil {
 			return err
-		}
-
-		// If we found the basic filter, and the filter isn't
-		// "nil", then we'll check the items in the watch list
-		// against it.
-		if bFilter != nil && bFilter.N() != 0 {
-			// We see if any relevant transactions match.
-			matched, err = bFilter.MatchAny(key, ro.watchList)
-			if err != nil {
-				return err
-			}
-		}
-
-		// If the regular filter didn't match, and a set of
-		// transactions is specified, then we'll also fetch the
-		// extended filter to see if anything actually matches
-		// for this block.
-		if !matched && len(ro.watchTxIDs) > 0 {
-			eFilter, err = s.GetCFilter(curStamp.Hash, true)
-			if err != nil {
-				return err
-			}
-		}
-		if eFilter != nil && eFilter.N() != 0 {
-			// We see if any relevant transactions match.
-			// TODO(roasbeef): should instead only match
-			// the txids?
-			matched, err = eFilter.MatchAny(key, ro.watchList)
-			if err != nil {
-				return err
-			}
 		}
 
 		if matched {
 			// We've matched. Now we actually get the block and
 			// cycle through the transactions to see which ones are
 			// relevant.
-			block, err = s.GetBlockFromNetwork(curStamp.Hash,
+			block, err := s.GetBlockFromNetwork(curStamp.Hash,
 				ro.queryOptions...)
 			if err != nil {
 				return err
@@ -545,6 +506,48 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	}
 
 	return nil
+}
+
+// blockFilterMatches returns whether the block filter matches the watched
+// items. If this returns false, it means the block is certainly not interesting
+// to us.
+func (s *ChainService) blockFilterMatches(ro *rescanOptions,
+	blockHash *chainhash.Hash) (bool, error) {
+
+	key := builder.DeriveKey(blockHash)
+	bFilter, err := s.GetCFilter(*blockHash, false)
+	if err != nil {
+		return false, err
+	}
+
+	// If we found the basic filter, and the filter isn't
+	// "nil", then we'll check the items in the watch list
+	// against it.
+	if bFilter != nil && bFilter.N() != 0 {
+		// We see if any relevant transactions match.
+		matched, err := bFilter.MatchAny(key, ro.watchList)
+		if matched || err != nil {
+			return matched, err
+		}
+	}
+
+	// If the regular filter didn't match, and a set of
+	// transactions is specified, then we'll also fetch the
+	// extended filter to see if anything actually matches
+	// for this block.
+	if len(ro.watchTxIDs) > 0 {
+		eFilter, err := s.GetCFilter(*blockHash, true)
+		if err != nil {
+			return false, err
+		}
+		if eFilter != nil && eFilter.N() != 0 {
+			// We see if any relevant transactions match.
+			// TODO(roasbeef): should instead only match
+			// the txids?
+			return eFilter.MatchAny(key, ro.watchList)
+		}
+	}
+	return false, nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
