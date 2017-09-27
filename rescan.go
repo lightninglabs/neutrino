@@ -329,6 +329,14 @@ rescanLoop:
 						"prevblock %s", header.BlockHash(), header.PrevBlock)
 					continue rescanLoop
 				}
+
+				// Do not process block until we have all filter headers. Don't
+				// worry, the block will get requeued every time there is a new
+				// filter available.
+				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
+					continue rescanLoop
+				}
+
 				curHeader = header
 				curStamp.Hash = header.BlockHash()
 				curStamp.Height++
@@ -386,19 +394,18 @@ rescanLoop:
 				}
 			}
 
-			// Since we're not current, we try to manually advance
-			// the block. If we fail, we mark outselves as current
-			// and follow notifications.
-			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				uint32(curStamp.Height + 1),
-			)
-			if err != nil {
+			// Since we're not current, we try to manually advance the block. We
+			// are only interested in blocks that we already have both filter
+			// headers for. If we fail, we mark outselves as current and follow
+			// notifications.
+			nextHeight := uint32(curStamp.Height + 1)
+			if !s.hasFilterHeadersByHeight(nextHeight) {
 				log.Tracef("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
-				subscription = s.subscribeBlockMsg(nil,
+				subscription = s.subscribeBlockMsg(blockConnected,
 					blockConnected, blockDisconnected, nil)
 				defer func() {
 					if subscription != nil {
@@ -407,6 +414,11 @@ rescanLoop:
 					}
 				}()
 				continue rescanLoop
+			}
+
+			header, err := s.BlockHeaders.FetchHeaderByHeight(nextHeight)
+			if err != nil {
+				return err
 			}
 
 			curHeader = *header
@@ -548,6 +560,14 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 		}
 	}
 	return false, nil
+}
+
+// hasFilterHeadersByHeight checks whether both the basic and extended filter
+// headers for a particular height are known.
+func (s *ChainService) hasFilterHeadersByHeight(height uint32) bool {
+	_, regFetchErr := s.RegFilterHeaders.FetchHeaderByHeight(height)
+	_, extFetchErr := s.ExtFilterHeaders.FetchHeaderByHeight(height)
+	return regFetchErr == nil && extFetchErr == nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
