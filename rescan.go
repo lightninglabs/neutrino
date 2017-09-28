@@ -604,11 +604,13 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	// If we need to rewind, then we'll walk backwards in the chain until
 	// we arrive at the block _just_ before the rewind.
 	for curStamp.Height > int32(update.rewind) {
-		if ro.ntfn.OnBlockDisconnected != nil {
+		if ro.ntfn.OnBlockDisconnected != nil &&
+			!update.disableDisconnectedNtfns {
 			ro.ntfn.OnBlockDisconnected(&curStamp.Hash,
 				curStamp.Height, curHeader.Timestamp)
 		}
-		if ro.ntfn.OnFilteredBlockDisconnected != nil {
+		if ro.ntfn.OnFilteredBlockDisconnected != nil &&
+			!update.disableDisconnectedNtfns {
 			ro.ntfn.OnFilteredBlockDisconnected(curStamp.Height,
 				curHeader)
 		}
@@ -759,10 +761,11 @@ func (r *Rescan) Start() <-chan error {
 
 // updateOptions are a set of functional parameters for Update.
 type updateOptions struct {
-	addrs     []btcutil.Address
-	outPoints []wire.OutPoint
-	txIDs     []chainhash.Hash
-	rewind    uint32
+	addrs                    []btcutil.Address
+	outPoints                []wire.OutPoint
+	txIDs                    []chainhash.Hash
+	rewind                   uint32
+	disableDisconnectedNtfns bool
 }
 
 // UpdateOption is a functional option argument for the Rescan.Update method.
@@ -800,6 +803,14 @@ func AddTxIDs(txIDs ...chainhash.Hash) UpdateOption {
 func Rewind(height uint32) UpdateOption {
 	return func(uo *updateOptions) {
 		uo.rewind = height
+	}
+}
+
+// DisableDisconnectedNtfns tells the rescan not to send `OnBlockDisconnected`
+// and `OnFilteredBlockDisconnected` notifications when rewinding.
+func DisableDisconnectedNtfns(disabled bool) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.disableDisconnectedNtfns = disabled
 	}
 }
 
