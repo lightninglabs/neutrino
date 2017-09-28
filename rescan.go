@@ -15,7 +15,6 @@ import (
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
@@ -282,6 +281,14 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	current := false
 rescanLoop:
 	for {
+		// If we've reached the ending height or hash for this rescan,
+		// then we'll exit.
+		if curStamp.Hash == ro.endBlock.Hash ||
+			curStamp.Height == ro.endBlock.Height {
+
+			return nil
+		}
+
 		// If we're current, we wait for notifications.
 		switch current {
 		case true:
@@ -292,7 +299,6 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				s.unsubscribeBlockMsgs(subscription)
 				return nil
 
 			// An update mesage has just come across, if it points
@@ -306,26 +312,43 @@ rescanLoop:
 					return err
 				}
 
-				// If we didn't need to rewind, then we'll
-				// continue our normal loop so we don't send a
-				// duplicate notification.
-				if !rewound {
-					continue rescanLoop
-				}
+				if rewound {
+					log.Tracef("Rewound to block %d (%s), no longer current",
+						curStamp.Height, curStamp.Hash)
 
-				current = false
+					current = false
+					s.unsubscribeBlockMsgs(subscription)
+					subscription = nil
+				}
 
 			case header := <-blockConnected:
 				// Only deal with the next block from what we
 				// know about. Otherwise, it's in the future.
 				if header.PrevBlock != curStamp.Hash {
-					log.Debugf("Rescan got out of order block %s with prevblock %s", header.BlockHash(), header.PrevBlock)
+					log.Debugf("Rescan got out of order block %s with "+
+						"prevblock %s", header.BlockHash(), header.PrevBlock)
 					continue rescanLoop
 				}
+
+				// Do not process block until we have all filter headers. Don't
+				// worry, the block will get requeued every time there is a new
+				// filter available.
+				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
+					continue rescanLoop
+				}
+
 				curHeader = header
 				curStamp.Hash = header.BlockHash()
 				curStamp.Height++
 				log.Tracef("Rescan got block %d (%s)", curStamp.Height, curStamp.Hash)
+
+				if !scanning {
+					scanning = ro.startTime.Before(curHeader.Timestamp)
+				}
+				err := s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+				if err != nil {
+					return err
+				}
 
 			case header := <-blockDisconnected:
 				// Only deal with it if it's the current block
@@ -353,147 +376,198 @@ rescanLoop:
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
 				}
-				continue rescanLoop
 			}
 		case false:
-			// Since we're not current, we try to manually advance
-			// the block. If we fail, we mark outselves as current
-			// and follow notifications.
-			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				uint32(curStamp.Height + 1),
-			)
-			if err != nil {
+
+			// Apply all queued filter updates.
+		updateFilterLoop:
+			for {
+				select {
+				case update := <-ro.update:
+					_, err := ro.updateFilter(update, &curStamp, &curHeader)
+					if err != nil {
+						return err
+					}
+
+				default:
+					break updateFilterLoop
+				}
+			}
+
+			// Since we're not current, we try to manually advance the block. We
+			// are only interested in blocks that we already have both filter
+			// headers for. If we fail, we mark outselves as current and follow
+			// notifications.
+			nextHeight := uint32(curStamp.Height + 1)
+			if !s.hasFilterHeadersByHeight(nextHeight) {
 				log.Tracef("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
-				subscription = s.subscribeBlockMsg(nil,
-					blockConnected, blockDisconnected,
-					ro.quit)
+				subscription = s.subscribeBlockMsg(blockConnected,
+					blockConnected, blockDisconnected, nil)
+				defer func() {
+					if subscription != nil {
+						s.unsubscribeBlockMsgs(subscription)
+						subscription = nil
+					}
+				}()
 				continue rescanLoop
 			}
+
+			header, err := s.BlockHeaders.FetchHeaderByHeight(nextHeight)
+			if err != nil {
+				return err
+			}
+
 			curHeader = *header
 			curStamp.Height++
 			curStamp.Hash = header.BlockHash()
-		}
 
-		// At this point, we've found the block header that's next in
-		// our rescan. First, if we're sending out BlockConnected
-		// notifications, do that.
-		if ro.ntfn.OnBlockConnected != nil {
-			ro.ntfn.OnBlockConnected(&curStamp.Hash,
-				curStamp.Height, curHeader.Timestamp)
-		}
-
-		var relevantTxs []*btcutil.Tx
-
-		// If we're not scanning yet, see if we need to start.
-		if !scanning {
-			scanning = ro.startTime.Before(curHeader.Timestamp)
-		}
-
-		// We'll only need to check the filter if the watch list is
-		// non-empty and we're scanning.
-		if len(ro.watchList) != 0 && scanning {
-			// If we have a non-empty watch list, then we need to
-			// see if it matches the rescan's filters, so we get
-			// the basic filter from the DB or network.
-			var (
-				block            *btcutil.Block
-				bFilter, eFilter *gcs.Filter
-				err              error
-			)
-			key := builder.DeriveKey(&curStamp.Hash)
-			matched := false
-			bFilter, err = s.GetCFilter(curStamp.Hash, false)
+			if !scanning {
+				scanning = ro.startTime.Before(curHeader.Timestamp)
+			}
+			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning)
 			if err != nil {
 				return err
 			}
-
-			// If we found the basic filter, and the filter isn't
-			// "nil", then we'll check the items in the watch list
-			// against it.
-			if bFilter != nil && bFilter.N() != 0 {
-				// We see if any relevant transactions match.
-				matched, err = bFilter.MatchAny(key, ro.watchList)
-				if err != nil {
-					return err
-				}
-			}
-
-			// If the regular filter didn't match, and a set of
-			// transactions is specified, then we'll also fetch the
-			// extended filter to see if anything actually matches
-			// for this block.
-			if !matched && len(ro.watchTxIDs) > 0 {
-				eFilter, err = s.GetCFilter(curStamp.Hash, true)
-				if err != nil {
-					return err
-				}
-			}
-			if eFilter != nil && eFilter.N() != 0 {
-				// We see if any relevant transactions match.
-				// TODO(roasbeef): should instead only match
-				// the txids?
-				matched, err = eFilter.MatchAny(key, ro.watchList)
-				if err != nil {
-					return err
-				}
-			}
-
-			if matched {
-				// We've matched. Now we actually get the block and
-				// cycle through the transactions to see which ones are
-				// relevant.
-				block, err = s.GetBlockFromNetwork(curStamp.Hash,
-					ro.queryOptions...)
-				if err != nil {
-					return err
-				}
-				if block == nil {
-					return fmt.Errorf("Couldn't get block %d "+
-						"(%s) from network", curStamp.Height,
-						curStamp.Hash)
-				}
-				relevantTxs, err = ro.notifyBlock(block)
-				if err != nil {
-					return err
-				}
-			}
-		}
-
-		// If we have no transactions, we just send an
-		// OnFilteredBlockConnected notification with no relevant
-		// transactions.
-		if ro.ntfn.OnFilteredBlockConnected != nil {
-			ro.ntfn.OnFilteredBlockConnected(curStamp.Height,
-				&curHeader, relevantTxs)
-		}
-
-		// If we've reached the ending height or hash for this rescan,
-		// then we'll exit.
-		if curStamp.Hash == ro.endBlock.Hash || curStamp.Height ==
-			ro.endBlock.Height {
-			return nil
-		}
-
-		// Check to see if there's a filter update. If so, then we'll
-		// check to see if we need to wind back our state or not,
-		// setting the current bool accordingly.
-		select {
-		case update := <-ro.update:
-			rewound, err := ro.updateFilter(update, &curStamp,
-				&curHeader)
-			if err != nil {
-				return err
-			}
-			if rewound {
-				current = false
-			}
-		default:
 		}
 	}
+}
+
+// notifyBlock calls appropriate listeners based on the block filter.
+func (s *ChainService) notifyBlock(ro *rescanOptions,
+	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	scanning bool) error {
+
+	// First, if we're sending out BlockConnected notifications, do that.
+	if ro.ntfn.OnBlockConnected != nil {
+		ro.ntfn.OnBlockConnected(&curStamp.Hash,
+			curStamp.Height, curHeader.Timestamp)
+	}
+
+	// Find relevant transactions based on watch list. If scanning is false,
+	// we can safely assume this block has no relevant transactions.
+	var relevantTxs []*btcutil.Tx
+	if len(ro.watchList) != 0 && scanning {
+		// If we have a non-empty watch list, then we need to
+		// see if it matches the rescan's filters, so we get
+		// the basic filter from the DB or network.
+		matched, err := s.blockFilterMatches(ro, &curStamp.Hash)
+		if err != nil {
+			return err
+		}
+
+		if matched {
+			// We've matched. Now we actually get the block and
+			// cycle through the transactions to see which ones are
+			// relevant.
+			block, err := s.GetBlockFromNetwork(curStamp.Hash,
+				ro.queryOptions...)
+			if err != nil {
+				return err
+			}
+			if block == nil {
+				return fmt.Errorf("Couldn't get block %d "+
+					"(%s) from network", curStamp.Height,
+					curStamp.Hash)
+			}
+
+			blockHeader := block.MsgBlock().Header
+			blockDetails := btcjson.BlockDetails{
+				Height: block.Height(),
+				Hash:   block.Hash().String(),
+				Time:   blockHeader.Timestamp.Unix(),
+			}
+
+			relevantTxs = make([]*btcutil.Tx, 0, len(block.Transactions()))
+			for txIdx, tx := range block.Transactions() {
+				txDetails := blockDetails
+				txDetails.Index = txIdx
+
+				relevant := ro.watchingTxID(tx)
+
+				if ro.spendsWatchedOutpoint(tx) {
+					relevant = true
+					if ro.ntfn.OnRedeemingTx != nil {
+						ro.ntfn.OnRedeemingTx(tx, &txDetails)
+					}
+				}
+
+				// Even though the transaction may already be known as relevant
+				// and there might not be a notification callback, we need to
+				// call paysWatchedAddr anyway as it updates the rescan options.
+				if ro.paysWatchedAddr(tx) {
+					relevant = true
+					if ro.ntfn.OnRecvTx != nil {
+						ro.ntfn.OnRecvTx(tx, &txDetails)
+					}
+				}
+
+				if relevant {
+					relevantTxs = append(relevantTxs, tx)
+				}
+			}
+		}
+	}
+
+	if ro.ntfn.OnFilteredBlockConnected != nil {
+		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
+			relevantTxs)
+	}
+
+	return nil
+}
+
+// blockFilterMatches returns whether the block filter matches the watched
+// items. If this returns false, it means the block is certainly not interesting
+// to us.
+func (s *ChainService) blockFilterMatches(ro *rescanOptions,
+	blockHash *chainhash.Hash) (bool, error) {
+
+	key := builder.DeriveKey(blockHash)
+	bFilter, err := s.GetCFilter(*blockHash, false)
+	if err != nil {
+		return false, err
+	}
+
+	// If we found the basic filter, and the filter isn't
+	// "nil", then we'll check the items in the watch list
+	// against it.
+	if bFilter != nil && bFilter.N() != 0 {
+		// We see if any relevant transactions match.
+		matched, err := bFilter.MatchAny(key, ro.watchList)
+		if matched || err != nil {
+			return matched, err
+		}
+	}
+
+	// If the regular filter didn't match, and a set of
+	// transactions is specified, then we'll also fetch the
+	// extended filter to see if anything actually matches
+	// for this block.
+	if len(ro.watchTxIDs) > 0 {
+		eFilter, err := s.GetCFilter(*blockHash, true)
+		if err != nil {
+			return false, err
+		}
+		if eFilter != nil && eFilter.N() != 0 {
+			// We see if any relevant transactions match.
+			// TODO(roasbeef): should instead only match
+			// the txids?
+			return eFilter.MatchAny(key, ro.watchList)
+		}
+	}
+	return false, nil
+}
+
+// hasFilterHeadersByHeight checks whether both the basic and extended filter
+// headers for a particular height are known.
+func (s *ChainService) hasFilterHeadersByHeight(height uint32) bool {
+	_, regFetchErr := s.RegFilterHeaders.FetchHeaderByHeight(height)
+	_, extFetchErr := s.ExtFilterHeaders.FetchHeaderByHeight(height)
+	return regFetchErr == nil && extFetchErr == nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
@@ -544,13 +618,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 		// notifications even if it was just a 1 block rewind.
 		rewound = true
 
-		// Don't rewind past the last block we need to disconnect,
-		// because otherwise we connect the last known good block
-		// without ever disconnecting it.
-		if curStamp.Height == int32(update.rewind+1) {
-			break
-		}
-
 		// Rewind and continue.
 		header, height, err = ro.chain.BlockHeaders.FetchHeader(
 			&curHeader.PrevBlock,
@@ -567,111 +634,67 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	return rewound, nil
 }
 
-// notifyBlock notifies listeners based on the block filter. It writes back to
-// the outPoints argument the updated list of outpoints to monitor based on
-// matched addresses.
-//
-// TODO(roasbeef): add an option to just allow callers to request the entire
-// block
-func (ro *rescanOptions) notifyBlock(block *btcutil.Block) ([]*btcutil.Tx,
-	error) {
-
-	var relevantTxs []*btcutil.Tx
-	blockHeader := block.MsgBlock().Header
-	details := btcjson.BlockDetails{
-		Height: block.Height(),
-		Hash:   block.Hash().String(),
-		Time:   blockHeader.Timestamp.Unix(),
-	}
-
-	// Scan the entire block to see if we have any items that actually
-	// match the current filter.
-	for txIdx, tx := range block.Transactions() {
-		relevant := false
-		txDetails := details
-		txDetails.Index = txIdx
-
-		// First, we'll scan the txids, if we have a match then we add
-		// the transaction as relevant and break out early.
-		for _, hash := range ro.watchTxIDs {
-			if hash == *(tx.Hash()) {
-				relevant = true
-				break
-			}
-		}
-
-		// Next we'll examine the txins to see if the transactions in
-		// the block spend any of our watched outpoints.
-		for _, in := range tx.MsgTx().TxIn {
-			// TODO(roasbeef): would still want to send relevant tx
-			// notification?
-			if relevant {
-				break
-			}
-
-			for _, op := range ro.watchOutPoints {
-				if in.PreviousOutPoint == op {
-					relevant = true
-					if ro.ntfn.OnRedeemingTx != nil {
-						ro.ntfn.OnRedeemingTx(tx,
-							&txDetails)
-					}
-					break
-				}
-			}
-		}
-
-		// Finally, we'll examine all the created outputs to check if
-		// it matches our watched push datas.
-		for outIdx, out := range tx.MsgTx().TxOut {
-			pushedData, err := txscript.PushedData(out.PkScript)
-			if err != nil {
-				continue
-			}
-
-			for _, addr := range ro.watchAddrs {
-				if relevant {
-					break
-				}
-
-				for _, data := range pushedData {
-					if !bytes.Equal(data, addr.ScriptAddress()) {
-						continue
-					}
-
-					relevant = true
-
-					// If this output matches, then we'll
-					// update the filter by also watching
-					// this created outpoint for the event
-					// in the future that it's spent.
-					hash := tx.Hash()
-					outPoint := wire.OutPoint{
-						Hash:  *hash,
-						Index: uint32(outIdx),
-					}
-					ro.watchOutPoints = append(
-						ro.watchOutPoints,
-						outPoint)
-					ro.watchList = append(
-						ro.watchList,
-						builder.OutPointToFilterEntry(
-							outPoint))
-					if ro.ntfn.OnRecvTx != nil {
-						ro.ntfn.OnRecvTx(tx, &txDetails)
-					}
-				}
-			}
-		}
-
-		// If the transaction was relevant then add it to the set of
-		// relevant transactions.
-		if relevant {
-			relevantTxs = append(relevantTxs, tx)
+// watchingTxID returns whether the transaction matches the filter based
+// directly on its hash.
+func (ro *rescanOptions) watchingTxID(tx *btcutil.Tx) bool {
+	for _, hash := range ro.watchTxIDs {
+		if hash == *tx.Hash() {
+			return true
 		}
 	}
+	return false
+}
 
-	return relevantTxs, nil
+// spendsWatchedOutpoint returns whether the transaction matches the filter by
+// spending a watched outpoint.
+func (ro *rescanOptions) spendsWatchedOutpoint(tx *btcutil.Tx) bool {
+	for _, in := range tx.MsgTx().TxIn {
+		for _, op := range ro.watchOutPoints {
+			if in.PreviousOutPoint == op {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// paysWatchedAddr returns whether the transaction matches the filter by having
+// an output paying to a watched address. If that is the case, this also updates
+// the filter to watch the newly created output going forward.
+func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) bool {
+	anyMatchingOutputs := false
+
+txOutLoop:
+	for outIdx, out := range tx.MsgTx().TxOut {
+		pushedData, err := txscript.PushedData(out.PkScript)
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range ro.watchAddrs {
+			for _, data := range pushedData {
+				if !bytes.Equal(data, addr.ScriptAddress()) {
+					continue
+				}
+
+				anyMatchingOutputs = true
+
+				// Update the filter by also watching this created outpoint
+				// for the event in the future that it's spent.
+				hash := tx.Hash()
+				outPoint := wire.OutPoint{
+					Hash:  *hash,
+					Index: uint32(outIdx),
+				}
+				ro.watchOutPoints = append(ro.watchOutPoints, outPoint)
+				ro.watchList = append(ro.watchList,
+					builder.OutPointToFilterEntry(outPoint))
+
+				continue txOutLoop
+			}
+		}
+	}
+	return anyMatchingOutputs
 }
 
 // Rescan is an object that represents a long-running rescan/notification
