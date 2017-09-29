@@ -787,12 +787,6 @@ func TestSetup(t *testing.T) {
 			" %d", numTXs)
 	}
 
-	close(quitRescan)
-	err = <-errChan
-	quitRescan = nil
-	if err != nil {
-		t.Fatalf("Rescan ended with error: %s", err)
-	}
 	if !bytes.Equal(wantLog, gotLog) {
 		leastBytes := len(wantLog)
 		if len(gotLog) < leastBytes {
@@ -809,6 +803,49 @@ func TestSetup(t *testing.T) {
 			"Got:  %s\nDifference - want: %s\nDifference -- got: "+
 			"%s", diffIndex, wantLog, gotLog, wantLog[diffIndex:],
 			gotLog[diffIndex:])
+	}
+
+	// Connect h1 and h2, wait for them to synchronize and check for the
+	// ChainService synchronization status.
+	err = rpctest.ConnectNode(h1, h2)
+	if err != nil {
+		t.Fatalf("Couldn't connect h1 to h2: %s", err)
+	}
+
+	err = rpctest.JoinNodes([]*rpctest.Harness{h1, h2}, rpctest.Blocks)
+	if err != nil {
+		t.Fatalf("Couldn't sync h1 and h2: %s", err)
+	}
+
+	err = waitForSync(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Couldn't sync ChainService: %s", err)
+	}
+
+	// Now generate a bunch of blocks on each while they're connected,
+	// triggering many tiny reorgs, and wait for sync again. The end result
+	// is somewhat random, depending on how quickly the nodes process each
+	// other's notifications vs finding new blocks, but the two nodes should
+	// remain fully synchronized with each other at the end.
+	go h2.Node.Generate(75)
+	h1.Node.Generate(50)
+
+	err = rpctest.JoinNodes([]*rpctest.Harness{h1, h2}, rpctest.Blocks)
+	if err != nil {
+		t.Fatalf("Couldn't sync h1 and h2: %s", err)
+	}
+
+	err = waitForSync(t, svc, h1)
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Couldn't sync ChainService: %s", err)
+	}
+
+	close(quitRescan)
+	err = <-errChan
+	quitRescan = nil
+	if err != nil {
+		t.Fatalf("Rescan ended with error: %s", err)
 	}
 }
 
