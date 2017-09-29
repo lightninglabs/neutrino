@@ -157,7 +157,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
 	ro.endBlock = &waddrmgr.BlockStamp{
-		Hash:   *s.chainParams.GenesisHash,
+		Hash:   chainhash.Hash{},
 		Height: 0,
 	}
 	for _, option := range options {
@@ -284,8 +284,8 @@ rescanLoop:
 		// If we've reached the ending height or hash for this rescan,
 		// then we'll exit.
 		if curStamp.Hash == ro.endBlock.Hash ||
-			curStamp.Height == ro.endBlock.Height {
-
+			(ro.endBlock.Height > 0 &&
+				curStamp.Height == ro.endBlock.Height) {
 			return nil
 		}
 
