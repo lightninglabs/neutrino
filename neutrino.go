@@ -813,6 +813,16 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		return nil, err
 	}
 
+	_, regHeight, err := s.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	_, extHeight, err := s.ExtFilterHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
 	for uint32(bs.Height) > height {
 		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
 		if err != nil {
@@ -820,13 +830,18 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		}
 
 		newTip := &header.PrevBlock
-		_, err = s.RegFilterHeaders.RollbackLastBlock(newTip)
-		if err != nil {
-			return nil, err
+		// Only roll back filter headers if they've caught up this far.
+		if uint32(bs.Height) <= regHeight {
+			_, err = s.RegFilterHeaders.RollbackLastBlock(newTip)
+			if err != nil {
+				return nil, err
+			}
 		}
-		_, err = s.ExtFilterHeaders.RollbackLastBlock(newTip)
-		if err != nil {
-			return nil, err
+		if uint32(bs.Height) <= extHeight {
+			_, err = s.ExtFilterHeaders.RollbackLastBlock(newTip)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		bs, err = s.BlockHeaders.RollbackLastBlock()
