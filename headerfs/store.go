@@ -439,6 +439,15 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 // ChainTip returns the best known block header and height for the
 // BlockHeaderStore.
 func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
+	// Ensure index and flat file read are part of same tx.
+	tx, err := h.db.BeginReadTx()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+	h.RLock()
+	defer h.RUnlock()
+
 	_, tipHeight, err := h.chainTip()
 	if err != nil {
 		return nil, 0, err
