@@ -528,7 +528,7 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
 	key := builder.DeriveKey(blockHash)
-	bFilter, err := s.GetCFilter(*blockHash, false)
+	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
@@ -548,26 +548,12 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 		}
 	}
 
-	// If the regular filter didn't match, and a set of
-	// transactions is specified, then we'll also fetch the
-	// extended filter to see if anything actually matches
-	// for this block.
-	if len(ro.watchTxIDs) > 0 {
-		eFilter, err := s.GetCFilter(*blockHash, true)
-		if err != nil {
-			if err == headerfs.ErrHashNotFound {
-				// Block has been reorged out from under us.
-				return false, nil
-			}
-			return false, err
-		}
-		if eFilter != nil && eFilter.N() != 0 {
-			// We see if any relevant transactions match.
-			// TODO(roasbeef): should instead only match
-			// the txids?
-			return eFilter.MatchAny(key, ro.watchList)
-		}
-	}
+	// We don't need the extended filter, since all of the things a rescan
+	// can watch for are currently added to the same watch list and
+	// available in the basic filter. In the future, we can watch for
+	// data pushes in input scripts (incl. P2SH and witness). In the
+	// meantime, we return false if the basic filter didn't match our
+	// watch list.
 	return false, nil
 }
 
@@ -948,8 +934,8 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	for {
 		// Check the basic filter for the spend and the extended filter
 		// for the transaction in which the outpoint is funded.
-		filter, err := s.GetCFilter(curStamp.Hash, false,
-			ro.queryOptions...)
+		filter, err := s.GetCFilter(curStamp.Hash,
+			wire.GCSFilterRegular, ro.queryOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("Couldn't get basic "+
 				"filter for block %d (%s)", curStamp.Height,
@@ -962,24 +948,6 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		}
 		if err != nil {
 			return nil, err
-		}
-
-		// If the regular filter didn't match, then we'll also fetch
-		// the extended filter to see if this is the block in which the
-		// outpoint was actually created.
-		if !matched {
-			filter, err = s.GetCFilter(curStamp.Hash, true,
-				ro.queryOptions...)
-			if err != nil {
-				return nil, fmt.Errorf("Couldn't get "+
-					"extended filter for block %d (%s)",
-					curStamp.Height, curStamp.Hash)
-			}
-			if filter != nil {
-				matched, err = filter.MatchAny(
-					builder.DeriveKey(&curStamp.Hash),
-					watchList)
-			}
 		}
 
 		// If either is matched, download the block and check to see

@@ -924,13 +924,13 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	}
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
-		knownBestHash, false)
+		knownBestHash, wire.GCSFilterRegular)
 	if err != nil || len(knownBasicHeader.HeaderHashes) < 1 {
 		return fmt.Errorf("Couldn't get latest basic header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
 	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
-		knownBestHash, true)
+		knownBestHash, wire.GCSFilterExtended)
 	if err != nil || len(knownExtHeader.HeaderHashes) < 1 {
 		return fmt.Errorf("Couldn't get latest extended header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
@@ -1023,39 +1023,32 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Couldn't get extended "+
 				"header for %d (%s) from DB", i, hash)
 		}
-		knownBasicHeader, err =
-			correctSyncNode.Node.GetCFilterHeader(&hash,
-				false)
+		knownBasicHeader, err = correctSyncNode.Node.GetCFilterHeader(
+			&hash, wire.GCSFilterRegular)
 		if err != nil {
 			return fmt.Errorf("Couldn't get basic header "+
 				"for %d (%s) from node %s", i, hash,
 				correctSyncNode.P2PAddress())
 		}
-		knownExtHeader, err =
-			correctSyncNode.Node.GetCFilterHeader(&hash,
-				true)
+		knownExtHeader, err = correctSyncNode.Node.GetCFilterHeader(
+			&hash, wire.GCSFilterExtended)
 		if err != nil {
 			return fmt.Errorf("Couldn't get extended "+
 				"header for %d (%s) from node %s", i,
 				hash, correctSyncNode.P2PAddress())
 		}
-		if *haveBasicHeader !=
-			*knownBasicHeader.HeaderHashes[0] {
+		if *haveBasicHeader != *knownBasicHeader.HeaderHashes[0] {
 			return fmt.Errorf("Basic header for %d (%s) "+
-				"doesn't match node %s. DB: %s, node: "+
-				"%s", i, hash,
-				correctSyncNode.P2PAddress(),
+				"doesn't match node %s. DB: %s, node: %s", i,
+				hash, correctSyncNode.P2PAddress(),
 				haveBasicHeader,
 				knownBasicHeader.HeaderHashes[0])
 		}
-		if *haveExtHeader !=
-			*knownExtHeader.HeaderHashes[0] {
+		if *haveExtHeader != *knownExtHeader.HeaderHashes[0] {
 			return fmt.Errorf("Extended header for %d (%s)"+
-				" doesn't match node %s. DB: %s, node:"+
-				" %s", i, hash,
-				correctSyncNode.P2PAddress(),
-				haveExtHeader,
-				knownExtHeader.HeaderHashes[0])
+				" doesn't match node %s. DB: %s, node: %s", i,
+				hash, correctSyncNode.P2PAddress(),
+				haveExtHeader, knownExtHeader.HeaderHashes[0])
 		}
 	}
 	return nil
@@ -1139,15 +1132,15 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get basic cfilter from network.
-			haveFilter, err := svc.GetCFilter(blockHash, false,
-				queryOptions...)
+			haveFilter, err := svc.GetCFilter(blockHash,
+				wire.GCSFilterRegular, queryOptions...)
 			if err != nil {
 				errChan <- err
 				return
 			}
 			// Get basic cfilter from RPC.
 			wantFilter, err := correctSyncNode.Node.GetCFilter(
-				&blockHash, false)
+				&blockHash, wire.GCSFilterRegular)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
 					"filter for block %d via RPC: %s",
@@ -1210,15 +1203,15 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get extended cfilter from network
-			haveFilter, err = svc.GetCFilter(blockHash, true,
-				queryOptions...)
+			haveFilter, err = svc.GetCFilter(blockHash,
+				wire.GCSFilterExtended, queryOptions...)
 			if err != nil {
 				errChan <- err
 				return
 			}
 			// Get extended cfilter from RPC
 			wantFilter, err = correctSyncNode.Node.GetCFilter(
-				&blockHash, true)
+				&blockHash, wire.GCSFilterExtended)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
 					"filter for block %d via RPC: %s",
@@ -1228,6 +1221,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			// Check that network and RPC cfilters match
 			if haveFilter != nil {
 				haveBytes = haveFilter.NBytes()
+			} else {
+				haveBytes = nil
 			}
 			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Extended filter from "+

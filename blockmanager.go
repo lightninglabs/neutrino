@@ -82,7 +82,7 @@ type cfheadersMsg struct {
 type processCFHeadersMsg struct {
 	earliestNode *headerNode
 	stopHash     chainhash.Hash
-	extended     bool
+	filterType   wire.FilterType
 }
 
 // donePeerMsg signifies a newly disconnected peer to the block handler.
@@ -552,11 +552,11 @@ func (b *blockManager) startSync(peers *list.List) {
 		}
 		startHash := startHeader.BlockHash()
 		endHeight := i
-		fType := false
+		fType := wire.GCSFilterRegular
 		if endHeight < bestRegHeight {
 			// We're catching extended headers up to regular headers
 			// so we set the header type to extended.
-			fType = true
+			fType = wire.GCSFilterExtended
 			if endHeight+wire.MaxCFHeadersPerMsg > bestRegHeight {
 				endHeight = bestRegHeight
 			} else {
@@ -566,7 +566,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		if endHeight < bestExtHeight {
 			// We're catching regular headers up to extended headers
 			// so we set the header type to regular.
-			fType = false
+			fType = wire.GCSFilterRegular
 			if endHeight+wire.MaxCFHeadersPerMsg > bestRegHeight {
 				endHeight = bestExtHeight
 			} else {
@@ -599,9 +599,9 @@ func (b *blockManager) startSync(peers *list.List) {
 			FetchHeaderByHeight(endHeight)
 		endHash := endHeader.BlockHash()
 		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
-			false)
+			wire.GCSFilterRegular)
 		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
-			true)
+			wire.GCSFilterExtended)
 		i = endHeight
 	}
 
@@ -1168,9 +1168,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// Send getcfheaders to each peer based on these headers.
 		cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
 		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-			len(msg.Headers), false)
+			len(msg.Headers), wire.GCSFilterRegular)
 		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-			len(msg.Headers), true)
+			len(msg.Headers), wire.GCSFilterExtended)
 	}
 
 	// When this header is a checkpoint, find the next checkpoint.
@@ -1200,12 +1200,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // sendGetcfheaders sends a getcfheaders message to all peers with the
 // specified start block and hash block and for the specified type of header.
 func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
-	count int, extended bool) {
+	count int, filterType wire.FilterType) {
 	// Send getcfheaders to each peer based on these headers.
 	cfhLocator := blockchain.BlockLocator([]*chainhash.Hash{startBlock})
 	cfhReq := cfhRequest{
-		extended: extended,
-		stopHash: *endBlock,
+		filterType: filterType,
+		stopHash:   *endBlock,
 	}
 	b.server.ForAllPeers(func(sp *ServerPeer) {
 		// Should probably use better isolation for this but we're in
@@ -1214,7 +1214,7 @@ func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
 		sp.mtxReqCFH.Lock()
 		sp.requestedCFHeaders[cfhReq] = count
 		sp.mtxReqCFH.Unlock()
-		sp.pushGetCFHeadersMsg(cfhLocator, endBlock, extended)
+		sp.pushGetCFHeadersMsg(cfhLocator, endBlock, filterType)
 	})
 }
 
@@ -1237,8 +1237,8 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 	// Check that the count is correct. This works even when the map lookup
 	// fails as it returns 0 in that case.
 	req := cfhRequest{
-		extended: cfheaders.Extended,
-		stopHash: cfheaders.StopHash,
+		filterType: cfheaders.FilterType,
+		stopHash:   cfheaders.StopHash,
 	}
 	// TODO: Get rid of this by refactoring all of this using the query API
 	sp.mtxReqCFH.Lock()
@@ -1258,7 +1258,7 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 	// Track number of pending cfheaders messsages for both basic and
 	// extended filters.
 	pendingMsgs := &b.numBasicCFHeadersMsgs
-	if cfheaders.Extended {
+	if cfheaders.FilterType == wire.GCSFilterExtended {
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
 	atomic.AddInt32(pendingMsgs, 1)
@@ -1273,7 +1273,7 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 	// it.
 	headerMap := b.basicHeaders
 	pendingMsgs := &b.numBasicCFHeadersMsgs
-	if cfhmsg.cfheaders.Extended {
+	if cfhmsg.cfheaders.FilterType == wire.GCSFilterExtended {
 		headerMap = b.extendedHeaders
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
@@ -1323,13 +1323,13 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 	b.intChan <- &processCFHeadersMsg{
 		earliestNode: node,
 		stopHash:     cfhmsg.cfheaders.StopHash,
-		extended:     cfhmsg.cfheaders.Extended,
+		filterType:   cfhmsg.cfheaders.FilterType,
 	}
 
 	log.Tracef("Processed cfheaders starting at %d(%s), ending at %s, from"+
-		" peer %s, extended: %t", node.height, node.header.BlockHash(),
+		" peer %s, type %d", node.height, node.header.BlockHash(),
 		cfhmsg.cfheaders.StopHash, cfhmsg.peer.Addr(),
-		cfhmsg.cfheaders.Extended)
+		cfhmsg.cfheaders.FilterType)
 }
 
 // handleProcessCFHeadersMsg checks to see if we have enough cfheaders to make
@@ -1346,7 +1346,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	lastCFHeaderHeight := &b.lastBasicCFHeaderHeight
 	pendingMsgs := &b.numBasicCFHeadersMsgs
 	headerStore := b.server.RegFilterHeaders
-	if msg.extended {
+	if msg.filterType == wire.GCSFilterExtended {
 		headerMap = b.extendedHeaders
 		lastCFHeaderHeight = &b.lastExtCFHeaderHeight
 		pendingMsgs = &b.numExtCFHeadersMsgs
@@ -1434,11 +1434,12 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			case 1:
 				// This will only cycle once
 				for headerHash := range blockMap {
-					log.Tracef("Accepted header for block %d "+
-						"with %d cfheaders messages, "+
-						"extended: %t", node.height,
+					log.Tracef("Accepted header for block "+
+						"%d with %d cfheaders "+
+						"messages, type %d",
+						node.height,
 						len(blockMap[headerHash]),
-						msg.extended)
+						msg.filterType)
 
 					// Add the accepted header to the current write batch.
 					headerWriteBatch = append(headerWriteBatch,
@@ -1469,8 +1470,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		// (if any).
 		if hash == stopHash {
 			log.Tracef("Finished processing cfheaders messages up "+
-				"to height %d/hash %s, extended: %t",
-				node.height, hash, msg.extended)
+				"to height %d/hash %s, type %d",
+				node.height, hash, msg.filterType)
 			break
 		}
 	}
@@ -1487,7 +1488,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 
 	// Notify subscribers of a connected block.
 	msgType := connectBasic
-	if msg.extended {
+	if msg.filterType == wire.GCSFilterExtended {
 		msgType = connectExt
 	}
 	for _, header := range processedHeaders {

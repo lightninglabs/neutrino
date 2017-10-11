@@ -12,6 +12,7 @@ import (
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
+	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 	"github.com/roasbeef/btcwallet/walletdb"
@@ -529,7 +530,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 			basicFilter, err := builder.BuildBasicFilter(
 				netParams.GenesisBlock,
 			)
-			if err != nil {
+			if err != nil && err != gcs.ErrNoData {
 				return nil, err
 			}
 
@@ -542,7 +543,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 			extFilter, err := builder.BuildExtFilter(
 				netParams.GenesisBlock,
 			)
-			if err != nil {
+			if err != nil && err != gcs.ErrNoData {
 				return nil, err
 			}
 
