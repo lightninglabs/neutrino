@@ -323,8 +323,9 @@ checkResponses:
 // cfilter from the network and writes it to the database. If extended is true,
 // an extended filter will be queried for. Otherwise, we'll fetch the regular
 // filter.
-func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
-	options ...QueryOption) (*gcs.Filter, error) {
+func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
+	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter,
+	error) {
 	// Only get one CFilter at a time to avoid redundancy from mutliple
 	// rescans running at once.
 	s.mtxCFilter.Lock()
@@ -333,15 +334,15 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 	// Based on if extended is true or not, we'll set up our set of
 	// querying, and db-write functions.
 	getHeader := s.RegFilterHeaders.FetchHeader
-	filterType := filterdb.RegularFilter
-	if extended {
+	dbFilterType := filterdb.RegularFilter
+	if filterType == wire.GCSFilterExtended {
 		getHeader = s.ExtFilterHeaders.FetchHeader
-		filterType = filterdb.ExtendedFilter
+		dbFilterType = filterdb.ExtendedFilter
 	}
 
 	// First check the database to see if we already have this filter. If
 	// so, then we can return it an exit early.
-	filter, err := s.FilterDB.FetchFilter(&blockHash, filterType)
+	filter, err := s.FilterDB.FetchFilter(&blockHash, dbFilterType)
 	if err == nil && filter != nil {
 		return filter, nil
 	}
@@ -387,7 +388,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 	// query to the set of connected peers.
 	s.queryPeers(
 		// Send a wire.GetCFilterMsg
-		wire.NewMsgGetCFilter(&blockHash, extended),
+		wire.NewMsgGetCFilter(&blockHash, filterType),
 
 		// Check responses and if we get one that matches, end the
 		// query early.
@@ -411,7 +412,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 				// If the response doesn't match our request.
 				// Ignore this message.
 				if blockHash != response.BlockHash ||
-					extended != response.Extended {
+					filterType != response.FilterType {
 					return
 				}
 
@@ -447,13 +448,13 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 
 	// If we've found a filter, write it to the database for next time.
 	if filter != nil {
-		err := s.FilterDB.PutFilter(&blockHash, filter, filterType)
+		err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
 		if err != nil {
 			return nil, err
 		}
 
-		log.Tracef("Wrote filter for block %s, extended: %t",
-			blockHash, extended)
+		log.Tracef("Wrote filter for block %s, type %d",
+			blockHash, filterType)
 	}
 
 	return filter, nil

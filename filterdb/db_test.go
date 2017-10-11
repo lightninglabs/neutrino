@@ -55,20 +55,17 @@ func TestGenesisFilterCreation(t *testing.T) {
 	}
 
 	// The regular filter should be non-nil as the gensis block's output
-	// should be indexed.
+	// and the coinbase txid should be indexed.
 	if regGenesisFilter == nil {
 		t.Fatalf("regular genesis filter is nil")
 	}
 
-	extGenesisFilter, err := database.FetchFilter(genesisHash, ExtendedFilter)
+	// We don't test the extended genesis filter for nullness because it
+	// only has a coinbase tx, which has no inputs to be indexed.
+	// Therefore, we only check if there's an error on retrieval.
+	_, err = database.FetchFilter(genesisHash, ExtendedFilter)
 	if err != nil {
-		t.Fatalf("unable to fetch ext genesis fitler: %v", err)
-	}
-
-	// The extended filter should also be non-nil as the the genesis
-	// filter's transaction should be indexed.
-	if extGenesisFilter == nil {
-		t.Fatalf("regular genesis filter is nil")
+		t.Fatalf("unable to fetch ext genesis filter: %v", err)
 	}
 }
 

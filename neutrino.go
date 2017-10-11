@@ -116,8 +116,8 @@ func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 // actual block hashes based on the cfheaders message to keep it compact, we
 // track it this way.
 type cfhRequest struct {
-	extended bool
-	stopHash chainhash.Hash
+	filterType wire.FilterType
+	stopHash   chainhash.Hash
 }
 
 // ServerPeer extends the peer to maintain state shared by the server and the
@@ -223,7 +223,7 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 // pushGetCFHeadersMsg sends a getcfheaders message for the provided block
 // locator and stop hash to the connected peer.
 func (sp *ServerPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
-	stopHash *chainhash.Hash, ext bool) error {
+	stopHash *chainhash.Hash, filterType wire.FilterType) error {
 
 	msg := wire.NewMsgGetCFHeaders()
 	msg.HashStop = *stopHash
@@ -234,7 +234,7 @@ func (sp *ServerPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 		}
 	}
 
-	msg.Extended = ext
+	msg.FilterType = filterType
 	sp.QueueMessage(msg, nil)
 	return nil
 }
