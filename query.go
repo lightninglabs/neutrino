@@ -437,8 +437,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 				// know about it and we declare it sane. We can
 				// kill the query and pass the response back to
 				// the caller.
-				close(quit)
 				filter = gotFilter
+				close(quit)
 			default:
 			}
 		},
@@ -543,8 +543,8 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 				// know about it and we declare it sane. We can
 				// kill the query and pass the response back to
 				// the caller.
-				close(quit)
 				foundBlock = block
+				close(quit)
 			default:
 			}
 		},
