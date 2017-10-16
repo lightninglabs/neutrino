@@ -410,7 +410,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 
 				// If the response doesn't match our request.
 				// Ignore this message.
-				if blockHash != response.BlockHash {
+				if blockHash != response.BlockHash ||
+					extended != response.Extended {
 					return
 				}
 
