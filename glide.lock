@@ -1,5 +1,5 @@
-hash: 476bc5c831c601c23b6858ed98aee7ee5d9895c921e37ac04c868f5b3cb367df
-updated: 2017-09-25T18:23:45.084425151-07:00
+hash: 14a7a74803d51ffecbec835624dc3cac580be48459a7ffdcbd86d5ba6cdcdf12
+updated: 2017-10-16T20:11:54.555266702-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -26,11 +26,11 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
-  version: a476722483882dd40b8111f0eb64e1d7f43f56e4
+  version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: ab9f9a6dab164b7d1246e0e688b0ab7b94d8553e
+  version: 130e6b02ab059e7b717a096f397c5b60111cae74
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
@@ -38,7 +38,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/roasbeef/btcd
-  version: 4b411f0e78f1faa96ae650d886170d018c1835bf
+  version: a64d018fd91151b842522d64771610712565d30a
   subpackages:
   - addrmgr
   - blockchain
@@ -62,7 +62,7 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: github.com/roasbeef/btcwallet
-  version: 24684c8e93c4b57db10986c021d3a15209678e32
+  version: fbd5b82e8efe29729e2c7ebed5900a210e931df2
   subpackages:
   - internal/helpers
   - internal/zero
@@ -74,15 +74,15 @@ imports:
   - walletdb
   - walletdb/bdb
 - name: golang.org/x/crypto
-  version: 81e90905daefcd6fd217b62423c0908922eadb30
+  version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
   subpackages:
   - ripemd160
 - name: golang.org/x/net
-  version: 66aacef3dd8a676686c7ae3716979581e8b03c47
+  version: a04bdaca5b32abe1c069418fb7088ae607de5bd0
   subpackages:
   - context
 - name: golang.org/x/sys
-  version: ab9e364efd8b52800ff7ee48a9ffba4e0ed78dfb
+  version: ebfc5b4631820b793c9010c87fd8fef0f39eb082
   subpackages:
   - unix
 - name: google.golang.org/grpc

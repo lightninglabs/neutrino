@@ -3,7 +3,7 @@ import:
 - package: github.com/boltdb/bolt
   version: ^1.3.0
 - package: github.com/roasbeef/btcd
-  version: 4b411f0e78f1faa96ae650d886170d018c1835bf
+  version: a64d018fd91151b842522d64771610712565d30a
   subpackages:
   - blockchain
   - btcec
@@ -21,7 +21,7 @@ import:
   - gcs/builder
   - hdkeychain
 - package: github.com/roasbeef/btcwallet
-  version: 24684c8e93c4b57db10986c021d3a15209678e32
+  version: fbd5b82e8efe29729e2c7ebed5900a210e931df2
   subpackages:
   - waddrmgr
   - wallet/txauthor
