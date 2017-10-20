@@ -65,7 +65,7 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	// We'll open the file, creating it if necessary and ensuring that all
 	// writes are actually appends to the end of the file.
 	fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
-	headerFile, err := os.OpenFile(flatFileName, fileFlags, 0755)
+	headerFile, err := os.OpenFile(flatFileName, fileFlags, 0644)
 	if err != nil {
 		return nil, err
 	}
