@@ -92,11 +92,11 @@ type BlockHeaderStore struct {
 	*headerStore
 }
 
-// New creates a new instance of the BlockHeaderStore based on a target file
-// path, an open database instance, and finally a set of parameters for the
-// target chain. These parameters are required as if this is the initial start
-// up of the BlockHeaderStore, then the initial genesis header will need to be
-// inserted.
+// NewBlockHeaderStore creates a new instance of the BlockHeaderStore based on
+// a target file path, an open database instance, and finally a set of
+// parameters for the target chain. These parameters are required as if this is
+// the initial start up of the BlockHeaderStore, then the initial genesis
+// header will need to be inserted.
 func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	netParams *chaincfg.Params) (*BlockHeaderStore, error) {
 
@@ -388,7 +388,7 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 		// index entries are also accurate. To do this, we start from a
 		// height of one before our current tip.
 		var newHeader *wire.BlockHeader
-		for height := int64(tipHeight) - 1; height > 0; height-- {
+		for height := tipHeight - 1; height > 0; height-- {
 			// First, read the block header for this block height,
 			// and also compute the block hash for it.
 			newHeader, err = h.readHeader(height)
@@ -411,7 +411,7 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 			// With the index entry retrieved, we'll now assert
 			// that the height matches up with our current height
 			// in this backwards walk.
-			if int64(indexHeight) != height {
+			if indexHeight != height {
 				return fmt.Errorf("index height isn't monotonically " +
 					"increasing")
 			}
