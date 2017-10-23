@@ -687,7 +687,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				}
 
 				addrString := addrmgr.NetAddressKey(addr.NetAddress())
-				return addrStringToNetAddr(addrString)
+				return s.addrStringToNetAddr(addrString)
 			}
 
 			return nil, errors.New("no valid connect address")
@@ -722,7 +722,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		permanentPeers = cfg.AddPeers
 	}
 	for _, addr := range permanentPeers {
-		tcpAddr, err := addrStringToNetAddr(addr)
+		tcpAddr, err := s.addrStringToNetAddr(addr)
 		if err != nil {
 			return nil, err
 		}
@@ -960,13 +960,20 @@ cleanup:
 	log.Tracef("Peer handler done")
 }
 
-// addrStringToNetAddr takes an address in the form of 'host:port' and returns
-// a net.Addr which maps to the original address with any host names resolved
-// to IP addresses.
-func addrStringToNetAddr(addr string) (net.Addr, error) {
+// addrStringToNetAddr takes an address in the form of 'host:port' or 'host'
+// and returns a net.Addr which maps to the original address with any host
+// names resolved to IP addresses and a default port added, if not specified,
+// from the ChainService's network parameters.
+func (s *ChainService) addrStringToNetAddr(addr string) (net.Addr, error) {
 	host, strPort, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, err
+		switch err.(type) {
+		case *net.AddrError:
+			host = addr
+			strPort = s.ChainParams().DefaultPort
+		default:
+			return nil, err
+		}
 	}
 
 	// Attempt to look up an IP address associated with the parsed host.
