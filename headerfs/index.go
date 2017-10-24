@@ -53,7 +53,7 @@ const (
 	// headers.
 	Block HeaderType = iota
 
-	// RegularFiler is a header type that represents the basic filter
+	// RegularFilter is a header type that represents the basic filter
 	// header type for the filter header chain.
 	RegularFilter
 
@@ -80,11 +80,9 @@ func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) 
 	// necessary for functioning of the index. If these buckets has already
 	// been created, then we can exit early.
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		if _, err := tx.CreateTopLevelBucket(indexBucket); err != nil {
-			return err
-		}
+		_, err := tx.CreateTopLevelBucket(indexBucket)
+		return err
 
-		return nil
 	})
 	if err != nil && err != walletdb.ErrBucketExists {
 		return nil, err
