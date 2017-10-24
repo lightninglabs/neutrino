@@ -33,7 +33,7 @@ var headerBufPool = sync.Pool{
 //
 // TODO(roasbeef): quickcheck coverage
 type headerStore struct {
-	sync.RWMutex
+	mtx sync.RWMutex
 
 	filePath string
 
@@ -175,6 +175,10 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 // FetchHeader attempts to retrieve a block header determined by the passed
 // block height.
 func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
+
 	// First, we'll query the index to obtain the block height of the
 	// passed block hash.
 	height, err := h.heightFromHash(hash)
@@ -194,6 +198,10 @@ func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 // FetchHeaderByHeight attempts to retrieve a target block header based on a
 // block height.
 func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader, error) {
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
+
 	// For this query, we don't need to consult the index, and can instead
 	// just seek into the flat file based on the target height and return
 	// the full header.
@@ -211,6 +219,10 @@ func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 // disconnects the latest block header from the end of the main chain. The
 // information about the new header tip after truncation is returned.
 func (h *BlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
+	// Lock store for write.
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+
 	// First, we'll obtain the latest height that the index knows of.
 	_, chainTipHeight, err := h.chainTip()
 	if err != nil {
@@ -263,6 +275,10 @@ func (b *BlockHeader) toIndexEntry() headerEntry {
 // WriteHeaders writes a set of headers to disk and updates the index in a
 // single atomic transaction.
 func (h *BlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
+	// Lock store for write.
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+
 	// First, we'll grab a buffer from the write buffer pool so we an
 	// reduce our total number of allocations, and also write the headers
 	// in a single swoop.
@@ -343,6 +359,10 @@ func (h *BlockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (blockchai
 // LatestBlockLocator returns the latest block locator object based on the tip
 // of the current main chain from the PoV of the database and flat files.
 func (h *BlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error) {
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
+
 	var locator blockchain.BlockLocator
 
 	chainTipHash, _, err := h.chainTip()
@@ -356,6 +376,10 @@ func (h *BlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error)
 // BlockLocatorFromHash computes a block locator given a particular hash. The
 // standard Bitcoin algorithm to compute block locators are employed.
 func (h *BlockHeaderStore) BlockLocatorFromHash(hash *chainhash.Hash) (blockchain.BlockLocator, error) {
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
+
 	return h.blockLocatorFromHash(hash)
 }
 
@@ -364,6 +388,10 @@ func (h *BlockHeaderStore) BlockLocatorFromHash(hash *chainhash.Hash) (blockchai
 // each block header, we also ensure that the index entry for that height and
 // hash also match up properly.
 func (h *BlockHeaderStore) CheckConnectivity() error {
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
+
 	return walletdb.View(h.db, func(tx walletdb.ReadTx) error {
 		// First, we'll fetch the root bucket, in order to use that to
 		// fetch the bucket that houses the header index.
@@ -439,14 +467,9 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 // ChainTip returns the best known block header and height for the
 // BlockHeaderStore.
 func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
-	// Ensure index and flat file read are part of same tx.
-	tx, err := h.db.BeginReadTx()
-	if err != nil {
-		return nil, 0, err
-	}
-	defer tx.Rollback()
-	h.RLock()
-	defer h.RUnlock()
+	// Lock store for read.
+	h.mtx.RLock()
+	defer h.mtx.RUnlock()
 
 	_, tipHeight, err := h.chainTip()
 	if err != nil {
@@ -582,6 +605,10 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 // FetchHeader returns the filter header that corresponds to the passed block
 // height.
 func (f *FilterHeaderStore) FetchHeader(hash *chainhash.Hash) (*chainhash.Hash, error) {
+	// Lock store for read.
+	f.mtx.RLock()
+	defer f.mtx.RUnlock()
+
 	height, err := f.heightFromHash(hash)
 	if err != nil {
 		return nil, err
@@ -592,6 +619,10 @@ func (f *FilterHeaderStore) FetchHeader(hash *chainhash.Hash) (*chainhash.Hash, 
 
 // FetchHeaderByHeight returns the filter header for a particular block height.
 func (f *FilterHeaderStore) FetchHeaderByHeight(height uint32) (*chainhash.Hash, error) {
+	// Lock store for read.
+	f.mtx.RLock()
+	defer f.mtx.RUnlock()
+
 	return f.readHeader(int64(height))
 }
 
@@ -623,6 +654,10 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 // headers themselves are appended to the flat file, and then the index updated
 // to reflect the new entires.
 func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
+	// Lock store for write.
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+
 	// If there are 0 headers to be written, return immediately. This
 	// prevents the newTip assignment from panicking because of an index
 	// of -1.
@@ -660,6 +695,10 @@ func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 // ChainTip returns the latest filter header and height known to the
 // FilterHeaderStore.
 func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
+	// Lock store for read.
+	f.mtx.RLock()
+	defer f.mtx.RUnlock()
+
 	_, tipHeight, err := f.chainTip()
 	if err != nil {
 		return nil, 0, err
@@ -679,6 +718,10 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 // chain. The information about the latest header tip after truncation is
 // returnd.
 func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error) {
+	// Lock store for write.
+	f.mtx.Lock()
+	defer f.mtx.Unlock()
+
 	// First, we'll obtain the latest height that the index knows of.
 	_, chainTipHeight, err := f.chainTip()
 	if err != nil {
