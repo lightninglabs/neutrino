@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/rpcclient"
@@ -529,6 +530,10 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	key := builder.DeriveKey(blockHash)
 	bFilter, err := s.GetCFilter(*blockHash, false)
 	if err != nil {
+		if err == headerfs.ErrHashNotFound {
+			// Block has been reorged out from under us.
+			return false, nil
+		}
 		return false, err
 	}
 
@@ -550,6 +555,10 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	if len(ro.watchTxIDs) > 0 {
 		eFilter, err := s.GetCFilter(*blockHash, true)
 		if err != nil {
+			if err == headerfs.ErrHashNotFound {
+				// Block has been reorged out from under us.
+				return false, nil
+			}
 			return false, err
 		}
 		if eFilter != nil && eFilter.N() != 0 {
