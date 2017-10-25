@@ -51,28 +51,28 @@ var zeroHash chainhash.Hash
 
 // newPeerMsg signifies a newly connected peer to the block handler.
 type newPeerMsg struct {
-	peer *serverPeer
+	peer *ServerPeer
 }
 
 // invMsg packages a bitcoin inv message and the peer it came from together
 // so the block handler has access to that information.
 type invMsg struct {
 	inv  *wire.MsgInv
-	peer *serverPeer
+	peer *ServerPeer
 }
 
 // headersMsg packages a bitcoin headers message and the peer it came from
 // together so the block handler has access to that information.
 type headersMsg struct {
 	headers *wire.MsgHeaders
-	peer    *serverPeer
+	peer    *ServerPeer
 }
 
 // cfheadersMsg packages a bitcoin cfheaders message and the peer it came from
 // together so the block handler has access to that information.
 type cfheadersMsg struct {
 	cfheaders *wire.MsgCFHeaders
-	peer      *serverPeer
+	peer      *ServerPeer
 }
 
 // cfheadersProcessedMsg tells the block manager to try to see if there are
@@ -87,14 +87,14 @@ type processCFHeadersMsg struct {
 
 // donePeerMsg signifies a newly disconnected peer to the block handler.
 type donePeerMsg struct {
-	peer *serverPeer
+	peer *ServerPeer
 }
 
 // txMsg packages a bitcoin tx message and the peer it came from together
 // so the block handler has access to that information.
 type txMsg struct {
 	tx   *btcutil.Tx
-	peer *serverPeer
+	peer *ServerPeer
 }
 
 // isCurrentMsg is a message type to be sent across the message channel for
@@ -119,7 +119,7 @@ type blockManager struct {
 	shutdown        int32
 	requestedBlocks map[chainhash.Hash]struct{}
 	progressLogger  *blockProgressLogger
-	syncPeer        *serverPeer
+	syncPeer        *ServerPeer
 	syncPeerMutex   sync.Mutex
 
 	// peerChan is a channel for messages that come from peers
@@ -137,10 +137,10 @@ type blockManager struct {
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
-	basicHeaders            map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	basicHeaders            map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer
 	lastBasicCFHeaderHeight int32
 	numBasicCFHeadersMsgs   int32
-	extendedHeaders         map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	extendedHeaders         map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer
 	lastExtCFHeaderHeight   int32
 	numExtCFHeadersMsgs     int32
 	mapMutex                sync.Mutex
@@ -170,10 +170,10 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
 		basicHeaders: make(
-			map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+			map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer,
 		),
 		extendedHeaders: make(
-			map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+			map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer,
 		),
 	}
 
@@ -216,7 +216,7 @@ func (b *blockManager) Stop() error {
 }
 
 // NewPeer informs the block manager of a newly active peer.
-func (b *blockManager) NewPeer(sp *serverPeer) {
+func (b *blockManager) NewPeer(sp *ServerPeer) {
 	// Ignore if we are shutting down.
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
@@ -228,7 +228,7 @@ func (b *blockManager) NewPeer(sp *serverPeer) {
 // considered as a sync peer (they have already successfully negotiated).  It
 // also starts syncing if needed.  It is invoked from the syncHandler
 // goroutine.
-func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *serverPeer) {
+func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	// Ignore if in the process of shutting down.
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
@@ -269,7 +269,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *serverPeer) {
 }
 
 // DonePeer informs the blockmanager that a peer has disconnected.
-func (b *blockManager) DonePeer(sp *serverPeer) {
+func (b *blockManager) DonePeer(sp *ServerPeer) {
 	// Ignore if we are shutting down.
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
@@ -282,7 +282,7 @@ func (b *blockManager) DonePeer(sp *serverPeer) {
 // removes the peer as a candidate for syncing and in the case where it was the
 // current sync peer, attempts to select a new best peer to sync from.  It is
 // invoked from the syncHandler goroutine.
-func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *serverPeer) {
+func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	// Remove the peer from the list of candidate peers.
 	for e := peers.Front(); e != nil; e = e.Next() {
 		if e.Value == sp {
@@ -370,7 +370,7 @@ out:
 }
 
 // SyncPeer returns the current sync peer.
-func (b *blockManager) SyncPeer() *serverPeer {
+func (b *blockManager) SyncPeer() *ServerPeer {
 	b.syncPeerMutex.Lock()
 	defer b.syncPeerMutex.Unlock()
 	return b.syncPeer
@@ -378,7 +378,7 @@ func (b *blockManager) SyncPeer() *serverPeer {
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
 // syncing from.
-func (b *blockManager) isSyncCandidate(sp *serverPeer) bool {
+func (b *blockManager) isSyncCandidate(sp *ServerPeer) bool {
 	// The peer is not a candidate for sync if it's not a full node.
 	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
 }
@@ -445,10 +445,10 @@ func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
 	b.startHeader = nil
 	b.mapMutex.Lock()
 	b.basicHeaders = make(
-		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+		map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer,
 	)
 	b.extendedHeaders = make(
-		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+		map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer,
 	)
 	b.mapMutex.Unlock()
 
@@ -459,10 +459,10 @@ func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
 	b.headerList.PushBack(&node)
 	b.mapMutex.Lock()
 	b.basicHeaders[newestHeader.BlockHash()] = make(
-		map[chainhash.Hash][]*serverPeer,
+		map[chainhash.Hash][]*ServerPeer,
 	)
 	b.extendedHeaders[newestHeader.BlockHash()] = make(
-		map[chainhash.Hash][]*serverPeer,
+		map[chainhash.Hash][]*ServerPeer,
 	)
 	b.mapMutex.Unlock()
 }
@@ -526,10 +526,10 @@ func (b *blockManager) startSync(peers *list.List) {
 		}
 		b.mapMutex.Lock()
 		b.basicHeaders[header.BlockHash()] = make(
-			map[chainhash.Hash][]*serverPeer,
+			map[chainhash.Hash][]*ServerPeer,
 		)
 		b.extendedHeaders[header.BlockHash()] = make(
-			map[chainhash.Hash][]*serverPeer,
+			map[chainhash.Hash][]*ServerPeer,
 		)
 		b.mapMutex.Unlock()
 		node := headerNode{header: header, height: height}
@@ -605,11 +605,11 @@ func (b *blockManager) startSync(peers *list.List) {
 		i = endHeight
 	}
 
-	var bestPeer *serverPeer
+	var bestPeer *ServerPeer
 	var enext *list.Element
 	for e := peers.Front(); e != nil; e = enext {
 		enext = e.Next()
-		sp := e.Value.(*serverPeer)
+		sp := e.Value.(*ServerPeer)
 
 		// Remove sync candidate peers that are no longer candidates
 		// due to passing their latest known block.
@@ -742,7 +742,7 @@ func (b *blockManager) IsCurrent() bool {
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.
-func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *serverPeer) {
+func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 	// No channel handling here because peers do not need to block on inv
 	// messages.
 	if atomic.LoadInt32(&b.shutdown) != 0 {
@@ -838,7 +838,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 
 // QueueHeaders adds the passed headers message and peer to the block handling
 // queue.
-func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *serverPeer) {
+func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 	// No channel handling here because peers do not need to block on
 	// headers messages.
 	if atomic.LoadInt32(&b.shutdown) != 0 {
@@ -921,10 +921,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			e := b.headerList.PushBack(&node)
 			b.mapMutex.Lock()
 			b.basicHeaders[node.header.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
+				map[chainhash.Hash][]*ServerPeer,
 			)
 			b.extendedHeaders[node.header.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
+				map[chainhash.Hash][]*ServerPeer,
 			)
 			b.mapMutex.Unlock()
 			if b.startHeader == nil {
@@ -1104,10 +1104,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			})
 			b.mapMutex.Lock()
 			b.basicHeaders[blockHeader.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
+				map[chainhash.Hash][]*ServerPeer,
 			)
 			b.extendedHeaders[blockHeader.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
+				map[chainhash.Hash][]*ServerPeer,
 			)
 			b.mapMutex.Unlock()
 			if b.lastBasicCFHeaderHeight > int32(backHeight) {
@@ -1207,7 +1207,7 @@ func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
 		extended: extended,
 		stopHash: *endBlock,
 	}
-	b.server.ForAllPeers(func(sp *serverPeer) {
+	b.server.ForAllPeers(func(sp *ServerPeer) {
 		// Should probably use better isolation for this but we're in
 		// the same package. One of the things to clean up when we do
 		// more general cleanup.
@@ -1221,7 +1221,7 @@ func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
 // QueueCFHeaders adds the passed headers message and peer to the block
 // handling queue.
 func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
-	sp *serverPeer) {
+	sp *ServerPeer) {
 
 	// No channel handling here because peers do not need to block on
 	// cfheaders messages.

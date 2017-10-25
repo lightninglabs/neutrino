@@ -18,7 +18,7 @@ type getConnCountMsg struct {
 }
 
 type getPeersMsg struct {
-	reply chan []*serverPeer
+	reply chan []*ServerPeer
 }
 
 type getOutboundGroup struct {
@@ -27,11 +27,11 @@ type getOutboundGroup struct {
 }
 
 type getAddedNodesMsg struct {
-	reply chan []*serverPeer
+	reply chan []*ServerPeer
 }
 
 type disconnectNodeMsg struct {
-	cmp   func(*serverPeer) bool
+	cmp   func(*ServerPeer) bool
 	reply chan error
 }
 
@@ -42,12 +42,12 @@ type connectNodeMsg struct {
 }
 
 type removeNodeMsg struct {
-	cmp   func(*serverPeer) bool
+	cmp   func(*ServerPeer) bool
 	reply chan error
 }
 
 type forAllPeersMsg struct {
-	closure func(*serverPeer)
+	closure func(*ServerPeer)
 }
 
 // TODO: General - abstract out more of blockmanager into queries. It'll make
@@ -60,7 +60,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case getConnCountMsg:
 		nconnected := int32(0)
-		state.forAllPeers(func(sp *serverPeer) {
+		state.forAllPeers(func(sp *ServerPeer) {
 			if sp.Connected() {
 				nconnected++
 			}
@@ -68,8 +68,8 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		msg.reply <- nconnected
 
 	case getPeersMsg:
-		peers := make([]*serverPeer, 0, state.Count())
-		state.forAllPeers(func(sp *serverPeer) {
+		peers := make([]*ServerPeer, 0, state.Count())
+		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
 				return
 			}
@@ -109,7 +109,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		msg.reply <- nil
 
 	case removeNodeMsg:
-		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *serverPeer) {
+		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *ServerPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
@@ -132,7 +132,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 	// Request a list of the persistent (added) peers.
 	case getAddedNodesMsg:
 		// Respond with a slice of the relavent peers.
-		peers := make([]*serverPeer, 0, len(state.persistentPeers))
+		peers := make([]*ServerPeer, 0, len(state.persistentPeers))
 		for _, sp := range state.persistentPeers {
 			peers = append(peers, sp)
 		}
@@ -140,7 +140,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case disconnectNodeMsg:
 		// Check outbound peers.
-		found := disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
+		found := disconnectPeer(state.outboundPeers, msg.cmp, func(sp *ServerPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
@@ -150,7 +150,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			// ip:port, continue disconnecting them all until no such
 			// peers are found.
 			for found {
-				found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
+				found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *ServerPeer) {
 					state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 				})
 			}
@@ -199,8 +199,8 @@ func (s *ChainService) OutboundGroupCount(key string) int {
 
 // AddedNodeInfo returns an array of btcjson.GetAddedNodeInfoResult structures
 // describing the persistent (added) nodes.
-func (s *ChainService) AddedNodeInfo() []*serverPeer {
-	replyChan := make(chan []*serverPeer)
+func (s *ChainService) AddedNodeInfo() []*ServerPeer {
+	replyChan := make(chan []*ServerPeer)
 
 	select {
 	case s.query <- getAddedNodesMsg{reply: replyChan}:
@@ -211,8 +211,8 @@ func (s *ChainService) AddedNodeInfo() []*serverPeer {
 }
 
 // Peers returns an array of all connected peers.
-func (s *ChainService) Peers() []*serverPeer {
-	replyChan := make(chan []*serverPeer)
+func (s *ChainService) Peers() []*ServerPeer {
+	replyChan := make(chan []*ServerPeer)
 
 	select {
 	case s.query <- getPeersMsg{reply: replyChan}:
@@ -230,7 +230,7 @@ func (s *ChainService) DisconnectNodeByAddr(addr string) error {
 
 	select {
 	case s.query <- disconnectNodeMsg{
-		cmp:   func(sp *serverPeer) bool { return sp.Addr() == addr },
+		cmp:   func(sp *ServerPeer) bool { return sp.Addr() == addr },
 		reply: replyChan,
 	}:
 		return <-replyChan
@@ -247,7 +247,7 @@ func (s *ChainService) DisconnectNodeByID(id int32) error {
 
 	select {
 	case s.query <- disconnectNodeMsg{
-		cmp:   func(sp *serverPeer) bool { return sp.ID() == id },
+		cmp:   func(sp *ServerPeer) bool { return sp.ID() == id },
 		reply: replyChan,
 	}:
 		return <-replyChan
@@ -263,7 +263,7 @@ func (s *ChainService) RemoveNodeByAddr(addr string) error {
 
 	select {
 	case s.query <- removeNodeMsg{
-		cmp:   func(sp *serverPeer) bool { return sp.Addr() == addr },
+		cmp:   func(sp *ServerPeer) bool { return sp.Addr() == addr },
 		reply: replyChan,
 	}:
 		return <-replyChan
@@ -279,7 +279,7 @@ func (s *ChainService) RemoveNodeByID(id int32) error {
 
 	select {
 	case s.query <- removeNodeMsg{
-		cmp:   func(sp *serverPeer) bool { return sp.ID() == id },
+		cmp:   func(sp *ServerPeer) bool { return sp.ID() == id },
 		reply: replyChan,
 	}:
 		return <-replyChan
@@ -310,7 +310,7 @@ func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 // the ChainService is connected. Nothing is returned because the peerState's
 // ForAllPeers method doesn't return anything as the closure passed to it
 // doesn't return anything.
-func (s *ChainService) ForAllPeers(closure func(sp *serverPeer)) {
+func (s *ChainService) ForAllPeers(closure func(sp *ServerPeer)) {
 	select {
 	case s.query <- forAllPeersMsg{closure: closure}:
 	case <-s.quit:

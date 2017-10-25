@@ -77,14 +77,14 @@ var (
 type updatePeerHeightsMsg struct {
 	newHash    *chainhash.Hash
 	newHeight  int32
-	originPeer *serverPeer
+	originPeer *ServerPeer
 }
 
 // peerState maintains state of inbound, persistent, outbound peers as well
 // as banned peers and outbound groups.
 type peerState struct {
-	outboundPeers   map[int32]*serverPeer
-	persistentPeers map[int32]*serverPeer
+	outboundPeers   map[int32]*ServerPeer
+	persistentPeers map[int32]*ServerPeer
 	banned          map[string]time.Time
 	outboundGroups  map[string]int
 }
@@ -96,7 +96,7 @@ func (ps *peerState) Count() int {
 
 // forAllOutboundPeers is a helper function that runs closure on all outbound
 // peers known to peerState.
-func (ps *peerState) forAllOutboundPeers(closure func(sp *serverPeer)) {
+func (ps *peerState) forAllOutboundPeers(closure func(sp *ServerPeer)) {
 	for _, e := range ps.outboundPeers {
 		closure(e)
 	}
@@ -107,7 +107,7 @@ func (ps *peerState) forAllOutboundPeers(closure func(sp *serverPeer)) {
 
 // forAllPeers is a helper function that runs closure on all peers known to
 // peerState.
-func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
+func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
@@ -120,9 +120,9 @@ type cfhRequest struct {
 	stopHash chainhash.Hash
 }
 
-// serverPeer extends the peer to maintain state shared by the server and the
+// ServerPeer extends the peer to maintain state shared by the server and the
 // blockmanager.
-type serverPeer struct {
+type ServerPeer struct {
 	// The following variables must only be used atomically
 	feeFilter int64
 
@@ -152,10 +152,10 @@ type serverPeer struct {
 	mtxReqCFH          sync.Mutex
 }
 
-// newServerPeer returns a new serverPeer instance. The peer needs to be set by
+// newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
-func newServerPeer(s *ChainService, isPersistent bool) *serverPeer {
-	return &serverPeer{
+func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
+	return &ServerPeer{
 		server:             s,
 		persistent:         isPersistent,
 		requestedCFHeaders: make(map[cfhRequest]int),
@@ -167,7 +167,7 @@ func newServerPeer(s *ChainService, isPersistent bool) *serverPeer {
 
 // newestBlock returns the current best block hash and height using the format
 // required by the configuration for the peer package.
-func (sp *serverPeer) newestBlock() (*chainhash.Hash, int32, error) {
+func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 	best, err := sp.server.BestSnapshot()
 	if err != nil {
 		return nil, 0, err
@@ -177,14 +177,14 @@ func (sp *serverPeer) newestBlock() (*chainhash.Hash, int32, error) {
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
 // the peer to prevent sending duplicate addresses.
-func (sp *serverPeer) addKnownAddresses(addresses []*wire.NetAddress) {
+func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
 	for _, na := range addresses {
 		sp.knownAddresses[addrmgr.NetAddressKey(na)] = struct{}{}
 	}
 }
 
 // addressKnown true if the given address is already known to the peer.
-func (sp *serverPeer) addressKnown(na *wire.NetAddress) bool {
+func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
 	_, exists := sp.knownAddresses[addrmgr.NetAddressKey(na)]
 	return exists
 }
@@ -194,7 +194,7 @@ func (sp *serverPeer) addressKnown(na *wire.NetAddress) bool {
 // threshold, a warning is logged including the reason provided. Further, if
 // the score is above the ban threshold, the peer will be banned and
 // disconnected.
-func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
+func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 	// No warning is logged and no score is calculated if banning is disabled.
 	warnThreshold := BanThreshold >> 1
 	if transient == 0 && persistent == 0 {
@@ -222,7 +222,7 @@ func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
 
 // pushGetCFHeadersMsg sends a getcfheaders message for the provided block
 // locator and stop hash to the connected peer.
-func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
+func (sp *ServerPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 	stopHash *chainhash.Hash, ext bool) error {
 
 	msg := wire.NewMsgGetCFHeaders()
@@ -240,7 +240,7 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 }
 
 // pushSendHeadersMsg sends a sendheaders message to the connected peer.
-func (sp *serverPeer) pushSendHeadersMsg() error {
+func (sp *ServerPeer) pushSendHeadersMsg() error {
 	if sp.VersionKnown() {
 		if sp.ProtocolVersion() > wire.SendHeadersVersion {
 			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
@@ -252,14 +252,14 @@ func (sp *serverPeer) pushSendHeadersMsg() error {
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
 // to send the "sendheaders" command to peers that are of a sufficienty new
 // protocol version.
-func (sp *serverPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
+func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
 	sp.pushSendHeadersMsg()
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
 // and is used to negotiate the protocol version details as well as kick start
 // the communications.
-func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
+func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	// Add the remote peer time as a sample for creating an offset against
 	// the local clock to keep the network time in sync.
 	sp.server.timeSource.AddTimeSample(sp.Addr(), msg.Timestamp)
@@ -308,7 +308,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 // used to examine the inventory being advertised by the remote peer and react
 // accordingly.  We pass the message down to blockmanager which will call
 // QueueMessage with any appropriate responses.
-func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
+func (sp *ServerPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 	log.Tracef("Got inv with %d items from %s", len(msg.InvList), p.Addr())
 	newInv := wire.NewMsgInvSizeHint(uint(len(msg.InvList)))
 	for _, invVect := range msg.InvList {
@@ -337,15 +337,15 @@ func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 
 // OnHeaders is invoked when a peer receives a headers bitcoin
 // message.  The message is passed down to the block manager.
-func (sp *serverPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
+func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 	log.Tracef("Got headers with %d items from %s", len(msg.Headers),
 		p.Addr())
 	sp.server.blockManager.QueueHeaders(msg, sp)
 }
 
-// handleGetData is invoked when a peer receives a getdata bitcoin message and
+// OnGetData is invoked when a peer receives a getdata bitcoin message and
 // is used to deliver block and transaction information.
-func (sp *serverPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
+func (sp *ServerPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
 	numAdded := 0
 	notFound := wire.NewMsgNotFound()
 
@@ -418,7 +418,7 @@ func (sp *serverPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
 // is used by remote peers to request that no transactions which have a fee rate
 // lower than provided value are inventoried to them.  The peer will be
 // disconnected if an invalid fee filter value is provided.
-func (sp *serverPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
+func (sp *ServerPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 	// Check that the passed minimum fee is a valid amount.
 	if msg.MinFee < 0 || msg.MinFee > btcutil.MaxSatoshi {
 		log.Debugf("Peer %v sent an invalid feefilter '%v' -- "+
@@ -432,13 +432,13 @@ func (sp *serverPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 
 // OnReject is invoked when a peer receives a reject bitcoin message and is
 // used to notify the server about a rejected transaction.
-func (sp *serverPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
+func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 	// TODO(roaseef): log?
 }
 
 // OnCFHeaders is invoked when a peer receives a cfheaders bitcoin message and
 // is used to notify the server about a list of committed filter headers.
-func (sp *serverPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
+func (sp *ServerPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
 	log.Tracef("Got cfheaders message with %d items from %s",
 		len(msg.HeaderHashes), p.Addr())
 	sp.server.blockManager.QueueCFHeaders(msg, sp)
@@ -446,7 +446,7 @@ func (sp *serverPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
 
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
 // used to notify the server about advertised addresses.
-func (sp *serverPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
+func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 	// Ignore addresses when running on the simulation test network.  This
 	// helps prevent the network from becoming another public test network
 	// since it will not be able to learn about other peers that have not
@@ -496,7 +496,7 @@ func (sp *serverPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 
 // OnRead is invoked when a peer receives a message and it is used to update
 // the bytes received by the server.
-func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
+func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	err error) {
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
@@ -522,7 +522,7 @@ func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 }
 
 // subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
-func (sp *serverPeer) subscribeRecvMsg(subscription spMsgSubscription) {
+func (sp *ServerPeer) subscribeRecvMsg(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	sp.recvSubscribers[subscription] = struct{}{}
@@ -530,7 +530,7 @@ func (sp *serverPeer) subscribeRecvMsg(subscription spMsgSubscription) {
 
 // unsubscribeRecvMsgs handles removing OnRead subscriptions from the server
 // peer.
-func (sp *serverPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
+func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	delete(sp.recvSubscribers, subscription)
@@ -538,7 +538,7 @@ func (sp *serverPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 
 // OnWrite is invoked when a peer sends a message and it is used to update
 // the bytes sent by the server.
-func (sp *serverPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, err error) {
+func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, err error) {
 	sp.server.AddBytesSent(uint64(bytesWritten))
 }
 
@@ -570,9 +570,9 @@ type ChainService struct {
 	addrManager       *addrmgr.AddrManager
 	connManager       *connmgr.ConnManager
 	blockManager      *blockManager
-	newPeers          chan *serverPeer
-	donePeers         chan *serverPeer
-	banPeers          chan *serverPeer
+	newPeers          chan *ServerPeer
+	donePeers         chan *ServerPeer
+	banPeers          chan *ServerPeer
 	query             chan interface{}
 	peerHeightsUpdate chan updatePeerHeightsMsg
 	wg                sync.WaitGroup
@@ -606,9 +606,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s := ChainService{
 		chainParams:         cfg.ChainParams,
 		addrManager:         amgr,
-		newPeers:            make(chan *serverPeer, MaxPeers),
-		donePeers:           make(chan *serverPeer, MaxPeers),
-		banPeers:            make(chan *serverPeer, MaxPeers),
+		newPeers:            make(chan *ServerPeer, MaxPeers),
+		donePeers:           make(chan *ServerPeer, MaxPeers),
+		banPeers:            make(chan *ServerPeer, MaxPeers),
 		query:               make(chan interface{}),
 		quit:                make(chan struct{}),
 		peerHeightsUpdate:   make(chan updatePeerHeightsMsg),
@@ -750,12 +750,12 @@ func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 }
 
 // BanPeer bans a peer that has already been connected to the server by ip.
-func (s *ChainService) BanPeer(sp *serverPeer) {
+func (s *ChainService) BanPeer(sp *ServerPeer) {
 	s.banPeers <- sp
 }
 
 // AddPeer adds a new peer that has already been connected to the server.
-func (s *ChainService) AddPeer(sp *serverPeer) {
+func (s *ChainService) AddPeer(sp *ServerPeer) {
 	s.newPeers <- sp
 }
 
@@ -780,7 +780,7 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 
 // pushTxMsg sends a tx message for the provided transaction hash to the
 // connected peer.  An error is returned if the transaction hash is not known.
-func (s *ChainService) pushTxMsg(sp *serverPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
+func (s *ChainService) pushTxMsg(sp *ServerPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
 	// Attempt to fetch the requested transaction from the pool.  A
 	// call could be made to check for existence first, but simply trying
 	// to fetch a missing transaction results in the same behavior.
@@ -886,8 +886,8 @@ func (s *ChainService) peerHandler() {
 	s.blockManager.Start()
 
 	state := &peerState{
-		persistentPeers: make(map[int32]*serverPeer),
-		outboundPeers:   make(map[int32]*serverPeer),
+		persistentPeers: make(map[int32]*ServerPeer),
+		outboundPeers:   make(map[int32]*ServerPeer),
 		banned:          make(map[string]time.Time),
 		outboundGroups:  make(map[string]int),
 	}
@@ -930,7 +930,7 @@ out:
 
 		case <-s.quit:
 			// Disconnect all peers on server shutdown.
-			state.forAllPeers(func(sp *serverPeer) {
+			state.forAllPeers(func(sp *ServerPeer) {
 				log.Tracef("Shutdown peer %s", sp)
 				sp.Disconnect()
 			})
@@ -999,7 +999,7 @@ func (s *ChainService) addrStringToNetAddr(addr string) (net.Addr, error) {
 // handleUpdatePeerHeight updates the heights of all peers who were known to
 // announce a block we recently accepted.
 func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeerHeightsMsg) {
-	state.forAllPeers(func(sp *serverPeer) {
+	state.forAllPeers(func(sp *ServerPeer) {
 		// The origin peer should already have the updated height.
 		if sp == umsg.originPeer {
 			return
@@ -1026,7 +1026,7 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
-func (s *ChainService) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
+func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	if sp == nil {
 		return false
 	}
@@ -1083,8 +1083,8 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
 // invoked from the peerHandler goroutine.
-func (s *ChainService) handleDonePeerMsg(state *peerState, sp *serverPeer) {
-	var list map[int32]*serverPeer
+func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
+	var list map[int32]*ServerPeer
 	if sp.persistent {
 		list = state.persistentPeers
 	} else {
@@ -1118,7 +1118,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 
 // handleBanPeerMsg deals with banning peers.  It is invoked from the
 // peerHandler goroutine.
-func (s *ChainService) handleBanPeerMsg(state *peerState, sp *serverPeer) {
+func (s *ChainService) handleBanPeerMsg(state *peerState, sp *ServerPeer) {
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err != nil {
 		log.Debugf("can't split ban peer %s: %s", sp.Addr(), err)
@@ -1135,7 +1135,7 @@ func (s *ChainService) handleBanPeerMsg(state *peerState, sp *serverPeer) {
 // to be located. If the peer is found, and the passed callback: `whenFound'
 // isn't nil, we call it with the peer as the argument before it is removed
 // from the peerList, and is disconnected from the server.
-func disconnectPeer(peerList map[int32]*serverPeer, compareFunc func(*serverPeer) bool, whenFound func(*serverPeer)) bool {
+func disconnectPeer(peerList map[int32]*ServerPeer, compareFunc func(*ServerPeer) bool, whenFound func(*ServerPeer)) bool {
 	for addr, peer := range peerList {
 		if compareFunc(peer) {
 			if whenFound != nil {
@@ -1162,8 +1162,8 @@ func (s *ChainService) PublishTransaction(tx *wire.MsgTx) error {
 	return nil
 }
 
-// newPeerConfig returns the configuration for the given serverPeer.
-func newPeerConfig(sp *serverPeer) *peer.Config {
+// newPeerConfig returns the configuration for the given ServerPeer.
+func newPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
 			OnVersion: sp.OnVersion,
@@ -1216,7 +1216,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's
 // done along with other performing other desirable cleanup.
-func (s *ChainService) peerDoneHandler(sp *serverPeer) {
+func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 	sp.WaitForDisconnect()
 	s.donePeers <- sp
 
@@ -1231,7 +1231,7 @@ func (s *ChainService) peerDoneHandler(sp *serverPeer) {
 // the latest connected main chain block, or a recognized orphan. These height
 // updates allow us to dynamically refresh peer heights, ensuring sync peer
 // selection has access to the latest block heights for each peer.
-func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash, latestHeight int32, updateSource *serverPeer) {
+func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash, latestHeight int32, updateSource *ServerPeer) {
 	s.peerHeightsUpdate <- updatePeerHeightsMsg{
 		newHash:    latestBlkHash,
 		newHeight:  latestHeight,
