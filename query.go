@@ -87,7 +87,7 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 }
 
 type spMsg struct {
-	sp  *serverPeer
+	sp  *ServerPeer
 	msg wire.Message
 }
 
@@ -108,7 +108,7 @@ func (s *ChainService) queryPeers(
 	// The quit channel lets the query know to terminate because the
 	// required response has been found. This is done by closing the
 	// channel.
-	checkResponse func(sp *serverPeer, resp wire.Message,
+	checkResponse func(sp *ServerPeer, resp wire.Message,
 		quit chan<- struct{}),
 
 	// options takes functional options for executing the query.
@@ -156,7 +156,7 @@ func (s *ChainService) queryPeers(
 	// Start a goroutine for each peer that potentially queries that peer.
 	for _, sp := range peers {
 		wg.Add(1)
-		go func(sp *serverPeer) {
+		go func(sp *ServerPeer) {
 			defer wg.Done()
 			defer sp.unsubscribeRecvMsgs(subscription)
 
@@ -391,7 +391,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash, extended bool,
 
 		// Check responses and if we get one that matches, end the
 		// query early.
-		func(sp *serverPeer, resp wire.Message, quit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
 			switch response := resp.(type) {
 			// We're only interested in "cfilter" messages.
 			case *wire.MsgCFilter:
@@ -491,7 +491,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 
 		// Check responses and if we get one that matches, end the
 		// query early.
-		func(sp *serverPeer, resp wire.Message,
+		func(sp *ServerPeer, resp wire.Message,
 			quit chan<- struct{}) {
 			switch response := resp.(type) {
 			// We're only interested in "block" messages.
@@ -567,7 +567,7 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	var err error
 	s.queryPeers(
 		tx,
-		func(sp *serverPeer, resp wire.Message, quit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
 			switch response := resp.(type) {
 			case *wire.MsgReject:
 				if response.Hash == tx.TxHash() &&
