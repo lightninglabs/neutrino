@@ -1,4 +1,4 @@
-hash: 14a7a74803d51ffecbec835624dc3cac580be48459a7ffdcbd86d5ba6cdcdf12
+hash: 12e860adb2b745415e699c062d0c4f4543b561fea972952bb4c6947c1ab313c0
 updated: 2017-10-16T20:11:54.555266702-07:00
 imports:
 - name: github.com/aead/siphash
@@ -38,7 +38,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/roasbeef/btcd
-  version: a64d018fd91151b842522d64771610712565d30a
+  version: 2e750e3efa3295394491dd922d9953375050cfed
   subpackages:
   - addrmgr
   - blockchain
