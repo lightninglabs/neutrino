@@ -1381,7 +1381,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		"block %s: %d of %d", msg.earliestNode.header.BlockHash(),
 		numHeaders, connCount)
 	if numHeaders < connCount {
-		log.Infof("waiting for more")
+		log.Debugf("waiting to see if more peers will respond with " +
+			"cfheaders")
 		time.Sleep(WaitForMoreCFHeaders)
 	}
 
