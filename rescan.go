@@ -442,12 +442,6 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
 	scanning bool) error {
 
-	// First, if we're sending out BlockConnected notifications, do that.
-	if ro.ntfn.OnBlockConnected != nil {
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
-			curStamp.Height, curHeader.Timestamp)
-	}
-
 	// Find relevant transactions based on watch list. If scanning is false,
 	// we can safely assume this block has no relevant transactions.
 	var relevantTxs []*btcutil.Tx
@@ -516,6 +510,11 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	if ro.ntfn.OnFilteredBlockConnected != nil {
 		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
 			relevantTxs)
+	}
+
+	if ro.ntfn.OnBlockConnected != nil {
+		ro.ntfn.OnBlockConnected(&curStamp.Hash,
+			curStamp.Height, curHeader.Timestamp)
 	}
 
 	return nil
