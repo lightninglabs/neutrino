@@ -63,25 +63,31 @@ var (
 	// "fd":	OnFilteredBlockDisconnected
 	wantLog = func() (log []byte) {
 		for i := 796; i <= 800; i++ {
-			// BlockConnected and FilteredBlockConnected
-			log = append(log, []byte("bcfc")...)
+			// FilteredBlockConnected
+			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
+			// BlockConnected
+			log = append(log, []byte("bc")...)
 		}
 		// Block with one relevant (receive) transaction
-		log = append(log, []byte("bcrvfc")...)
+		log = append(log, []byte("rvfc")...)
 		log = append(log, 0x01)
+		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
 		for i := 802; i <= 925; i++ {
-			log = append(log, []byte("bcfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
+			log = append(log, []byte("bc")...)
 		}
 		// Block with 1 redeeming transaction
-		log = append(log, []byte("bcrdfc")...)
+		log = append(log, []byte("rdfc")...)
 		log = append(log, 0x01)
+		log = append(log, []byte("bc")...)
 		// Block with nothing
-		log = append(log, []byte("bcfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
+		log = append(log, []byte("bc")...)
 		// Update with rewind - rewind back to 795, add another address,
 		// and see more interesting transactions.
 		for i := 927; i >= 796; i-- {
@@ -90,35 +96,42 @@ var (
 		}
 		// Forward to 800
 		for i := 796; i <= 800; i++ {
-			// BlockConnected and FilteredBlockConnected
-			log = append(log, []byte("bcfc")...)
+			// FilteredBlockConnected
+			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
+			// BlockConnected
+			log = append(log, []byte("bc")...)
 		}
 		// Block with two relevant (receive) transactions
-		log = append(log, []byte("bcrvrvfc")...)
+		log = append(log, []byte("rvrvfc")...)
 		log = append(log, 0x02)
+		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
 		for i := 802; i <= 925; i++ {
-			log = append(log, []byte("bcfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
+			log = append(log, []byte("bc")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 926; i <= 927; i++ {
-			log = append(log, []byte("bcrdfc")...)
+			log = append(log, []byte("rdfc")...)
 			log = append(log, 0x01)
+			log = append(log, []byte("bc")...)
 		}
 		// Block with nothing
-		log = append(log, []byte("bcfc")...)
+		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
+		log = append(log, []byte("bc")...)
 		// 3 block rollback
 		for i := 928; i >= 926; i-- {
 			log = append(log, []byte("fdbd")...)
 		}
 		// 5 block empty reorg
 		for i := 926; i <= 930; i++ {
-			log = append(log, []byte("bcfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
+			log = append(log, []byte("bc")...)
 		}
 		// 5 block rollback
 		for i := 930; i >= 926; i-- {
@@ -126,13 +139,15 @@ var (
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 926; i <= 927; i++ {
-			log = append(log, []byte("bcrdfc")...)
+			log = append(log, []byte("rdfc")...)
 			log = append(log, 0x01)
+			log = append(log, []byte("bc")...)
 		}
 		// 8 block rest of reorg
 		for i := 928; i <= 935; i++ {
-			log = append(log, []byte("bcfc")...)
+			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
+			log = append(log, []byte("bc")...)
 		}
 		return log
 	}()
@@ -799,9 +814,9 @@ func TestSetup(t *testing.T) {
 				break
 			}
 		}
-		t.Fatalf("Rescan event logs differ starting at %d.\nWant: %s\n"+
-			"Got:  %s\nDifference - want: %s\nDifference -- got: "+
-			"%s", diffIndex, wantLog, gotLog, wantLog[diffIndex:],
+		t.Fatalf("Rescan event logs differ starting at %d.\nWant: %v\n"+
+			"Got:  %v\nDifference - want: %v\nDifference -- got: "+
+			"%v", diffIndex, wantLog, gotLog, wantLog[diffIndex:],
 			gotLog[diffIndex:])
 	}
 
