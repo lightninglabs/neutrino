@@ -3,7 +3,7 @@ import:
 - package: github.com/boltdb/bolt
   version: ^1.3.0
 - package: github.com/roasbeef/btcd
-  version: 300370be8e0a44dedc4eea6319c56c1df7014325
+  version: 9978b939c33973be19b932fa7b936079bb7ba38d
   subpackages:
   - blockchain
   - btcec
