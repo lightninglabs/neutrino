@@ -223,7 +223,7 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 		var tipKey []byte
 
 		// Based on the specified index type of this instance of the
-		// index, we'll grab the particualr key that tracks the chain
+		// index, we'll grab the particular key that tracks the chain
 		// tip.
 		switch h.indexType {
 		case Block:
