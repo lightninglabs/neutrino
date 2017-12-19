@@ -27,7 +27,7 @@ var headerBufPool = sync.Pool{
 }
 
 // headerStore combines a on-disk set of headers within a flat file in addition
-// to a databse which indexes tghat flat file. Together, these two abstractions
+// to a database which indexes that flat file. Together, these two abstractions
 // can be used in order to build an indexed header store for any type of
 // "header" as it deals only with raw bytes, and leaves it to a higher layer to
 // interpret those raw bytes accordingly.
@@ -209,7 +209,7 @@ func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader
 	return h.readHeader(int64(height))
 }
 
-// HeightFromHash returns the height of a particualr block header given its
+// HeightFromHash returns the height of a particular block header given its
 // hash.
 func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) {
 	return h.heightFromHash(hash)
@@ -717,7 +717,7 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 // _single_ filter header. This method is meant to be used in the case of
 // re-org which disconnects the latest filter header from the end of the main
 // chain. The information about the latest header tip after truncation is
-// returnd.
+// returned.
 func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error) {
 	// Lock store for write.
 	f.mtx.Lock()
