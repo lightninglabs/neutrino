@@ -694,7 +694,7 @@ txOutLoop:
 }
 
 // Rescan is an object that represents a long-running rescan/notification
-// client with updateable filters. It's meant to be close to a drop-in
+// client with updatable filters. It's meant to be close to a drop-in
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
@@ -712,8 +712,8 @@ type Rescan struct {
 }
 
 // NewRescan returns a rescan object that runs in another goroutine and has an
-// updateable filter. It returns the long-running rescan object, and a channel
-// which returns any error on termination of the rescan prcess.
+// updatable filter. It returns the long-running rescan object, and a channel
+// which returns any error on termination of the rescan process.
 func (s *ChainService) NewRescan(options ...RescanOption) Rescan {
 	return Rescan{
 		running:    1,
