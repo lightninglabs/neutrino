@@ -415,7 +415,7 @@ func (b *blockManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoi
 // findPreviousHeaderCheckpoint returns the last checkpoint before the passed
 // height. It returns a checkpoint matching the genesis block when the height
 // is earlier than the first checkpoint or there are no checkpoints for the
-// current network. This is used for resettng state when a malicious peer sends
+// current network. This is used for resetting state when a malicious peer sends
 // us headers that don't lead up to a known checkpoint.
 func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Checkpoint {
 	// Start with the genesis block - earliest checkpoint to which our
