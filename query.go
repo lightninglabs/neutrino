@@ -16,6 +16,7 @@ import (
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
+	"github.com/lightninglabs/neutrino/blockcache"
 )
 
 var (
@@ -477,6 +478,17 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 			"from database", blockHash)
 	}
 
+	// First check if the block has been cached.
+	cachedBlock, err := s.blockCache.FetchBlock(&blockHash)
+	if err != nil && err != blockcache.ErrBlockNotFound {
+		return nil, err
+	}
+	if cachedBlock != nil {
+		block := btcutil.NewBlock(cachedBlock)
+		block.SetHeight(int32(height))
+		return block, nil
+	}
+
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
 	getData.AddInvVect(wire.NewInvVect(wire.InvTypeWitnessBlock,
@@ -555,6 +567,9 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
 			"network", blockHash)
 	}
+
+	// Cache the block for subsequent calls.
+	s.blockCache.PutBlock(foundBlock.MsgBlock())
 
 	return foundBlock, nil
 }

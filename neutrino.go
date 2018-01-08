@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/blockcache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/roasbeef/btcd/addrmgr"
@@ -581,6 +582,7 @@ type ChainService struct {
 	services          wire.ServiceFlag
 	blockSubscribers  map[*blockSubscription]struct{}
 	mtxSubscribers    sync.RWMutex
+	blockCache        blockcache.BlockCache
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -731,6 +733,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			Addr:      tcpAddr,
 			Permanent: true,
 		})
+	}
+
+	s.blockCache, err = blockcache.New(cfg.DataDir, blockcache.DefaultCapacity, s.BlockHeaders)
+	if err != nil {
+		return nil, err
 	}
 
 	return &s, nil
