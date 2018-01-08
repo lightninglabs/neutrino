@@ -2,6 +2,7 @@ package blockcache
 
 import (
 	"fmt"
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcwallet/walletdb"
@@ -40,6 +41,9 @@ type BlockCache interface {
 type MostRecentBlockCache struct {
 	db walletdb.DB
 
+	// A BlockHeaderStore allows translation between block heights and hashes.
+	blockHeaders *headerfs.BlockHeaderStore
+
 	// The maximum number of blocks to store in the cache.
 	capacity int
 }
@@ -50,7 +54,7 @@ var _ BlockCache = (*MostRecentBlockCache)(nil)
 
 // New creates a new instance of a MostRecentBlockCache given an already open
 // database.
-func New(db walletdb.DB, capacity int) (*MostRecentBlockCache, error) {
+func New(db walletdb.DB, capacity int, blockHeaders *headerfs.BlockHeaderStore) (*MostRecentBlockCache, error) {
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		// Create the cache bucket, if it doesn't already exist.
 		_, err := tx.CreateTopLevelBucket(blockCacheBucket)
@@ -61,8 +65,9 @@ func New(db walletdb.DB, capacity int) (*MostRecentBlockCache, error) {
 	}
 
 	return &MostRecentBlockCache{
-		db:       db,
-		capacity: capacity,
+		db:           db,
+		capacity:     capacity,
+		blockHeaders: blockHeaders,
 	}, nil
 }
 

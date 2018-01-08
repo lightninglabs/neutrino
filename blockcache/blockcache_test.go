@@ -8,40 +8,46 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
 	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
 	"time"
 )
 
-func createTestDatabase(capacity int) (func(), BlockCache, error) {
+func createTestDatabase(capacity int) (func(), BlockCache,
+	*headerfs.BlockHeaderStore, error) {
 	tempDir, err := ioutil.TempDir("", "neutrino")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	db, err := walletdb.Create("bdb", tempDir+"/test.db")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+
+	headers, err := headerfs.NewBlockHeaderStore(tempDir, db,
+		&chaincfg.MainNetParams)
 
 	cleanUp := func() {
 		os.RemoveAll(tempDir)
 		db.Close()
 	}
 
-	blockDB, err := New(db, capacity)
+	blockDB, err := New(db, capacity, headers)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return cleanUp, blockDB, nil
+	return cleanUp, blockDB, headers, nil
 }
 
 // Test that any block that's persisted is retrieved intact and exactly the
 // same.
 func TestRetrievesSameBlockData(t *testing.T) {
-	cleanUp, database, err := createTestDatabase()
+	cleanUp, database, headers, err := createTestDatabase(DefaultCapacity)
 	defer cleanUp()
 	if err != nil {
 		t.Fatalf("unable to create test db: %v", err)
@@ -49,6 +55,12 @@ func TestRetrievesSameBlockData(t *testing.T) {
 
 	block := &Block100000
 	hash := Block100000.BlockHash()
+
+	// Ensure we can look up the height from the hash.
+	headers.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &block.Header,
+		Height:      100000,
+	})
 
 	err = database.PutBlock(block)
 	if err != nil {
@@ -69,11 +81,17 @@ func TestRetrievesSameBlockData(t *testing.T) {
 // Test that if the block does not exist in the cache then an
 // ErrBlockNotFound is returned.
 func TestNotFoundIfBlockDoesntExist(t *testing.T) {
-	cleanUp, database, err := createTestDatabase()
+	cleanUp, database, headers, err := createTestDatabase(DefaultCapacity)
 	defer cleanUp()
 	if err != nil {
 		t.Fatalf("unable to create test db: %v", err)
 	}
+
+	// Ensure we can look up the height from the hash.
+	headers.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &Block100000.Header,
+		Height:      100000,
+	})
 
 	hash := Block100000.BlockHash()
 
@@ -85,25 +103,60 @@ func TestNotFoundIfBlockDoesntExist(t *testing.T) {
 
 // Test that once the cache is at capacity then the oldest block is evicted.
 func TestEviction(t *testing.T) {
-	cleanUp, database, err := createTestDatabase()
+	// Set the cache to have a capacity of a single element.
+	cleanUp, database, headers, err := createTestDatabase(1)
 	defer cleanUp()
 	if err != nil {
 		t.Fatalf("unable to create test db: %v", err)
 	}
 
-	hash := Block100000.BlockHash()
+	// Construct a fake block with a greater height than the first block.
+	root, _ := chainhash.NewHashFromStr(
+		"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+	block2 := wire.MsgBlock{
+		Header: wire.BlockHeader{
+			Version:    1,
+			PrevBlock:  Block100000.BlockHash(),
+			MerkleRoot: *root,
+			Bits:       0x1b04864c,
+			Timestamp:  time.Unix(1293623863, 0),
+			Nonce:      0,
+		},
+		Transactions: nil,
+	}
+
+	// Ensure we can look up the height from the hash.
+	headers.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &Block100000.Header,
+		Height:      100000,
+	}, headerfs.BlockHeader{
+		BlockHeader: &block2.Header,
+		Height:      100001,
+	})
+
+	// Persist the first block.
 	err = database.PutBlock(&Block100000)
 	if err != nil {
 		t.Fatalf("unable to store block: %v", err)
 	}
 
-	// Ensure that the block we just persisted can be fetched,
-	// and that it's content is exactly the same.
-	retrievedBlock, err := database.FetchBlock(&hash)
+	// Expect that this insertion causes the eviction of the first block.
+	err = database.PutBlock(&block2)
 	if err != nil {
-		t.Fatalf("unable to retrieve block: %v", err)
+		t.Fatalf("unable to store block: %v", err)
 	}
 
+	hash := Block100000.BlockHash()
+	_, err = database.FetchBlock(&hash)
+	if err == nil {
+		t.Fatalf("older block not evicted: %v", err)
+	}
+
+	block2Hash := block2.BlockHash()
+	_, err = database.FetchBlock(&block2Hash)
+	if err != nil {
+		t.Fatalf("could not retrieve newer block: %v", err)
+	}
 }
 
 // Copied from github.com/btcsuite/btcd/blockchain/validate_test.go.
