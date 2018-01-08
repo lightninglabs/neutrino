@@ -22,7 +22,7 @@ var (
 
 	// defaultCapacity is the default maximum capacity of the
 	// MostRecentBlockCache, in blocks.
-	DefaultCapacity = 500
+	DefaultCapacity = 1000
 )
 
 const (
