@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/blockcache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/roasbeef/btcd/blockchain"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
@@ -16,7 +17,6 @@ import (
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
-	"github.com/lightninglabs/neutrino/blockcache"
 )
 
 var (

@@ -21,7 +21,7 @@ var (
 	// persist the blocks.
 	blockCacheBucket = []byte("block-cache")
 
-	// defaultCapacity is the default maximum capacity of the
+	// DefaultCapacity is the default maximum capacity of the
 	// MostRecentBlockCache, in blocks.
 	DefaultCapacity = 1000
 )
