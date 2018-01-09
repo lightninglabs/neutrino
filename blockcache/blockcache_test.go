@@ -35,7 +35,7 @@ func createTestBlocks() (wire.MsgBlock, wire.MsgBlock) {
 				Bits:       0x1b04864c,
 				Nonce:      0x10572b0f,
 			},
-			Transactions: nil,
+			Transactions: []*wire.MsgTx{},
 		}, wire.MsgBlock{
 			Header: wire.BlockHeader{
 				Version:    1,
@@ -45,7 +45,7 @@ func createTestBlocks() (wire.MsgBlock, wire.MsgBlock) {
 				Bits:       0x1b04864c,
 				Nonce:      0x9bcc8940,
 			},
-			Transactions: nil,
+			Transactions: []*wire.MsgTx{},
 		}
 }
 
