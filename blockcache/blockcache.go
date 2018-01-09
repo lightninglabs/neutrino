@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 )
 
 var (
@@ -55,6 +56,10 @@ type MostRecentBlockCache struct {
 
 	// The maximum number of blocks to store in the cache.
 	capacity int
+
+	// The number of cache hits and misses. Must be accessed atomically.
+	hits   uint64
+	misses uint64
 }
 
 // A compile-time check to ensure the MostRecentBlockCache adheres to the
@@ -109,6 +114,9 @@ func New(dbPath string, capacity int, blockHeaders *headerfs.BlockHeaderStore) (
 	}, nil
 }
 
+// PutBlock attempts to insert the block into the cache. If the cache is at
+// capacity it will first attempt to evict the oldest block, if the given block
+// is older than all blocks currently in the cache, then no action happens.
 func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	// The key for this block is its height in the blockchain.
 	// This allows us to evict the oldest entry easily.
@@ -158,6 +166,15 @@ func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	return nil
 }
 
+// PrintStats prints the cache hit rate to standard output.
+func (c *MostRecentBlockCache) PrintStats() {
+	hits := float64(atomic.LoadUint64(&c.hits))
+	misses := float64(atomic.LoadUint64(&c.misses))
+	fmt.Printf("hits: %.0f, total: %.0f (%.01f)\n", hits, hits+misses, hits/(hits+misses))
+}
+
+// FetchBlock queries the cache for a block matching the given hash, returning
+// the block or ErrBlockNotFound if it couldn't be retrieved.
 func (c *MostRecentBlockCache) FetchBlock(hash *chainhash.Hash) (*wire.MsgBlock,
 	error) {
 	// Look up the height from the hash, then query by height and double
@@ -190,8 +207,10 @@ func (c *MostRecentBlockCache) FetchBlock(hash *chainhash.Hash) (*wire.MsgBlock,
 	// If we didn't find the block in the cache, or if we found a different
 	// block at that height, then return not found.
 	if block.BlockHash() != *hash {
+		atomic.AddUint64(&c.misses, 1)
 		return nil, ErrBlockNotFound
 	}
 
+	atomic.AddUint64(&c.hits, 1)
 	return &block, nil
 }
