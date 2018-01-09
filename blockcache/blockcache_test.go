@@ -64,14 +64,15 @@ func createTestDatabase(capacity int) (func(), BlockCache,
 	headers, err := headerfs.NewBlockHeaderStore(tempDir, db,
 		&chaincfg.MainNetParams)
 
-	cleanUp := func() {
-		os.RemoveAll(tempDir)
-		db.Close()
-	}
-
 	blockDB, err := New(tempDir, capacity, headers)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+
+	cleanUp := func() {
+		db.Close()
+		blockDB.Close()
+		os.RemoveAll(tempDir)
 	}
 
 	return cleanUp, blockDB, headers, nil
