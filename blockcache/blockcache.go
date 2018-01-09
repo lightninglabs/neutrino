@@ -42,6 +42,9 @@ type BlockCache interface {
 	// backing store. If the backing store does not contain the block then
 	// an ErrBlockNotFound error is returned.
 	FetchBlock(*chainhash.Hash) (*wire.MsgBlock, error)
+
+	// Close releases any resources currently in use by the cache.
+	Close()
 }
 
 // MostRecentBlockCache is an implementation of the BlockCache interface
@@ -112,6 +115,11 @@ func New(dbPath string, capacity int, blockHeaders *headerfs.BlockHeaderStore) (
 		capacity:     capacity,
 		blockHeaders: blockHeaders,
 	}, nil
+}
+
+// Close instructs the underlying database to stop cleanly.
+func (c *MostRecentBlockCache) Close() {
+	c.db.Close()
 }
 
 // PutBlock attempts to insert the block into the cache. If the cache is at

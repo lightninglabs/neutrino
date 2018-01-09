@@ -1267,6 +1267,8 @@ func (s *ChainService) Start() {
 // Stop gracefully shuts down the server by stopping and disconnecting all
 // peers and the main listener.
 func (s *ChainService) Stop() error {
+	log.Debug("Neutrino shutting down")
+
 	// Make sure this only happens once.
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
@@ -1275,6 +1277,9 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	s.blockCache.Close()
+
 	return nil
 }
 
