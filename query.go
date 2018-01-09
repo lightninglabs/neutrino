@@ -470,7 +470,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
 
 	// Fetch the corresponding block header from the database. If this
-	// isn't found, then we don't have the header for this block s we can't
+	// isn't found, then we don't have the header for this block so we can't
 	// request it.
 	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
