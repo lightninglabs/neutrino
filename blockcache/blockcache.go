@@ -33,7 +33,6 @@ const (
 
 // BlockCache is an interface which represents an object that is capable of
 // storing and retrieving blocks according to their corresponding block hash.
-//
 type BlockCache interface {
 	// PutBlock stores a block to persistent storage.
 	PutBlock(block *wire.MsgBlock) error
@@ -82,7 +81,8 @@ func fileExists(path string) bool {
 
 // New creates a new instance of a MostRecentBlockCache given a path to store
 // the data.
-func New(dbPath string, capacity int, blockHeaders *headerfs.BlockHeaderStore) (*MostRecentBlockCache, error) {
+func New(dbPath string, capacity int,
+	blockHeaders *headerfs.BlockHeaderStore) (*MostRecentBlockCache, error) {
 	if !fileExists(dbPath) {
 		if err := os.MkdirAll(dbPath, 0700); err != nil {
 			return nil, err
