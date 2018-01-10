@@ -22,8 +22,8 @@ var (
 	blockCacheBucket = []byte("block-cache")
 
 	// DefaultCapacity is the default maximum capacity of the
-	// MostRecentBlockCache, in blocks.
-	DefaultCapacity = 1000
+	// MostRecentBlockCache, in bytes.
+	DefaultCapacity = 1000 * 1024 * 1024
 )
 
 const (
@@ -56,8 +56,9 @@ type MostRecentBlockCache struct {
 	// A BlockHeaderStore allows translation between block heights and hashes.
 	blockHeaders *headerfs.BlockHeaderStore
 
-	// The maximum number of blocks to store in the cache.
+	// The maximum number of bytes to store in the cache.
 	capacity int
+	usage    int32
 
 	// The number of cache hits and misses. Must be accessed atomically.
 	hits   uint64
@@ -110,9 +111,18 @@ func New(dbPath string, capacity int,
 		return nil, fmt.Errorf("unable to create cache db")
 	}
 
+	var usage int
+	err = bdb.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(blockCacheBucket).ForEach(func(k, v []byte) error {
+			usage += len(v)
+			return nil
+		})
+	})
+
 	return &MostRecentBlockCache{
 		db:           bdb,
 		capacity:     capacity,
+		usage:        int32(usage),
 		blockHeaders: blockHeaders,
 	}, nil
 }
@@ -137,7 +147,8 @@ func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	key := []byte(strconv.FormatUint(uint64(height), 10))
 
 	// Serialize the block.
-	w := bytes.NewBuffer(make([]byte, 0, block.SerializeSize()))
+	blockSize := block.SerializeSize()
+	w := bytes.NewBuffer(make([]byte, 0, blockSize))
 	err = block.Serialize(w)
 	if err != nil {
 		return err
@@ -148,21 +159,48 @@ func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	err = c.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(blockCacheBucket)
 
-		isFull := bucket.Stats().KeyN >= c.capacity
+		usage := int(atomic.LoadInt32(&c.usage))
 
-		if isFull {
-			// Find the oldest block we have in the cache.
-			oldestKey, _ := bucket.Cursor().First()
-			isNewer := bytes.Compare(key, oldestKey) == 1
+		// Determine how many bytes we need to evict from the cache, if any.
+		availableBytes := c.capacity - usage
+		evictBytes := blockSize - availableBytes
+		var usageDelta int32
 
-			// Only insert this block if it wouldn't evict a block that's newer
-			// than itself.
-			if isNewer {
-				bucket.Delete(oldestKey)
-				bucket.Put(key, w.Bytes())
+		// List all of the blocks we'd need to evict to be able to fit this one.
+		var evictKeys [][]byte
+		cursor := bucket.Cursor()
+		oldestKey, v := cursor.First()
+		for evictBytes > 0 {
+			// If we've evicted everything in the bucket, and there's still not
+			// enough space, then exit here.
+			if oldestKey == nil {
+				return nil
 			}
-		} else {
-			bucket.Put(key, w.Bytes())
+
+			evictKeys = append(evictKeys, oldestKey)
+			usageDelta -= int32(len(v))
+			evictBytes -= len(v)
+
+			// If this block would evict any newer blocks, then we don't need
+			// to cache it.
+			isNewer := bytes.Compare(key, oldestKey) == 1
+			if !isNewer {
+				return nil
+			}
+
+			oldestKey, v = cursor.Next()
+		}
+
+		atomic.AddInt32(&c.usage, usageDelta+int32(blockSize))
+
+		for _, k := range evictKeys {
+			if err := bucket.Delete(k); err != nil {
+				return err
+			}
+		}
+
+		if err := bucket.Put(key, w.Bytes()); err != nil {
+			return err
 		}
 
 		return nil
