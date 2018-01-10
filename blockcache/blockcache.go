@@ -2,6 +2,7 @@ package blockcache
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/boltdb/bolt"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -9,7 +10,6 @@ import (
 	"github.com/roasbeef/btcd/wire"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync/atomic"
 )
 
@@ -132,6 +132,14 @@ func (c *MostRecentBlockCache) Close() {
 	c.db.Close()
 }
 
+// encodeKey encodes an integer key into a byte slice that can be used by
+// boltdb.
+func encodeKey(height uint32) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, height)
+	return buf
+}
+
 // PutBlock attempts to insert the block into the cache. If the cache is at
 // capacity it will first attempt to evict the oldest block, if the given block
 // is older than all blocks currently in the cache, then no action happens.
@@ -144,7 +152,7 @@ func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 		return err
 	}
 
-	key := []byte(strconv.FormatUint(uint64(height), 10))
+	key := encodeKey(height)
 
 	// Serialize the block.
 	blockSize := block.SerializeSize()
@@ -230,7 +238,7 @@ func (c *MostRecentBlockCache) FetchBlock(hash *chainhash.Hash) (*wire.MsgBlock,
 		return nil, err
 	}
 
-	key := []byte(strconv.FormatUint(uint64(height), 10))
+	key := encodeKey(height)
 
 	var block wire.MsgBlock
 	err = c.db.View(func(tx *bolt.Tx) error {
