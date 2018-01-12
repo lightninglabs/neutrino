@@ -220,11 +220,11 @@ func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	return nil
 }
 
-// PrintStats prints the cache hit rate to standard output.
-func (c *MostRecentBlockCache) PrintStats() {
-	hits := float64(atomic.LoadUint64(&c.hits))
-	misses := float64(atomic.LoadUint64(&c.misses))
-	fmt.Printf("hits: %.0f, total: %.0f (%.01f)\n", hits, hits+misses, hits/(hits+misses))
+// GetStats returns the number of cache hits and misses.
+func (c *MostRecentBlockCache) GetStats() (uint64, uint64) {
+	hits := atomic.LoadUint64(&c.hits)
+	misses := atomic.LoadUint64(&c.misses)
+	return hits, misses
 }
 
 // FetchBlock queries the cache for a block matching the given hash, returning
