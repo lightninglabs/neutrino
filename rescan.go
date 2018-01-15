@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -892,141 +893,36 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	}
 
 	// As this is meant to fetch UTXO's, the options MUST specify at least
-	// a single input.
-	if len(ro.watchInputs) != 1 {
-		return nil, fmt.Errorf("must pass exactly one InputWithScript")
-	}
-	watchList := [][]byte{ro.watchInputs[0].PkScript}
-
-	originTxID := ro.watchInputs[0].OutPoint.Hash
-
-	// Track our position in the chain.
-	curHeader, curHeight, err := s.BlockHeaders.ChainTip()
-	if err != nil {
-		return nil, err
+	// a single outpoint.
+	if len(ro.watchOutPoints) != 1 {
+		return nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 
-	curStamp := &waddrmgr.BlockStamp{
-		Hash:   curHeader.BlockHash(),
-		Height: int32(curHeight),
+	var result *SpendReport
+	var resultError error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	s.utxoScanner.Enqueue(GetUtxoRequest{
+		OutPoint:    &ro.watchOutPoints[0],
+		StartHeight: uint32(ro.startBlock.Height),
+		Result: func(report *SpendReport, err error) {
+			result = report
+			resultError = err
+			wg.Done()
+		},
+	})
+
+	wg.Wait()
+
+	if resultError != nil {
+		log.Debugf("Error finding spends for %s: %v", ro.watchOutPoints[0].String(), resultError)
+
+		return nil, resultError
 	}
 
-	// Find our earliest possible block, which may be a hash.
-	if (ro.startBlock.Hash != chainhash.Hash{}) {
-		_, height, err := s.BlockHeaders.FetchHeader(&ro.startBlock.Hash)
-		if err == nil {
-			ro.startBlock.Height = int32(height)
-		} else {
-			ro.startBlock.Hash = chainhash.Hash{}
-		}
-	}
+	log.Debugf("Returning spend report for %s: %s", ro.watchOutPoints[0].String(), spew.Sdump(result))
 
-	// Alternatively, our earliest possible block by actually be a height.
-	if (ro.startBlock.Hash == chainhash.Hash{}) {
-		if ro.startBlock.Height == 0 {
-			ro.startBlock.Hash = *s.chainParams.GenesisHash
-		} else if ro.startBlock.Height < int32(curHeight) {
-			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				uint32(ro.startBlock.Height))
-			if err == nil {
-				ro.startBlock.Hash = header.BlockHash()
-			} else {
-				ro.startBlock.Hash = *s.chainParams.GenesisHash
-				ro.startBlock.Height = 0
-			}
-		} else {
-			ro.startBlock.Height = int32(curHeight)
-			ro.startBlock.Hash = curHeader.BlockHash()
-		}
-	}
-
-	log.Tracef("Starting scan for output spend from known block %d (%s) "+
-		"back to block %d (%s)", curStamp.Height, curStamp.Hash,
-		ro.startBlock.Height, ro.startBlock.Hash)
-
-	for {
-		// Check the basic filter for the spend and the extended filter
-		// for the transaction in which the outpoint is funded.
-		filter, err := s.GetCFilter(
-			curStamp.Hash, wire.GCSFilterRegular, ro.queryOptions...,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("Couldn't get basic "+
-				"filter for block %d (%s)", curStamp.Height,
-				curStamp.Hash)
-		}
-		matched := false
-		if filter != nil {
-			filterKey := builder.DeriveKey(&curStamp.Hash)
-			matched, err = filter.MatchAny(filterKey, watchList)
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		// If either is matched, download the block and check to see
-		// what we have.
-		if matched {
-			block, err := s.GetBlockFromNetwork(
-				curStamp.Hash, ro.queryOptions...,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if block == nil {
-				return nil, fmt.Errorf("Couldn't get "+
-					"block %d (%s)", curStamp.Height,
-					curStamp.Hash)
-			}
-
-			// If we've spent the output in this block, return an
-			// error stating that the output is spent.
-			for _, tx := range block.Transactions() {
-				for i, ti := range tx.MsgTx().TxIn {
-					if ti.PreviousOutPoint == ro.watchInputs[0].OutPoint {
-						return &SpendReport{
-							SpendingTx:         tx.MsgTx(),
-							SpendingInputIndex: uint32(i),
-							SpendingTxHeight:   uint32(curStamp.Height),
-						}, nil
-					}
-				}
-			}
-
-			// If we found the transaction that created the output,
-			// then it's not spent and we can return the TxOut.
-			for _, tx := range block.Transactions() {
-				if *(tx.Hash()) == originTxID {
-					outputs := tx.MsgTx().TxOut
-					outputIndex := ro.watchInputs[0].OutPoint.Index
-					targetOutput := outputs[outputIndex]
-
-					return &SpendReport{
-						Output: targetOutput,
-					}, nil
-				}
-			}
-		}
-
-		// Otherwise, iterate backwards until we've gone too far.
-		curStamp.Height--
-		if curStamp.Height < ro.startBlock.Height {
-			return nil, fmt.Errorf("Transaction %s not found "+
-				"since start block %d (%s)",
-				originTxID, curStamp.Height+1,
-				curStamp.Hash)
-		}
-
-		// Fetch the previous header so we can continue our walk
-		// backwards.
-		header, err := s.BlockHeaders.FetchHeaderByHeight(
-			uint32(curStamp.Height),
-		)
-		if err != nil {
-			return nil, err
-		}
-		curStamp.Hash = header.BlockHash()
-	}
+	return result, nil
 }
 
 // getReorgTip gets a block header from the chain service's cache. This is only
