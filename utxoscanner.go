@@ -24,14 +24,15 @@ type Interface interface {
 	GetBlockFromNetwork(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	BestSnapshot() (*waddrmgr.BlockStamp, error)
-	GetCFilter(blockHash chainhash.Hash, filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error)
+	GetCFilter(blockHash chainhash.Hash, filterType wire.FilterType,
+		options ...QueryOption) (*gcs.Filter, error)
 }
 
-// A PriorityQueue implements heap.Interface and holds GetUtxoRequests. The queue
-// maintains that heap.Pop() will always return the GetUtxo request with the greatest
-// starting height. This allows us to add new GetUtxo requests to an already
-// running batch that's still in the process of catching up to the start height
-// of the request.
+// A PriorityQueue implements heap.Interface and holds GetUtxoRequests. The
+// queue maintains that heap.Pop() will always return the GetUtxo request with
+// the greatest starting height. This allows us to add new GetUtxo requests to
+// an already running batch that's still in the process of catching up to the
+// start height of the request.
 type PriorityQueue []*GetUtxoRequest
 
 func (pq PriorityQueue) Len() int { return len(pq) }
@@ -167,7 +168,8 @@ func (s *UtxoScanner) getAfterHeight(height uint32) []GetUtxoRequest {
 // CheckTransactions finds any transactions in the block that spend the given
 // outpoints.
 func (s *UtxoScanner) CheckTransactions(block *wire.MsgBlock, height uint32,
-	outpoints map[wire.OutPoint]struct{}) (map[wire.OutPoint]SpendReport, error) {
+	outpoints map[wire.OutPoint]struct{}) (map[wire.OutPoint]SpendReport,
+	error) {
 	spends := make(map[wire.OutPoint]SpendReport)
 
 	// If we've spent the output in this block, return an
@@ -264,7 +266,8 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 		reqs := s.getAfterHeight(height)
 		if len(reqs) > 0 {
 			for _, req := range reqs {
-				log.Debugf("Adding %s (%d) to watchlist", req.OutPoint.String(), req.StartHeight)
+				log.Debugf("Adding %s (%d) to watchlist", req.OutPoint.String(),
+					req.StartHeight)
 				requests = append(requests, req)
 				outpoints[*req.OutPoint] = struct{}{}
 				filterEntries = append(filterEntries,
@@ -272,7 +275,8 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 			}
 		}
 
-		log.Debugf("Checking for spends of %d/%d outpoints at height %d", len(requests), size, height)
+		log.Debugf("Checking for spends of %d/%d outpoints at height %d",
+			len(requests), size, height)
 
 		hash, err := s.chainClient.GetBlockHash(int64(height))
 		if err != nil {
@@ -293,7 +297,8 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 		}
 
 		if match || fetch {
-			log.Debugf("Fetching block at height %d (%s)", height, hash.String())
+			log.Debugf("Fetching block at height %d (%s)", height,
+				hash.String())
 
 			// FIXME(simon): Find out why this takes three minutes.
 			// Fetch the block from the network.
@@ -307,22 +312,26 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 			if fetch {
 				for _, request := range requests {
 					if request.StartHeight == height {
-						tx := s.GetOriginalTx(block.MsgBlock(), request.OutPoint)
+						tx := s.GetOriginalTx(block.MsgBlock(),
+							request.OutPoint)
 						// Grab the tx that created this output.
 						initialTx[*request.OutPoint] = tx
 
-						log.Debugf("Block %d creates output %s", height, request.OutPoint.String())
+						log.Debugf("Block %d creates output %s", height,
+							request.OutPoint.String())
 					}
 				}
 			}
 
-			spends, err := s.CheckTransactions(block.MsgBlock(), height, outpoints)
+			spends, err := s.CheckTransactions(block.MsgBlock(), height,
+				outpoints)
 			if err != nil {
 				return requests, err
 			}
 
 			for outPoint, spend := range spends {
-				log.Debugf("Outpoint %s is spent in tx %s", outPoint.String(), spew.Sprint(spend))
+				log.Debugf("Outpoint %s is spent in tx %s", outPoint.String(),
+					spew.Sprint(spend))
 
 				// Find the request this spend relates to.
 				var filteredRequests []GetUtxoRequest
