@@ -51,6 +51,10 @@ type BlockCache interface {
 // If a newer block (by height) is inserted and the cache is already full,
 // then the oldest block will be evicted to make room.
 type MostRecentBlockCache struct {
+	// The number of cache hits and misses. Must be accessed atomically.
+	hits   uint64
+	misses uint64
+
 	db *bolt.DB
 
 	// A BlockHeaderStore allows translation between block heights and hashes.
@@ -59,10 +63,6 @@ type MostRecentBlockCache struct {
 	// The maximum number of bytes to store in the cache.
 	capacity int
 	usage    int32
-
-	// The number of cache hits and misses. Must be accessed atomically.
-	hits   uint64
-	misses uint64
 }
 
 // A compile-time check to ensure the MostRecentBlockCache adheres to the
