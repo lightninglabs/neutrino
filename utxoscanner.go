@@ -38,8 +38,8 @@ type PriorityQueue []*GetUtxoRequest
 func (pq PriorityQueue) Len() int { return len(pq) }
 
 func (pq PriorityQueue) Less(i, j int) bool {
-	// We want Pop to give us the highest height so we use greater than here.
-	return pq[i].StartHeight > pq[j].StartHeight
+	// We want Pop to give us the least StartHeight.
+	return pq[i].StartHeight < pq[j].StartHeight
 }
 
 func (pq PriorityQueue) Swap(i, j int) {
@@ -85,6 +85,8 @@ type UtxoScanner struct {
 
 	chainClient Interface
 
+	nextBatch []*GetUtxoRequest
+
 	cv *sync.Cond
 }
 
@@ -108,6 +110,14 @@ func (s *UtxoScanner) Start() {
 				s.cv.L.Unlock()
 				return
 			}
+
+			// Re-queue previously skipped requests for next batch.
+			for _, request := range s.nextBatch {
+				heap.Push(&s.pq, request)
+			}
+
+			s.nextBatch = nil
+
 			s.cv.L.Unlock()
 
 			requests, err := s.runBatch()
@@ -123,45 +133,25 @@ func (s *UtxoScanner) Start() {
 	}()
 }
 
-// drain removes all items currently in the queue and returns a slice. If there
-// are no items in the queue, this method blocks until one is available. The
-// requests are returned in descending height order.
-func (s *UtxoScanner) drain() []GetUtxoRequest {
+// getAtHeight returns all GetUtxo requests that have starting height of the
+// given height.
+func (s *UtxoScanner) getAtHeight(height uint32) []*GetUtxoRequest {
 	s.cv.L.Lock()
 	defer s.cv.L.Unlock()
 
-	// Block until the queue is no longer empty.
-	for !s.stopped && s.pq.IsEmpty() {
-		s.cv.Wait()
-	}
-
-	// We return nil only in the case that we've been interrupted, so callers
-	// can use this to determine that the UtxoScanner is shutting down.
-	if s.stopped {
-		return nil
-	}
-
-	// Empty the queue.
-	var requests []GetUtxoRequest
-	for !s.pq.IsEmpty() {
+	// Take any requests that are too old to go in this batch and keep them for
+	// the next batch.
+	for !s.pq.IsEmpty() && s.pq.Peek().StartHeight < height {
 		item := heap.Pop(&s.pq).(*GetUtxoRequest)
-		requests = append(requests, *item)
+		s.nextBatch = append(s.nextBatch, item)
 	}
 
-	return requests
-}
-
-// getAfterHeight returns all GetUtxo requests that have starting height of at
-// least the given height.
-func (s *UtxoScanner) getAfterHeight(height uint32) []GetUtxoRequest {
-	s.cv.L.Lock()
-	defer s.cv.L.Unlock()
-
-	var requests []GetUtxoRequest
-	for !s.pq.IsEmpty() && s.pq.Peek().StartHeight >= height {
+	var requests []*GetUtxoRequest
+	for !s.pq.IsEmpty() && s.pq.Peek().StartHeight == height {
 		item := heap.Pop(&s.pq).(*GetUtxoRequest)
-		requests = append(requests, *item)
+		requests = append(requests, item)
 	}
+
 	return requests
 }
 
@@ -211,7 +201,7 @@ func (s *UtxoScanner) filterMatches(hash chainhash.Hash,
 	return false, nil
 }
 
-func buildFilterEntries(requests []GetUtxoRequest) ([][]byte,
+func buildFilterEntries(requests []*GetUtxoRequest) ([][]byte,
 	map[wire.OutPoint]struct{}) {
 	var filterEntries [][]byte
 	outpoints := make(map[wire.OutPoint]struct{})
@@ -227,20 +217,21 @@ func buildFilterEntries(requests []GetUtxoRequest) ([][]byte,
 
 // runBatch runs a single batch. If there was an error, then return the
 // outstanding requests.
-func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
-	// Fetch all queued requests, blocking if the queue is empty.
-	requests := s.drain()
+func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
+	var requests []*GetUtxoRequest
 
-	// If the queue was empty then we were interrupted while waiting.
-	if requests == nil {
+	// Take the request with the lowest block height so we can begin the scan
+	// from there.
+	req := s.peek()
+
+	// Check if we were interrupted while waiting.
+	if req == nil {
 		return nil, nil
 	}
 
-	log.Debugf("Running batch, looking for %d outpoints", len(requests))
+	//log.Debugf("Running batch, looking for %d outpoints", s.Len())
 
-	filterEntries, outpoints := buildFilterEntries(requests)
-
-	startHeight := requests[len(requests)-1].StartHeight
+	startHeight := req.StartHeight
 	best, err := s.chainClient.BestSnapshot()
 	if err != nil {
 		return requests, err
@@ -251,19 +242,14 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 	// transaction.
 	initialTx := make(map[wire.OutPoint]*SpendReport)
 
+	filterEntries, outpoints := buildFilterEntries(requests)
+
 	// Scan forward through the blockchain and look for any transactions that
 	// might spend the given UTXOs.
 	for height := startHeight; height <= uint32(best.Height); height++ {
-
-		// TODO(simon): Don't search for outpoints before their birthday.
-
-		s.cv.L.Lock()
-		size := s.pq.Len()
-		s.cv.L.Unlock()
-
 		// If there are any new requests that can safely be added to this batch,
 		// then try and fetch them.
-		reqs := s.getAfterHeight(height)
+		reqs := s.getAtHeight(height)
 		if len(reqs) > 0 {
 			for _, req := range reqs {
 				log.Debugf("Adding %s (%d) to watchlist", req.OutPoint.String(),
@@ -275,28 +261,24 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 			}
 		}
 
-		log.Debugf("Checking for spends of %d/%d outpoints at height %d",
-			len(requests), size, height)
-
 		hash, err := s.chainClient.GetBlockHash(int64(height))
 		if err != nil {
 			return requests, err
 		}
 
-		fetch := false
-		for _, request := range requests {
-			if request.StartHeight == height {
-				// Grab the tx that created this output.
-				fetch = true
+		// If an outpoint is created in this block, then fetch it regardless.
+		// Otherwise check to see if the filter matches any of our watched
+		// outpoints.
+		fetch := len(reqs) > 0
+		if !fetch {
+			match, err := s.filterMatches(*hash, filterEntries)
+			if err != nil {
+				return requests, err
 			}
+			fetch = match
 		}
 
-		match, err := s.filterMatches(*hash, filterEntries)
-		if err != nil {
-			return requests, err
-		}
-
-		if match || fetch {
+		if fetch {
 			log.Debugf("Fetching block at height %d (%s)", height,
 				hash.String())
 
@@ -334,7 +316,7 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 					spew.Sprint(spend))
 
 				// Find the request this spend relates to.
-				var filteredRequests []GetUtxoRequest
+				var filteredRequests []*GetUtxoRequest
 				for _, request := range requests {
 					if *request.OutPoint == outPoint {
 						request.Result(&spend, nil)
@@ -355,11 +337,8 @@ func (s *UtxoScanner) runBatch() ([]GetUtxoRequest, error) {
 	for _, request := range requests {
 		tx, ok := initialTx[*request.OutPoint]
 		if ok {
-			log.Debugf("Returning unspent output %s", spew.Sdump(tx))
 			request.Result(tx, nil)
 		} else {
-			log.Debugf("Failed to find output %s", request.OutPoint)
-
 			// A nil SpendReport indicates the output was not found.
 			request.Result(nil, nil)
 		}
@@ -376,16 +355,37 @@ func (s *UtxoScanner) Stop() {
 	s.stopped = true
 }
 
-// Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
-func (s *UtxoScanner) Enqueue(req GetUtxoRequest) {
-	log.Debugf("Enqueuing request for %s with start height %d",
-		req.OutPoint.String(), req.StartHeight)
+// Returns the GetUtxoRequest with the lowest block height. If no elements are
+// available, then block until one is added.
+func (s *UtxoScanner) peek() *GetUtxoRequest {
 	s.cv.L.Lock()
 	defer s.cv.L.Unlock()
 
+	// Block until the queue is no longer empty.
+	for !s.stopped && s.pq.IsEmpty() {
+		s.cv.Wait()
+	}
+
+	// We return nil only in the case that we've been interrupted, so callers
+	// can use this to determine that the UtxoScanner is shutting down.
+	if s.stopped {
+		return nil
+	}
+
+	return s.pq.Peek()
+}
+
+// Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
+func (s *UtxoScanner) Enqueue(req *GetUtxoRequest) {
+	log.Debugf("Enqueuing request for %s with start height %d",
+		req.OutPoint.String(), req.StartHeight)
+	s.cv.L.Lock()
+
 	// Insert the request into the queue and signal any threads that might be
 	// waiting for new elements.
-	heap.Push(&s.pq, &req)
+	heap.Push(&s.pq, req)
+
+	s.cv.L.Unlock()
 	s.cv.Signal()
 }
 
