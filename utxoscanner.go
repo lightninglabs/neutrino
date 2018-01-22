@@ -30,9 +30,8 @@ type Interface interface {
 
 // A PriorityQueue implements heap.Interface and holds GetUtxoRequests. The
 // queue maintains that heap.Pop() will always return the GetUtxo request with
-// the greatest starting height. This allows us to add new GetUtxo requests to
-// an already running batch that's still in the process of catching up to the
-// start height of the request.
+// the least starting height. This allows us to add new GetUtxo requests to
+// an already running batch.
 type PriorityQueue []*GetUtxoRequest
 
 func (pq PriorityQueue) Len() int { return len(pq) }
@@ -54,7 +53,7 @@ func (pq *PriorityQueue) Push(x interface{}) {
 	*pq = append(*pq, item)
 }
 
-// Peek returns the greatest height element in the queue without removing it.
+// Peek returns the least height element in the queue without removing it.
 func (pq *PriorityQueue) Peek() *GetUtxoRequest {
 	return (*pq)[0]
 }
