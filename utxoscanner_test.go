@@ -144,9 +144,9 @@ func TestGetAfterHeight(t *testing.T) {
 	})
 
 	// We've missed block 100000 by this point so only return 100001.
-	reqs := scanner.getAfterHeight(100000)
+	reqs := scanner.getAtHeight(100000)
 	if len(reqs) != 1 || reqs[0].StartHeight != 100001 {
-		t.Error("Incorrect request returned from getAfterHeight")
+		t.Error("Incorrect request returned from getAtHeight")
 	}
 }
 

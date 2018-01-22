@@ -902,7 +902,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	var resultError error
 	var wg sync.WaitGroup
 	wg.Add(1)
-	s.utxoScanner.Enqueue(GetUtxoRequest{
+	s.utxoScanner.Enqueue(&GetUtxoRequest{
 		OutPoint:    &ro.watchOutPoints[0],
 		StartHeight: uint32(ro.startBlock.Height),
 		Result: func(report *SpendReport, err error) {
@@ -916,11 +916,8 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 	if resultError != nil {
 		log.Debugf("Error finding spends for %s: %v", ro.watchOutPoints[0].String(), resultError)
-
 		return nil, resultError
 	}
-
-	log.Debugf("Returning spend report for %s: %s", ro.watchOutPoints[0].String(), spew.Sdump(result))
 
 	return result, nil
 }
