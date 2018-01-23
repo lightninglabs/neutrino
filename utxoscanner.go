@@ -228,8 +228,6 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 		return nil, nil
 	}
 
-	//log.Debugf("Running batch, looking for %d outpoints", s.Len())
-
 	startHeight := req.StartHeight
 	best, err := s.chainClient.BestSnapshot()
 	if err != nil {
