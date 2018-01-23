@@ -71,14 +71,12 @@ func makeTestOutpoint() *wire.OutPoint {
 }
 
 func TestScanForSingleUtxo(t *testing.T) {
-	scanner := NewUtxoScanner(NewMockChainClient())
-
 	outpoints := make(map[wire.OutPoint]struct{})
 
 	// Search for spends of this outpoint.
 	outpoints[*makeTestOutpoint()] = struct{}{}
 
-	spends, _ := scanner.CheckTransactions(&Block100000, 100000, outpoints)
+	spends, _ := checkTransactions(&Block100000, 100000, outpoints)
 
 	if len(spends) != 1 {
 		t.Fail()
