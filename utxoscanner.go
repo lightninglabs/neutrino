@@ -154,9 +154,9 @@ func (s *UtxoScanner) getAtHeight(height uint32) []*GetUtxoRequest {
 	return requests
 }
 
-// CheckTransactions finds any transactions in the block that spend the given
+// checkTransactions finds any transactions in the block that spend the given
 // outpoints.
-func (s *UtxoScanner) CheckTransactions(block *wire.MsgBlock, height uint32,
+func checkTransactions(block *wire.MsgBlock, height uint32,
 	outpoints map[wire.OutPoint]struct{}) (map[wire.OutPoint]SpendReport,
 	error) {
 	spends := make(map[wire.OutPoint]SpendReport)
@@ -299,7 +299,7 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 				}
 			}
 
-			spends, err := s.CheckTransactions(block.MsgBlock(), height,
+			spends, err := checkTransactions(block.MsgBlock(), height,
 				outpoints)
 			if err != nil {
 				return requests, err
