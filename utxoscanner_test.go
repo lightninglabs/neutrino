@@ -94,36 +94,7 @@ func TestScanForOriginalUtxo(t *testing.T) {
 	}
 }
 
-func TestDrain(t *testing.T) {
-	scanner := NewUtxoScanner(NewMockChainClient())
-
-	scanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    makeTestOutpoint(),
-		StartHeight: 100001,
-		Result: func(report *SpendReport, err error) {
-			fmt.Printf("spent")
-		},
-	})
-	scanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    makeTestOutpoint(),
-		StartHeight: 100000,
-		Result: func(report *SpendReport, err error) {
-			fmt.Printf("spent")
-		},
-	})
-
-	reqs := scanner.getAtHeight(100000)
-	if len(reqs) != 1 || reqs[0].StartHeight != 100000 {
-		t.Error("getAtHeight not properly ordered")
-	}
-
-	reqs = scanner.getAtHeight(100001)
-	if len(reqs) != 1 || reqs[0].StartHeight != 100001 {
-		t.Error("getAtHeight not properly ordered")
-	}
-}
-
-func TestGetAfterHeight(t *testing.T) {
+func TestGetAtHeight(t *testing.T) {
 	scanner := NewUtxoScanner(NewMockChainClient())
 
 	scanner.Enqueue(&GetUtxoRequest{
@@ -142,7 +113,7 @@ func TestGetAfterHeight(t *testing.T) {
 	})
 
 	// We've missed block 100000 by this point so only return 100001.
-	reqs := scanner.getAtHeight(100000)
+	reqs := scanner.getAtHeight(100001)
 	if len(reqs) != 1 || reqs[0].StartHeight != 100001 {
 		t.Error("Incorrect request returned from getAtHeight")
 	}
