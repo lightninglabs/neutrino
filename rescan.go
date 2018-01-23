@@ -898,9 +898,12 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		return nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 
-	var result *SpendReport
-	var resultError error
-	var wg sync.WaitGroup
+	var (
+		result *SpendReport
+		resultError error
+		wg sync.WaitGroup
+	)
+
 	wg.Add(1)
 	s.utxoScanner.Enqueue(&GetUtxoRequest{
 		OutPoint:    &ro.watchOutPoints[0],
@@ -911,11 +914,11 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 			wg.Done()
 		},
 	})
-
 	wg.Wait()
 
 	if resultError != nil {
-		log.Debugf("Error finding spends for %s: %v", ro.watchOutPoints[0].String(), resultError)
+		log.Debugf("Error finding spends for %s: %v",
+			ro.watchOutPoints[0].String(), resultError)
 		return nil, resultError
 	}
 
