@@ -238,8 +238,8 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 	// create the outpoints. If the outpoint isn't spent then return this
 	// transaction.
 	initialTx := make(map[wire.OutPoint]*SpendReport)
-
-	filterEntries, outpoints := buildFilterEntries(requests)
+	outpoints := make(map[wire.OutPoint]struct{})
+	var filterEntries [][]byte
 
 	// Scan forward through the blockchain and look for any transactions that
 	// might spend the given UTXOs.
@@ -278,9 +278,6 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 		if fetch {
 			log.Debugf("Fetching block at height %d (%s)", height,
 				hash.String())
-
-			// FIXME(simon): Find out why this takes three minutes.
-			// Fetch the block from the network.
 			block, err := s.chainClient.GetBlockFromNetwork(*hash)
 			if err != nil {
 				return requests, err
