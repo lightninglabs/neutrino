@@ -26,6 +26,8 @@ type Interface interface {
 	BestSnapshot() (*waddrmgr.BlockStamp, error)
 	GetCFilter(blockHash chainhash.Hash, filterType wire.FilterType,
 		options ...QueryOption) (*gcs.Filter, error)
+	blockFilterMatches(ro *rescanOptions, blockHash *chainhash.Hash) (bool,
+		error)
 }
 
 // A PriorityQueue implements heap.Interface and holds GetUtxoRequests. The
@@ -182,24 +184,6 @@ func checkTransactions(block *wire.MsgBlock, height uint32,
 	return spends, nil
 }
 
-// filterMatches checks whether any of the filterEntries match for the given
-// block.
-func (s *UtxoScanner) filterMatches(hash chainhash.Hash,
-	filterEntries [][]byte) (bool, error) {
-	filter, err := s.chainClient.GetCFilter(hash,
-		wire.GCSFilterRegular)
-	if err != nil {
-		return false, err
-	}
-
-	if filter != nil {
-		filterKey := builder.DeriveKey(&hash)
-		return filter.MatchAny(filterKey, filterEntries)
-	}
-
-	return false, nil
-}
-
 func buildFilterEntries(requests []*GetUtxoRequest) ([][]byte,
 	map[wire.OutPoint]struct{}) {
 	var filterEntries [][]byte
@@ -268,7 +252,8 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 		// outpoints.
 		fetch := len(reqs) > 0
 		if !fetch {
-			match, err := s.filterMatches(*hash, filterEntries)
+			match, err := s.chainClient.blockFilterMatches(&rescanOptions{
+				watchList: filterEntries}, hash)
 			if err != nil {
 				return requests, err
 			}

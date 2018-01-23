@@ -65,6 +65,11 @@ func (c *MockChainClient) GetCFilter(blockHash chainhash.Hash, filterType wire.F
 	return c.getCFilterResponse[blockHash], nil
 }
 
+func (c *MockChainClient) blockFilterMatches(ro *rescanOptions,
+	blockHash *chainhash.Hash) (bool, error) {
+	return true, nil
+}
+
 func makeTestOutpoint() *wire.OutPoint {
 	hash, _ := chainhash.NewHashFromStr("87a157f3fd88ac7907c05fc55e271dc4acdc5605d187d646604ca8c0e9382e03")
 	return &wire.OutPoint{Hash: *hash, Index: 0}
