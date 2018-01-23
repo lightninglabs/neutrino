@@ -86,12 +86,10 @@ func TestScanForSingleUtxo(t *testing.T) {
 }
 
 func TestScanForOriginalUtxo(t *testing.T) {
-	scanner := NewUtxoScanner(NewMockChainClient())
-
 	hash, _ := chainhash.NewHashFromStr("e9a66845e05d5abc0ad04ec80f774a7e585c6e8db975962d069a522137b80c1d")
 	outpoint := &wire.OutPoint{Hash: *hash, Index: 0}
 
-	spend := scanner.GetOriginalTx(&Block100000, outpoint)
+	spend := findTransaction(&Block100000, outpoint)
 
 	if spend.Output.Value != 1000000 {
 		t.Errorf("Failed to find original tx")

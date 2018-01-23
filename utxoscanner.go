@@ -293,7 +293,7 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 			if fetch {
 				for _, request := range requests {
 					if request.StartHeight == height {
-						tx := s.GetOriginalTx(block.MsgBlock(),
+						tx := findTransaction(block.MsgBlock(),
 							request.OutPoint)
 						// Grab the tx that created this output.
 						initialTx[*request.OutPoint] = tx
@@ -388,9 +388,9 @@ func (s *UtxoScanner) Enqueue(req *GetUtxoRequest) {
 	s.cv.Signal()
 }
 
-// GetOriginalTx returns a SpendReport for the UTXO, or nil if it does not exist
-// in this block.
-func (s *UtxoScanner) GetOriginalTx(block *wire.MsgBlock,
+// findTransaction returns a SpendReport for the UTXO, or nil if it does not
+// exist in this block.
+func findTransaction(block *wire.MsgBlock,
 	point *wire.OutPoint) *SpendReport {
 	for _, tx := range block.Transactions {
 		if tx.TxHash() == point.Hash {
