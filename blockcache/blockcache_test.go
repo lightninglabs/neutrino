@@ -113,7 +113,7 @@ func createTestDatabase(capacity int) (func(), BlockCache,
 	headers, err := headerfs.NewBlockHeaderStore(tempDir, db,
 		&chaincfg.MainNetParams)
 
-	blockDB, err := New(tempDir, capacity, headers)
+	blockDB, err := New(tempDir, capacity)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -2,14 +2,10 @@ package blockcache
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
-	"github.com/boltdb/bolt"
-	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 )
 
@@ -55,14 +51,7 @@ type MostRecentBlockCache struct {
 	hits   uint64
 	misses uint64
 
-	db *bolt.DB
-
-	// A BlockHeaderStore allows translation between block heights and hashes.
-	blockHeaders *headerfs.BlockHeaderStore
-
-	// The maximum number of bytes to store in the cache.
-	capacity int
-	usage    int32
+	cache *Cache
 }
 
 // A compile-time check to ensure the MostRecentBlockCache adheres to the
@@ -82,142 +71,42 @@ func fileExists(path string) bool {
 
 // New creates a new instance of a MostRecentBlockCache given a path to store
 // the data.
-func New(dbPath string, capacity int,
-	blockHeaders *headerfs.BlockHeaderStore) (*MostRecentBlockCache, error) {
-	if !fileExists(dbPath) {
-		if err := os.MkdirAll(dbPath, 0700); err != nil {
-			return nil, err
-		}
-	}
-
-	path := filepath.Join(dbPath, dbName)
-	bdb, err := bolt.Open(path, dbFilePermission, nil)
+func New(dbPath string, capacity int) (*MostRecentBlockCache, error) {
+	// Create the backing boltdb database.
+	store, err := NewStore(dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create the bucket if necessary.
-	err = bdb.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucket(blockCacheBucket)
-
-		if err != nil && err != bolt.ErrBucketExists {
-			return err
-		}
-
-		return nil
-	})
-
+	cache, err := NewCache(store, int32(capacity))
 	if err != nil {
-		return nil, fmt.Errorf("unable to create cache db")
+		return nil, err
 	}
 
-	var usage int
-	err = bdb.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(blockCacheBucket).ForEach(func(k, v []byte) error {
-			usage += len(v)
-			return nil
-		})
-	})
-
 	return &MostRecentBlockCache{
-		db:           bdb,
-		capacity:     capacity,
-		usage:        int32(usage),
-		blockHeaders: blockHeaders,
+		cache: cache,
 	}, nil
 }
 
 // Close instructs the underlying database to stop cleanly.
 func (c *MostRecentBlockCache) Close() {
-	c.db.Close()
-}
-
-// encodeKey encodes an integer key into a byte slice that can be used by
-// boltdb.
-func encodeKey(height uint32) []byte {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, height)
-	return buf
+	//c.cache.Close()
 }
 
 // PutBlock attempts to insert the block into the cache. If the cache is at
 // capacity it will first attempt to evict the oldest block, if the given block
 // is older than all blocks currently in the cache, then no action happens.
 func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
-	// The key for this block is its height in the blockchain.
-	// This allows us to evict the oldest entry easily.
-	hash := block.BlockHash()
-	height, err := c.blockHeaders.HeightFromHash(&hash)
-	if err != nil {
-		return err
-	}
-
-	key := encodeKey(height)
-
 	// Serialize the block.
-	blockSize := block.SerializeSize()
-	w := bytes.NewBuffer(make([]byte, 0, blockSize))
-	err = block.Serialize(w)
+	w := bytes.NewBuffer(make([]byte, 0, block.SerializeSize()))
+	err := block.Serialize(w)
 	if err != nil {
 		return err
 	}
 
-	// Insert the block, evicting the oldest block if the capacity has been
-	// reached.
-	err = c.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(blockCacheBucket)
+	hash := block.BlockHash()
 
-		usage := int(atomic.LoadInt32(&c.usage))
-
-		// Determine how many bytes we need to evict from the cache, if any.
-		availableBytes := c.capacity - usage
-		evictBytes := blockSize - availableBytes
-		var usageDelta int32
-
-		// List all of the blocks we'd need to evict to be able to fit this one.
-		var evictKeys [][]byte
-		cursor := bucket.Cursor()
-		oldestKey, v := cursor.First()
-		for evictBytes > 0 {
-			// If we've evicted everything in the bucket, and there's still not
-			// enough space, then exit here.
-			if oldestKey == nil {
-				return nil
-			}
-
-			evictKeys = append(evictKeys, oldestKey)
-			usageDelta -= int32(len(v))
-			evictBytes -= len(v)
-
-			// If this block would evict any newer blocks, then we don't need
-			// to cache it.
-			isNewer := bytes.Compare(key, oldestKey) == 1
-			if !isNewer {
-				return nil
-			}
-
-			oldestKey, v = cursor.Next()
-		}
-
-		atomic.AddInt32(&c.usage, usageDelta+int32(blockSize))
-
-		for _, k := range evictKeys {
-			if err := bucket.Delete(k); err != nil {
-				return err
-			}
-		}
-
-		if err := bucket.Put(key, w.Bytes()); err != nil {
-			return err
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.cache.Put(hash.CloneBytes(), w.Bytes())
 }
 
 // GetStats returns the number of cache hits and misses.
@@ -231,38 +120,21 @@ func (c *MostRecentBlockCache) GetStats() (uint64, uint64) {
 // the block or ErrBlockNotFound if it couldn't be retrieved.
 func (c *MostRecentBlockCache) FetchBlock(hash *chainhash.Hash) (*wire.MsgBlock,
 	error) {
-	// Look up the height from the hash, then query by height and double
-	// check we got the right block.
-	height, err := c.blockHeaders.HeightFromHash(hash)
-	if err != nil {
+	var block wire.MsgBlock
+
+	value, err := c.cache.Get(hash.CloneBytes())
+	if err != nil && err != ErrBlockNotFound {
 		return nil, err
 	}
 
-	key := encodeKey(height)
-
-	var block wire.MsgBlock
-	err = c.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(blockCacheBucket)
-
-		// Fetch the block, if it exists.
-		value := bucket.Get(key)
-		if value == nil {
-			return nil
-		}
-
-		err := block.Deserialize(bytes.NewReader(value))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	// If we didn't find the block in the cache, or if we found a different
-	// block at that height, then return not found.
-	if block.BlockHash() != *hash {
+	if value == nil {
 		atomic.AddUint64(&c.misses, 1)
 		return nil, ErrBlockNotFound
+	}
+
+	err = block.Deserialize(bytes.NewReader(value))
+	if err != nil {
+		return nil, err
 	}
 
 	atomic.AddUint64(&c.hits, 1)
