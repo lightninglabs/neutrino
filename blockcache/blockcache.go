@@ -51,7 +51,8 @@ type MostRecentBlockCache struct {
 	hits   uint64
 	misses uint64
 
-	cache *Cache
+	cache   *Cache
+	cleanup func()
 }
 
 // A compile-time check to ensure the MostRecentBlockCache adheres to the
@@ -85,12 +86,15 @@ func New(dbPath string, capacity int) (*MostRecentBlockCache, error) {
 
 	return &MostRecentBlockCache{
 		cache: cache,
+		cleanup: func() {
+			store.Close()
+		},
 	}, nil
 }
 
 // Close instructs the underlying database to stop cleanly.
 func (c *MostRecentBlockCache) Close() {
-	//c.cache.Close()
+	c.cleanup()
 }
 
 // PutBlock attempts to insert the block into the cache. If the cache is at
