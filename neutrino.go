@@ -735,7 +735,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		})
 	}
 
-	s.blockCache, err = blockcache.New(cfg.DataDir, blockcache.DefaultCapacity, s.BlockHeaders)
+	s.blockCache, err = blockcache.New(cfg.DataDir, blockcache.DefaultCapacity)
 	if err != nil {
 		return nil, err
 	}
