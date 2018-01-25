@@ -20,16 +20,16 @@ func createTestBlock() wire.MsgBlock {
 	merkleRoot, _ := chainhash.NewHashFromStr("f3e94742aca4b5ef85488dc37c06c3282295ffec960994b2c0d5ac2a25a95766")
 
 	return wire.MsgBlock{
-			Header: wire.BlockHeader{
-				Version:    1,
-				PrevBlock:  *prevBlock,
-				MerkleRoot: *merkleRoot,
-				Timestamp:  time.Unix(1293623863, 0),
-				Bits:       0x1b04864c,
-				Nonce:      0x10572b0f,
-			},
-			Transactions: []*wire.MsgTx{},
-		}
+		Header: wire.BlockHeader{
+			Version:    1,
+			PrevBlock:  *prevBlock,
+			MerkleRoot: *merkleRoot,
+			Timestamp:  time.Unix(1293623863, 0),
+			Bits:       0x1b04864c,
+			Nonce:      0x10572b0f,
+		},
+		Transactions: []*wire.MsgTx{},
+	}
 }
 
 func createTestDatabase(capacity int) (func(), BlockCache, error) {
