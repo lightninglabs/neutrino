@@ -24,6 +24,17 @@ type BoltStore struct {
 	db *bolt.DB
 }
 
+// fileExists returns true if the file exists, and false otherwise.
+func fileExists(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // NewStore opens an existing boltdb store, or if it doesn't exist creates a
 // new one.
 func NewStore(dbPath string) (*BoltStore, error) {

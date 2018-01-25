@@ -43,9 +43,9 @@ type BlockCache interface {
 }
 
 // MostRecentBlockCache is an implementation of the BlockCache interface
-// which attempts to cache a fixed number of the most recent blocks.
-// If a newer block (by height) is inserted and the cache is already full,
-// then the oldest block will be evicted to make room.
+// which attempts to cache recently requested blocks. If a block is inserted and
+// the cache is already full, then the least recently requested block will be
+// evicted to make room.
 type MostRecentBlockCache struct {
 	// The number of cache hits and misses. Must be accessed atomically.
 	hits   uint64
@@ -58,17 +58,6 @@ type MostRecentBlockCache struct {
 // A compile-time check to ensure the MostRecentBlockCache adheres to the
 // BlockCache interface.
 var _ BlockCache = (*MostRecentBlockCache)(nil)
-
-// fileExists returns true if the file exists, and false otherwise.
-func fileExists(path string) bool {
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-
-	return true
-}
 
 // New creates a new instance of a MostRecentBlockCache given a path to store
 // the data.
@@ -97,9 +86,7 @@ func (c *MostRecentBlockCache) Close() {
 	c.cleanup()
 }
 
-// PutBlock attempts to insert the block into the cache. If the cache is at
-// capacity it will first attempt to evict the oldest block, if the given block
-// is older than all blocks currently in the cache, then no action happens.
+// PutBlock attempts to insert the block into the cache.
 func (c *MostRecentBlockCache) PutBlock(block *wire.MsgBlock) error {
 	// Serialize the block.
 	w := bytes.NewBuffer(make([]byte, 0, block.SerializeSize()))
