@@ -4,7 +4,6 @@ package neutrino
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -560,7 +559,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 }
 
 // SendTransaction sends a transaction to each peer. It returns an error if any
-// peer rejects the transaction for any reason than that it's already known.
+// peer rejects the transaction.
 //
 // TODO: Better privacy by sending to only one random peer and watching
 // propagation, requires better peer selection support in query API.
@@ -572,9 +571,7 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
 			switch response := resp.(type) {
 			case *wire.MsgReject:
-				if response.Hash == tx.TxHash() &&
-					!strings.Contains(response.Reason,
-						"already have transaction") {
+				if response.Hash == tx.TxHash() {
 					err = fmt.Errorf("Transaction %s "+
 						"rejected by %s: %s",
 						tx.TxHash(), sp.Addr(),
