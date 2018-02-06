@@ -544,12 +544,27 @@ func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 
 // Config is a struct detailing the configuration of the chain service.
 type Config struct {
-	DataDir      string
-	Database     walletdb.DB
-	Namespace    []byte
-	ChainParams  chaincfg.Params
+	// DataDir is the directory that neutrino will store all header
+	// information within.
+	DataDir string
+
+	// Database is an *open* database instance that we'll use to storm
+	// indexes of teh chain.
+	Database walletdb.DB
+
+	// ChainParams is the chain that we're running on.
+	ChainParams chaincfg.Params
+
+	// ConnectPeers is a slice of hosts that should be connected to on
+	// startup, and be established as persistent peers.
+	//
+	// NOTE: If specified, we'll *only* connect to this set of peers and
+	// won't attempt to automatically seek outbound peers.
 	ConnectPeers []string
-	AddPeers     []string
+
+	// AddPeers is a slice of hosts that should be connected to on startup,
+	// and be maintained as persistent peers.
+	AddPeers []string
 }
 
 // ChainService is instantiated with functional options
