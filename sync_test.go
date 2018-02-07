@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -654,7 +655,7 @@ func TestSetup(t *testing.T) {
 	}
 	banPeer(svc, h2)
 	err = svc.SendTransaction(authTx1.Tx, queryOptions...)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
 	_, err = h1.Node.Generate(1)
@@ -692,7 +693,7 @@ func TestSetup(t *testing.T) {
 	}
 	banPeer(svc, h2)
 	err = svc.SendTransaction(authTx2.Tx, queryOptions...)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
 	_, err = h1.Node.Generate(1)
