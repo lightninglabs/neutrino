@@ -1144,10 +1144,10 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Check that block height matches what we have.
-			if int32(height) != haveBlock.Height() {
+			if height != uint32(haveBlock.Height()) {
 				errChan <- fmt.Errorf("Block height from "+
 					"network doesn't match expected "+
-					"height. Want: %d, network: %d",
+					"height. Want: %v, network: %v",
 					height, haveBlock.Height())
 				return
 			}
