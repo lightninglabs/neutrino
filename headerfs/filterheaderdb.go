@@ -5,7 +5,7 @@ import (
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
 
-// interface to persistent filter header store
+// FilterHeaderDB is the interface to the persistent filter header store
 // An implementation of FilterHeaderDB is a fully fledged database for any variant of filter headers.
 type FilterHeaderDB interface {
 	// FetchHeader returns the filter header that corresponds to the passed block

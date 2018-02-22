@@ -7,7 +7,7 @@ import (
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
 
-// Interface to persistent block header store
+// BlockHeaderDB is the interface to the persistent block header store
 // An implementation of BlockHeaderDB is a fully fledged database for Bitcoin block headers.
 type BlockHeaderDB interface {
 	// WriteHeaders writes a set of headers to disk and updates the index in a
@@ -50,7 +50,6 @@ type BlockHeaderDB interface {
 	// information about the new header tip after truncation is returned.
 	RollbackLastBlock() (*waddrmgr.BlockStamp, error)
 }
-
 
 // BlockHeaderStore implements the BlockHeaderDB interface
 // Create an instance with: NewBlockHeaderStore
