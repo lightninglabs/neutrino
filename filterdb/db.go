@@ -45,7 +45,7 @@ var (
 )
 
 // FilterDatabase is an interface which represents an object that is capable of
-// storing and retiring filters according to their corresponding block hash and
+// storing and retrieving filters according to their corresponding block hash and
 // also their filter type.
 //
 // TODO(roasbeef): similar interface for headerfs?

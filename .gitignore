@@ -15,3 +15,6 @@
 
 # Glide vendor subdirectory
 vendor/
+
+#GoLand config files
+.idea
