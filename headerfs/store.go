@@ -141,7 +141,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 	// First, we'll compute the size of the current file so we can
 	// calculate the latest header written to disk.
-	fileHeight := uint32(fileInfo.Size() / 80) - 1
+	fileHeight := uint32(fileInfo.Size()/80) - 1
 
 	// Using the file's current height, fetch the latest on-disk header.
 	latestFileHeader, err := bhs.readHeader(fileHeight)
@@ -574,7 +574,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 
 	// First, we'll compute the size of the current file so we can
 	// calculate the latest header written to disk.
-	fileHeight := uint32(fileInfo.Size() / 32) - 1
+	fileHeight := uint32(fileInfo.Size()/32) - 1
 
 	// Using the file's current height, fetch the latest on-disk header.
 	latestFileHeader, err := fhs.readHeader(fileHeight)
