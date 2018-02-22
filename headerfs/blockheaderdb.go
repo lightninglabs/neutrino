@@ -7,6 +7,8 @@ import (
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
 
+// Interface to persistent block header store
+// An implementation of BlockHeaderDB is a fully fledged database for Bitcoin block headers.
 type BlockHeaderDB interface {
 	// WriteHeaders writes a set of headers to disk and updates the index in a
 	// single atomic transaction.
@@ -49,13 +51,14 @@ type BlockHeaderDB interface {
 	RollbackLastBlock() (*waddrmgr.BlockStamp, error)
 }
 
-// BlockHeaderStore is an implementation of a fully fledged database for
-// Bitcoin block headers. The BlockHeaderStore combines a flat file to store
+
+// BlockHeaderStore implements the BlockHeaderDB interface
+// Create an instance with: NewBlockHeaderStore
+//
+// The BlockHeaderStore combines a flat file to store
 // the block headers with a database instance for managing the index into the
 // set of flat files.
 //
-// BlockHeaderStore implements the BlockHeaderDB interface
-// Create an instance with: NewBlockHeaderStore
 type BlockHeaderStore struct {
 	*headerStore
 }

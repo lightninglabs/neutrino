@@ -5,6 +5,8 @@ import (
 	"github.com/roasbeef/btcwallet/waddrmgr"
 )
 
+// interface to persistent filter header store
+// An implementation of FilterHeaderDB is a fully fledged database for any variant of filter headers.
 type FilterHeaderDB interface {
 	// FetchHeader returns the filter header that corresponds to the passed block
 	// height.
@@ -30,13 +32,11 @@ type FilterHeaderDB interface {
 	RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error)
 }
 
-// FilterHeaderStore is an implementation of a fully fledged database for any
-// variant of filter headers.  The FilterHeaderStore combines a flat file to
-// store the block headers with a database instance for managing the index into
-// the set of flat files.
-//
 // FilterHeaderStore implements the FilterHeaderDB interface
 // Create an instance with: NewFilterHeaderStore
+//
+// The FilterHeaderStore combines a flat file to store the block headers with a
+// database instance for managing the index into the set of flat files.
 type FilterHeaderStore struct {
 	*headerStore
 }
