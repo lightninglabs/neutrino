@@ -48,7 +48,6 @@ var (
 // storing and retiring filters according to their corresponding block hash and
 // also their filter type.
 //
-// TODO(roasbeef): similar interface for headerfs?
 type FilterDatabase interface {
 	// PutFilter stores a filter with the given hash and type to persistent
 	// storage.

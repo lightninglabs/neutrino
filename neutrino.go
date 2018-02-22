@@ -589,9 +589,9 @@ type ChainService struct {
 	shutdown      int32
 
 	FilterDB         filterdb.FilterDatabase
-	BlockHeaders     *headerfs.BlockHeaderStore
-	RegFilterHeaders *headerfs.FilterHeaderStore
-	ExtFilterHeaders *headerfs.FilterHeaderStore
+	BlockHeaders     headerfs.BlockHeaderDB
+	RegFilterHeaders headerfs.FilterHeaderDB
+	ExtFilterHeaders headerfs.FilterHeaderDB
 
 	chainParams       chaincfg.Params
 	addrManager       *addrmgr.AddrManager

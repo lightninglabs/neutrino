@@ -85,14 +85,6 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}, nil
 }
 
-// BlockHeaderStore is an implementation of a fully fledged database for
-// Bitcoin block headers. The BlockHeaderStore combines a flat file to store
-// the block headers with a database instance for managing the index into the
-// set of flat files.
-type BlockHeaderStore struct {
-	*headerStore
-}
-
 // NewBlockHeaderStore creates a new instance of the BlockHeaderStore based on
 // a target file path, an open database instance, and finally a set of
 // parameters for the target chain. These parameters are required as if this is
@@ -253,15 +245,6 @@ func (h *BlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 		Height: int32(chainTipHeight) - 1,
 		Hash:   prevHeaderHash,
 	}, nil
-}
-
-// BlockHeader is a Bitcoin block header that also has its height included.
-type BlockHeader struct {
-	*wire.BlockHeader
-
-	// Height is the height of this block header within the current main
-	// chain.
-	Height uint32
 }
 
 // toIndexEntry converts the BlockHeader into a matching headerEntry. This
@@ -485,14 +468,6 @@ func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 	return latestHeader, tipHeight, nil
 }
 
-// FilterHeaderStore is an implementation of a fully fledged database for any
-// variant of filter headers.  The FilterHeaderStore combines a flat file to
-// store the block headers with a database instance for managing the index into
-// the set of flat files.
-type FilterHeaderStore struct {
-	*headerStore
-}
-
 // NewFilterHeaderStore returns a new instance of the FilterHeaderStore based
 // on a target file path, filter type, and target net parameters. These
 // parameters are required as if this is the initial start up of the
@@ -625,21 +600,6 @@ func (f *FilterHeaderStore) FetchHeaderByHeight(height uint32) (*chainhash.Hash,
 	defer f.mtx.RUnlock()
 
 	return f.readHeader(int64(height))
-}
-
-// FilterHeader represents a filter header (basic or extended). The filter
-// header itself is coupled with the block height and hash of the filter's
-// block.
-type FilterHeader struct {
-	// HeaderHash is the hash of the block header that this filter header
-	// corresponds to.
-	HeaderHash chainhash.Hash
-
-	// FilterHash is the filter header itself.
-	FilterHash chainhash.Hash
-
-	// Height is the block height of the filter header in the main chain.
-	Height uint32
 }
 
 // toIndexEntry converts the filter header into a index entry to be stored

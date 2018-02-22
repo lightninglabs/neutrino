@@ -50,7 +50,7 @@ var (
 	// messages.
 	numQueryThreads = 20
 	queryOptions    = []neutrino.QueryOption{
-	//neutrino.NumRetries(5),
+		//neutrino.NumRetries(5),
 	}
 
 	// The logged sequence of events we want to see. The value of i

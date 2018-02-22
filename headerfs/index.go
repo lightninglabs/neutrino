@@ -258,7 +258,7 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 	return tipHash, tipHeight, nil
 }
 
-// truncateIndex truncates the index for a particluar header type by a single
+// truncateIndex truncates the index for a particular header type by a single
 // header entry. The passed newTip pointer should point to the hash of the new
 // chain tip. Optionally, if the entry is to be deleted as well, then the
 // delete flag should be set to true.
