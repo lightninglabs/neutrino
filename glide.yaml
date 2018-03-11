@@ -1,7 +1,7 @@
 package: github.com/lightninglabs/neutrino
 import:
-- package: github.com/boltdb/bolt
-  version: ^1.3.0
+- package: github.com/coreos/bbolt
+  version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/roasbeef/btcd
   version: 9978b939c33973be19b932fa7b936079bb7ba38d
   subpackages:
@@ -21,7 +21,7 @@ import:
   - gcs/builder
   - hdkeychain
 - package: github.com/roasbeef/btcwallet
-  version: 4f4765c3e3baf4c7b40c311340a076ec83c5ef3a
+  version: 46f7390abe89576059b52588d91b82212e753493
   subpackages:
   - waddrmgr
   - wallet/txauthor
