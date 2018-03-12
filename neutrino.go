@@ -608,6 +608,7 @@ type ChainService struct {
 	services          wire.ServiceFlag
 	blockSubscribers  map[*blockSubscription]struct{}
 	mtxSubscribers    sync.RWMutex
+	utxoScanner       UtxoScanner
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -792,6 +793,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		})
 	}
 
+	s.utxoScanner = NewUtxoScanner(&s)
+	s.utxoScanner.Start()
+
 	return &s, nil
 }
 
@@ -806,6 +810,16 @@ func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 		Height: int32(bestHeight),
 		Hash:   bestHeader.BlockHash(),
 	}, nil
+}
+
+// GetBlockHash returns the block hash at the given height.
+func (s *ChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	header, err := s.BlockHeaders.FetchHeaderByHeight(uint32(height))
+	if err != nil {
+		return nil, err
+	}
+	hash := header.BlockHash()
+	return &hash, err
 }
 
 // BanPeer bans a peer that has already been connected to the server by ip.
