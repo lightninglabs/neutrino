@@ -892,12 +892,13 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 	// Track our position in the chain.
 	curHeader, curHeight, err := s.BlockHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
 	curStamp := &waddrmgr.BlockStamp{
 		Hash:   curHeader.BlockHash(),
 		Height: int32(curHeight),
-	}
-	if err != nil {
-		return nil, err
 	}
 
 	// Find our earliest possible block.
