@@ -353,7 +353,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// In order to verify the authenticity of the filter, we'll fetch the
 	// target block header so we can retrieve the hash of the prior block,
 	// which is required to fetch the filter header for that block.
-	block, _, err := s.BlockHeaders.FetchHeader(&blockHash)
+	block, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -376,18 +376,11 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			"from database", blockHash)
 	}
 
-	// If we're expecting a zero filter, just return a nil filter and don't
-	// bother trying to get it from the network. The caller will know
-	// there's no error because we're also returning a nil error.
-	if builder.MakeHeaderForFilter(nil, *prevHeader) == *curHeader {
-		return nil, nil
-	}
-
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
 	s.queryPeers(
-		// Send a wire.GetCFilterMsg
-		wire.NewMsgGetCFilter(&blockHash, filterType),
+		// Send a wire.MsgGetCFilters
+		wire.NewMsgGetCFilters(filterType, height, &blockHash),
 
 		// Check responses and if we get one that matches, end the
 		// query early.
@@ -399,12 +392,6 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 				// found a filter, or we risk closing an
 				// already closed channel.
 				if filter != nil {
-					return
-				}
-
-				// If the filter data is too short.  Ignore
-				// this message.
-				if len(response.Data) < 4 {
 					return
 				}
 
@@ -428,8 +415,10 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 				// for the header _after_ the filter in the
 				// chain checks out. If not, we can ignore this
 				// response.
-				if builder.MakeHeaderForFilter(gotFilter,
-					*prevHeader) != *curHeader {
+				if gotHeader, err := builder.
+					MakeHeaderForFilter(gotFilter,
+						*prevHeader); err != nil ||
+					gotHeader != *curHeader {
 					return
 				}
 
