@@ -100,7 +100,7 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 		// With the bucket created, we'll now construct the initial
 		// basic genesis filter and store it within the database.
 		basicFilter, err := builder.BuildBasicFilter(genesisBlock)
-		if err != nil && err != gcs.ErrNoData {
+		if err != nil {
 			return err
 		}
 		err = putFilter(regFilters, genesisHash, basicFilter)
@@ -117,7 +117,7 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 		}
 
 		extFilter, err := builder.BuildExtFilter(genesisBlock)
-		if err != nil && err != gcs.ErrNoData {
+		if err != nil {
 			return err
 		}
 		return putFilter(extFilters, genesisHash, extFilter)
@@ -141,7 +141,12 @@ func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
 		return bucket.Put(hash[:], nil)
 	}
 
-	return bucket.Put(hash[:], filter.NBytes())
+	bytes, err := filter.NBytes()
+	if err != nil {
+		return err
+	}
+
+	return bucket.Put(hash[:], bytes)
 }
 
 // PutFilter stores a filter with the given hash and type to persistent
@@ -166,7 +171,12 @@ func (f *FilterStore) PutFilter(hash *chainhash.Hash,
 			return targetBucket.Put(hash[:], nil)
 		}
 
-		return targetBucket.Put(hash[:], filter.NBytes())
+		bytes, err := filter.NBytes()
+		if err != nil {
+			return err
+		}
+
+		return targetBucket.Put(hash[:], bytes)
 	})
 }
 

@@ -544,13 +544,6 @@ func (b *blockManager) startSync(peers *list.List) {
 			bestExtHeight, best.Height)
 	}
 	for i := minHeight; i < maxminHeight; {
-		startHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(i)
-		if err != nil {
-			log.Errorf("Failed to get block header for height %d: "+
-				"%s", i, err)
-			break
-		}
-		startHash := startHeader.BlockHash()
 		endHeight := i
 		fType := wire.GCSFilterRegular
 		if endHeight < bestRegHeight {
@@ -578,29 +571,31 @@ func (b *blockManager) startSync(peers *list.List) {
 		}
 		endHeader, err := b.server.BlockHeaders.
 			FetchHeaderByHeight(endHeight)
+		if err != nil {
+			log.Errorf("Failed to get block header for height %d: "+
+				"%s", endHeight, err)
+			break
+		}
 		endHash := endHeader.BlockHash()
-		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
-			fType)
+		b.sendGetcfheaders(i+1, &endHash, int(endHeight-i), fType)
 		i = endHeight
 	}
 	for i := maxminHeight; i < uint32(best.Height); {
-		startHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(i)
-		if err != nil {
-			log.Errorf("Failed to get block header for height %d: "+
-				"%s", i, err)
-			break
-		}
-		startHash := startHeader.BlockHash()
 		endHeight := i + wire.MaxCFHeadersPerMsg
 		if endHeight > uint32(best.Height) {
 			endHeight = uint32(best.Height)
 		}
 		endHeader, err := b.server.BlockHeaders.
 			FetchHeaderByHeight(endHeight)
+		if err != nil {
+			log.Errorf("Failed to get block header for height %d: "+
+				"%s", endHeight, err)
+			break
+		}
 		endHash := endHeader.BlockHash()
-		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
+		b.sendGetcfheaders(i+1, &endHash, int(endHeight-i),
 			wire.GCSFilterRegular)
-		b.sendGetcfheaders(&startHash, &endHash, int(endHeight-i),
+		b.sendGetcfheaders(i+1, &endHash, int(endHeight-i),
 			wire.GCSFilterExtended)
 		i = endHeight
 	}
@@ -1116,6 +1111,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			if b.lastExtCFHeaderHeight > int32(backHeight) {
 				b.lastExtCFHeaderHeight = int32(backHeight)
 			}
+			b.sendGetcfheaders(backHeight+1, finalHash, 1,
+				wire.GCSFilterRegular)
+			b.sendGetcfheaders(backHeight+1, finalHash, 1,
+				wire.GCSFilterExtended)
 		}
 
 		// Verify the header at the next checkpoint height matches.
@@ -1167,10 +1166,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 		// Send getcfheaders to each peer based on these headers.
 		cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
-		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-			len(msg.Headers), wire.GCSFilterRegular)
-		b.sendGetcfheaders(&msg.Headers[0].PrevBlock, &cfhStopHash,
-			len(msg.Headers), wire.GCSFilterExtended)
+		b.sendGetcfheaders(uint32(int(finalHeight)-len(headerWriteBatch)+1),
+			&cfhStopHash, len(headerWriteBatch), wire.GCSFilterRegular)
+		b.sendGetcfheaders(uint32(int(finalHeight)-len(headerWriteBatch)+1),
+			&cfhStopHash, len(headerWriteBatch), wire.GCSFilterExtended)
 	}
 
 	// When this header is a checkpoint, find the next checkpoint.
@@ -1199,10 +1198,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 // sendGetcfheaders sends a getcfheaders message to all peers with the
 // specified start block and hash block and for the specified type of header.
-func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
+func (b *blockManager) sendGetcfheaders(startHeight uint32, endBlock *chainhash.Hash,
 	count int, filterType wire.FilterType) {
 	// Send getcfheaders to each peer based on these headers.
-	cfhLocator := blockchain.BlockLocator([]*chainhash.Hash{startBlock})
 	cfhReq := cfhRequest{
 		filterType: filterType,
 		stopHash:   *endBlock,
@@ -1214,7 +1212,7 @@ func (b *blockManager) sendGetcfheaders(startBlock, endBlock *chainhash.Hash,
 		sp.mtxReqCFH.Lock()
 		sp.requestedCFHeaders[cfhReq] = count
 		sp.mtxReqCFH.Unlock()
-		sp.pushGetCFHeadersMsg(cfhLocator, endBlock, filterType)
+		sp.pushGetCFHeadersMsg(startHeight, endBlock, filterType)
 	})
 }
 
@@ -1230,7 +1228,7 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 	}
 
 	// Ignore messages with 0 headers.
-	if len(cfheaders.HeaderHashes) == 0 {
+	if len(cfheaders.FilterHashes) == 0 {
 		return
 	}
 
@@ -1244,7 +1242,7 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 	sp.mtxReqCFH.Lock()
 	expLen := sp.requestedCFHeaders[req]
 	sp.mtxReqCFH.Unlock()
-	if expLen != len(cfheaders.HeaderHashes) {
+	if expLen != len(cfheaders.FilterHashes) {
 		log.Warnf("Received cfheaders message doesn't match any "+
 			"getcfheaders request. Peer %s is probably on a "+
 			"different chain -- ignoring", sp.Addr())
@@ -1278,8 +1276,16 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
 	atomic.AddInt32(pendingMsgs, -1)
-	headerList := cfhmsg.cfheaders.HeaderHashes
-	respLen := len(headerList)
+
+	// Go through each filter hash and calculate the header hash from it.
+	prevHeader := cfhmsg.cfheaders.PrevFilterHeader
+	respLen := len(cfhmsg.cfheaders.FilterHashes)
+	headerList := make([]chainhash.Hash, respLen)
+	for i, filterHash := range cfhmsg.cfheaders.FilterHashes {
+		headerList[i] = chainhash.DoubleHashH(append(filterHash[:],
+			prevHeader[:]...))
+		prevHeader = headerList[i]
+	}
 
 	// Find the block header matching the last filter header, if any.
 	el := b.headerList.Front()
@@ -1313,8 +1319,8 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		}
 
 		// Process this header and set up the next iteration.
-		headerMap[hash][*headerList[i]] = append(
-			headerMap[hash][*headerList[i]], cfhmsg.peer,
+		headerMap[hash][headerList[i]] = append(
+			headerMap[hash][headerList[i]], cfhmsg.peer,
 		)
 		b.mapMutex.Unlock()
 		el = el.Prev()

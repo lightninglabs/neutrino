@@ -222,20 +222,11 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 
 // pushGetCFHeadersMsg sends a getcfheaders message for the provided block
 // locator and stop hash to the connected peer.
-func (sp *ServerPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
+func (sp *ServerPeer) pushGetCFHeadersMsg(startHeight uint32,
 	stopHash *chainhash.Hash, filterType wire.FilterType) error {
 
-	msg := wire.NewMsgGetCFHeaders()
-	msg.HashStop = *stopHash
-	for _, hash := range locator {
-		err := msg.AddBlockLocatorHash(hash)
-		if err != nil {
-			return err
-		}
-	}
-
-	msg.FilterType = filterType
-	sp.QueueMessage(msg, nil)
+	sp.QueueMessage(wire.NewMsgGetCFHeaders(filterType, startHeight,
+		stopHash), nil)
 	return nil
 }
 
@@ -440,7 +431,7 @@ func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 // is used to notify the server about a list of committed filter headers.
 func (sp *ServerPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
 	log.Tracef("Got cfheaders message with %d items from %s",
-		len(msg.HeaderHashes), p.Addr())
+		len(msg.FilterHashes), p.Addr())
 	sp.server.blockManager.QueueCFHeaders(msg, sp)
 }
 

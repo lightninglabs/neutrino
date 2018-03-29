@@ -25,7 +25,6 @@ import (
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/gcs"
 	"github.com/roasbeef/btcutil/gcs/builder"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 	"github.com/roasbeef/btcwallet/wallet/txauthor"
@@ -49,9 +48,7 @@ var (
 	// TODO: Implement load limiting for both outgoing and incoming
 	// messages.
 	numQueryThreads = 20
-	queryOptions    = []neutrino.QueryOption{
-	//neutrino.NumRetries(5),
-	}
+	queryOptions    = []neutrino.QueryOption{}
 
 	// The logged sequence of events we want to see. The value of i
 	// represents the block for which a loop is generating a log entry,
@@ -851,6 +848,9 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sync h1 and h2: %s", err)
 	}
 
+	// We increase the timeout because running on Travis with race
+	// detection enabled can make this pretty slow.
+	syncTimeout *= 2
 	err = waitForSync(t, svc, h1)
 	if err != nil {
 		checkErrChan(t, errChan)
@@ -941,20 +941,20 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, wire.GCSFilterRegular)
-	if err != nil || len(knownBasicHeader.HeaderHashes) < 1 {
+	if err != nil {
 		return fmt.Errorf("Couldn't get latest basic header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
 	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, wire.GCSFilterExtended)
-	if err != nil || len(knownExtHeader.HeaderHashes) < 1 {
+	if err != nil {
 		return fmt.Errorf("Couldn't get latest extended header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
 	haveBasicHeader := &chainhash.Hash{}
 	haveExtHeader := &chainhash.Hash{}
-	for (*knownBasicHeader.HeaderHashes[0] != *haveBasicHeader) &&
-		(*knownExtHeader.HeaderHashes[0] != *haveExtHeader) {
+	for (knownBasicHeader.PrevFilterHeader != *haveBasicHeader) &&
+		(knownExtHeader.PrevFilterHeader != *haveExtHeader) {
 		if total > syncTimeout {
 			return fmt.Errorf("Timed out after %v waiting for "+
 				"cfheaders synchronization.", syncTimeout)
@@ -963,6 +963,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		if err != nil {
 			if err == io.EOF {
 				haveBasicHeader = &chainhash.Hash{}
+				time.Sleep(syncUpdate)
+				total += syncUpdate
 				continue
 			}
 			return fmt.Errorf("Couldn't get regular filter header"+
@@ -972,6 +974,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		if err != nil {
 			if err == io.EOF {
 				haveExtHeader = &chainhash.Hash{}
+				time.Sleep(syncUpdate)
+				total += syncUpdate
 				continue
 			}
 			return fmt.Errorf("Couldn't get extended filter header"+
@@ -1053,18 +1057,18 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"header for %d (%s) from node %s", i,
 				hash, correctSyncNode.P2PAddress())
 		}
-		if *haveBasicHeader != *knownBasicHeader.HeaderHashes[0] {
+		if *haveBasicHeader != knownBasicHeader.PrevFilterHeader {
 			return fmt.Errorf("Basic header for %d (%s) "+
 				"doesn't match node %s. DB: %s, node: %s", i,
 				hash, correctSyncNode.P2PAddress(),
 				haveBasicHeader,
-				knownBasicHeader.HeaderHashes[0])
+				knownBasicHeader.PrevFilterHeader)
 		}
-		if *haveExtHeader != *knownExtHeader.HeaderHashes[0] {
+		if *haveExtHeader != knownExtHeader.PrevFilterHeader {
 			return fmt.Errorf("Extended header for %d (%s)"+
 				" doesn't match node %s. DB: %s, node: %s", i,
 				hash, correctSyncNode.P2PAddress(),
-				haveExtHeader, knownExtHeader.HeaderHashes[0])
+				haveExtHeader, knownExtHeader.PrevFilterHeader)
 		}
 	}
 	return nil
@@ -1143,7 +1147,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if int32(height) != haveBlock.Height() {
 				errChan <- fmt.Errorf("Block height from "+
 					"network doesn't match expected "+
-					"height. Want: %s, network: %s",
+					"height. Want: %d, network: %d",
 					height, haveBlock.Height())
 				return
 			}
@@ -1166,7 +1170,13 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			// Check that network and RPC cfilters match.
 			var haveBytes []byte
 			if haveFilter != nil {
-				haveBytes = haveFilter.NBytes()
+				haveBytes, err = haveFilter.NBytes()
+				if err != nil {
+					errChan <- fmt.Errorf("Couldn't get "+
+						"basic filter for block %d "+
+						"via P2P: %s", height, err)
+					return
+				}
 			}
 			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
@@ -1177,15 +1187,21 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			// Calculate basic filter from block.
 			calcFilter, err := builder.BuildBasicFilter(
 				haveBlock.MsgBlock())
-			if err != nil && err != gcs.ErrNoData {
+			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build basic "+
 					"filter for block %d (%s): %s", height,
 					blockHash, err)
 				return
 			}
+			calcBytes, err := calcFilter.NBytes()
+			if err != nil {
+				errChan <- fmt.Errorf("Couldn't get bytes from"+
+					" calculated basic filter for block "+
+					"%d (%s): %s", height, blockHash, err)
+			}
 			// Check that the network value matches the calculated
 			// value from the block.
-			if !reflect.DeepEqual(haveFilter, calcFilter) {
+			if !bytes.Equal(haveBytes, calcBytes) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
 					"network/DB doesn't match calculated "+
 					"value for block %d", height)
@@ -1210,8 +1226,14 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Check that the filter and header line up.
-			calcHeader := builder.MakeHeaderForFilter(calcFilter,
-				*prevHeader)
+			calcHeader, err := builder.MakeHeaderForFilter(
+				calcFilter, *prevHeader)
+			if err != nil {
+				errChan <- fmt.Errorf("Couldn't calculate "+
+					"header for basic filter for block "+
+					"%d: %s", height, err)
+				return
+			}
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
 				errChan <- fmt.Errorf("Filter header doesn't "+
 					"match. Want: %s, got: %s", curHeader,
@@ -1236,7 +1258,13 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			}
 			// Check that network and RPC cfilters match
 			if haveFilter != nil {
-				haveBytes = haveFilter.NBytes()
+				haveBytes, err = haveFilter.NBytes()
+				if err != nil {
+					errChan <- fmt.Errorf("Couldn't get "+
+						"extended filter for block %d "+
+						"via P2P: %s", height, err)
+					return
+				}
 			} else {
 				haveBytes = nil
 			}
@@ -1249,18 +1277,26 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			// Calculate extended filter from block
 			calcFilter, err = builder.BuildExtFilter(
 				haveBlock.MsgBlock())
-			if err != nil && err != gcs.ErrNoData {
+			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build extended"+
 					" filter for block %d (%s): %s", height,
 					blockHash, err)
 				return
 			}
+			calcBytes, err = calcFilter.NBytes()
+			if err != nil {
+				errChan <- fmt.Errorf("Couldn't get bytes from"+
+					" calculated extended filter for block"+
+					" %d (%s): %s", height, blockHash, err)
+			}
 			// Check that the network value matches the calculated
 			// value from the block.
-			if !reflect.DeepEqual(haveFilter, calcFilter) {
+			if !bytes.Equal(haveBytes, calcBytes) {
 				errChan <- fmt.Errorf("Extended filter from "+
 					"P2P network/DB doesn't match "+
-					"calculated value for block %d", height)
+					"calculated value for block %d: "+
+					"got\n%+v\nwant\n%+v\n", height,
+					haveFilter, calcFilter)
 				return
 			}
 			// Get previous extended filter header from the
@@ -1284,8 +1320,14 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Check that the filter and header line up.
-			calcHeader = builder.MakeHeaderForFilter(calcFilter,
-				*prevHeader)
+			calcHeader, err = builder.MakeHeaderForFilter(
+				calcFilter, *prevHeader)
+			if err != nil {
+				errChan <- fmt.Errorf("Couldn't calculate "+
+					"header for extended filter for block "+
+					"%d: %s", height, err)
+				return
+			}
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
 				errChan <- fmt.Errorf("Filter header doesn't "+
 					"match. Want: %s, got: %s", curHeader,
