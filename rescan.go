@@ -169,7 +169,12 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// If we have something to watch, create a watch list. The watch list
 	// can be composed of a set of scripts, outpoints, and txids.
 	for _, addr := range ro.watchAddrs {
-		ro.watchList = append(ro.watchList, addr.ScriptAddress())
+		script, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return err
+		}
+
+		ro.watchList = append(ro.watchList, script)
 	}
 	for _, op := range ro.watchOutPoints {
 		ro.watchList = append(ro.watchList,
@@ -490,10 +495,17 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 					}
 				}
 
-				// Even though the transaction may already be known as relevant
-				// and there might not be a notification callback, we need to
-				// call paysWatchedAddr anyway as it updates the rescan options.
-				if ro.paysWatchedAddr(tx) {
+				// Even though the transaction may already be
+				// known as relevant and there might not be a
+				// notification callback, we need to call
+				// paysWatchedAddr anyway as it updates the
+				// rescan options.
+				pays, err := ro.paysWatchedAddr(tx)
+				if err != nil {
+					return err
+				}
+
+				if pays {
 					relevant = true
 					if ro.ntfn.OnRecvTx != nil {
 						ro.ntfn.OnRecvTx(tx, &txDetails)
@@ -574,7 +586,12 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	ro.watchTxIDs = append(ro.watchTxIDs, update.txIDs...)
 
 	for _, addr := range update.addrs {
-		ro.watchList = append(ro.watchList, addr.ScriptAddress())
+		script, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return false, err
+		}
+
+		ro.watchList = append(ro.watchList, script)
 	}
 	for _, op := range update.outPoints {
 		ro.watchList = append(ro.watchList, builder.OutPointToFilterEntry(op))
@@ -655,46 +672,55 @@ func (ro *rescanOptions) spendsWatchedOutpoint(tx *btcutil.Tx) bool {
 }
 
 // paysWatchedAddr returns whether the transaction matches the filter by having
-// an output paying to a watched address. If that is the case, this also updates
-// the filter to watch the newly created output going forward.
-func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) bool {
+// an output paying to a watched address. If that is the case, this also
+// updates the filter to watch the newly created output going forward.
+func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) (bool, error) {
 	anyMatchingOutputs := false
 
 txOutLoop:
 	for outIdx, out := range tx.MsgTx().TxOut {
-		pushedData, err := txscript.PushedData(out.PkScript)
-		if err != nil {
-			continue
-		}
+		pkScript := out.PkScript
 
 		for _, addr := range ro.watchAddrs {
-			for _, data := range pushedData {
-				if !bytes.Equal(data, addr.ScriptAddress()) {
-					continue
-				}
-
-				anyMatchingOutputs = true
-
-				// Update the filter by also watching this created outpoint
-				// for the event in the future that it's spent.
-				hash := tx.Hash()
-				outPoint := wire.OutPoint{
-					Hash:  *hash,
-					Index: uint32(outIdx),
-				}
-				ro.watchOutPoints = append(ro.watchOutPoints, outPoint)
-				ro.watchList = append(ro.watchList,
-					builder.OutPointToFilterEntry(outPoint))
-
-				continue txOutLoop
+			// We'll convert the address into its matching pkScript
+			// to in order to check for a match.
+			addrScript, err := txscript.PayToAddrScript(addr)
+			if err != nil {
+				return false, err
 			}
+
+			// If the script doesn't match, we'll move onto the
+			// next one.
+			if !bytes.Equal(pkScript, addrScript) {
+				continue
+			}
+
+			// At this state, we have a matching output so we'll
+			// mark this transaction as matching.
+			anyMatchingOutputs = true
+
+			// Update the filter by also watching this created
+			// outpoint for the event in the future that it's
+			// spent.
+			hash := tx.Hash()
+			outPoint := wire.OutPoint{
+				Hash:  *hash,
+				Index: uint32(outIdx),
+			}
+			ro.watchOutPoints = append(ro.watchOutPoints, outPoint)
+			ro.watchList = append(
+				ro.watchList, builder.OutPointToFilterEntry(outPoint),
+			)
+
+			continue txOutLoop
 		}
 	}
-	return anyMatchingOutputs
+
+	return anyMatchingOutputs, nil
 }
 
 // Rescan is an object that represents a long-running rescan/notification
-// client with updatable filters. It's meant to be close to a drop-in
+// client with updateable filters. It's meant to be close to a drop-in
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
