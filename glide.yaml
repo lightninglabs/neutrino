@@ -3,7 +3,7 @@ import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/roasbeef/btcd
-  version: 9978b939c33973be19b932fa7b936079bb7ba38d
+  version: 4844a17dbc7797459df38c724758c02a89c5e8e9
   subpackages:
   - blockchain
   - btcec
@@ -14,14 +14,14 @@ import:
   - wire
 - package: github.com/btcsuite/btclog
 - package: github.com/roasbeef/btcutil
-  version: c3ff179366044979fb9856c2feb79bd4c2184c7a
+  version: 071180c7540a3ac6db95d88fc8709bb83c0b47d4
   subpackages:
   - base58
   - gcs
   - gcs/builder
   - hdkeychain
 - package: github.com/roasbeef/btcwallet
-  version: 46f7390abe89576059b52588d91b82212e753493
+  version: 45445d1b09670109410174cb01fab0b133e3a904
   subpackages:
   - waddrmgr
   - wallet/txauthor
