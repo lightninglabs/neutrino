@@ -2,32 +2,67 @@ package neutrino
 
 import (
 	"container/heap"
-	"github.com/davecgh/go-spew/spew"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/gcs"
-	"github.com/roasbeef/btcutil/gcs/builder"
-	"github.com/roasbeef/btcwallet/waddrmgr"
 	"sync"
+	"sync/atomic"
+
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/davecgh/go-spew/spew"
 )
+
+// reportAndError is a simple pair type holding a spend report and error.
+type reportAndError struct {
+	report *SpendReport
+	err    error
+}
 
 // GetUtxoRequest is a request to scan for OutPoint from the height StartHeight.
 type GetUtxoRequest struct {
-	OutPoint    *wire.OutPoint
+	// OutPoint is the target outpoint to watch for spentness.
+	OutPoint *wire.OutPoint
+
+	// StartHeight is the height we should begin scanning for spends.
 	StartHeight uint32
-	Result      func(*SpendReport, error)
+
+	resultErrChan chan reportAndError
+
+	quit chan struct{}
 }
 
-// Interface exposes the necessary methods for interacting with the blockchain.
-type Interface interface {
-	GetBlockFromNetwork(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
-	GetBlockHash(int64) (*chainhash.Hash, error)
-	BestSnapshot() (*waddrmgr.BlockStamp, error)
-	GetCFilter(blockHash chainhash.Hash, filterType wire.FilterType,
-		options ...QueryOption) (*gcs.Filter, error)
-	blockFilterMatches(ro *rescanOptions, blockHash *chainhash.Hash) (bool,
-		error)
+func (r *GetUtxoRequest) deliver(report *SpendReport, err error) {
+	select {
+	case r.resultErrChan <- reportAndError{report, err}:
+	default:
+	}
+}
+
+// Result is callback returning either a spend report or an error.
+func (r *GetUtxoRequest) Result() (*SpendReport, error) {
+	select {
+	case resultErr := <-r.resultErrChan:
+		return resultErr.report, resultErr.err
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	}
+}
+
+// UtxoScannerConfig exposes configurable methods for interacting with the blockchain.
+type UtxoScannerConfig struct {
+	// BestSnapshot returns the block stamp of the current chain tip.
+	BestSnapshot func() (*waddrmgr.BlockStamp, error)
+
+	// GetBlockHash returns the block hash at given height in main chain.
+	GetBlockHash func(height int64) (*chainhash.Hash, error)
+
+	// BlockFilterMatches checks the cfilter for the block hash for matches
+	// against the rescan options.
+	BlockFilterMatches func(ro *rescanOptions, blockHash *chainhash.Hash) (bool, error)
+
+	// GetBlock fetches a block from the p2p network.
+	GetBlock func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 }
 
 // A PriorityQueue implements heap.Interface and holds GetUtxoRequests. The
@@ -81,62 +116,153 @@ func (pq *PriorityQueue) IsEmpty() bool {
 // check whether it can safely be added to the current batch, if not it will be
 // included in the next batch.
 type UtxoScanner struct {
-	pq      PriorityQueue
-	stopped bool
+	started uint32
+	stopped uint32
 
-	chainClient Interface
+	cfg *UtxoScannerConfig
+
+	pq        PriorityQueue
+	stopQueue bool
 
 	nextBatch []*GetUtxoRequest
 
+	mu sync.Mutex
 	cv *sync.Cond
+
+	wg   sync.WaitGroup
+	quit chan struct{}
 }
 
 // NewUtxoScanner creates a new instance of UtxoScanner using the given chain
 // interface.
-func NewUtxoScanner(chainClient Interface) UtxoScanner {
-	return UtxoScanner{
-		pq:          make(PriorityQueue, 0),
-		cv:          sync.NewCond(&sync.Mutex{}),
-		stopped:     false,
-		chainClient: chainClient,
+func NewUtxoScanner(cfg *UtxoScannerConfig) *UtxoScanner {
+	scanner := &UtxoScanner{
+		cfg:  cfg,
+		cv:   sync.NewCond(&sync.Mutex{}),
+		quit: make(chan struct{}),
 	}
+	scanner.cv = sync.NewCond(&scanner.mu)
+
+	return scanner
 }
 
 // Start begins running scan batches.
 func (s *UtxoScanner) Start() {
-	go func() {
-		for {
-			s.cv.L.Lock()
-			if s.stopped {
-				s.cv.L.Unlock()
-				return
-			}
+	if !atomic.CompareAndSwapUint32(&s.started, 0, 1) {
+		return
+	}
 
-			// Re-queue previously skipped requests for next batch.
-			for _, request := range s.nextBatch {
-				heap.Push(&s.pq, request)
-			}
-
-			s.nextBatch = nil
-
-			s.cv.L.Unlock()
-
-			requests, err := s.runBatch()
-
-			// If there was an error, then notify the currently outstanding
-			// requests.
-			if err != nil {
-				for _, request := range requests {
-					request.Result(nil, err)
-				}
-			}
-		}
-	}()
+	s.wg.Add(1)
+	go s.batchManager()
 }
 
-// getAtHeight returns all GetUtxo requests that have starting height of the
+// Stop any in-progress scan.
+func (s *UtxoScanner) Stop() {
+	if !atomic.CompareAndSwapUint32(&s.stopped, 0, 1) {
+		return
+	}
+
+	s.cv.L.Lock()
+	s.stopQueue = true
+	s.cv.L.Unlock()
+
+	s.cv.Signal()
+
+	close(s.quit)
+	s.wg.Wait()
+}
+
+// Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
+func (s *UtxoScanner) Enqueue(outPoint *wire.OutPoint,
+	startHeight uint32) (*GetUtxoRequest, error) {
+
+	log.Debugf("Enqueuing request for %s with start height %d",
+		outPoint.String(), startHeight)
+
+	req := &GetUtxoRequest{
+		OutPoint:      outPoint,
+		StartHeight:   startHeight,
+		resultErrChan: make(chan reportAndError, 1),
+		quit:          s.quit,
+	}
+
+	s.cv.L.Lock()
+	select {
+	case <-s.quit:
+		s.cv.L.Unlock()
+		return nil, ErrShuttingDown
+	default:
+	}
+
+	// Insert the request into the queue and signal any threads that might be
+	// waiting for new elements.
+	heap.Push(&s.pq, req)
+
+	s.cv.L.Unlock()
+	s.cv.Signal()
+
+	return req, nil
+}
+
+// batchManager is responsible for scheduling batches of UTXOs to scan. Any
+// incoming requests whose start height has already been passed will be added to
+// the next batch, which gets scheduled after the current batch finishes.
+//
+// NOTE: This method MUST be spawned as a goroutine.
+func (s *UtxoScanner) batchManager() {
+	defer s.wg.Done()
+
+	for {
+		s.cv.L.Lock()
+		if s.stopQueue {
+			s.cv.L.Unlock()
+			return
+		}
+
+		// Re-queue previously skipped requests for next batch.
+		for _, request := range s.nextBatch {
+			heap.Push(&s.pq, request)
+		}
+
+		s.nextBatch = nil
+
+		s.cv.L.Unlock()
+
+		failedRequests, err := s.scan()
+
+		// If there was an error, then notify the currently outstanding
+		// requests.
+		if err != nil {
+			for _, request := range failedRequests {
+				request.deliver(nil, err)
+			}
+		}
+	}
+}
+
+// Returns the GetUtxoRequest with the lowest block height. If no elements are
+// available, then block until one is added.
+func (s *UtxoScanner) peek() *GetUtxoRequest {
+	s.cv.L.Lock()
+	defer s.cv.L.Unlock()
+
+	// Block until the queue is no longer empty.
+	for !s.stopQueue && s.pq.IsEmpty() {
+		s.cv.Wait()
+	}
+
+	// We return nil only in the case that we've been interrupted, so callers
+	// can use this to determine that the UtxoScanner is shutting down.
+	if s.stopQueue {
+		return nil
+	}
+
+	return s.pq.Peek()
+}
+
+// dequeueAtHeight returns all GetUtxo requests that have starting height of the
 // given height.
-func (s *UtxoScanner) getAtHeight(height uint32) []*GetUtxoRequest {
+func (s *UtxoScanner) dequeueAtHeight(height uint32) []*GetUtxoRequest {
 	s.cv.L.Lock()
 	defer s.cv.L.Unlock()
 
@@ -156,15 +282,80 @@ func (s *UtxoScanner) getAtHeight(height uint32) []*GetUtxoRequest {
 	return requests
 }
 
-// checkTransactions finds any transactions in the block that spend the given
-// outpoints.
-func checkTransactions(block *wire.MsgBlock, height uint32,
-	outpoints map[wire.OutPoint]struct{}) (map[wire.OutPoint]SpendReport,
-	error) {
-	spends := make(map[wire.OutPoint]SpendReport)
+// findInitialTransactions returns a SpendReport for the UTXO, or nil if it does
+// not exist in this block.
+func findInitialTransactions(block *wire.MsgBlock,
+	newReqs []*GetUtxoRequest) map[wire.OutPoint]*SpendReport {
 
-	// If we've spent the output in this block, return an
-	// error stating that the output is spent.
+	// Construct a reverse index from txid to all a list of requests whose
+	// outputs share the same txid.
+	txidReverseIndex := make(map[chainhash.Hash][]*GetUtxoRequest)
+	for _, req := range newReqs {
+		txidReverseIndex[req.OutPoint.Hash] = append(
+			txidReverseIndex[req.OutPoint.Hash], req,
+		)
+	}
+
+	// Iterate over the transactions in this block, hashing each and
+	// querying our reverse index to see if any requests depend on the txn.
+	initialTxns := make(map[wire.OutPoint]*SpendReport)
+	for _, tx := range block.Transactions {
+		txidReqs, ok := txidReverseIndex[tx.TxHash()]
+		if !ok {
+			continue
+		}
+
+		// For all requests that are watching this txid, use the output
+		// index of each to grab the initial output.
+		txOuts := tx.TxOut
+		for _, req := range txidReqs {
+			op := req.OutPoint
+
+			// Ensure that the outpoint's index references an actual
+			// output on the transaction. If not, we will be unable
+			// to find the initial output.
+			if op.Index >= uint32(len(txOuts)) {
+				log.Errorf("Failed to find outpoint %s -- "+
+					"invalid output index", req.OutPoint)
+				initialTxns[*op] = nil
+				continue
+			}
+
+			initialTxns[*op] = &SpendReport{
+				Output: txOuts[op.Index],
+			}
+		}
+
+		// If our set of initial txns is the same size as the requests
+		// we were asked to find, we are done.
+		if len(initialTxns) == len(newReqs) {
+			return initialTxns
+		}
+	}
+
+	// Otherwise, we must reconcile any requests for which the txid did not
+	// exist in this block.
+	for _, req := range newReqs {
+		_, ok := initialTxns[*req.OutPoint]
+		if !ok {
+			log.Errorf("Failed to find outpoint %s -- "+
+				"txid not found in block", req.OutPoint)
+			initialTxns[*req.OutPoint] = nil
+		}
+	}
+
+	return initialTxns
+}
+
+// findSpends finds any transactions in the block that spend the given
+// outpoints.
+func findSpends(block *wire.MsgBlock, height uint32,
+	outpoints map[wire.OutPoint][]byte) map[wire.OutPoint]*SpendReport {
+
+	spends := make(map[wire.OutPoint]*SpendReport)
+
+	// If we've spent the output in this block, return an error stating that
+	// the output is spent.
 	for _, tx := range block.Transactions {
 		// Check each input to see if this transaction spends one of our
 		// watched outpoints.
@@ -172,7 +363,8 @@ func checkTransactions(block *wire.MsgBlock, height uint32,
 			if _, ok := outpoints[ti.PreviousOutPoint]; ok {
 				log.Debugf("Transaction %s spends outpoint %s", tx.TxHash(),
 					ti.PreviousOutPoint)
-				spends[ti.PreviousOutPoint] = SpendReport{
+
+				spends[ti.PreviousOutPoint] = &SpendReport{
 					SpendingTx:         tx,
 					SpendingInputIndex: uint32(i),
 					SpendingTxHeight:   height,
@@ -181,27 +373,24 @@ func checkTransactions(block *wire.MsgBlock, height uint32,
 		}
 	}
 
-	return spends, nil
+	return spends
 }
 
-func buildFilterEntries(requests []*GetUtxoRequest) ([][]byte,
-	map[wire.OutPoint]struct{}) {
-	var filterEntries [][]byte
-	outpoints := make(map[wire.OutPoint]struct{})
-
-	for _, request := range requests {
-		op := *request.OutPoint
-		outpoints[op] = struct{}{}
-		filterEntries = append(filterEntries, builder.OutPointToFilterEntry(op))
-	}
-
-	return filterEntries, outpoints
-}
-
-// runBatch runs a single batch. If there was an error, then return the
+// scan runs a single batch, pulling in any requests that get added above the
+// batch's last processed height. If there was an error, then return the
 // outstanding requests.
-func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
-	var requests []*GetUtxoRequest
+func (s *UtxoScanner) scan() ([]*GetUtxoRequest, error) {
+	requests := make(map[wire.OutPoint]*GetUtxoRequest)
+
+	// Construct a closure that will spill the contents of the request map
+	// in the event we experience a critical rescan error.
+	spillRequests := func() []*GetUtxoRequest {
+		requestList := make([]*GetUtxoRequest, 0, len(requests))
+		for _, req := range requests {
+			requestList = append(requestList, req)
+		}
+		return requestList
+	}
 
 	// Take the request with the lowest block height so we can begin the scan
 	// from there.
@@ -212,39 +401,51 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 		return nil, nil
 	}
 
-	startHeight := req.StartHeight
-	best, err := s.chainClient.BestSnapshot()
-	if err != nil {
-		return requests, err
-	}
-
 	// While scanning through the blockchain, take note of the transactions that
 	// create the outpoints. If the outpoint isn't spent then return this
 	// transaction.
 	initialTx := make(map[wire.OutPoint]*SpendReport)
-	outpoints := make(map[wire.OutPoint]struct{})
+	outpoints := make(map[wire.OutPoint][]byte)
 	var filterEntries [][]byte
 
+	bestStamp, err := s.cfg.BestSnapshot()
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		startHeight = req.StartHeight
+		endHeight   = uint32(bestStamp.Height)
+	)
+
+scanToEnd:
 	// Scan forward through the blockchain and look for any transactions that
 	// might spend the given UTXOs.
-	for height := startHeight; height <= uint32(best.Height); height++ {
-		// If there are any new requests that can safely be added to this batch,
-		// then try and fetch them.
-		reqs := s.getAtHeight(height)
-		if len(reqs) > 0 {
-			for _, req := range reqs {
-				log.Debugf("Adding %s (%d) to watchlist", req.OutPoint.String(),
-					req.StartHeight)
-				requests = append(requests, req)
-				outpoints[*req.OutPoint] = struct{}{}
-				filterEntries = append(filterEntries,
-					builder.OutPointToFilterEntry(*req.OutPoint))
-			}
+	for height := startHeight; height <= endHeight; height++ {
+		// Check to see if the utxoscanner has been signaled to exit.
+		select {
+		case <-s.quit:
+			return spillRequests(), ErrShuttingDown
+		default:
 		}
 
-		hash, err := s.chainClient.GetBlockHash(int64(height))
+		// If there are any new requests that can safely be added to this batch,
+		// then try and fetch them.
+		reqs := s.dequeueAtHeight(height)
+		for _, req := range reqs {
+			log.Debugf("Adding outpoint=%s height=%d to watchlist",
+				req.OutPoint, req.StartHeight)
+
+			entry := builder.OutPointToFilterEntry(*req.OutPoint)
+			filterEntries = append(filterEntries, entry)
+
+			outpoints[*req.OutPoint] = entry
+			requests[*req.OutPoint] = req
+		}
+
+		hash, err := s.cfg.GetBlockHash(int64(height))
 		if err != nil {
-			return requests, err
+			return spillRequests(), err
 		}
 
 		// If an outpoint is created in this block, then fetch it regardless.
@@ -252,63 +453,98 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 		// outpoints.
 		fetch := len(reqs) > 0
 		if !fetch {
-			match, err := s.chainClient.blockFilterMatches(&rescanOptions{
-				watchList: filterEntries}, hash)
-			if err != nil {
-				return requests, err
+			options := rescanOptions{
+				watchList: filterEntries,
 			}
-			fetch = match
+
+			match, err := s.cfg.BlockFilterMatches(&options, hash)
+			if err != nil {
+				return spillRequests(), err
+			}
+
+			// If still no match is found, we have no reason to
+			// fetch this block, and can continue to next height.
+			if !match {
+				continue
+			}
 		}
 
-		if fetch {
-			log.Debugf("Fetching block at height %d (%s)", height,
-				hash.String())
-			block, err := s.chainClient.GetBlockFromNetwork(*hash)
-			if err != nil {
-				return requests, err
-			}
+		log.Debugf("Fetching block height=%d hash=%s", height, hash)
 
-			log.Debugf("Got block %d (%s)", height, hash.String())
-
-			if fetch {
-				for _, request := range requests {
-					if request.StartHeight == height {
-						tx := findTransaction(block.MsgBlock(),
-							request.OutPoint)
-						// Grab the tx that created this output.
-						initialTx[*request.OutPoint] = tx
-
-						log.Debugf("Block %d creates output %s", height,
-							request.OutPoint.String())
-					}
-				}
-			}
-
-			spends, err := checkTransactions(block.MsgBlock(), height,
-				outpoints)
-			if err != nil {
-				return requests, err
-			}
-
-			for outPoint, spend := range spends {
-				log.Debugf("Outpoint %s is spent in tx %s", outPoint.String(),
-					spew.Sprint(spend))
-
-				// Find the request this spend relates to.
-				var filteredRequests []*GetUtxoRequest
-				for _, request := range requests {
-					if *request.OutPoint == outPoint {
-						request.Result(&spend, nil)
-					} else {
-						filteredRequests = append(filteredRequests, request)
-					}
-				}
-				requests = filteredRequests
-
-				// Remove the filter from filterEntries.
-				filterEntries, outpoints = buildFilterEntries(requests)
-			}
+		block, err := s.cfg.GetBlock(*hash)
+		if err != nil {
+			return spillRequests(), err
 		}
+
+		// Check to see if the utxoscanner has been signaled to exit.
+		select {
+		case <-s.quit:
+			return spillRequests(), ErrShuttingDown
+		default:
+		}
+
+		log.Debugf("Got block height=%d hash=%s", height, hash)
+
+		// Grab the txns that created the outputs requested at this
+		// block height.
+		txnsInBlock := findInitialTransactions(block.MsgBlock(), reqs)
+		for outPoint, tx := range txnsInBlock {
+			if tx != nil {
+				log.Debugf("Block %d creates output %s",
+					height, outPoint)
+			}
+			initialTx[outPoint] = tx
+		}
+
+		// Filter the block for any spends using our set of outpoints.
+		spends := findSpends(block.MsgBlock(), height, outpoints)
+		for outPoint, spend := range spends {
+			// Find the request this spend relates to.
+			request, ok := requests[outPoint]
+			if !ok {
+				log.Debugf("Utxo scan request for scanned "+
+					"outpoint=%v was not found", outPoint)
+				continue
+			}
+
+			// With the request located, we remove this outpoint
+			// from both the requests, outpoints, and initial txns
+			// map. This will ensures we don't continue watching
+			// this outpoint.
+			delete(requests, outPoint)
+			delete(outpoints, outPoint)
+			delete(initialTx, outPoint)
+
+			log.Debugf("Outpoint %s is spent in tx %s",
+				outPoint.String(), spew.Sprint(spend))
+
+			// Deliver the spend report to the request.
+			request.deliver(spend, nil)
+		}
+
+		// Rebuild filter entries from cached entries remaining in
+		// outpoints map.
+		filterEntries = filterEntries[:0]
+		for _, entry := range outpoints {
+			filterEntries = append(filterEntries, entry)
+		}
+	}
+
+	// We've scanned up to the end height, now perform a check to see if we
+	// still have any new blocks to process. If this is the first time
+	// through, we might have a few blocks that were added since the
+	// scan started.
+	currStamp, err := s.cfg.BestSnapshot()
+	if err != nil {
+		return spillRequests(), err
+	}
+
+	// If the returned height is higher, we still have more blocks to go.
+	// Shift the start and end heights and continue scanning.
+	if uint32(currStamp.Height) > endHeight {
+		startHeight = endHeight + 1
+		endHeight = uint32(currStamp.Height)
+		goto scanToEnd
 	}
 
 	log.Debugf("Finished batch, %d unspent outpoints", len(requests))
@@ -316,72 +552,12 @@ func (s *UtxoScanner) runBatch() ([]*GetUtxoRequest, error) {
 	for _, request := range requests {
 		tx, ok := initialTx[*request.OutPoint]
 		if ok {
-			request.Result(tx, nil)
+			request.deliver(tx, nil)
 		} else {
 			// A nil SpendReport indicates the output was not found.
-			request.Result(nil, nil)
+			request.deliver(nil, nil)
 		}
 	}
 
 	return nil, nil
-}
-
-// Stop any in-progress scan.
-func (s *UtxoScanner) Stop() {
-	s.cv.L.Lock()
-	defer s.cv.L.Unlock()
-
-	s.stopped = true
-}
-
-// Returns the GetUtxoRequest with the lowest block height. If no elements are
-// available, then block until one is added.
-func (s *UtxoScanner) peek() *GetUtxoRequest {
-	s.cv.L.Lock()
-	defer s.cv.L.Unlock()
-
-	// Block until the queue is no longer empty.
-	for !s.stopped && s.pq.IsEmpty() {
-		s.cv.Wait()
-	}
-
-	// We return nil only in the case that we've been interrupted, so callers
-	// can use this to determine that the UtxoScanner is shutting down.
-	if s.stopped {
-		return nil
-	}
-
-	return s.pq.Peek()
-}
-
-// Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
-func (s *UtxoScanner) Enqueue(req *GetUtxoRequest) {
-	log.Debugf("Enqueuing request for %s with start height %d",
-		req.OutPoint.String(), req.StartHeight)
-	s.cv.L.Lock()
-
-	// Insert the request into the queue and signal any threads that might be
-	// waiting for new elements.
-	heap.Push(&s.pq, req)
-
-	s.cv.L.Unlock()
-	s.cv.Signal()
-}
-
-// findTransaction returns a SpendReport for the UTXO, or nil if it does not
-// exist in this block.
-func findTransaction(block *wire.MsgBlock,
-	point *wire.OutPoint) *SpendReport {
-	for _, tx := range block.Transactions {
-		if tx.TxHash() == point.Hash {
-			outputs := tx.TxOut
-			return &SpendReport{
-				Output: outputs[point.Index],
-			}
-		}
-	}
-
-	log.Errorf("Failed to find tx %s", point.Hash.String())
-
-	return nil
 }
