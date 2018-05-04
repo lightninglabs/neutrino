@@ -17,7 +17,6 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -892,37 +891,29 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		option(ro)
 	}
 
-	// As this is meant to fetch UTXO's, the options MUST specify at least
-	// a single outpoint.
+	// As this is meant to fetch UTXO's, the options MUST specify exactly
+	// one outpoint.
 	if len(ro.watchOutPoints) != 1 {
 		return nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 
-	var (
-		result *SpendReport
-		resultError error
-		wg sync.WaitGroup
+	req, err := s.utxoScanner.Enqueue(
+		&ro.watchOutPoints[0], uint32(ro.startBlock.Height),
 	)
-
-	wg.Add(1)
-	s.utxoScanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    &ro.watchOutPoints[0],
-		StartHeight: uint32(ro.startBlock.Height),
-		Result: func(report *SpendReport, err error) {
-			result = report
-			resultError = err
-			wg.Done()
-		},
-	})
-	wg.Wait()
-
-	if resultError != nil {
-		log.Debugf("Error finding spends for %s: %v",
-			ro.watchOutPoints[0].String(), resultError)
-		return nil, resultError
+	if err != nil {
+		return nil, err
 	}
 
-	return result, nil
+	// Wait for the result to be delivered by the rescan or until a shutdown
+	// is signaled.
+	report, err := req.Result()
+	if err != nil {
+		log.Debugf("Error finding spends for %s: %v",
+			ro.watchOutPoints[0].String(), err)
+		return nil, err
+	}
+
+	return report, nil
 }
 
 // getReorgTip gets a block header from the chain service's cache. This is only
