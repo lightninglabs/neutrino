@@ -1,15 +1,16 @@
 package neutrino
 
 import (
-	"fmt"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/gcs"
-	"github.com/roasbeef/btcutil/gcs/builder"
-	"github.com/roasbeef/btcwallet/waddrmgr"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 type MockChainClient struct {
@@ -57,14 +58,6 @@ func (c *MockChainClient) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 	}, nil
 }
 
-func (c *MockChainClient) SetCFilter(blockHash chainhash.Hash, filter *gcs.Filter) {
-	c.getCFilterResponse[blockHash] = filter
-}
-
-func (c *MockChainClient) GetCFilter(blockHash chainhash.Hash, filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
-	return c.getCFilterResponse[blockHash], nil
-}
-
 func (c *MockChainClient) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 	return true, nil
@@ -75,87 +68,407 @@ func makeTestOutpoint() *wire.OutPoint {
 	return &wire.OutPoint{Hash: *hash, Index: 0}
 }
 
-func TestScanForSingleUtxo(t *testing.T) {
-	outpoints := make(map[wire.OutPoint]struct{})
+// TestFindSpends tests that findSpends properly returns spend reports.
+func TestFindSpends(t *testing.T) {
+	outpoints := make(map[wire.OutPoint][]byte)
 
-	// Search for spends of this outpoint.
-	outpoints[*makeTestOutpoint()] = struct{}{}
+	// Test that finding spends with an empty outpoints index returns no
+	// spends.
+	spends := findSpends(&Block100000, 100000, outpoints)
+	if len(spends) != 0 {
+		t.Fatalf("unexpected number of spend reports -- "+
+			"want %d, got %d", 0, len(spends))
+	}
 
-	spends, _ := checkTransactions(&Block100000, 100000, outpoints)
+	// Now, add the test outpoint to the outpoint index.
+	outpoints[*makeTestOutpoint()] = []byte{}
 
+	// Ensure that a spend report is now returned.
+	spends = findSpends(&Block100000, 100000, outpoints)
 	if len(spends) != 1 {
-		t.Fail()
+		t.Fatalf("unexpected number of spend reports -- "+
+			"want %d, got %d", 1, len(spends))
 	}
 }
 
-func TestScanForOriginalUtxo(t *testing.T) {
+// TestFindInitialTransactions tests that findInitialTransactions properly
+// returns the transaction corresponding to an output if it is found in the
+// given block.
+func TestFindInitialTransactions(t *testing.T) {
 	hash, _ := chainhash.NewHashFromStr("e9a66845e05d5abc0ad04ec80f774a7e585c6e8db975962d069a522137b80c1d")
 	outpoint := &wire.OutPoint{Hash: *hash, Index: 0}
 
-	spend := findTransaction(&Block100000, outpoint)
+	reqs := []*GetUtxoRequest{
+		{
+			OutPoint:    outpoint,
+			StartHeight: 100000,
+		},
+	}
 
-	if spend.Output.Value != 1000000 {
-		t.Errorf("Failed to find original tx")
+	// First, try to find the outpoint within the block.
+	spends := findInitialTransactions(&Block100000, reqs)
+	if len(spends) != 1 {
+		t.Fatalf("unexpected number of spend reports -- "+
+			"want %v, got %v", 1, len(spends))
+	}
+
+	spend := spends[*outpoint]
+	if spend == nil || spend.Output == nil || spend.Output.Value != 1000000 {
+		t.Fatalf("Expected spend report to contain initial output -- "+
+			"instead got: %v", spend)
+	}
+
+	// Now, modify the output index such that is invalid.
+	outpoint.Index = 1
+
+	// Try to find the invalid outpoint in the same block.
+	spends = findInitialTransactions(&Block100000, reqs)
+	if len(spends) != 1 {
+		t.Fatalf("unexpected number of spend reports -- "+
+			"want %v, got %v", 1, len(spends))
+	}
+
+	// The spend report should be nil since the output index is invalid.
+	spend = spends[*outpoint]
+	if spend != nil {
+		t.Fatalf("Expected spend report to be nil since the output index "+
+			"is invalid, got %v", spend)
+	}
+
+	// Finally, restore the valid output index, but modify the txid.
+	outpoint.Index = 0
+	outpoint.Hash[0] ^= 0x01
+
+	// Try to find the outpoint with an invalid txid in the same block.
+	spends = findInitialTransactions(&Block100000, reqs)
+	if len(spends) != 1 {
+		t.Fatalf("unexpected number of spend reports -- "+
+			"want %v, got %v", 1, len(spends))
+	}
+
+	// Again, the spend report should be nil because of the invalid txid.
+	spend = spends[*outpoint]
+	if spend != nil {
+		t.Fatalf("Expected spend report to be nil since the txid "+
+			"is not in block, got %v", spend)
 	}
 }
 
-func TestGetAtHeight(t *testing.T) {
-	scanner := NewUtxoScanner(NewMockChainClient())
+// TestDequeueAtHeight asserts the correct behavior of various orderings of
+// enqueuing requests and dequeueing that could arise. Predominately, this
+// ensures that dequeueing heights lower than what has already been dequeued
+// will not return requests, as they should be moved internally to the nextBatch
+// slice.
+func TestDequeueAtHeight(t *testing.T) {
+	mockChainClient := NewMockChainClient()
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock:           mockChainClient.GetBlockFromNetwork,
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
 
-	scanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    makeTestOutpoint(),
-		StartHeight: 100001,
-		Result: func(report *SpendReport, err error) {
-			fmt.Printf("spent")
-		},
-	})
-	scanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    makeTestOutpoint(),
-		StartHeight: 100000,
-		Result: func(report *SpendReport, err error) {
-			fmt.Printf("spent")
-		},
-	})
+	// Add the requests in order of their block heights.
+	req100000, err := scanner.Enqueue(makeTestOutpoint(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	req100001, err := scanner.Enqueue(makeTestOutpoint(), 100001)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// Dequeue the heights in the same order, this should return both
+	// requests without failure.
+
+	reqs := scanner.dequeueAtHeight(100000)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100000) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100000)
+	}
 
 	// We've missed block 100000 by this point so only return 100001.
-	reqs := scanner.getAtHeight(100001)
-	if len(reqs) != 1 || reqs[0].StartHeight != 100001 {
-		t.Error("Incorrect request returned from getAtHeight")
+	reqs = scanner.dequeueAtHeight(100001)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100001) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100001)
+	}
+
+	// Now, add the requests in order of their block heights.
+	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// We've missed block 100000 by this point so only return 100001.
+	reqs = scanner.dequeueAtHeight(100001)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100001) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100001)
+	}
+
+	// Try to request requests at height 100000, which should not return a
+	// request since we've already passed it.
+	reqs = scanner.dequeueAtHeight(100000)
+	if len(reqs) != 0 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 0, len(reqs))
+	}
+
+	// Now, add the requests out of order wrt. their block heights.
+	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// Dequeue the heights in the correct order, this should return both
+	// requests without failure.
+
+	reqs = scanner.dequeueAtHeight(100000)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100000) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100000)
+	}
+
+	reqs = scanner.dequeueAtHeight(100001)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100001) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100001)
+	}
+
+	// Again, add the requests out of order wrt. their block heights.
+	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// We've missed block 100000 by this point so only return 100001.
+	reqs = scanner.dequeueAtHeight(100001)
+	if len(reqs) != 1 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 1, len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], req100001) {
+		t.Fatalf("Unexpected request returned -- "+
+			"want %v, got %v", reqs[0], req100001)
+	}
+
+	// Try to request requests at height 100000, which should not return a
+	// request since we've already passed it.
+	reqs = scanner.dequeueAtHeight(100000)
+	if len(reqs) != 0 {
+		t.Fatalf("Unexpected number of requests returned -- "+
+			"want %v, got %v", 0, len(reqs))
 	}
 }
 
-func TestScan(t *testing.T) {
+// TestUtxoScannerScanBasic tests that enqueueing a spend request at the height
+// of the spend returns a correct spend report.
+func TestUtxoScannerScanBasic(t *testing.T) {
 	mockChainClient := NewMockChainClient()
-	scanner := NewUtxoScanner(mockChainClient)
 
-	spent := false
-	scanner.Enqueue(&GetUtxoRequest{
-		OutPoint:    makeTestOutpoint(),
-		StartHeight: 100000,
-		Result: func(report *SpendReport, err error) {
-			fmt.Printf("spent")
-			spent = true
-		},
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBlockHash(100000, &block100000Hash)
+	mockChainClient.SetBlock(&block100000Hash, btcutil.NewBlock(&Block100000))
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock:           mockChainClient.GetBlockFromNetwork,
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
+	scanner.Start()
+	defer scanner.Stop()
 
-	blockHash := Block100000.BlockHash()
-	mockChainClient.SetBestSnapshot(&blockHash, 100000)
-	mockChainClient.SetBlockHash(100000, &blockHash)
-	mockChainClient.SetBlock(&blockHash, btcutil.NewBlock(&Block100000))
+	var (
+		spendReport *SpendReport
+		scanErr     error
+	)
 
-	filter, _ := builder.BuildBasicFilter(&Block100000)
-	mockChainClient.SetCFilter(blockHash, filter)
-
-	scanner.runBatch()
-
-	if !spent {
-		t.Error("Expected spent")
+	req, err := scanner.Enqueue(makeTestOutpoint(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue utxo scan request: %v", err)
 	}
+
+	spendReport, scanErr = req.Result()
+	if scanErr != nil {
+		t.Fatalf("unable to complete scan for utxo: %v", scanErr)
+	}
+
+	if spendReport == nil || spendReport.SpendingTx == nil {
+		t.Fatalf("Expected scanned output to be spent -- "+
+			"scan report: %v", spendReport)
+	}
+}
+
+// TestUtxoScannerScanAddBlocks tests that adding new blocks to neutrino's view
+// of the best snapshot properly dispatches spend reports. Internally, this
+// tests that the rescan detects a difference in the original best height and
+// the best height after a rescan, and then continues scans up to the new tip.
+func TestUtxoScannerScanAddBlocks(t *testing.T) {
+	mockChainClient := NewMockChainClient()
+
+	block99999Hash := Block99999.BlockHash()
+	mockChainClient.SetBlockHash(99999, &block99999Hash)
+	mockChainClient.SetBlock(&block99999Hash, btcutil.NewBlock(&Block99999))
+	mockChainClient.SetBestSnapshot(&block99999Hash, 99999)
+
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBlockHash(100000, &block100000Hash)
+	mockChainClient.SetBlock(&block100000Hash, btcutil.NewBlock(&Block100000))
+
+	var snapshotLock sync.Mutex
+	waitForSnapshot := make(chan struct{})
+
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock:     mockChainClient.GetBlockFromNetwork,
+		GetBlockHash: mockChainClient.GetBlockHash,
+		BestSnapshot: func() (*waddrmgr.BlockStamp, error) {
+			<-waitForSnapshot
+			snapshotLock.Lock()
+			defer snapshotLock.Unlock()
+
+			return mockChainClient.BestSnapshot()
+		},
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
+	scanner.Start()
+	defer scanner.Stop()
+
+	var (
+		spendReport *SpendReport
+		scanErr     error
+	)
+
+	req, err := scanner.Enqueue(makeTestOutpoint(), 99999)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// The utxoscanner should currently be waiting for the block stamp at
+	// height 99999. Signaling will cause the initial scan to finish and
+	// block while querying again for the updated chain tip.
+	waitForSnapshot <- struct{}{}
+
+	// Now, add the successor block at height 100000 and update the best
+	// snapshot..
+	snapshotLock.Lock()
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+	snapshotLock.Unlock()
+
+	// The rescan should now be waiting for stamp 100000, signal to allow
+	// the rescan to detect the added block and perform another pass.
+	// Signal one more for the final query scan makes before exiting.
+	waitForSnapshot <- struct{}{}
+	waitForSnapshot <- struct{}{}
+
+	spendReport, scanErr = req.Result()
+
+	if scanErr != nil {
+		t.Fatalf("unable to complete scan for utxo: %v", scanErr)
+	}
+
+	if spendReport == nil || spendReport.SpendingTx == nil {
+		t.Fatalf("Expected scanned output to be spent -- "+
+			"scan report: %v", spendReport)
+	}
+}
+
+// Block99999 defines block 99,999 of the main chain. It is used to test a
+// rescan consisting of multiple blocks.
+var Block99999 = wire.MsgBlock{
+	Header: wire.BlockHeader{
+		Version: 1,
+		PrevBlock: chainhash.Hash([32]byte{
+			0x1d, 0x35, 0xce, 0x8c, 0x72, 0x5a, 0x13, 0x56,
+			0xc2, 0x34, 0xd0, 0x88, 0x59, 0x0b, 0xf7, 0x86,
+			0x69, 0x90, 0x91, 0x76, 0x2d, 0x01, 0x97, 0x36,
+			0x30, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		}), // 0000000000002103637910d267190996687fb095880d432c6531a527c8ec53d1
+		MerkleRoot: chainhash.Hash([32]byte{
+			0x09, 0xa7, 0x45, 0x1a, 0x7d, 0x41, 0xca, 0x75,
+			0x8d, 0x4c, 0xc3, 0xc8, 0x5c, 0x5b, 0x07, 0x60,
+			0x30, 0xf2, 0x3c, 0x5a, 0xed, 0xd6, 0x79, 0x49,
+			0xa3, 0xe1, 0xa8, 0x55, 0xf2, 0x9d, 0xe0, 0x11,
+		}), // 110ed92f558a1e3a94976ddea5c32f030670b5c58c3cc4d857ac14d7a1547a90
+		Timestamp: time.Unix(1293623731, 0), // 2010-12-29 11:55:31
+		Bits:      0x1b04864c,               // 453281356
+		Nonce:     0xe80388b2,               // 3892545714
+	},
+	Transactions: []*wire.MsgTx{
+		{
+			Version: 1,
+			TxIn: []*wire.TxIn{
+				{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  chainhash.Hash{},
+						Index: 0xffffffff,
+					},
+					SignatureScript: []byte{
+						0x04, 0x4c, 0x86, 0x04, 0x1b, 0x01, 0x3e,
+					},
+					Sequence: 0xffffffff,
+				},
+			},
+			TxOut: []*wire.TxOut{
+				{
+					Value: 0x12a05f200, // 5000000000
+					PkScript: []byte{
+						0x41, // OP_DATA_65
+						0x04, 0xd1, 0x90, 0x84, 0x0c, 0xfd, 0xae, 0x05,
+						0xaf, 0x3d, 0x2f, 0xeb, 0xca, 0x52, 0xb0, 0x46,
+						0x6b, 0x6e, 0xfb, 0x02, 0xb4, 0x40, 0x36, 0xa5,
+						0xd0, 0xd7, 0x06, 0x59, 0xa5, 0x3f, 0x7b, 0x84,
+						0xb7, 0x36, 0xc5, 0xa0, 0x5e, 0xd8, 0x1e, 0x90,
+						0xaf, 0x70, 0x98, 0x5d, 0x59, 0xff, 0xb3, 0xd1,
+						0xb9, 0x13, 0x64, 0xf7, 0x0b, 0x4d, 0x2b, 0x3b,
+						0x75, 0x53, 0xe1, 0x77, 0xb1, 0xce, 0xaf, 0xf3,
+						0x22, // 65-byte signature
+						0xac, // OP_CHECKSIG
+					},
+				},
+			},
+			LockTime: 0,
+		},
+	},
 }
 
 // The following is taken from the btcsuite/btcutil project.
-// Block100000 defines block 100,000 of the block chain.  It is used to
-// test Block operations.
+// Block100000 defines block 100,000 of the block chain.  It is used to test
+// Block operations.
 var Block100000 = wire.MsgBlock{
 	Header: wire.BlockHeader{
 		Version: 1,
