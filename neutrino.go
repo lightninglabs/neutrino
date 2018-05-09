@@ -1,5 +1,4 @@
 // NOTE: THIS API IS UNSTABLE RIGHT NOW.
-// TODO: Add functional options to ChainService instantiation.
 
 package neutrino
 
@@ -453,45 +452,121 @@ func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 type Config struct {
 	// DataDir is the directory that neutrino will store all header
 	// information within.
-	DataDir string
+	dataDir string
 
 	// Database is an *open* database instance that we'll use to storm
 	// indexes of teh chain.
-	Database walletdb.DB
+	database walletdb.DB
 
 	// ChainParams is the chain that we're running on.
-	ChainParams chaincfg.Params
+	chainParams chaincfg.Params
 
 	// ConnectPeers is a slice of hosts that should be connected to on
 	// startup, and be established as persistent peers.
 	//
 	// NOTE: If specified, we'll *only* connect to this set of peers and
 	// won't attempt to automatically seek outbound peers.
-	ConnectPeers []string
+	connectPeers []string
 
 	// AddPeers is a slice of hosts that should be connected to on startup,
 	// and be maintained as persistent peers.
-	AddPeers []string
+	addPeers []string
 
 	// Dialer is an optional function closure that will be used to
 	// establish outbound TCP connections. If specified, then the
 	// connection manager will use this in place of net.Dial for all
 	// outbound connection attempts.
-	Dialer func(addr net.Addr) (net.Conn, error)
+	dialer func(addr net.Addr) (net.Conn, error)
 
 	// NameResolver is an optional function closure that will be used to
 	// lookup the IP of any host. If specified, then the address manager,
 	// along with regular outbound connection attempts will use this
 	// instead.
-	NameResolver func(host string) ([]net.IP, error)
+	nameResolver func(host string) ([]net.IP, error)
 
 	// FilterCacheSize indicates the size (in bytes) of filters the cache will
 	// hold in memory at most.
-	FilterCacheSize uint64
+	filterCacheSize uint64
 
 	// BlockCacheSize indicates the size (in bytes) of blocks the block
 	// cache will hold in memory at most.
-	BlockCacheSize uint64
+	blockCacheSize uint64
+}
+
+// DataDir is a functional option that allows callers of NewChainService to set the
+// data directory for storing header information.
+func DataDir(dataDir string) func(*Config) {
+	return func(c *Config) {
+		c.dataDir = dataDir
+	}
+}
+
+// Database is a functional option that allows callers of NewChainService to set the
+// open database instance for storing indices of the chain.
+func Database(db walletdb.DB) func(*Config) {
+	return func(c *Config) {
+		c.database = db
+	}
+}
+
+// ChainParams is a functional option that allows callers of NewChainService to set the
+// params for chain that neutrino is running on.
+func ChainParams(params chaincfg.Params) func(*Config) {
+	return func(c *Config) {
+		c.chainParams = params
+	}
+}
+
+// ConnectPeers is a functional option that allows callers of NewChainService to set the
+// hosts to be connected on startup and established as persistent peers.
+func ConnectPeers(peers []string) func(*Config) {
+	return func(c *Config) {
+		c.connectPeers = peers
+	}
+}
+
+// AddPeers is a functional option that allows callers of NewChainService to set the
+// hosts to be connected on startup and maintained as persistent peers.
+func AddPeers(peers []string) func(*Config) {
+	return func(c *Config) {
+		c.addPeers = peers
+	}
+}
+
+// Dialer is a functional option that allows callers of NewChainService to set the
+// dialer for establishing outbound TCP connections.
+func Dialer(dialer func(net.Addr) (net.Conn, error)) func(*Config) {
+	return func(c *Config) {
+		c.dialer = dialer
+	}
+}
+
+// NameResolver is a functional option that allows callers of NewChainService to set the
+// name resolver for IP lookup.
+func NameResolver(resolver func(string) ([]net.IP, error)) func(*Config) {
+	return func(c *Config) {
+		c.nameResolver = resolver
+	}
+}
+
+// FilterCacheSize is a functional option for setting the size (in bytes) of filters
+// the cache will hold in memory at most.
+func FilterCacheSize(size uint64) func(*Config) {
+	return func(c *Config) {
+		if size != 0 {
+			c.filterCacheSize = size
+		}
+	}
+}
+
+// BlockCacheSize indicates the size (in bytes) of blocks the block
+// cache will hold in memory at most.
+func BlockCacheSize(size uint64) func(*Config) {
+	return func(c *Config) {
+		if size != 0 {
+			c.blockCacheSize = size
+		}
+	}
 }
 
 // ChainService is instantiated with functional options
@@ -553,40 +628,30 @@ type ChainService struct {
 // NewChainService returns a new chain service configured to connect to the
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
-func NewChainService(cfg Config) (*ChainService, error) {
+func NewChainService(opts ...func(*Config)) (*ChainService, error) {
 	// First, we'll sort out the methods that we'll use to established
 	// outbound TCP connections, as well as perform any DNS queries.
-	//
-	// If the dialler was specified, then we'll use that in place of the
-	// default net.Dial function.
-	var (
-		nameResolver func(string) ([]net.IP, error)
-		dialer       func(net.Addr) (net.Conn, error)
-	)
-	if cfg.Dialer != nil {
-		dialer = cfg.Dialer
-	} else {
-		dialer = func(addr net.Addr) (net.Conn, error) {
+	cfg := &Config{
+		dialer: func(addr net.Addr) (net.Conn, error) {
 			return net.Dial(addr.Network(), addr.String())
-		}
+		},
+		nameResolver:    net.LookupIP,
+		filterCacheSize: DefaultFilterCacheSize,
+		blockCacheSize:  DefaultBlockCacheSize,
 	}
 
-	// Similarly, if the user specified as function to use for name
-	// resolution, then we'll use that everywhere as well.
-	if cfg.NameResolver != nil {
-		nameResolver = cfg.NameResolver
-	} else {
-		nameResolver = net.LookupIP
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	// When creating the addr manager, we'll check to see if the user has
 	// provided their own resolution function. If so, then we'll use that
 	// instead as this may be proxying requests over an anonymizing
 	// network.
-	amgr := addrmgr.New(cfg.DataDir, nameResolver)
+	amgr := addrmgr.New(cfg.dataDir, cfg.nameResolver)
 
 	s := ChainService{
-		chainParams:         cfg.ChainParams,
+		chainParams:         cfg.chainParams,
 		addrManager:         amgr,
 		newPeers:            make(chan *ServerPeer, MaxPeers),
 		donePeers:           make(chan *ServerPeer, MaxPeers),
@@ -600,8 +665,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		userAgentVersion:    UserAgentVersion,
 		blockSubscribers:    make(map[*blockSubscription]struct{}),
 		reorgedBlockHeaders: make(map[chainhash.Hash]*wire.BlockHeader),
-		nameResolver:        nameResolver,
-		dialer:              dialer,
+		nameResolver:        cfg.nameResolver,
+		dialer:              cfg.dialer,
 	}
 
 	// We set the queryPeers method to point to queryChainServicePeers,
@@ -613,31 +678,22 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 	var err error
 
-	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+	s.FilterDB, err = filterdb.New(cfg.database, cfg.chainParams)
 	if err != nil {
 		return nil, err
 	}
 
-	filterCacheSize := DefaultFilterCacheSize
-	if cfg.FilterCacheSize != 0 {
-		filterCacheSize = cfg.FilterCacheSize
-	}
-	s.FilterCache = lru.NewCache(filterCacheSize)
-
-	blockCacheSize := DefaultBlockCacheSize
-	if cfg.BlockCacheSize != 0 {
-		blockCacheSize = cfg.BlockCacheSize
-	}
-	s.BlockCache = lru.NewCache(blockCacheSize)
+	s.FilterCache = lru.NewCache(cfg.filterCacheSize)
+	s.BlockCache = lru.NewCache(cfg.blockCacheSize)
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
-		cfg.DataDir, cfg.Database, &cfg.ChainParams,
+		cfg.dataDir, cfg.database, &cfg.chainParams,
 	)
 	if err != nil {
 		return nil, err
 	}
 	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter, &cfg.ChainParams,
+		cfg.dataDir, cfg.database, headerfs.RegularFilter, &cfg.chainParams,
 	)
 	if err != nil {
 		return nil, err
@@ -698,9 +754,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RetryDuration:  ConnectionRetryInterval,
 		TargetOutbound: uint32(TargetOutbound),
 		OnConnection:   s.outboundPeerConnected,
-		Dial:           dialer,
+		Dial:           cfg.dialer,
 	}
-	if len(cfg.ConnectPeers) == 0 {
+	if len(cfg.connectPeers) == 0 {
 		cmgrCfg.GetNewAddress = newAddressFunc
 	}
 
@@ -715,9 +771,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.connManager = cmgr
 
 	// Start up persistent peers.
-	permanentPeers := cfg.ConnectPeers
+	permanentPeers := cfg.connectPeers
 	if len(permanentPeers) == 0 {
-		permanentPeers = cfg.AddPeers
+		permanentPeers = cfg.addPeers
 	}
 	for _, addr := range permanentPeers {
 		tcpAddr, err := s.addrStringToNetAddr(addr)

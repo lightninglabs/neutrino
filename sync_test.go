@@ -1091,21 +1091,18 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
 	}
-	config := neutrino.Config{
-		DataDir:     tempDir,
-		Database:    db,
-		ChainParams: modParams,
-		AddPeers: []string{
-			h3.P2PAddress(),
-			h2.P2PAddress(),
-			h1.P2PAddress(),
-		},
-	}
 
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
 	neutrino.QueryPeerConnectTimeout = 10 * time.Second
-	svc, err := neutrino.NewChainService(config)
+	svc, err := neutrino.NewChainService(
+		neutrino.DataDir(tempDir),
+		neutrino.Database(db),
+		neutrino.ChainParams(modParams),
+		neutrino.AddPeers([]string{
+			h3.P2PAddress(), h2.P2PAddress(), h1.P2PAddress(),
+		}),
+	)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
 	}
