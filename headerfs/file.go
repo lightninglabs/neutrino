@@ -3,8 +3,8 @@ package headerfs
 import (
 	"bytes"
 
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 )
 
 // appendRaw appends a new raw header to the end of the flat file.

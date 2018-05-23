@@ -2,7 +2,7 @@ package: github.com/lightninglabs/neutrino
 import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
-- package: github.com/roasbeef/btcd
+- package: github.com/btcsuite/btcd
   version: 609264819073f69e69716f17e2978ba18288eafe
   subpackages:
   - blockchain
@@ -13,14 +13,14 @@ import:
   - txscript
   - wire
 - package: github.com/btcsuite/btclog
-- package: github.com/roasbeef/btcutil
+- package: github.com/btcsuite/btcutil
   version: dfb640c57141f1c2113b92b4b16d2a89c30dd258
   subpackages:
   - base58
   - gcs
   - gcs/builder
   - hdkeychain
-- package: github.com/roasbeef/btcwallet
+- package: github.com/btcsuite/btcwallet
   version: 45445d1b09670109410174cb01fab0b133e3a904
   subpackages:
   - waddrmgr

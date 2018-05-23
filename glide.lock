@@ -37,7 +37,7 @@ imports:
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
-- name: github.com/roasbeef/btcd
+- name: github.com/btcsuite/btcd
   version: 609264819073f69e69716f17e2978ba18288eafe
   subpackages:
   - addrmgr
@@ -53,7 +53,7 @@ imports:
   - rpcclient
   - txscript
   - wire
-- name: github.com/roasbeef/btcutil
+- name: github.com/btcsuite/btcutil
   version: dfb640c57141f1c2113b92b4b16d2a89c30dd258
   subpackages:
   - base58
@@ -61,7 +61,7 @@ imports:
   - gcs
   - gcs/builder
   - hdkeychain
-- name: github.com/roasbeef/btcwallet
+- name: github.com/btcsuite/btcwallet
   version: 45445d1b09670109410174cb01fab0b133e3a904
   subpackages:
   - internal/helpers

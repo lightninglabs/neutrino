@@ -18,3 +18,4 @@ vendor/
 
 #GoLand config files
 .idea
+*.DS_Store
