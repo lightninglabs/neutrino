@@ -671,7 +671,7 @@ func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 		return nil
 	}
 
-	// First, we'll grab a buffer from the write buffer pool so we an
+	// First, we'll grab a buffer from the write buffer pool so we can
 	// reduce our total number of allocations, and also write the headers
 	// in a single swoop.
 	headerBuf := headerBufPool.Get().(*bytes.Buffer)

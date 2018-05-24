@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/blockcache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/btcsuite/btcd/addrmgr"
@@ -599,6 +600,7 @@ type ChainService struct {
 	services          wire.ServiceFlag
 	blockSubscribers  map[*blockSubscription]struct{}
 	mtxSubscribers    sync.RWMutex
+	blockCache        blockcache.BlockCache
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -781,6 +783,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			Addr:      tcpAddr,
 			Permanent: true,
 		})
+	}
+
+	s.blockCache, err = blockcache.New(cfg.DataDir, blockcache.DefaultCapacity)
+	if err != nil {
+		return nil, err
 	}
 
 	return &s, nil
@@ -1311,6 +1318,8 @@ func (s *ChainService) Start() {
 // Stop gracefully shuts down the server by stopping and disconnecting all
 // peers and the main listener.
 func (s *ChainService) Stop() error {
+	log.Debug("Neutrino shutting down")
+
 	// Make sure this only happens once.
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
@@ -1319,6 +1328,9 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	s.blockCache.Close()
+
 	return nil
 }
 

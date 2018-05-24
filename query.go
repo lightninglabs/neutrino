@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lightninglabs/neutrino/blockcache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -457,12 +458,23 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
 
 	// Fetch the corresponding block header from the database. If this
-	// isn't found, then we don't have the header for this block s we can't
+	// isn't found, then we don't have the header for this block so we can't
 	// request it.
 	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
 		return nil, fmt.Errorf("Couldn't get header for block %s "+
 			"from database", blockHash)
+	}
+
+	// First check if the block has been cached.
+	cachedBlock, err := s.blockCache.FetchBlock(&blockHash)
+	if err != nil && err != blockcache.ErrBlockNotFound {
+		return nil, err
+	}
+	if cachedBlock != nil {
+		block := btcutil.NewBlock(cachedBlock)
+		block.SetHeight(int32(height))
+		return block, nil
 	}
 
 	// Construct the appropriate getdata message to fetch the target block.
@@ -543,6 +555,9 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
 			"network", blockHash)
 	}
+
+	// Cache the block for subsequent calls.
+	s.blockCache.PutBlock(foundBlock.MsgBlock())
 
 	return foundBlock, nil
 }
