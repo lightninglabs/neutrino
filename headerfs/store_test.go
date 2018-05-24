@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/davecgh/go-spew/spew"
 )
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string, *BlockHeaderStore, error) {

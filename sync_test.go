@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btclog"
-	"github.com/lightninglabs/neutrino"
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -24,12 +22,14 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/lightninglabs/neutrino"
 )
 
 var (
