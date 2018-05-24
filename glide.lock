@@ -1,10 +1,11 @@
-hash: 45b0ddaf6e4a92c2155472442ececdfe72079a70896871f8ec8324129613360c
-updated: 2018-05-23T19:45:10.732106605-07:00
+hash: 2d5df08614cebead2f5a0b3cf51806fbbd2e998de1dfd2b74df9e0143e4c8c36
+updated: 2018-05-23T20:15:04.144997639-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/btcsuite/btcd
-  version: d52471044ab259b656083399c4304ce6672308fd
+  version: 3f1ccb8b866dd611031d55caa31e04c62a91cbca
+  repo: git@github.com:Roasbeef/btcd.git
   subpackages:
   - addrmgr
   - blockchain
