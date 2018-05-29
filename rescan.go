@@ -30,7 +30,6 @@ type rescanOptions struct {
 	endBlock       *waddrmgr.BlockStamp
 	watchAddrs     []btcutil.Address
 	watchOutPoints []wire.OutPoint
-	watchTxIDs     []chainhash.Hash
 	watchList      [][]byte
 	txIdx          uint32
 	update         <-chan *updateOptions
@@ -115,15 +114,6 @@ func WatchOutPoints(watchOutPoints ...wire.OutPoint) RescanOption {
 	}
 }
 
-// WatchTxIDs specifies the outpoints to watch for on-chain spends. Each call
-// to this function adds to the list of outpoints being watched rather than
-// replacing the list.
-func WatchTxIDs(watchTxIDs ...chainhash.Hash) RescanOption {
-	return func(ro *rescanOptions) {
-		ro.watchTxIDs = append(ro.watchTxIDs, watchTxIDs...)
-	}
-}
-
 // TxIdx specifies a hint transaction index into the block in which the UTXO is
 // created (eg, coinbase is 0, next transaction is 1, etc.)
 func TxIdx(txIdx uint32) RescanOption {
@@ -177,11 +167,10 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		ro.watchList = append(ro.watchList, script)
 	}
 	for _, op := range ro.watchOutPoints {
-		ro.watchList = append(ro.watchList,
-			builder.OutPointToFilterEntry(op))
-	}
-	for _, txid := range ro.watchTxIDs {
-		ro.watchList = append(ro.watchList, txid[:])
+		ro.watchList = append(
+			ro.watchList,
+			builder.OutPointToFilterEntry(op),
+		)
 	}
 
 	// Check that we have either an end block or a quit channel.
@@ -486,7 +475,7 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 				txDetails := blockDetails
 				txDetails.Index = txIdx
 
-				relevant := ro.watchingTxID(tx)
+				var relevant bool
 
 				if ro.spendsWatchedOutpoint(tx) {
 					relevant = true
@@ -583,7 +572,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 
 	ro.watchAddrs = append(ro.watchAddrs, update.addrs...)
 	ro.watchOutPoints = append(ro.watchOutPoints, update.outPoints...)
-	ro.watchTxIDs = append(ro.watchTxIDs, update.txIDs...)
 
 	for _, addr := range update.addrs {
 		script, err := txscript.PayToAddrScript(addr)
@@ -645,17 +633,6 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	}
 
 	return rewound, nil
-}
-
-// watchingTxID returns whether the transaction matches the filter based
-// directly on its hash.
-func (ro *rescanOptions) watchingTxID(tx *btcutil.Tx) bool {
-	for _, hash := range ro.watchTxIDs {
-		if hash == *tx.Hash() {
-			return true
-		}
-	}
-	return false
 }
 
 // spendsWatchedOutpoint returns whether the transaction matches the filter by
