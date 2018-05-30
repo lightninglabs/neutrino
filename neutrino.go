@@ -120,6 +120,19 @@ type cfhRequest struct {
 	stopHash   chainhash.Hash
 }
 
+// spMsg represents a message over the wire from a specific peer.
+type spMsg struct {
+	sp  *ServerPeer
+	msg wire.Message
+}
+
+// spMsgSubscription sends all messages from a peer over a channel, allowing
+// pluggable filtering of the messages.
+type spMsgSubscription struct {
+	msgChan  chan<- spMsg
+	quitChan <-chan struct{}
+}
+
 // ServerPeer extends the peer to maintain state shared by the server and the
 // blockmanager.
 type ServerPeer struct {
@@ -498,9 +511,7 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	sp.mtxSubscribers.RLock()
 	defer sp.mtxSubscribers.RUnlock()
 	for subscription := range sp.recvSubscribers {
-		subscription.wg.Add(1)
 		go func(subscription spMsgSubscription) {
-			defer subscription.wg.Done()
 			select {
 			case <-subscription.quitChan:
 			case subscription.msgChan <- spMsg{
