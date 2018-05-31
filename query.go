@@ -109,36 +109,6 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 	}
 }
 
-// checkPeer alows the caller to query a single peer. Should be called in its
-// own goroutine. Exits when quit channel is closed or a message on it is
-// received.
-func checkPeer(sp *ServerPeer, subscription spMsgSubscription,
-	queryMsg wire.Message, quit <-chan struct{}) {
-
-	// Don't do anything if the peer isn't connected.
-	if sp == nil || !sp.Connected() {
-		return
-	}
-
-	// Subscribe to the peer's received messages.
-	sp.subscribeRecvMsg(subscription)
-	defer sp.unsubscribeRecvMsgs(subscription)
-
-	// Send the query to the peer. Exit if we quit before reading the sent
-	// channel.
-	sentChan := make(chan struct{}, 1)
-	sp.QueueMessageWithEncoding(queryMsg, sentChan, wire.WitnessEncoding)
-	select {
-	case <-sentChan:
-	case <-quit:
-	}
-
-	// Wait for a quit signal.
-	select {
-	case <-quit:
-	}
-}
-
 // queryPeers is a helper function that sends a query to one or more peers and
 // waits for an answer. The timeout for queries is set by the QueryTimeout
 // package-level variable.
@@ -171,7 +141,6 @@ func (s *ChainService) queryPeers(
 	// This will be state used by the peer query goroutine.
 	quit := make(chan struct{})
 	subQuit := make(chan struct{})
-	peerQuit := make(chan struct{})
 
 	// Increase this number to be able to handle more queries at once as
 	// each channel gets results for all queries, otherwise messages can
@@ -186,21 +155,29 @@ func (s *ChainService) queryPeers(
 	// Loop for any messages sent to us via our subscription channel and
 	// check them for whether they satisfy the query. Break the loop if
 	// it's time to quit.
-	peerTimeout := time.Tick(qo.timeout)
+	peerTimeout := time.NewTicker(qo.timeout)
 	timeout := time.After(qo.peerConnectTimeout)
 	if curPeer != nil {
 		peerTries[curPeer.Addr()]++
-		go checkPeer(curPeer, subscription, queryMsg, peerQuit)
+		curPeer.subscribeRecvMsg(subscription)
+		curPeer.QueueMessageWithEncoding(queryMsg, nil,
+			wire.WitnessEncoding)
 	}
 checkResponses:
 	for {
 		select {
 		case <-timeout:
 			// When we time out, we're done.
+			if curPeer != nil {
+				curPeer.unsubscribeRecvMsgs(subscription)
+			}
 			break checkResponses
 
 		case <-quit:
 			// Same when we get a quit signal.
+			if curPeer != nil {
+				curPeer.unsubscribeRecvMsgs(subscription)
+			}
 			break checkResponses
 
 		// A message has arrived over the subscription channel, so we
@@ -214,10 +191,9 @@ checkResponses:
 
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
-		case <-peerTimeout:
-			select {
-			case peerQuit <- struct{}{}:
-			default:
+		case <-peerTimeout.C:
+			if curPeer != nil {
+				curPeer.unsubscribeRecvMsgs(subscription)
 			}
 
 			curPeer = nil
@@ -227,17 +203,19 @@ checkResponses:
 						qo.numRetries {
 					// Found a peer we can query.
 					peerTries[curPeer.Addr()]++
-					go checkPeer(curPeer, subscription,
-						queryMsg, peerQuit)
+					curPeer.subscribeRecvMsg(subscription)
+					curPeer.QueueMessageWithEncoding(
+						queryMsg, nil,
+						wire.WitnessEncoding)
 					break
 				}
 			}
 		}
 	}
 
-	// Close the subordinate quit channels and the done channel, if any.
+	// Close the subscription quit channel and the done channel, if any.
 	close(subQuit)
-	close(peerQuit)
+	peerTimeout.Stop()
 	if qo.doneChan != nil {
 		close(qo.doneChan)
 	}

@@ -126,7 +126,7 @@ type spMsg struct {
 	msg wire.Message
 }
 
-// spMsgSubscription sends all messages from a peer ove a channel, allowing
+// spMsgSubscription sends all messages from a peer over a channel, allowing
 // pluggable filtering of the messages.
 type spMsgSubscription struct {
 	msgChan  chan<- spMsg
