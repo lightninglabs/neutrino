@@ -50,6 +50,11 @@ var (
 	// This is mostly for testing, but can be useful when being actively
 	// attacked by peers sending false information.
 	CFHMinPeers = 1
+
+	// CFHTimeBetweenPeerEnums specifies how long to wait between attempts
+	// to enumerate the peers to which the underlying chain service is
+	// connected.
+	CFHTimeBetweenPeerEnums = time.Millisecond * 200
 )
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
@@ -1222,8 +1227,8 @@ func (b *blockManager) sendGetcfheaders(startHeight uint32, endBlock *chainhash.
 		timeWithoutPeers < QueryPeerConnectTimeout {
 		peers = b.server.Peers()
 		if len(peers) == 0 {
-			time.Sleep(QueryTimeBetweenPeerEnums)
-			timeWithoutPeers += QueryTimeBetweenPeerEnums
+			time.Sleep(CFHTimeBetweenPeerEnums)
+			timeWithoutPeers += CFHTimeBetweenPeerEnums
 		}
 	}
 
