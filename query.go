@@ -30,12 +30,6 @@ var (
 	// underlying chain service to connect to a peer before giving up
 	// on a query in case we don't have any peers.
 	QueryPeerConnectTimeout = time.Second * 30
-
-	// QueryTimeBetweenPeerEnums specifies how long to wait between attempts
-	// to enumerate the peers to which the underlying chain service is
-	// connected. This value is only set globally, not as a query
-	// option.
-	QueryTimeBetweenPeerEnums = time.Millisecond * 200
 )
 
 // queries are a set of options that can be modified per-query, unlike global
