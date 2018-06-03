@@ -44,6 +44,17 @@ var (
 	// messages from peers. It defaults to 3 seconds but can be increased
 	// for higher security and decreased for faster synchronization.
 	WaitForMoreCFHeaders = 3 * time.Second
+
+	// CFHMinPeers specifies the minimum number of peers to which we
+	// require to be connected before broadcasting a getcfheaders request.
+	// This is mostly for testing, but can be useful when being actively
+	// attacked by peers sending false information.
+	CFHMinPeers = 1
+
+	// CFHTimeBetweenPeerEnums specifies how long to wait between attempts
+	// to enumerate the peers to which the underlying chain service is
+	// connected.
+	CFHTimeBetweenPeerEnums = time.Millisecond * 200
 )
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
@@ -1205,6 +1216,23 @@ func (b *blockManager) sendGetcfheaders(startHeight uint32, endBlock *chainhash.
 		filterType: filterType,
 		stopHash:   *endBlock,
 	}
+
+	// Ensure we have peers.
+	// TODO(aakselrod): This is hacky, but is going away soon, when the
+	// cfheaders download is parallelized and refactored to use the query
+	// API.
+	var peers []*ServerPeer
+	var timeWithoutPeers time.Duration
+	for len(peers) < CFHMinPeers &&
+		timeWithoutPeers < QueryPeerConnectTimeout {
+		peers = b.server.Peers()
+		if len(peers) == 0 {
+			time.Sleep(CFHTimeBetweenPeerEnums)
+			timeWithoutPeers += CFHTimeBetweenPeerEnums
+		}
+	}
+
+	// Broadcast the message.
 	b.server.ForAllPeers(func(sp *ServerPeer) {
 		// Should probably use better isolation for this but we're in
 		// the same package. One of the things to clean up when we do

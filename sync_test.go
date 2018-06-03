@@ -4,6 +4,7 @@ package neutrino_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -28,6 +29,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino"
 )
 
@@ -369,6 +371,7 @@ func TestSetup(t *testing.T) {
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
 	neutrino.WaitForMoreCFHeaders = time.Second
+	neutrino.QueryPeerConnectTimeout = 10 * time.Second
 	svc, err := neutrino.NewChainService(config)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
@@ -650,7 +653,9 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(svc, h2)
-	err = svc.SendTransaction(authTx1.Tx, queryOptions...)
+	err = svc.SendTransaction(authTx1.Tx,
+		append(queryOptions,
+			neutrino.PeerConnectTimeout(3*time.Second))...)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
@@ -688,7 +693,9 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(svc, h2)
-	err = svc.SendTransaction(authTx2.Tx, queryOptions...)
+	err = svc.SendTransaction(authTx2.Tx,
+		append(queryOptions,
+			neutrino.PeerConnectTimeout(3*time.Second))...)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
@@ -839,6 +846,7 @@ func TestSetup(t *testing.T) {
 	// is somewhat random, depending on how quickly the nodes process each
 	// other's notifications vs finding new blocks, but the two nodes should
 	// remain fully synchronized with each other at the end.
+	neutrino.CFHMinPeers = 2
 	go h2.Node.Generate(75)
 	h1.Node.Generate(50)
 
@@ -1162,8 +1170,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				&blockHash, wire.GCSFilterRegular)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
-					"filter for block %d via RPC: %s",
-					height, err)
+					"filter for block %d (%s) via RPC: %s",
+					height, blockHash, err)
 				return
 			}
 			// Check that network and RPC cfilters match.
@@ -1173,14 +1181,18 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				if err != nil {
 					errChan <- fmt.Errorf("Couldn't get "+
 						"basic filter for block %d "+
-						"via P2P: %s", height, err)
+						"(%s) via P2P: %s", height,
+						blockHash, err)
 					return
 				}
 			}
 			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
 					"network/DB doesn't match RPC value "+
-					"for block %d", height)
+					"for block %d (%s):\nRPC: %s\nNet: %s",
+					height, blockHash,
+					hex.EncodeToString(wantFilter.Data),
+					hex.EncodeToString(haveBytes))
 				return
 			}
 			// Calculate basic filter from block.
@@ -1203,7 +1215,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if !bytes.Equal(haveBytes, calcBytes) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
 					"network/DB doesn't match calculated "+
-					"value for block %d", height)
+					"value for block %d (%s)", height,
+					blockHash)
 				return
 			}
 			// Get previous basic filter header from the database.
@@ -1217,11 +1230,12 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get current basic filter header from the database.
-			curHeader, err := svc.RegFilterHeaders.FetchHeader(&blockHash)
+			curHeader, err := svc.RegFilterHeaders.FetchHeader(
+				&blockHash)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
 					"filter header for block %d (%s) from "+
-					"DB: %s", height-1, blockHash, err)
+					"DB: %s", height, blockHash, err)
 				return
 			}
 			// Check that the filter and header line up.
@@ -1230,7 +1244,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't calculate "+
 					"header for basic filter for block "+
-					"%d: %s", height, err)
+					"%d (%s): %s", height, blockHash, err)
 				return
 			}
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
@@ -1251,8 +1265,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				&blockHash, wire.GCSFilterExtended)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
-					"filter for block %d via RPC: %s",
-					height, err)
+					"filter for block %d (%s) via RPC: %s",
+					height, blockHash, err)
 				return
 			}
 			// Check that network and RPC cfilters match
@@ -1261,7 +1275,8 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				if err != nil {
 					errChan <- fmt.Errorf("Couldn't get "+
 						"extended filter for block %d "+
-						"via P2P: %s", height, err)
+						"(%s) via P2P: %s", height,
+						blockHash, err)
 					return
 				}
 			} else {
@@ -1270,7 +1285,10 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Extended filter from "+
 					"P2P network/DB doesn't match RPC "+
-					"value for block %d", height)
+					"for block %d (%s):\nRPC: %s\nNet: %s",
+					height, blockHash,
+					hex.EncodeToString(wantFilter.Data),
+					hex.EncodeToString(haveBytes))
 				return
 			}
 			// Calculate extended filter from block
@@ -1293,9 +1311,9 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if !bytes.Equal(haveBytes, calcBytes) {
 				errChan <- fmt.Errorf("Extended filter from "+
 					"P2P network/DB doesn't match "+
-					"calculated value for block %d: "+
+					"calculated value for block %d (%s): "+
 					"got\n%+v\nwant\n%+v\n", height,
-					haveFilter, calcFilter)
+					blockHash, haveFilter, calcFilter)
 				return
 			}
 			// Get previous extended filter header from the
@@ -1310,12 +1328,12 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 				return
 			}
 			// Get current basic filter header from the database.
-			curHeader, err = svc.ExtFilterHeaders.FetchHeader(&blockHash)
+			curHeader, err = svc.ExtFilterHeaders.FetchHeader(
+				&blockHash)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
 					"filter header for block %d (%s) from "+
-					"DB: %s", height-1,
-					blockHash, err)
+					"DB: %s", height, blockHash, err)
 				return
 			}
 			// Check that the filter and header line up.
@@ -1324,7 +1342,7 @@ func testRandomBlocks(t *testing.T, svc *neutrino.ChainService,
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't calculate "+
 					"header for extended filter for block "+
-					"%d: %s", height, err)
+					"%d (%s): %s", height, blockHash, err)
 				return
 			}
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
