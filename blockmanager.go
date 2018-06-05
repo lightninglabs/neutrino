@@ -15,6 +15,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -148,6 +150,7 @@ type blockManager struct {
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
+	startCFHeaderSync       chan struct{}
 	basicHeaders            map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer
 	lastBasicCFHeaderHeight int32
 	numBasicCFHeadersMsgs   int32
@@ -180,6 +183,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		startCFHeaderSync:   make(chan struct{}),
 		basicHeaders: make(
 			map[chainhash.Hash]map[chainhash.Hash][]*ServerPeer,
 		),
@@ -207,8 +211,9 @@ func (b *blockManager) Start() {
 	}
 
 	log.Trace("Starting block manager")
-	b.wg.Add(1)
+	b.wg.Add(2)
 	go b.blockHandler()
+	go b.cfHandler()
 }
 
 // Stop gracefully shuts down the block manager by stopping all asynchronous
@@ -317,6 +322,492 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.resetHeaderState(header, int32(height))
 		b.startSync(peers)
 	}
+}
+
+// cfHandler is the cfheader download handler for the block manager. It must be
+// run as a goroutine. It requests and processes cfheaders messages in a
+// separate goroutine from the peer handlers.
+func (b *blockManager) cfHandler() {
+	// If a loop ends with a quit, we want to signal that the goroutine is
+	// done.
+	defer func() {
+		log.Trace("Committed filter header handler done")
+		b.wg.Done()
+	}()
+
+	// Wait for block header sync to complete first.
+	select {
+	case <-b.startCFHeaderSync:
+	case <-b.quit:
+		return
+	}
+
+	// Query all peers for their checkpoints.
+	lastHeader, _, err := b.server.BlockHeaders.ChainTip()
+	if err != nil {
+		log.Critical(err)
+		return
+	}
+	lastHash := lastHeader.BlockHash()
+
+	var regCheckpoints, extCheckpoints []*chainhash.Hash
+
+	for regCheckpoints == nil {
+		select {
+		case <-b.quit:
+			return
+		}
+		allRegCheckpoints := b.getCheckpts(&lastHash,
+			wire.GCSFilterRegular)
+		if len(allRegCheckpoints) == 0 {
+			time.Sleep(QueryTimeout)
+			continue
+		}
+		regCheckpoints, err = b.resolveConflict(allRegCheckpoints,
+			b.server.RegFilterHeaders, wire.GCSFilterRegular)
+		if err != nil {
+			log.Debugf("got error attempting to determine correct "+
+				"cfheader checkpoints: %v, trying again", err)
+			time.Sleep(QueryTimeout)
+		}
+	}
+
+	for extCheckpoints == nil {
+		select {
+		case <-b.quit:
+			return
+		}
+		allExtCheckpoints := b.getCheckpts(&lastHash,
+			wire.GCSFilterExtended)
+		if len(allExtCheckpoints) == 0 {
+			time.Sleep(QueryTimeout)
+			continue
+		}
+		extCheckpoints, err = b.resolveConflict(allExtCheckpoints,
+			b.server.ExtFilterHeaders, wire.GCSFilterExtended)
+		if err != nil {
+			log.Debugf("got error attempting to determine correct "+
+				"cfheader checkpoints: %v, trying again", err)
+			time.Sleep(QueryTimeout)
+		}
+	}
+
+	// At this point, we have good checkpoints and we've banned most peers
+	// that aren't on the same chain as we are. Now, we download all of
+	// the headers that match those checkpoints. We launch the downloads
+	// for both types of headers simultaneously and then wait for them to
+	// both return. Each one returns when its store is caught up with
+	// the block headers.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		b.getAllCFHeaders(regCheckpoints, b.server.RegFilterHeaders,
+			wire.GCSFilterRegular)
+		wg.Done()
+	}()
+
+	go func() {
+		b.getAllCFHeaders(extCheckpoints, b.server.ExtFilterHeaders,
+			wire.GCSFilterExtended)
+		wg.Done()
+	}()
+
+	wg.Wait()
+
+}
+
+// getAllCFHeaders catches a filter header store up with the block header
+// store from the network. It assumes that the filter header store matches the
+// checkpoints up to the tip of the store.
+func (b *blockManager) getAllCFHeaders(checkpoints []*chainhash.Hash,
+	store *headerfs.FilterHeaderStore, fType wire.FilterType) {
+
+	// We keep going until we've caught up the filter header store with
+	// the block header store.
+	var bestHeight, curHeight uint32
+	var err error
+
+	// Get the best height of the block header store and don't take
+	// an error for an answer unless we're quitting.
+	for bestHeight == 0 {
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
+		_, bestHeight, err = b.server.BlockHeaders.ChainTip()
+		if err != nil {
+			bestHeight = 0
+			// Don't beat up storage too much if we're failing.
+			time.Sleep(QueryTimeout)
+		}
+	}
+
+	// Get the current height of the filter header store and don't take
+	// an error for an answer unless we're quitting.
+	for curHeight == 0 {
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
+		_, curHeight, err = store.ChainTip()
+		if err != nil {
+			bestHeight = 0
+			// Don't beat up storage too much if we're failing.
+			time.Sleep(QueryTimeout)
+		}
+	}
+
+	// Generate all of the requests we'll be batching.
+	var queryMsgs []*wire.MsgGetCFHeaders
+	for i, checkpt := range checkpoints {
+		// If we have the header for this checkpoint, we can skip doing
+		// anything with it. We also already have
+		if i*wire.CFCheckptInterval < int(curHeight) ||
+			i == 0 {
+			continue
+		}
+
+		// Create a new query message for the checkpoint and append
+		// it.
+	}
+
+	for curHeight < bestHeight {
+		// Quit if requested.
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
+
+		// Update current height and best height.
+		bestHeight, curHeight = 0, 0
+		for bestHeight == 0 {
+			select {
+			case <-b.quit:
+				return
+			default:
+			}
+			_, bestHeight, err = b.server.BlockHeaders.ChainTip()
+			if err != nil {
+				bestHeight = 0
+				// Don't beat up storage too much if we're
+				// failing.
+				time.Sleep(QueryTimeout)
+			}
+		}
+		for curHeight == 0 {
+			select {
+			case <-b.quit:
+				return
+			default:
+			}
+			_, curHeight, err = store.ChainTip()
+			if err != nil {
+				curHeight = 0
+				// Don't beat up storage too much if we're
+				// failing.
+				time.Sleep(QueryTimeout)
+			}
+		}
+	}
+}
+
+// resolveConflict finds the correct checkpoint information, rewinds the header
+// store if it's incorrect, and bans any peers giving us incorrect header
+// information.
+func (b *blockManager) resolveConflict(
+	checkpoints map[*ServerPeer][]*chainhash.Hash,
+	store *headerfs.FilterHeaderStore, fType wire.FilterType) (
+	[]*chainhash.Hash, error) {
+
+	heightDiff, err := checkCFCheckptSanity(checkpoints, store)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we got -1, we have full agreement between all peers and the store.
+	if heightDiff == -1 {
+		// Take the first peer's checkpoint list and return it.
+		for _, checkpts := range checkpoints {
+			return checkpts, nil
+		}
+	}
+
+	// Delete any responses that have fewer checkpoints than where we see a
+	// mismatch.
+	for peer, checkpts := range checkpoints {
+		if len(checkpts) < heightDiff {
+			delete(checkpoints, peer)
+		}
+	}
+
+	if len(checkpoints) == 0 {
+		return nil, fmt.Errorf("no peer is serving good cfheaders")
+	}
+
+	// Now we get all of the mismatched CFHeaders from peers, and check
+	// which ones are valid.
+	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
+	headers := b.getCFHeaders(startHeight, fType)
+
+	// Make sure we're working off the same baseline. Otherwise, we
+	// want to go back and get checkpoints again.
+	var hash chainhash.Hash
+	for _, msg := range headers {
+		if (hash == chainhash.Hash{}) {
+			hash = msg.PrevFilterHeader
+		} else if hash != msg.PrevFilterHeader {
+			return nil, fmt.Errorf("mismatch between filter " +
+				"headers expected to be the same")
+		}
+	}
+
+	// For each header, go through and check whether all headers messages
+	// have the same filter hash. If we find a difference, get the block
+	// and calculate the filter.
+	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
+		hash = chainhash.Hash{}
+		var mismatch bool
+		for _, msg := range headers {
+			if len(msg.FilterHashes) <= i {
+				continue
+			}
+
+			if (hash == chainhash.Hash{}) {
+				hash = *msg.FilterHashes[i]
+				continue
+			}
+
+			if hash != *msg.FilterHashes[i] {
+				// We've found a mismatch!
+				mismatch = true
+				break
+			}
+		}
+
+		if mismatch {
+			u32i := uint32(i)
+			// Get the block for this height.
+			header, err := b.server.BlockHeaders.
+				FetchHeaderByHeight(startHeight + u32i)
+			if err != nil {
+				return nil, err
+			}
+			block, err := b.server.GetBlockFromNetwork(
+				header.BlockHash())
+			if err != nil {
+				return nil, err
+			}
+
+			// Calculate the filter.
+			var filter *gcs.Filter
+			switch fType {
+			case wire.GCSFilterRegular:
+				filter, err = builder.BuildBasicFilter(
+					block.MsgBlock())
+			case wire.GCSFilterExtended:
+				filter, err = builder.BuildExtFilter(
+					block.MsgBlock())
+			}
+			if err != nil {
+				return nil, err
+			}
+
+			// Hash the filter to see what the correct value
+			// should be.
+			fHash, err := builder.GetFilterHash(filter)
+			if err != nil {
+				return nil, err
+			}
+
+			// Compare the calculated filter hash against received
+			// filter hashes and throw out any mismatching peers.
+			for peer, msg := range headers {
+				if len(msg.FilterHashes) <= i {
+					continue
+				}
+
+				if *msg.FilterHashes[i] != fHash {
+					// Got a mismatching peer
+					b.server.BanPeer(peer)
+					peer.Disconnect()
+					delete(headers, peer)
+					delete(checkpoints, peer)
+				}
+			}
+
+			// Compare the calculated filter against the stored
+			// filter headers, if any, and roll back if the stored
+			// header at this height doesn't match the calculated
+			// filter hash.
+			_, maxHeight, err := store.ChainTip()
+			if err != nil {
+				return nil, err
+			}
+
+			if u32i <= maxHeight {
+				/*curHeader, err := store.FetchHeaderByHeight(
+					u32i)
+				if err != nil {
+					return nil, err
+				}*/
+				lastHeader, err := store.FetchHeaderByHeight(
+					u32i - 1)
+				if err != nil {
+					return nil, err
+				}
+				calcHeader, err := builder.MakeHeaderForFilter(
+					filter, *lastHeader)
+				if err != nil {
+					return nil, err
+				}
+				if *lastHeader != calcHeader {
+					// Roll back stored headers to previous
+					// height, which is the last one that
+					// agrees with the network.
+				}
+			}
+		}
+	}
+
+	// Any mismatches have now been thrown out. Delete any checkpoint
+	// lists that don't have matching headers, as these are peers that
+	// didn't respond, and ban them from future queries.
+	for peer := range checkpoints {
+		if _, ok := headers[peer]; !ok {
+			b.server.BanPeer(peer)
+			peer.Disconnect()
+			delete(checkpoints, peer)
+		}
+	}
+
+	// Check sanity again. If we're sane, return a matching checkpoint
+	// list. If not, return an error and download checkpoints from
+	// remaining peers.
+	heightDiff, err = checkCFCheckptSanity(checkpoints, store)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we got -1, we have full agreement between all peers and the store.
+	if heightDiff == -1 {
+		// Take the first peer's checkpoint list and return it.
+		for _, checkpts := range checkpoints {
+			return checkpts, nil
+		}
+	}
+
+	// Otherwise, return an error and allow the loop which calls this
+	// function to call it again with the new set of peers.
+	return nil, fmt.Errorf("got mismatched checkpoints")
+}
+
+// getCFHeaders runs a query for cfheaders at a specific height and returns a
+// map of responses.
+func (b *blockManager) getCFHeaders(height uint32,
+	fType wire.FilterType) map[*ServerPeer]*wire.MsgCFHeaders {
+	headers := make(map[*ServerPeer]*wire.MsgCFHeaders)
+	stopHeader, err := b.server.BlockHeaders.FetchHeaderByHeight(
+		height + wire.MaxCFHeadersPerMsg - 1)
+	if err != nil {
+		return headers
+	}
+	stopHash := stopHeader.BlockHash()
+	msg := wire.NewMsgGetCFHeaders(fType, height, &stopHash)
+	b.server.queryAllPeers(
+		msg,
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+			peerQuit chan<- struct{}) {
+			switch m := resp.(type) {
+			case *wire.MsgCFHeaders:
+				if m.StopHash == stopHash &&
+					m.FilterType == fType {
+					headers[sp] = m
+					close(peerQuit)
+				}
+			}
+		},
+	)
+	return headers
+}
+
+// getCheckpts runs a query for cfcheckpts against all peers and returns a map
+// of responses.
+func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
+	fType wire.FilterType) map[*ServerPeer][]*chainhash.Hash {
+
+	checkpoints := make(map[*ServerPeer][]*chainhash.Hash)
+	getCheckptMsg := wire.NewMsgGetCFCheckpt(fType, lastHash)
+	b.server.queryAllPeers(
+		getCheckptMsg,
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+			peerQuit chan<- struct{}) {
+			switch m := resp.(type) {
+			case *wire.MsgCFCheckpt:
+				if m.FilterType == fType &&
+					m.StopHash == *lastHash {
+					checkpoints[sp] = m.FilterHeaders
+					close(peerQuit)
+				}
+			}
+		},
+	)
+	return checkpoints
+}
+
+// checkCFCheckptSanity checks whether all peers which have responded agree.
+// If so, it returns -1; otherwise, it returns the earliest index at which at
+// least one of the peers differs. The checkpoints are also checked against the
+// existing store up to the tip of the store. If all of the peers match but
+// the store doesn't, the height at which the mismatch occurs is returned.
+func checkCFCheckptSanity(cp map[*ServerPeer][]*chainhash.Hash,
+	headerStore *headerfs.FilterHeaderStore) (int, error) {
+
+	// Get the known best header to compare against checkpoints.
+	_, storeTip, err := headerStore.ChainTip()
+	if err != nil {
+		return 0, err
+	}
+
+	// Determine the maximum length of each peer's checkpoint list. If they
+	// differ, we don't return yet because we want to make sure they match
+	// up to the shortest one.
+	maxLen := 0
+	for _, checkpoints := range cp {
+		if len(checkpoints) > maxLen {
+			maxLen = len(checkpoints)
+		}
+	}
+
+	// Compare the actual checkpoints against each other and anything
+	// stored in the header store.
+	for i := 0; i < maxLen; i++ {
+		var checkpoint chainhash.Hash
+		for _, checkpoints := range cp {
+			if i >= len(checkpoints) {
+				return i, nil
+			}
+			if checkpoint == (chainhash.Hash{}) {
+				checkpoint = *checkpoints[i]
+			}
+			if checkpoint != *checkpoints[i] {
+				return i, nil
+			}
+		}
+		if uint32((i+1)*wire.CFCheckptInterval) <= storeTip {
+			header, err := headerStore.FetchHeaderByHeight(
+				uint32((i + 1) * wire.CFCheckptInterval))
+			if err != nil {
+				return i, err
+			}
+			if *header != checkpoint {
+				return i, nil
+			}
+		}
+	}
+	return -1, nil
 }
 
 // blockHandler is the main handler for the block manager.  It must be run as a
@@ -1200,10 +1691,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.peer.Addr(), err)
-			// Unnecessary but we might put other code after this
-			// eventually.
 			return
 		}
+	}
+
+	// If we've caught up to the headers, we can start the cfheader sync
+	if b.current() && b.startCFHeaderSync != nil {
+		close(b.startCFHeaderSync)
+		b.startCFHeaderSync = nil
 	}
 }
 
@@ -1212,7 +1707,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 func (b *blockManager) sendGetcfheaders(startHeight uint32, endBlock *chainhash.Hash,
 	count int, filterType wire.FilterType) {
 	// Send getcfheaders to each peer based on these headers.
-	cfhReq := cfhRequest{
+	/* cfhReq := cfhRequest{
 		filterType: filterType,
 		stopHash:   *endBlock,
 	}
@@ -1242,6 +1737,7 @@ func (b *blockManager) sendGetcfheaders(startHeight uint32, endBlock *chainhash.
 		sp.mtxReqCFH.Unlock()
 		sp.pushGetCFHeadersMsg(startHeight, endBlock, filterType)
 	})
+	*/
 }
 
 // QueueCFHeaders adds the passed headers message and peer to the block

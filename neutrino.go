@@ -445,7 +445,7 @@ func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 func (sp *ServerPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
 	log.Tracef("Got cfheaders message with %d items from %s",
 		len(msg.FilterHashes), p.Addr())
-	sp.server.blockManager.QueueCFHeaders(msg, sp)
+	//sp.server.blockManager.QueueCFHeaders(msg, sp)
 }
 
 // OnAddr is invoked when a peer receives an addr bitcoin message and is

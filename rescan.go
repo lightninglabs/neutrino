@@ -740,8 +740,8 @@ type Rescan struct {
 // NewRescan returns a rescan object that runs in another goroutine and has an
 // updatable filter. It returns the long-running rescan object, and a channel
 // which returns any error on termination of the rescan process.
-func (s *ChainService) NewRescan(options ...RescanOption) Rescan {
-	return Rescan{
+func (s *ChainService) NewRescan(options ...RescanOption) *Rescan {
+	return &Rescan{
 		running:    1,
 		options:    options,
 		updateChan: make(chan *updateOptions),
