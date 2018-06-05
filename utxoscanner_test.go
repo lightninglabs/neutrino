@@ -70,21 +70,30 @@ func makeTestOutpoint() *wire.OutPoint {
 
 // TestFindSpends tests that findSpends properly returns spend reports.
 func TestFindSpends(t *testing.T) {
-	outpoints := make(map[wire.OutPoint][]byte)
+	outpoint := makeTestOutpoint()
+	height := uint32(100000)
+
+	reqs := []*GetUtxoRequest{
+		{
+			OutPoint:    outpoint,
+			BirthHeight: height,
+		},
+	}
 
 	// Test that finding spends with an empty outpoints index returns no
 	// spends.
-	spends := findSpends(&Block100000, 100000, outpoints)
+	r := newBatchSpendReporter()
+	spends := r.notifySpends(&Block100000, height)
 	if len(spends) != 0 {
 		t.Fatalf("unexpected number of spend reports -- "+
 			"want %d, got %d", 0, len(spends))
 	}
 
 	// Now, add the test outpoint to the outpoint index.
-	outpoints[*makeTestOutpoint()] = []byte{}
+	r.addNewRequests(reqs)
 
 	// Ensure that a spend report is now returned.
-	spends = findSpends(&Block100000, 100000, outpoints)
+	spends = r.notifySpends(&Block100000, height)
 	if len(spends) != 1 {
 		t.Fatalf("unexpected number of spend reports -- "+
 			"want %d, got %d", 1, len(spends))
@@ -97,42 +106,45 @@ func TestFindSpends(t *testing.T) {
 func TestFindInitialTransactions(t *testing.T) {
 	hash, _ := chainhash.NewHashFromStr("e9a66845e05d5abc0ad04ec80f774a7e585c6e8db975962d069a522137b80c1d")
 	outpoint := &wire.OutPoint{Hash: *hash, Index: 0}
+	height := uint32(100000)
 
 	reqs := []*GetUtxoRequest{
 		{
 			OutPoint:    outpoint,
-			StartHeight: 100000,
+			BirthHeight: height,
 		},
 	}
 
 	// First, try to find the outpoint within the block.
-	spends := findInitialTransactions(&Block100000, reqs)
-	if len(spends) != 1 {
+	r := newBatchSpendReporter()
+	initialTxns := r.findInitialTransactions(&Block100000, reqs, height)
+	if len(initialTxns) != 1 {
 		t.Fatalf("unexpected number of spend reports -- "+
-			"want %v, got %v", 1, len(spends))
+			"want %v, got %v", 1, len(initialTxns))
 	}
 
-	spend := spends[*outpoint]
-	if spend == nil || spend.Output == nil || spend.Output.Value != 1000000 {
+	output := initialTxns[*outpoint]
+	if output == nil || output.Output == nil || output.Output.Value != 1000000 {
 		t.Fatalf("Expected spend report to contain initial output -- "+
-			"instead got: %v", spend)
+			"instead got: %v", output)
 	}
 
 	// Now, modify the output index such that is invalid.
 	outpoint.Index = 1
 
 	// Try to find the invalid outpoint in the same block.
-	spends = findInitialTransactions(&Block100000, reqs)
-	if len(spends) != 1 {
+	r = newBatchSpendReporter()
+	initialTxns = r.findInitialTransactions(&Block100000, reqs, height)
+	if len(initialTxns) != 1 {
 		t.Fatalf("unexpected number of spend reports -- "+
-			"want %v, got %v", 1, len(spends))
+			"want %v, got %v", 1, len(initialTxns))
 	}
 
 	// The spend report should be nil since the output index is invalid.
-	spend = spends[*outpoint]
-	if spend != nil {
+	output = initialTxns[*outpoint]
+	if output != nil {
 		t.Fatalf("Expected spend report to be nil since the output index "+
-			"is invalid, got %v", spend)
+			"is invalid, got %v", output)
 	}
 
 	// Finally, restore the valid output index, but modify the txid.
@@ -140,17 +152,18 @@ func TestFindInitialTransactions(t *testing.T) {
 	outpoint.Hash[0] ^= 0x01
 
 	// Try to find the outpoint with an invalid txid in the same block.
-	spends = findInitialTransactions(&Block100000, reqs)
-	if len(spends) != 1 {
+	r = newBatchSpendReporter()
+	initialTxns = r.findInitialTransactions(&Block100000, reqs, height)
+	if len(initialTxns) != 1 {
 		t.Fatalf("unexpected number of spend reports -- "+
-			"want %v, got %v", 1, len(spends))
+			"want %v, got %v", 1, len(initialTxns))
 	}
 
 	// Again, the spend report should be nil because of the invalid txid.
-	spend = spends[*outpoint]
-	if spend != nil {
+	output = initialTxns[*outpoint]
+	if output != nil {
 		t.Fatalf("Expected spend report to be nil since the txid "+
-			"is not in block, got %v", spend)
+			"is not in block, got %v", output)
 	}
 }
 
