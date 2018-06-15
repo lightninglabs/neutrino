@@ -527,7 +527,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		switch filterType {
 		case RegularFilter:
 			basicFilter, err := builder.BuildBasicFilter(
-				netParams.GenesisBlock,
+				netParams.GenesisBlock, nil,
 			)
 			if err != nil {
 				return nil, err
@@ -541,21 +541,8 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 				return nil, err
 			}
 
-		case ExtendedFilter:
-			extFilter, err := builder.BuildExtFilter(
-				netParams.GenesisBlock,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			genesisFilterHash, err = builder.MakeHeaderForFilter(
-				extFilter,
-				netParams.GenesisBlock.Header.PrevBlock,
-			)
-			if err != nil {
-				return nil, err
-			}
+		default:
+			return nil, fmt.Errorf("unknown filter type: %v", filterType)
 		}
 
 		genesisHeader := FilterHeader{
