@@ -844,9 +844,21 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 					hex.EncodeToString(haveBytes))
 				return
 			}
+
+			inputScripts, err := fetchPrevInputScripts(
+				haveBlock.MsgBlock(),
+				correctSyncNode,
+			)
+			if err != nil {
+				errChan <- fmt.Errorf("unable to create prev "+
+					"input scripts: %v", err)
+				return
+			}
+
 			// Calculate basic filter from block.
 			calcFilter, err := builder.BuildBasicFilter(
-				haveBlock.MsgBlock())
+				haveBlock.MsgBlock(), inputScripts,
+			)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build basic "+
 					"filter for block %d (%s): %s", height,
