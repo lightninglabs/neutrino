@@ -1145,11 +1145,11 @@ func (b *blockManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoi
 // findPreviousHeaderCheckpoint returns the last checkpoint before the passed
 // height. It returns a checkpoint matching the genesis block when the height
 // is earlier than the first checkpoint or there are no checkpoints for the
-// current network. This is used for resetting state when a malicious peer sends
-// us headers that don't lead up to a known checkpoint.
+// current network. This is used for resetting state when a malicious peer
+// sends us headers that don't lead up to a known checkpoint.
 func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Checkpoint {
-	// Start with the genesis block - earliest checkpoint to which our
-	// code will want to reset
+	// Start with the genesis block - earliest checkpoint to which our code
+	// will want to reset
 	prevCheckpoint := &chaincfg.Checkpoint{
 		Height: 0,
 		Hash:   b.server.chainParams.GenesisHash,
@@ -1171,11 +1171,12 @@ func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Chec
 // syncing from a new peer.
 func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
 	newestHeight int32) {
+
 	b.headerList.Init()
 	b.startHeader = nil
 
-	// Add an entry for the latest known block into the header pool.
-	// This allows the next downloaded header to prove it links to the chain
+	// Add an entry for the latest known block into the header pool.  This
+	// allows the next downloaded header to prove it links to the chain
 	// properly.
 	node := headerNode{header: newestHeader, height: newestHeight}
 	b.headerList.PushBack(&node)
@@ -1704,19 +1705,25 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"disconnecting", node.height,
 					nodeHash, hmsg.peer.Addr(),
 					b.nextCheckpoint.Hash)
+
 				prevCheckpoint := b.findPreviousHeaderCheckpoint(
-					node.height)
+					node.height,
+				)
+
 				log.Infof("Rolling back to previous validated "+
 					"checkpoint at height %d/hash %s",
 					prevCheckpoint.Height,
 					prevCheckpoint.Hash)
+
 				_, err := b.server.rollBackToHeight(uint32(
-					prevCheckpoint.Height))
+					prevCheckpoint.Height),
+				)
 				if err != nil {
 					log.Criticalf("Rollback failed: %s",
 						err)
 					// Should we panic here?
 				}
+
 				hmsg.peer.Disconnect()
 				return
 			}
