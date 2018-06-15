@@ -18,10 +18,6 @@ var (
 
 	// regBucket is the bucket that stores the regular filters.
 	regBucket = []byte("regular")
-
-	// extBucket is the name of the bucket that stores the extended
-	// filters.
-	extBucket = []byte("ext")
 )
 
 // FilterType is a enum-like type that represents the various filter types
@@ -32,10 +28,6 @@ const (
 	// RegularFilter is the filter type of regular filters which contain
 	// outputs and pkScript data pushes.
 	RegularFilter FilterType = iota
-
-	// ExtendedFilter is the filter type of extended filters which contain
-	// txids, and witness data.
-	ExtendedFilter
 )
 
 var (
@@ -99,28 +91,12 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 
 		// With the bucket created, we'll now construct the initial
 		// basic genesis filter and store it within the database.
-		basicFilter, err := builder.BuildBasicFilter(genesisBlock)
-		if err != nil {
-			return err
-		}
-		err = putFilter(regFilters, genesisHash, basicFilter)
+		basicFilter, err := builder.BuildBasicFilter(genesisBlock, nil)
 		if err != nil {
 			return err
 		}
 
-		// Similarly, we'll then create the bucket to store the
-		// extended filters, build the genesis tiler and finally store
-		// it within the database.
-		extFilters, err := filters.CreateBucketIfNotExists(extBucket)
-		if err != nil {
-			return err
-		}
-
-		extFilter, err := builder.BuildExtFilter(genesisBlock)
-		if err != nil {
-			return err
-		}
-		return putFilter(extFilters, genesisHash, extFilter)
+		return putFilter(regFilters, genesisHash, basicFilter)
 	})
 	if err != nil && err != walletdb.ErrBucketExists {
 		return nil, err
@@ -163,8 +139,8 @@ func (f *FilterStore) PutFilter(hash *chainhash.Hash,
 		switch fType {
 		case RegularFilter:
 			targetBucket = filters.NestedReadWriteBucket(regBucket)
-		case ExtendedFilter:
-			targetBucket = filters.NestedReadWriteBucket(extBucket)
+		default:
+			return fmt.Errorf("unknown filter type: %v", fType)
 		}
 
 		if filter == nil {
@@ -196,8 +172,8 @@ func (f *FilterStore) FetchFilter(blockHash *chainhash.Hash,
 		switch filterType {
 		case RegularFilter:
 			targetBucket = filters.NestedReadBucket(regBucket)
-		case ExtendedFilter:
-			targetBucket = filters.NestedReadBucket(extBucket)
+		default:
+			return fmt.Errorf("unknown filter type")
 		}
 
 		filterBytes := targetBucket.Get(blockHash[:])
@@ -208,7 +184,9 @@ func (f *FilterStore) FetchFilter(blockHash *chainhash.Hash,
 			return nil
 		}
 
-		dbFilter, err := gcs.FromNBytes(builder.DefaultP, filterBytes)
+		dbFilter, err := gcs.FromNBytes(
+			builder.DefaultP, builder.DefaultM, filterBytes,
+		)
 		if err != nil {
 			return err
 		}
