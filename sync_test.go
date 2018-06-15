@@ -368,64 +368,6 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
-	// Do a rescan that searches only for a specific prevOut
-	startBlock = waddrmgr.BlockStamp{Height: 1095}
-	endBlock := waddrmgr.BlockStamp{Height: 1101}
-	var foundTx *btcutil.Tx
-	err = harness.svc.Rescan(
-		neutrino.StartBlock(&startBlock),
-		neutrino.EndBlock(&endBlock),
-		neutrino.WatchOutPoints(tx1.TxIn[0].PreviousOutPoint),
-		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
-			OnFilteredBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				relevantTxs []*btcutil.Tx) {
-				if height == 1101 {
-					if len(relevantTxs) != 1 {
-						t.Fatalf("Didn't get expected "+
-							"number of relevant "+
-							"transactions from "+
-							"rescan: want 1, got "+
-							"%d", len(relevantTxs))
-					}
-					if *(relevantTxs[0].Hash()) !=
-						tx1.TxHash() {
-						t.Fatalf("Didn't get expected "+
-							"relevant transaction:"+
-							" want %s, got %s",
-							tx1.TxHash(),
-							relevantTxs[0].Hash())
-					}
-					foundTx = relevantTxs[0]
-				}
-			},
-		}),
-	)
-	if err != nil || foundTx == nil || *(foundTx.Hash()) != tx1.TxHash() {
-		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
-			tx1.TxHash(), err)
-	}
-	// Check that we got the right transaction index.
-	blockHeader, err := harness.svc.BlockHeaders.FetchHeaderByHeight(1101)
-	if err != nil {
-		t.Fatalf("Couldn't get block hash for block 1101: %s", err)
-	}
-	blockHash := blockHeader.BlockHash()
-	block, err := harness.h1.Node.GetBlock(&blockHash)
-	if err != nil {
-		t.Fatalf("Couldn't get block %s via RPC: %s", blockHash, err)
-	}
-	ourIndex := 0
-	for i, tx := range block.Transactions {
-		if tx.TxHash() == tx1.TxHash() {
-			ourIndex = i
-		}
-	}
-	if foundTx.Index() != ourIndex {
-		t.Fatalf("Index of found transaction incorrect: want 1, got %d",
-			foundTx.Index())
-	}
-
 	// Call GetUtxo for our output in tx1 to see if it's spent.
 	ourIndex = 1 << 30 // Should work on 32-bit systems
 	for i, txo := range tx1.TxOut {
