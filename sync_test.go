@@ -757,7 +757,6 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	// is somewhat random, depending on how quickly the nodes process each
 	// other's notifications vs finding new blocks, but the two nodes should
 	// remain fully synchronized with each other at the end.
-	neutrino.CFHMinPeers = 2
 	go harness.h2.Node.Generate(75)
 	harness.h1.Node.Generate(50)
 
@@ -1198,7 +1197,6 @@ func TestNeutrinoSync(t *testing.T) {
 
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
-	neutrino.WaitForMoreCFHeaders = time.Second
 	neutrino.QueryPeerConnectTimeout = 10 * time.Second
 	svc, err := neutrino.NewChainService(config)
 	if err != nil {

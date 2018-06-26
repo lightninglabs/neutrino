@@ -81,6 +81,13 @@ func defaultQueryOptions() *queryOptions {
 	}
 }
 
+// applyQueryOptions updates a queryOptions set with functional options.
+func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
+	for _, option := range options {
+		option(qo)
+	}
+}
+
 // Timeout is a query option that lets the query know how long to wait for each
 // peer we ask the query to answer it before moving on.
 func Timeout(timeout time.Duration) QueryOption {
@@ -122,6 +129,29 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 	}
 }
 
+type queryState uint32
+
+const (
+	// Atomically updated per-query state for each query. The states are:
+
+	// Waiting to be submitted to a peer.
+	queryWaitSubmit queryState = iota
+
+	// Submitted to a peer, waiting for reply.
+	queryWaitResponse
+
+	// Valid reply received.
+	queryAnswered
+
+	// State transitions are:
+	//
+	// * queryWaitSubmit->queryWaitResponse - send query to peer
+	// * queryWaitResponse->queryWaitSubmit - query timeout with no
+	//   acceptable response
+	// * queryWaitResponse->queryAnswered - acceptable response to query
+	//   received
+)
+
 // We provide 3 kinds of queries:
 //
 // * queryAllPeers allows a single query to be broadcast to all peers, and
@@ -160,7 +190,7 @@ func (s *ChainService) queryBatch(
 	// checkResponse is called for every received message to see if it
 	// answers the query message. It should return true if so.
 	checkResponse func(sp *ServerPeer, query wire.Message,
-		resp wire.Message, quit chan<- struct{}) bool,
+		resp wire.Message) bool,
 
 	// quit forces the query to end before it's complete.
 	quit <-chan struct{},
@@ -171,22 +201,12 @@ func (s *ChainService) queryBatch(
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query.
 	qo := defaultQueryOptions()
-	for _, option := range options {
-		option(qo)
-	}
+	qo.applyQueryOptions(options...)
 
 	// Shared state between this goroutine and the per-peer goroutines.
-	// queryStates holds an atomically updated state for each query. The
-	// states are:
-	// 0 - waiting to be submitted to a peer
-	// 1 - submitted to a peer, waiting for reply
-	// 2 - valid reply received
-	// State transitions are:
-	// 0->1 - send query to peer
-	// 1->0 - query timeout with no acceptable response
-	// 1->2 - acceptable response to query received
 	queryStates := make([]uint32, len(queryMsgs))
-	// subscriptions allows us to subscribe to notifications from peers.
+
+	// subscription allows us to subscribe to notifications from peers.
 	msgChan := make(chan spMsg)
 	subQuit := make(chan struct{})
 	subscription := spMsgSubscription{
@@ -194,13 +214,22 @@ func (s *ChainService) queryBatch(
 		quitChan: subQuit,
 	}
 	defer close(subQuit)
+	// peerStates and its companion mutex allow the peer goroutines to
+	// tell the main goroutine what query they're currently working on.
+	peerStates := make(map[*ServerPeer]wire.Message)
+	var mtxPeerStates sync.RWMutex
 
 	peerGoroutine := func(sp *ServerPeer, quit <-chan struct{},
-		matchSignal <-chan wire.Message) {
+		matchSignal <-chan struct{}) {
 
 		// Subscribe to messages from the peer.
 		sp.subscribeRecvMsg(subscription)
 		defer sp.unsubscribeRecvMsgs(subscription)
+		defer func() {
+			mtxPeerStates.Lock()
+			delete(peerStates, sp)
+			mtxPeerStates.Unlock()
+		}()
 
 		// Track the last query our peer failed to answer and skip over
 		// it for the next attempt. This helps prevent most instances
@@ -224,17 +253,21 @@ func (s *ChainService) queryBatch(
 
 				// If this query is finished and we're at
 				// firstUnfinished, update firstUnfinished.
-				if i == firstUnfinished && atomic.
-					LoadUint32(&queryStates[i]) == 2 {
+				if i == firstUnfinished &&
+					atomic.LoadUint32(&queryStates[i]) ==
+						uint32(queryAnswered) {
 					firstUnfinished++
 					continue
 				}
 
-				// We check to see if the query is waitng to
+				// We check to see if the query is waiting to
 				// be handled. If so, we mark it as being
 				// handled. If not, we move to the next one.
-				if !atomic.CompareAndSwapUint32(&queryStates[i],
-					0, 1) {
+				if !atomic.CompareAndSwapUint32(
+					&queryStates[i],
+					uint32(queryWaitSubmit),
+					uint32(queryWaitResponse),
+				) {
 					continue
 				}
 
@@ -243,6 +276,7 @@ func (s *ChainService) queryBatch(
 				handleQuery = i
 				sp.QueueMessageWithEncoding(queryMsgs[i],
 					nil, qo.encoding)
+				break
 			}
 
 			// Regardless of whether we have a query or not, we
@@ -271,6 +305,9 @@ func (s *ChainService) queryBatch(
 			}
 
 			// We have a query we're working on.
+			mtxPeerStates.Lock()
+			peerStates[sp] = queryMsgs[handleQuery]
+			mtxPeerStates.Unlock()
 			select {
 			case <-quit:
 				return
@@ -278,18 +315,16 @@ func (s *ChainService) queryBatch(
 				// We failed, so set the query state back to
 				// zero and update our lastFailed state.
 				atomic.StoreUint32(&queryStates[handleQuery],
-					0)
+					uint32(queryWaitSubmit))
 				if !sp.Connected() {
 					return
 				}
 				lastFailed = handleQuery
-			case m := <-matchSignal:
-				// We got a match signal. If it matches our
-				// query, we can mark this query a success.
-				if m == queryMsgs[handleQuery] {
-					atomic.StoreUint32(
-						&queryStates[handleQuery], 2)
-				}
+			case <-matchSignal:
+				// We got a match signal so we can mark this
+				// query a success.
+				atomic.StoreUint32(&queryStates[handleQuery],
+					uint32(queryAnswered))
 			}
 		}
 	}
@@ -302,7 +337,7 @@ func (s *ChainService) queryBatch(
 	// the query got a match. If it's the peer's match, the peer can
 	// mark the query a success and move on to the next query ahead of
 	// timeout.
-	matchSignals := make(map[*ServerPeer]chan wire.Message)
+	matchSignals := make(map[*ServerPeer]chan struct{})
 
 	// Clean up on exit.
 	defer func() {
@@ -317,7 +352,7 @@ func (s *ChainService) queryBatch(
 		for _, peer := range s.Peers() {
 			if _, ok := peerQuits[peer]; !ok && peer.Connected() {
 				peerQuits[peer] = make(chan struct{})
-				matchSignals[peer] = make(chan wire.Message)
+				matchSignals[peer] = make(chan struct{})
 				go peerGoroutine(peer, peerQuits[peer],
 					matchSignals[peer])
 			}
@@ -332,8 +367,28 @@ func (s *ChainService) queryBatch(
 				delete(matchSignals, peer)
 			}
 		}
-	}
 
+		timeout := time.After(qo.timeout)
+		for {
+			select {
+			case msg := <-msgChan:
+				mtxPeerStates.RLock()
+				curQuery := peerStates[msg.sp]
+				mtxPeerStates.RUnlock()
+				if checkResponse(msg.sp, curQuery, msg.msg) {
+					select {
+					case <-quit:
+						return
+					case matchSignals[msg.sp] <- struct{}{}:
+					}
+				}
+			case <-timeout:
+				break
+			case <-quit:
+				return
+			}
+		}
+	}
 }
 
 // queryAllPeers is a helper function that sends a query to all peers and waits
@@ -361,9 +416,7 @@ func (s *ChainService) queryAllPeers(
 	// functional options to the query.
 	qo := defaultQueryOptions()
 	qo.numRetries = 1
-	for _, option := range options {
-		option(qo)
-	}
+	qo.applyQueryOptions(options...)
 
 	// This is done in a single-threaded query because the peerState is
 	// held in a single thread. This is the only part of the query
@@ -467,9 +520,7 @@ func (s *ChainService) queryPeers(
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query.
 	qo := defaultQueryOptions()
-	for _, option := range options {
-		option(qo)
-	}
+	qo.applyQueryOptions(options...)
 
 	// We get an initial view of our peers, to be updated each time a peer
 	// query times out.
@@ -689,11 +740,18 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 // GetBlockFromNetwork gets a block by requesting it from the network, one peer
 // at a time, until one answers.
-//
-// TODO(roasbeef): add query option to indicate if the caller wants witness
-// data or not.
 func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query so that we can check what inv type
+	// to use.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	invType := wire.InvTypeWitnessBlock
+	if qo.encoding == wire.BaseEncoding {
+		invType = wire.InvTypeBlock
+	}
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block s we can't
@@ -706,8 +764,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(wire.InvTypeWitnessBlock,
-		&blockHash))
+	getData.AddInvVect(wire.NewInvVect(invType, &blockHash))
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -794,13 +851,38 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 
 	var err error
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query so that we can check what inv type
+	// to use. Broadcast the inv to all peers, responding to any getdata
+	// messages for the transaction.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	invType := wire.InvTypeWitnessTx
+	if qo.encoding == wire.BaseEncoding {
+		invType = wire.InvTypeTx
+	}
+
+	// Create an inv.
+	txHash := tx.TxHash()
+	inv := wire.NewMsgInv()
+	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+
+	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
-		tx,
+		inv,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
 			switch response := resp.(type) {
+			case *wire.MsgGetData:
+				for _, vec := range response.InvList {
+					if vec.Hash == txHash {
+						sp.QueueMessageWithEncoding(
+							tx, nil, qo.encoding)
+					}
+				}
 			case *wire.MsgReject:
-				if response.Hash == tx.TxHash() {
+				if response.Hash == txHash {
 					err = fmt.Errorf("Transaction %s "+
 						"rejected by %s: %s",
 						tx.TxHash(), sp.Addr(),
@@ -810,7 +892,12 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				}
 			}
 		},
-		options...,
+		// Default to 500ms timeout. Default for queryAllPeers is a
+		// single try.
+		append(
+			[]QueryOption{Timeout(time.Millisecond * 500)},
+			options...,
+		)...,
 	)
 
 	return err
