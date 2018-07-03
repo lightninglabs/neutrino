@@ -38,7 +38,7 @@ var (
 	// btclog.LevelOff turns on log messages from the tests themselves as
 	// well. Keep in mind some log messages may not appear in order due to
 	// use of multiple query goroutines in the tests.
-	logLevel    = btclog.LevelOff
+	logLevel    = btclog.LevelInfo
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 
@@ -60,7 +60,7 @@ var (
 	// "bd":	OnBlockDisconnected
 	// "fd":	OnFilteredBlockDisconnected
 	wantLog = func() (log []byte) {
-		for i := 796; i <= 800; i++ {
+		for i := 1096; i <= 1100; i++ {
 			// FilteredBlockConnected
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
@@ -73,7 +73,7 @@ var (
 		log = append(log, 0x01)
 		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
-		for i := 802; i <= 925; i++ {
+		for i := 1102; i <= 1225; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
 			log = append(log, []byte("bc")...)
@@ -86,14 +86,14 @@ var (
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
 		log = append(log, []byte("bc")...)
-		// Update with rewind - rewind back to 795, add another address,
+		// Update with rewind - rewind back to 1095, add another address,
 		// and see more interesting transactions.
-		for i := 927; i >= 796; i-- {
+		for i := 1227; i >= 1096; i-- {
 			// BlockDisconnected and FilteredBlockDisconnected
 			log = append(log, []byte("bdfd")...)
 		}
-		// Forward to 800
-		for i := 796; i <= 800; i++ {
+		// Forward to 1100
+		for i := 1096; i <= 1100; i++ {
 			// FilteredBlockConnected
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
@@ -106,13 +106,13 @@ var (
 		log = append(log, 0x02)
 		log = append(log, []byte("bc")...)
 		// 124 blocks with nothing
-		for i := 802; i <= 925; i++ {
+		for i := 1102; i <= 1225; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
 			log = append(log, []byte("bc")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
-		for i := 926; i <= 927; i++ {
+		for i := 1226; i <= 1227; i++ {
 			log = append(log, []byte("rdfc")...)
 			log = append(log, 0x01)
 			log = append(log, []byte("bc")...)
@@ -122,27 +122,27 @@ var (
 		log = append(log, 0x00)
 		log = append(log, []byte("bc")...)
 		// 3 block rollback
-		for i := 928; i >= 926; i-- {
+		for i := 1228; i >= 1226; i-- {
 			log = append(log, []byte("fdbd")...)
 		}
 		// 5 block empty reorg
-		for i := 926; i <= 930; i++ {
+		for i := 1226; i <= 1230; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
 			log = append(log, []byte("bc")...)
 		}
 		// 5 block rollback
-		for i := 930; i >= 926; i-- {
+		for i := 1230; i >= 1226; i-- {
 			log = append(log, []byte("fdbd")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
-		for i := 926; i <= 927; i++ {
+		for i := 1226; i <= 1227; i++ {
 			log = append(log, []byte("rdfc")...)
 			log = append(log, 0x01)
 			log = append(log, []byte("bc")...)
 		}
 		// 8 block rest of reorg
-		for i := 928; i <= 935; i++ {
+		for i := 1228; i <= 1235; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
 			log = append(log, []byte("bc")...)
@@ -1096,7 +1096,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't set up harness: %s", err)
 	}
-	_, err = h1.Node.Generate(500)
+	_, err = h1.Node.Generate(800)
 	if err != nil {
 		t.Fatalf("Couldn't generate blocks: %s", err)
 	}

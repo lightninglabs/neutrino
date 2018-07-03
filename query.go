@@ -436,11 +436,11 @@ func (s *ChainService) queryAllPeers(
 
 	// Now we start a goroutine for each peer which manages the peer's
 	// message subscription.
-	peerQuits := make(map[*ServerPeer]chan struct{})
+	peerQuits := make(map[string]chan struct{})
 	for _, sp := range peers {
 		sp.subscribeRecvMsg(subscription)
 		wg.Add(1)
-		peerQuits[sp] = make(chan struct{})
+		peerQuits[sp.Addr()] = make(chan struct{})
 		go func(sp *ServerPeer, peerQuit <-chan struct{}) {
 			defer wg.Done()
 
@@ -458,7 +458,7 @@ func (s *ChainService) queryAllPeers(
 				case <-timeout:
 				}
 			}
-		}(sp, peerQuits[sp])
+		}(sp, peerQuits[sp.Addr()])
 	}
 
 	// This goroutine will wait until all of the peer-query goroutines have
@@ -495,7 +495,12 @@ checkResponses:
 			// TODO: This will get stuck if checkResponse gets
 			// stuck. This is a caveat for callers that should be
 			// fixed before exposing this function for public use.
-			checkResponse(sm.sp, sm.msg, quit, peerQuits[sm.sp])
+			select {
+			case <-peerQuits[sm.sp.Addr()]:
+			default:
+				checkResponse(sm.sp, sm.msg, quit,
+					peerQuits[sm.sp.Addr()])
+			}
 		}
 	}
 }

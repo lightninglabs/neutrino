@@ -111,15 +111,6 @@ func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
-// cfhRequest records which cfheaders we've requested, and the order in which
-// we've requested them. Since there's no way to associate the cfheaders to the
-// actual block hashes based on the cfheaders message to keep it compact, we
-// track it this way.
-type cfhRequest struct {
-	filterType wire.FilterType
-	stopHash   chainhash.Hash
-}
-
 // spMsg represents a message over the wire from a specific peer.
 type spMsg struct {
 	sp  *ServerPeer
@@ -158,23 +149,17 @@ type ServerPeer struct {
 	// can't accept will be dropped silently.
 	recvSubscribers map[spMsgSubscription]struct{}
 	mtxSubscribers  sync.RWMutex
-
-	// These are only necessary until the cfheaders logic is refactored as
-	// a query client.
-	requestedCFHeaders map[cfhRequest]int
-	mtxReqCFH          sync.Mutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:             s,
-		persistent:         isPersistent,
-		requestedCFHeaders: make(map[cfhRequest]int),
-		knownAddresses:     make(map[string]struct{}),
-		quit:               make(chan struct{}),
-		recvSubscribers:    make(map[spMsgSubscription]struct{}),
+		server:          s,
+		persistent:      isPersistent,
+		knownAddresses:  make(map[string]struct{}),
+		quit:            make(chan struct{}),
+		recvSubscribers: make(map[spMsgSubscription]struct{}),
 	}
 }
 
@@ -231,16 +216,6 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 			sp.Disconnect()
 		}
 	}
-}
-
-// pushGetCFHeadersMsg sends a getcfheaders message for the provided block
-// locator and stop hash to the connected peer.
-func (sp *ServerPeer) pushGetCFHeadersMsg(startHeight uint32,
-	stopHash *chainhash.Hash, filterType wire.FilterType) error {
-
-	sp.QueueMessage(wire.NewMsgGetCFHeaders(filterType, startHeight,
-		stopHash), nil)
-	return nil
 }
 
 // pushSendHeadersMsg sends a sendheaders message to the connected peer.
@@ -1337,4 +1312,15 @@ func (s *ChainService) Stop() error {
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
 	return s.blockManager.IsCurrent()
+}
+
+// PeerByAddr lets the caller look up a peer address in the service's peer
+// table, if connected to that peer address.
+func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
+	for _, peer := range s.Peers() {
+		if peer.Addr() == addr {
+			return peer
+		}
+	}
+	return nil
 }
