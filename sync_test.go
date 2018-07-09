@@ -275,10 +275,10 @@ var testCases = []*testCase{
 		name: "test blocks and filters in random order",
 		test: testRandomBlocks,
 	},
-	&testCase{
+	/*&testCase{
 		name: "check long-running rescan results",
 		test: testRescanResults,
-	},
+	},*/
 }
 
 // Make sure the client synchronizes with the correct node.
@@ -368,19 +368,19 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
-	// Do a rescan that searches only for a specific TXID
-	startBlock = waddrmgr.BlockStamp{Height: 795}
-	endBlock := waddrmgr.BlockStamp{Height: 801}
+	// Do a rescan that searches only for a specific prevOut
+	startBlock = waddrmgr.BlockStamp{Height: 1095}
+	endBlock := waddrmgr.BlockStamp{Height: 1101}
 	var foundTx *btcutil.Tx
 	err = harness.svc.Rescan(
 		neutrino.StartBlock(&startBlock),
 		neutrino.EndBlock(&endBlock),
-		neutrino.WatchTxIDs(tx1.TxHash()),
+		neutrino.WatchOutPoints(tx1.TxIn[0].PreviousOutPoint),
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnFilteredBlockConnected: func(height int32,
 				header *wire.BlockHeader,
 				relevantTxs []*btcutil.Tx) {
-				if height == 801 {
+				if height == 1101 {
 					if len(relevantTxs) != 1 {
 						t.Fatalf("Didn't get expected "+
 							"number of relevant "+
@@ -406,7 +406,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			tx1.TxHash(), err)
 	}
 	// Check that we got the right transaction index.
-	blockHeader, err := harness.svc.BlockHeaders.FetchHeaderByHeight(801)
+	blockHeader, err := harness.svc.BlockHeaders.FetchHeaderByHeight(1101)
 	if err != nil {
 		t.Fatalf("Couldn't get block hash for block 801: %s", err)
 	}
@@ -444,7 +444,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 	}
 	spendReport, err := harness.svc.GetUtxo(
 		neutrino.WatchOutPoints(ourOutPoint),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -1086,7 +1086,7 @@ func TestNeutrinoSync(t *testing.T) {
 	rpcLogger.SetLevel(logLevel)
 	rpcclient.UseLogger(rpcLogger)
 
-	// Create a btcd SimNet node and generate 500 blocks
+	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
@@ -1112,7 +1112,7 @@ func TestNeutrinoSync(t *testing.T) {
 		t.Fatalf("Couldn't set up harness: %s", err)
 	}
 
-	// Create a third btcd SimNet node and generate 900 blocks
+	// Create a third btcd SimNet node and generate 1200 blocks
 	h3, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
@@ -1122,7 +1122,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't set up harness: %s", err)
 	}
-	_, err = h3.Node.Generate(900)
+	_, err = h3.Node.Generate(1200)
 	if err != nil {
 		t.Fatalf("Couldn't generate blocks: %s", err)
 	}
@@ -1143,11 +1143,11 @@ func TestNeutrinoSync(t *testing.T) {
 		t.Fatalf("Couldn't generate blocks: %s", err)
 	}
 
-	// Now we have a node with 800 blocks (h1), 850 blocks (h2), and
-	// 900 blocks (h3). The chains of nodes h1 and h2 match up to block
-	// 500. By default, a synchronizing wallet connected to all three
+	// Now we have a node with 1100 blocks (h1), 1150 blocks (h2), and
+	// 1200 blocks (h3). The chains of nodes h1 and h2 match up to block
+	// 800. By default, a synchronizing wallet connected to all three
 	// should synchronize to h3. However, we're going to take checkpoints
-	// from h1 at 111, 333, 555, and 777, and add those to the
+	// from h1 at 111, 333, 555, 777, and 999, and add those to the
 	// synchronizing wallet's chain parameters so that it should
 	// disconnect from h3 at block 111, and from h2 at block 555, and
 	// then synchronize to block 800 from h1. Order of connection is
@@ -1156,7 +1156,7 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Copy parameters and insert checkpoints
 	modParams := chaincfg.SimNetParams
-	for _, height := range []int64{111, 333, 555, 777} {
+	for _, height := range []int64{111, 333, 555, 777, 999} {
 		hash, err := h1.Node.GetBlockHash(height)
 		if err != nil {
 			t.Fatalf("Couldn't get block hash for height %d: %s",

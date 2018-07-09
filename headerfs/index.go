@@ -239,6 +239,9 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 		// we'll fetch the height that corresponds to that hash.
 		tipHashBytes := rootBucket.Get(tipKey)
 		tipHeightBytes := rootBucket.Get(tipHashBytes)
+		if len(tipHeightBytes) != 4 {
+			return ErrHeightNotFound
+		}
 
 		// With the height fetched, we can now populate our return
 		// parameters.

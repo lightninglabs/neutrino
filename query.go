@@ -216,7 +216,7 @@ func (s *ChainService) queryBatch(
 	defer close(subQuit)
 	// peerStates and its companion mutex allow the peer goroutines to
 	// tell the main goroutine what query they're currently working on.
-	peerStates := make(map[*ServerPeer]wire.Message)
+	peerStates := make(map[string]wire.Message)
 	var mtxPeerStates sync.RWMutex
 
 	peerGoroutine := func(sp *ServerPeer, quit <-chan struct{},
@@ -227,7 +227,7 @@ func (s *ChainService) queryBatch(
 		defer sp.unsubscribeRecvMsgs(subscription)
 		defer func() {
 			mtxPeerStates.Lock()
-			delete(peerStates, sp)
+			delete(peerStates, sp.Addr())
 			mtxPeerStates.Unlock()
 		}()
 
@@ -306,7 +306,7 @@ func (s *ChainService) queryBatch(
 
 			// We have a query we're working on.
 			mtxPeerStates.Lock()
-			peerStates[sp] = queryMsgs[handleQuery]
+			peerStates[sp.Addr()] = queryMsgs[handleQuery]
 			mtxPeerStates.Unlock()
 			select {
 			case <-quit:
@@ -331,13 +331,13 @@ func (s *ChainService) queryBatch(
 
 	// peerQuits holds per-peer quit channels so we can kill the goroutines
 	// when they disconnect.
-	peerQuits := make(map[*ServerPeer]chan struct{})
+	peerQuits := make(map[string]chan struct{})
 
 	// matchSignals holds per-peer answer channels that get a notice that
 	// the query got a match. If it's the peer's match, the peer can
 	// mark the query a success and move on to the next query ahead of
 	// timeout.
-	matchSignals := make(map[*ServerPeer]chan struct{})
+	matchSignals := make(map[string]chan struct{})
 
 	// Clean up on exit.
 	defer func() {
@@ -350,17 +350,18 @@ func (s *ChainService) queryBatch(
 		// Update our view of peers, starting new workers for new peers
 		// and removing disconnected/banned peers.
 		for _, peer := range s.Peers() {
-			if _, ok := peerQuits[peer]; !ok && peer.Connected() {
-				peerQuits[peer] = make(chan struct{})
-				matchSignals[peer] = make(chan struct{})
-				go peerGoroutine(peer, peerQuits[peer],
-					matchSignals[peer])
+			sp := peer.Addr()
+			if _, ok := peerQuits[sp]; !ok && peer.Connected() {
+				peerQuits[sp] = make(chan struct{})
+				matchSignals[sp] = make(chan struct{})
+				go peerGoroutine(peer, peerQuits[sp],
+					matchSignals[sp])
 			}
 
 		}
 
 		for peer, quitChan := range peerQuits {
-			if !peer.Connected() {
+			if !s.PeerByAddr(peer).Connected() {
 				close(quitChan)
 				close(matchSignals[peer])
 				delete(peerQuits, peer)
@@ -373,17 +374,27 @@ func (s *ChainService) queryBatch(
 			select {
 			case msg := <-msgChan:
 				mtxPeerStates.RLock()
-				curQuery := peerStates[msg.sp]
+				curQuery := peerStates[msg.sp.Addr()]
 				mtxPeerStates.RUnlock()
 				if checkResponse(msg.sp, curQuery, msg.msg) {
 					select {
 					case <-quit:
 						return
-					case matchSignals[msg.sp] <- struct{}{}:
+					case matchSignals[msg.sp.Addr()] <- struct{}{}:
 					}
 				}
 			case <-timeout:
-				break
+				// Check if we're done; if so, quit.
+				allDone := true
+				for i := 0; i < len(queryStates); i++ {
+					if atomic.LoadUint32(&queryStates[i]) !=
+						uint32(queryAnswered) {
+						allDone = false
+					}
+				}
+				if allDone {
+					return
+				}
 			case <-quit:
 				return
 			}
