@@ -344,14 +344,6 @@ func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 	// TODO(roaseef): log?
 }
 
-// OnCFHeaders is invoked when a peer receives a cfheaders bitcoin message and
-// is used to notify the server about a list of committed filter headers.
-func (sp *ServerPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
-	log.Tracef("Got cfheaders message with %d items from %s",
-		len(msg.FilterHashes), p.Addr())
-	//sp.server.blockManager.QueueCFHeaders(msg, sp)
-}
-
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
 // used to notify the server about advertised addresses.
 func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
@@ -1109,7 +1101,6 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
-			OnCFHeaders: sp.OnCFHeaders,
 			OnReject:    sp.OnReject,
 			OnFeeFilter: sp.OnFeeFilter,
 			OnAddr:      sp.OnAddr,
