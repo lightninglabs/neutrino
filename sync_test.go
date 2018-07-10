@@ -259,19 +259,19 @@ type testCase struct {
 }
 
 var testCases = []*testCase{
-	&testCase{
+	{
 		name: "initial sync",
 		test: testInitialSync,
 	},
-	&testCase{
+	{
 		name: "one-shot rescan",
 		test: testRescan,
 	},
-	&testCase{
+	{
 		name: "start long-running rescan",
 		test: testStartRescan,
 	},
-	&testCase{
+	{
 		name: "test blocks and filters in random order",
 		test: testRandomBlocks,
 	},
