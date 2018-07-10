@@ -275,10 +275,10 @@ var testCases = []*testCase{
 		name: "test blocks and filters in random order",
 		test: testRandomBlocks,
 	},
-	/*&testCase{
+	&testCase{
 		name: "check long-running rescan results",
 		test: testRescanResults,
-	},*/
+	},
 }
 
 // Make sure the client synchronizes with the correct node.
@@ -408,7 +408,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 	// Check that we got the right transaction index.
 	blockHeader, err := harness.svc.BlockHeaders.FetchHeaderByHeight(1101)
 	if err != nil {
-		t.Fatalf("Couldn't get block hash for block 801: %s", err)
+		t.Fatalf("Couldn't get block hash for block 1101: %s", err)
 	}
 	blockHash := blockHeader.BlockHash()
 	block, err := harness.h1.Node.GetBlock(&blockHash)
@@ -461,7 +461,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
 	quitRescan = make(chan struct{})
-	startBlock = waddrmgr.BlockStamp{Height: 795}
+	startBlock = waddrmgr.BlockStamp{Height: 1095}
 	rescan, errChan = startRescan(t, harness.svc, addr1, &startBlock,
 		quitRescan)
 	err := waitForSync(t, harness.svc, harness.h1)
@@ -632,7 +632,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 
 	// Update the filter with the second address, and we should have 2 more
 	// relevant transactions.
-	err = rescan.Update(neutrino.AddAddrs(addr2), neutrino.Rewind(795))
+	err = rescan.Update(neutrino.AddAddrs(addr2), neutrino.Rewind(1095))
 	if err != nil {
 		t.Fatalf("Couldn't update the rescan filter: %s", err)
 	}
@@ -667,7 +667,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	// Check and make sure the previous UTXO is now spent.
 	spendReport, err := harness.svc.GetUtxo(
 		neutrino.WatchOutPoints(ourOutPoint),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
