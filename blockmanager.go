@@ -415,7 +415,8 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 			"height %d", blockHeight, filtHeight)
 	}
 	if blockHeight == filtHeight {
-		return fmt.Errorf("cfheaders already caught up to blocks")
+		log.Tracef("cfheaders already caught up to blocks")
+		return nil
 	}
 
 	// Query all peers for the responses.
@@ -1754,6 +1755,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	if b.current() {
 		select {
 		case b.startCFHeaderSync <- struct{}{}:
+			log.Infof("Sent startcfheadersync at height %d",
+				finalHeight)
 		case <-b.quit:
 		// If the cfheader sync is too busy to notice our notification,
 		// we move along. It'll catch up next time.

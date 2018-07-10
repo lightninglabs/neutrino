@@ -12,6 +12,8 @@ install:
   - pushd $GOPATH/src/github.com/btcsuite/
   - git clone https://github.com/btcsuite/btcd
   - pushd btcd
+  - BTCD_VERSION=$(cat glide.yaml | grep -A1 btcd | tail -n1 | awk '{ print $2}')
+  - git checkout $BTCD_VERSION
   - glide install
   - go install . ./cmd/...
   - popd

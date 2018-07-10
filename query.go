@@ -246,17 +246,17 @@ func (s *ChainService) queryBatch(
 			handleQuery = -1
 
 			for i := firstUnfinished; i < len(queryMsgs); i++ {
-				// If we last failed at this query, skip it.
-				if i == lastFailed {
-					continue
-				}
-
 				// If this query is finished and we're at
 				// firstUnfinished, update firstUnfinished.
 				if i == firstUnfinished &&
 					atomic.LoadUint32(&queryStates[i]) ==
 						uint32(queryAnswered) {
 					firstUnfinished++
+					continue
+				}
+
+				// If we last failed at this query, skip it.
+				if i == lastFailed {
 					continue
 				}
 
@@ -369,7 +369,8 @@ func (s *ChainService) queryBatch(
 			}
 		}
 
-		timeout := time.After(qo.timeout)
+		ticker := time.NewTicker(qo.timeout)
+		defer ticker.Stop()
 		for {
 			select {
 			case msg := <-msgChan:
@@ -383,7 +384,7 @@ func (s *ChainService) queryBatch(
 					case matchSignals[msg.sp.Addr()] <- struct{}{}:
 					}
 				}
-			case <-timeout:
+			case <-ticker.C:
 				// Check if we're done; if so, quit.
 				allDone := true
 				for i := 0; i < len(queryStates); i++ {

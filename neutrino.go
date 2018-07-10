@@ -322,77 +322,6 @@ func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 	sp.server.blockManager.QueueHeaders(msg, sp)
 }
 
-// OnGetData is invoked when a peer receives a getdata bitcoin message and
-// is used to deliver block and transaction information.
-func (sp *ServerPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
-	numAdded := 0
-	notFound := wire.NewMsgNotFound()
-
-	length := len(msg.InvList)
-
-	// A decaying ban score increase is applied to prevent exhausting resources
-	// with unusually large inventory queries.
-	// Requesting more than the maximum inventory vector length within a short
-	// period of time yields a score above the default ban threshold. Sustained
-	// bursts of small requests are not penalized as that would potentially ban
-	// peers performing IBD.
-	// This incremental score decays each minute to half of its value.
-	sp.addBanScore(0, uint32(length)*99/wire.MaxInvPerMsg, "getdata")
-
-	// We wait on this wait channel periodically to prevent queuing
-	// far more data than we can send in a reasonable time, wasting memory.
-	// The waiting occurs after the database fetch for the next one to
-	// provide a little pipelining.
-	var waitChan chan struct{}
-	doneChan := make(chan struct{}, 1)
-
-	for i, iv := range msg.InvList {
-		var c chan struct{}
-		// If this will be the last message we send.
-		if i == length-1 && len(notFound.InvList) == 0 {
-			c = doneChan
-		} else if (i+1)%3 == 0 {
-			// Buffered so as to not make the send goroutine block.
-			c = make(chan struct{}, 1)
-		}
-		var err error
-		switch iv.Type {
-		case wire.InvTypeTx:
-			err = sp.server.pushTxMsg(sp, &iv.Hash, c, waitChan)
-		default:
-			log.Warnf("Unsupported type in inventory request %d",
-				iv.Type)
-			continue
-		}
-		if err != nil {
-			notFound.AddInvVect(iv)
-
-			// When there is a failure fetching the final entry
-			// and the done channel was sent in due to there
-			// being no outstanding not found inventory, consume
-			// it here because there is now not found inventory
-			// that will use the channel momentarily.
-			if i == len(msg.InvList)-1 && c != nil {
-				<-c
-			}
-		}
-		numAdded++
-		waitChan = c
-	}
-	if len(notFound.InvList) != 0 {
-		sp.QueueMessage(notFound, doneChan)
-	}
-
-	// Wait for messages to be sent. We can send quite a lot of data at this
-	// point and this will keep the peer busy for a decent amount of time.
-	// We don't process anything else by them in this time so that we
-	// have an idea of when we should hear back from them - else the idle
-	// timeout could fire when we were only half done sending the blocks.
-	if numAdded > 0 {
-		<-doneChan
-	}
-}
-
 // OnFeeFilter is invoked when a peer receives a feefilter bitcoin message and
 // is used by remote peers to request that no transactions which have a fee rate
 // lower than provided value are inventoried to them.  The peer will be
@@ -814,33 +743,6 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 		atomic.LoadUint64(&s.bytesSent)
 }
 
-// pushTxMsg sends a tx message for the provided transaction hash to the
-// connected peer.  An error is returned if the transaction hash is not known.
-func (s *ChainService) pushTxMsg(sp *ServerPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
-	// Attempt to fetch the requested transaction from the pool.  A
-	// call could be made to check for existence first, but simply trying
-	// to fetch a missing transaction results in the same behavior.
-	/*	tx, err := s.txMemPool.FetchTransaction(hash)
-		if err != nil {
-			log.Tracef("Unable to fetch tx %v from transaction "+
-				"pool: %v", hash, err)
-
-			if doneChan != nil {
-				doneChan <- struct{}{}
-			}
-			return err
-		}
-
-		// Once we have fetched data wait for any previous operation to finish.
-		if waitChan != nil {
-			<-waitChan
-		}
-
-		sp.QueueMessage(tx.MsgTx(), doneChan) */
-
-	return nil
-}
-
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
 func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
@@ -1208,7 +1110,6 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnCFHeaders: sp.OnCFHeaders,
-			OnGetData:   sp.OnGetData,
 			OnReject:    sp.OnReject,
 			OnFeeFilter: sp.OnFeeFilter,
 			OnAddr:      sp.OnAddr,

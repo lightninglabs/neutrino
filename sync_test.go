@@ -38,7 +38,7 @@ var (
 	// btclog.LevelOff turns on log messages from the tests themselves as
 	// well. Keep in mind some log messages may not appear in order due to
 	// use of multiple query goroutines in the tests.
-	logLevel    = btclog.LevelInfo
+	logLevel    = btclog.LevelOff
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 
