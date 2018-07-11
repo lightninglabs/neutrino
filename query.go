@@ -129,11 +129,18 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 	}
 }
 
+// queryState is an atomically updated per-query state for each query in a
+// batch.
+//
+// State transitions are:
+//
+// * queryWaitSubmit->queryWaitResponse - send query to peer
+// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
+//   response
+// * queryWaitResponse->queryAnswered - acceptable response to query received
 type queryState uint32
 
 const (
-	// Atomically updated per-query state for each query. The states are:
-
 	// Waiting to be submitted to a peer.
 	queryWaitSubmit queryState = iota
 
@@ -142,14 +149,6 @@ const (
 
 	// Valid reply received.
 	queryAnswered
-
-	// State transitions are:
-	//
-	// * queryWaitSubmit->queryWaitResponse - send query to peer
-	// * queryWaitResponse->queryWaitSubmit - query timeout with no
-	//   acceptable response
-	// * queryWaitResponse->queryAnswered - acceptable response to query
-	//   received
 )
 
 // We provide 3 kinds of queries:

@@ -26,17 +26,20 @@ const (
 	maxTimeOffset = 2 * time.Hour
 )
 
+type FilterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
+
 var (
 	// FilterTypes is a map of filter types to synchronize to a lookup
 	// function for the service's store for that filter type.
-	FilterTypes = map[wire.FilterType]func(
-		*ChainService) *headerfs.FilterHeaderStore{
+	FilterTypes = map[wire.FilterType]FilterStoreLookup{
 		wire.GCSFilterRegular: func(
 			s *ChainService) *headerfs.FilterHeaderStore {
+
 			return s.RegFilterHeaders
 		},
 		wire.GCSFilterExtended: func(
 			s *ChainService) *headerfs.FilterHeaderStore {
+
 			return s.ExtFilterHeaders
 		},
 	}
@@ -298,13 +301,7 @@ func (b *blockManager) cfHandler() {
 		return
 	}
 	lastHash := lastHeader.BlockHash()
-
-	// At this point, we have good checkpoints and we've banned most peers
-	// that aren't on the same chain as we are. Now, we download all of
-	// the headers that match those checkpoints. We launch the downloads
-	// for both types of headers simultaneously and then wait for them to
-	// both return. Each one returns when its store is caught up with
-	// the block headers.
+	// Create a goroutine per filter type.
 	var wg sync.WaitGroup
 	wg.Add(len(FilterTypes))
 	for fType, storeLookup := range FilterTypes {
@@ -368,6 +365,11 @@ func (b *blockManager) cfHandler() {
 			// each signal while watching for reorgs. We ignore
 			// checkpoints because at this point, we're past
 			// any valid checkpoints.
+			// TODO: We can read startCFHeaderSync and split it
+			// out into a signal for each goroutine instead of
+			// using the ticker. This would make cfheaders stay
+			// caught up constantly rather than catch up every
+			// tick in the event of fast blocks coming in.
 			ticker := time.NewTicker(QueryTimeout)
 			defer ticker.Stop()
 			for {
@@ -658,9 +660,14 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 	// Add the block hashes by walking backwards through the headers.
 	// Also, cache the block headers for notification dispatch.
+	// TODO: Add DB-layer support for fetching the blocks as a batch
+	// and use that here.
 	processedHeaders := make([]*wire.BlockHeader, len(headerBatch))
 	curHeader, height, err := b.server.BlockHeaders.FetchHeader(
 		&msg.StopHash)
+	if err != nil {
+		return err
+	}
 	for i := 0; i < len(headerBatch); i++ {
 		headerBatch[len(headerBatch)-i-1].HeaderHash =
 			curHeader.BlockHash()
@@ -890,37 +897,10 @@ func (b *blockManager) checkForCFHeaderMismatch(
 			}
 		}
 
-		// Compare the calculated filter against the stored
-		// filter headers, if any, and roll back if the stored
-		// header at this height doesn't match the calculated
-		// filter hash.
-		_, maxHeight, err := store.ChainTip()
-		if err != nil {
-			return err
-		}
-
-		if u32i <= maxHeight {
-			/*curHeader, err := store.FetchHeaderByHeight(
-				u32i)
-			if err != nil {
-				return err
-			}*/
-			lastHeader, err := store.FetchHeaderByHeight(
-				u32i - 1)
-			if err != nil {
-				return err
-			}
-			calcHeader, err := builder.MakeHeaderForFilter(
-				filter, *lastHeader)
-			if err != nil {
-				return err
-			}
-			if *lastHeader != calcHeader {
-				// Roll back stored headers to previous
-				// height, which is the last one that
-				// agrees with the network.
-			}
-		}
+		// TODO: We can add an after-the-fact countermeasure here
+		// against eclipse attacks. If the checkpoints don't match
+		// the store, we can check whether the store or the
+		// checkpoints we got from the network are correct.
 	}
 
 	return nil
