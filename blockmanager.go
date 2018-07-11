@@ -313,6 +313,7 @@ func (b *blockManager) cfHandler() {
 
 			defer wg.Done()
 			var goodCheckpoints []*chainhash.Hash
+			var err error
 
 			// Get the header store for this filter type.
 			store := storeLookup(b.server)
