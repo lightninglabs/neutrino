@@ -275,7 +275,7 @@ var testCases = []*testCase{
 		name: "test blocks and filters in random order",
 		test: testRandomBlocks,
 	},
-	&testCase{
+	{
 		name: "check long-running rescan results",
 		test: testRescanResults,
 	},

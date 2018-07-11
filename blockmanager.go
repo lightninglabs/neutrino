@@ -26,12 +26,13 @@ const (
 	maxTimeOffset = 2 * time.Hour
 )
 
-type FilterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
+// filterStoreLookup
+type filterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
 
 var (
-	// FilterTypes is a map of filter types to synchronize to a lookup
+	// filterTypes is a map of filter types to synchronize to a lookup
 	// function for the service's store for that filter type.
-	FilterTypes = map[wire.FilterType]FilterStoreLookup{
+	filterTypes = map[wire.FilterType]filterStoreLookup{
 		wire.GCSFilterRegular: func(
 			s *ChainService) *headerfs.FilterHeaderStore {
 
@@ -303,8 +304,8 @@ func (b *blockManager) cfHandler() {
 	lastHash := lastHeader.BlockHash()
 	// Create a goroutine per filter type.
 	var wg sync.WaitGroup
-	wg.Add(len(FilterTypes))
-	for fType, storeLookup := range FilterTypes {
+	wg.Add(len(filterTypes))
+	for fType, storeLookup := range filterTypes {
 		// Launch a goroutine to get all of the filter headers for
 		// this filter type.
 		go func(fType wire.FilterType, storeLookup func(
