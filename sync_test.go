@@ -384,7 +384,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't find the index of our output in transaction"+
 			" %s", tx1.TxHash())
 	}
-	spendReport, err := svc.GetUtxo(
+	spendReport, err := harness.svc.GetUtxo(
 		neutrino.WatchInputs(neutrino.InputWithScript{
 			PkScript: script1,
 			OutPoint: ourOutPoint,
@@ -611,7 +611,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	}
 
 	// Check and make sure the previous UTXO is now spent.
-	spendReport, err = svc.GetUtxo(
+	spendReport, err := harness.svc.GetUtxo(
 		neutrino.WatchInputs(neutrino.InputWithScript{
 			PkScript: script1,
 			OutPoint: ourOutPoint,
@@ -626,6 +626,31 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 			"transaction: want %s, got %s", authTx1.Tx.TxHash(),
 			spendReport.SpendingTx.TxHash())
 	}
+}
+
+func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]byte, error) {
+	var inputScripts [][]byte
+	for i, tx := range block.Transactions {
+		if i == 0 {
+			continue
+		}
+
+		for _, txIn := range tx.TxIn {
+			prevTxHash := txIn.PreviousOutPoint.Hash
+
+			prevTx, err := client.Node.GetRawTransaction(&prevTxHash)
+			if err != nil {
+				return nil, err
+			}
+
+			prevIndex := txIn.PreviousOutPoint.Index
+			prevOutput := prevTx.MsgTx().TxOut[prevIndex]
+
+			inputScripts = append(inputScripts, prevOutput.PkScript)
+		}
+	}
+
+	return inputScripts, nil
 }
 
 func testRescanResults(harness *neutrinoHarness, t *testing.T) {
@@ -847,7 +872,7 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 
 			inputScripts, err := fetchPrevInputScripts(
 				haveBlock.MsgBlock(),
-				correctSyncNode,
+				harness.h1,
 			)
 			if err != nil {
 				errChan <- fmt.Errorf("unable to create prev "+
@@ -1144,11 +1169,13 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"ChainService: %s", err)
 		}
 	}
+
 	// Check if we're current.
 	if !svc.IsCurrent() {
 		return fmt.Errorf("the ChainService doesn't see itself as " +
 			"current")
 	}
+
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, wire.GCSFilterRegular)
@@ -1156,16 +1183,9 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		return fmt.Errorf("Couldn't get latest basic header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
-	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
-		knownBestHash, wire.GCSFilterExtended)
-	if err != nil {
-		return fmt.Errorf("Couldn't get latest extended header from "+
-			"%s: %s", correctSyncNode.P2PAddress(), err)
-	}
 	haveBasicHeader := &chainhash.Hash{}
-	haveExtHeader := &chainhash.Hash{}
-	for (knownBasicHeader.PrevFilterHeader != *haveBasicHeader) &&
-		(knownExtHeader.PrevFilterHeader != *haveExtHeader) {
+
+	for knownBasicHeader.PrevFilterHeader != *haveBasicHeader {
 		if total > syncTimeout {
 			return fmt.Errorf("Timed out after %v waiting for "+
 				"cfheaders synchronization.\n%s", syncTimeout,
@@ -1182,24 +1202,15 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Couldn't get regular filter header"+
 				" for %s: %s", knownBestHash, err)
 		}
-		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(knownBestHash)
-		if err != nil {
-			if err == io.EOF {
-				haveExtHeader = &chainhash.Hash{}
-				time.Sleep(syncUpdate)
-				total += syncUpdate
-				continue
-			}
-			return fmt.Errorf("Couldn't get extended filter header"+
-				" for %s: %s", knownBestHash, err)
-		}
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 	}
+
 	if logLevel != btclog.LevelOff {
 		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
 			haveBest.Hash)
 	}
+
 	// At this point, we know we have good cfheaders. Now we wait for the
 	// rescan, if one is going, to catch up.
 	for {
@@ -1234,6 +1245,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		}
 		rescanMtx.RUnlock()
 	}
+
 	// At this point, we know the latest cfheader is stored in the
 	// ChainService database. We now compare each cfheader the
 	// harness knows about to what's stored in the ChainService
@@ -1250,6 +1262,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Couldn't read block by "+
 				"height: %s", err)
 		}
+
 		hash := head.BlockHash()
 		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(&hash)
 		if err == io.EOF {
@@ -1266,47 +1279,21 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"for %d (%s) from DB: %v\n%s", i, hash,
 				err, goroutineDump())
 		}
-		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(&hash)
-		if err == io.EOF {
-			// This sometimes happens due to reorgs after the
-			// service decides it's current. Just wait for the
-			// DB to catch up and try again.
-			time.Sleep(syncUpdate)
-			total += syncUpdate
-			i--
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("Couldn't get extended "+
-				"header for %d (%s) from DB: %v\n%s", i, hash,
-				err, goroutineDump())
-		}
 		knownBasicHeader, err = correctSyncNode.Node.GetCFilterHeader(
-			&hash, wire.GCSFilterRegular)
+			&hash, wire.GCSFilterRegular,
+		)
 		if err != nil {
 			return fmt.Errorf("Couldn't get basic header "+
 				"for %d (%s) from node %s", i, hash,
 				correctSyncNode.P2PAddress())
 		}
-		knownExtHeader, err = correctSyncNode.Node.GetCFilterHeader(
-			&hash, wire.GCSFilterExtended)
-		if err != nil {
-			return fmt.Errorf("Couldn't get extended "+
-				"header for %d (%s) from node %s", i,
-				hash, correctSyncNode.P2PAddress())
-		}
+
 		if *haveBasicHeader != knownBasicHeader.PrevFilterHeader {
 			return fmt.Errorf("Basic header for %d (%s) "+
 				"doesn't match node %s. DB: %s, node: %s", i,
 				hash, correctSyncNode.P2PAddress(),
 				haveBasicHeader,
 				knownBasicHeader.PrevFilterHeader)
-		}
-		if *haveExtHeader != knownExtHeader.PrevFilterHeader {
-			return fmt.Errorf("Extended header for %d (%s)"+
-				" doesn't match node %s. DB: %s, node: %s", i,
-				hash, correctSyncNode.P2PAddress(),
-				haveExtHeader, knownExtHeader.PrevFilterHeader)
 		}
 	}
 	return nil
