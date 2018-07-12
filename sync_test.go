@@ -1380,6 +1380,11 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	// database to see if we've missed anything or messed anything
 	// up.
 	for i := int32(0); i <= haveBest.Height; i++ {
+		if total > syncTimeout {
+			return fmt.Errorf("Timed out after %v waiting for "+
+				"cfheaders DB to catch up.\n%s", syncTimeout,
+				goroutineDump())
+		}
 		head, err := svc.BlockHeaders.FetchHeaderByHeight(uint32(i))
 		if err != nil {
 			return fmt.Errorf("Couldn't read block by "+
@@ -1387,14 +1392,34 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		}
 		hash := head.BlockHash()
 		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(&hash)
+		if err == io.EOF {
+			// This sometimes happens due to reorgs after the
+			// service decides it's current. Just wait for the
+			// DB to catch up and try again.
+			time.Sleep(syncUpdate)
+			total += syncUpdate
+			i--
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("Couldn't get basic header "+
-				"for %d (%s) from DB", i, hash)
+				"for %d (%s) from DB: %v\n%s", i, hash,
+				err, goroutineDump())
 		}
 		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(&hash)
+		if err == io.EOF {
+			// This sometimes happens due to reorgs after the
+			// service decides it's current. Just wait for the
+			// DB to catch up and try again.
+			time.Sleep(syncUpdate)
+			total += syncUpdate
+			i--
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("Couldn't get extended "+
-				"header for %d (%s) from DB", i, hash)
+				"header for %d (%s) from DB: %v\n%s", i, hash,
+				err, goroutineDump())
 		}
 		knownBasicHeader, err = correctSyncNode.Node.GetCFilterHeader(
 			&hash, wire.GCSFilterRegular)
