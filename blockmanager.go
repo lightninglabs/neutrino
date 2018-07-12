@@ -38,11 +38,6 @@ var (
 
 			return s.RegFilterHeaders
 		},
-		wire.GCSFilterExtended: func(
-			s *ChainService) *headerfs.FilterHeaderStore {
-
-			return s.ExtFilterHeaders
-		},
 	}
 )
 
@@ -708,9 +703,6 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 	// Notify subscribers.
 	msgType := connectBasic
-	if msg.FilterType == wire.GCSFilterExtended {
-		msgType = connectExt
-	}
 	for _, header := range processedHeaders {
 		b.server.sendSubscribedMsg(&blockMessage{
 			msgType: msgType,
@@ -897,8 +889,6 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 	switch fType {
 	case wire.GCSFilterRegular:
 		filter, err = builder.BuildBasicFilter(block)
-	case wire.GCSFilterExtended:
-		filter, err = builder.BuildExtFilter(block)
 	default:
 		return returnPeers(), fmt.Errorf("unknown filter type")
 	}
