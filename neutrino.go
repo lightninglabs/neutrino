@@ -111,15 +111,6 @@ func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
-// cfhRequest records which cfheaders we've requested, and the order in which
-// we've requested them. Since there's no way to associate the cfheaders to the
-// actual block hashes based on the cfheaders message to keep it compact, we
-// track it this way.
-type cfhRequest struct {
-	filterType wire.FilterType
-	stopHash   chainhash.Hash
-}
-
 // spMsg represents a message over the wire from a specific peer.
 type spMsg struct {
 	sp  *ServerPeer
@@ -158,23 +149,17 @@ type ServerPeer struct {
 	// can't accept will be dropped silently.
 	recvSubscribers map[spMsgSubscription]struct{}
 	mtxSubscribers  sync.RWMutex
-
-	// These are only necessary until the cfheaders logic is refactored as
-	// a query client.
-	requestedCFHeaders map[cfhRequest]int
-	mtxReqCFH          sync.Mutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:             s,
-		persistent:         isPersistent,
-		requestedCFHeaders: make(map[cfhRequest]int),
-		knownAddresses:     make(map[string]struct{}),
-		quit:               make(chan struct{}),
-		recvSubscribers:    make(map[spMsgSubscription]struct{}),
+		server:          s,
+		persistent:      isPersistent,
+		knownAddresses:  make(map[string]struct{}),
+		quit:            make(chan struct{}),
+		recvSubscribers: make(map[spMsgSubscription]struct{}),
 	}
 }
 
@@ -231,16 +216,6 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 			sp.Disconnect()
 		}
 	}
-}
-
-// pushGetCFHeadersMsg sends a getcfheaders message for the provided block
-// locator and stop hash to the connected peer.
-func (sp *ServerPeer) pushGetCFHeadersMsg(startHeight uint32,
-	stopHash *chainhash.Hash, filterType wire.FilterType) error {
-
-	sp.QueueMessage(wire.NewMsgGetCFHeaders(filterType, startHeight,
-		stopHash), nil)
-	return nil
 }
 
 // pushSendHeadersMsg sends a sendheaders message to the connected peer.
@@ -347,77 +322,6 @@ func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 	sp.server.blockManager.QueueHeaders(msg, sp)
 }
 
-// OnGetData is invoked when a peer receives a getdata bitcoin message and
-// is used to deliver block and transaction information.
-func (sp *ServerPeer) OnGetData(_ *peer.Peer, msg *wire.MsgGetData) {
-	numAdded := 0
-	notFound := wire.NewMsgNotFound()
-
-	length := len(msg.InvList)
-
-	// A decaying ban score increase is applied to prevent exhausting resources
-	// with unusually large inventory queries.
-	// Requesting more than the maximum inventory vector length within a short
-	// period of time yields a score above the default ban threshold. Sustained
-	// bursts of small requests are not penalized as that would potentially ban
-	// peers performing IBD.
-	// This incremental score decays each minute to half of its value.
-	sp.addBanScore(0, uint32(length)*99/wire.MaxInvPerMsg, "getdata")
-
-	// We wait on this wait channel periodically to prevent queuing
-	// far more data than we can send in a reasonable time, wasting memory.
-	// The waiting occurs after the database fetch for the next one to
-	// provide a little pipelining.
-	var waitChan chan struct{}
-	doneChan := make(chan struct{}, 1)
-
-	for i, iv := range msg.InvList {
-		var c chan struct{}
-		// If this will be the last message we send.
-		if i == length-1 && len(notFound.InvList) == 0 {
-			c = doneChan
-		} else if (i+1)%3 == 0 {
-			// Buffered so as to not make the send goroutine block.
-			c = make(chan struct{}, 1)
-		}
-		var err error
-		switch iv.Type {
-		case wire.InvTypeTx:
-			err = sp.server.pushTxMsg(sp, &iv.Hash, c, waitChan)
-		default:
-			log.Warnf("Unsupported type in inventory request %d",
-				iv.Type)
-			continue
-		}
-		if err != nil {
-			notFound.AddInvVect(iv)
-
-			// When there is a failure fetching the final entry
-			// and the done channel was sent in due to there
-			// being no outstanding not found inventory, consume
-			// it here because there is now not found inventory
-			// that will use the channel momentarily.
-			if i == len(msg.InvList)-1 && c != nil {
-				<-c
-			}
-		}
-		numAdded++
-		waitChan = c
-	}
-	if len(notFound.InvList) != 0 {
-		sp.QueueMessage(notFound, doneChan)
-	}
-
-	// Wait for messages to be sent. We can send quite a lot of data at this
-	// point and this will keep the peer busy for a decent amount of time.
-	// We don't process anything else by them in this time so that we
-	// have an idea of when we should hear back from them - else the idle
-	// timeout could fire when we were only half done sending the blocks.
-	if numAdded > 0 {
-		<-doneChan
-	}
-}
-
 // OnFeeFilter is invoked when a peer receives a feefilter bitcoin message and
 // is used by remote peers to request that no transactions which have a fee rate
 // lower than provided value are inventoried to them.  The peer will be
@@ -438,14 +342,6 @@ func (sp *ServerPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 // used to notify the server about a rejected transaction.
 func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 	// TODO(roaseef): log?
-}
-
-// OnCFHeaders is invoked when a peer receives a cfheaders bitcoin message and
-// is used to notify the server about a list of committed filter headers.
-func (sp *ServerPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
-	log.Tracef("Got cfheaders message with %d items from %s",
-		len(msg.FilterHashes), p.Addr())
-	sp.server.blockManager.QueueCFHeaders(msg, sp)
 }
 
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
@@ -839,33 +735,6 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 		atomic.LoadUint64(&s.bytesSent)
 }
 
-// pushTxMsg sends a tx message for the provided transaction hash to the
-// connected peer.  An error is returned if the transaction hash is not known.
-func (s *ChainService) pushTxMsg(sp *ServerPeer, hash *chainhash.Hash, doneChan chan<- struct{}, waitChan <-chan struct{}) error {
-	// Attempt to fetch the requested transaction from the pool.  A
-	// call could be made to check for existence first, but simply trying
-	// to fetch a missing transaction results in the same behavior.
-	/*	tx, err := s.txMemPool.FetchTransaction(hash)
-		if err != nil {
-			log.Tracef("Unable to fetch tx %v from transaction "+
-				"pool: %v", hash, err)
-
-			if doneChan != nil {
-				doneChan <- struct{}{}
-			}
-			return err
-		}
-
-		// Once we have fetched data wait for any previous operation to finish.
-		if waitChan != nil {
-			<-waitChan
-		}
-
-		sp.QueueMessage(tx.MsgTx(), doneChan) */
-
-	return nil
-}
-
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
 func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
@@ -1232,8 +1101,6 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
-			OnCFHeaders: sp.OnCFHeaders,
-			OnGetData:   sp.OnGetData,
 			OnReject:    sp.OnReject,
 			OnFeeFilter: sp.OnFeeFilter,
 			OnAddr:      sp.OnAddr,
@@ -1337,4 +1204,15 @@ func (s *ChainService) Stop() error {
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
 	return s.blockManager.IsCurrent()
+}
+
+// PeerByAddr lets the caller look up a peer address in the service's peer
+// table, if connected to that peer address.
+func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
+	for _, peer := range s.Peers() {
+		if peer.Addr() == addr {
+			return peer
+		}
+	}
+	return nil
 }

@@ -4,6 +4,8 @@ package neutrino
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -30,6 +32,10 @@ var (
 	// underlying chain service to connect to a peer before giving up
 	// on a query in case we don't have any peers.
 	QueryPeerConnectTimeout = time.Second * 30
+
+	// QueryEncoding specifies the default encoding (witness or not) for
+	// `getdata` and other similar messages.
+	QueryEncoding = wire.WitnessEncoding
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -50,6 +56,10 @@ type queryOptions struct {
 	// on a query in case we don't have any peers.
 	peerConnectTimeout time.Duration
 
+	// encoding lets the query know which encoding to use when queueing
+	// messages to a peer.
+	encoding wire.MessageEncoding
+
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
@@ -67,6 +77,14 @@ func defaultQueryOptions() *queryOptions {
 		timeout:            QueryTimeout,
 		numRetries:         uint8(QueryNumRetries),
 		peerConnectTimeout: QueryPeerConnectTimeout,
+		encoding:           QueryEncoding,
+	}
+}
+
+// applyQueryOptions updates a queryOptions set with functional options.
+func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
+	for _, option := range options {
+		option(qo)
 	}
 }
 
@@ -95,6 +113,14 @@ func PeerConnectTimeout(timeout time.Duration) QueryOption {
 	}
 }
 
+// Encoding is a query option that allows the caller to set a message encoding
+// for the query messages.
+func Encoding(encoding wire.MessageEncoding) QueryOption {
+	return func(qo *queryOptions) {
+		qo.encoding = encoding
+	}
+}
+
 // DoneChan allows the caller to pass a channel that will get closed when the
 // query is finished.
 func DoneChan(doneChan chan<- struct{}) QueryOption {
@@ -103,14 +129,401 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 	}
 }
 
+// queryState is an atomically updated per-query state for each query in a
+// batch.
+//
+// State transitions are:
+//
+// * queryWaitSubmit->queryWaitResponse - send query to peer
+// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
+//   response
+// * queryWaitResponse->queryAnswered - acceptable response to query received
+type queryState uint32
+
+const (
+	// Waiting to be submitted to a peer.
+	queryWaitSubmit queryState = iota
+
+	// Submitted to a peer, waiting for reply.
+	queryWaitResponse
+
+	// Valid reply received.
+	queryAnswered
+)
+
+// We provide 3 kinds of queries:
+//
+// * queryAllPeers allows a single query to be broadcast to all peers, and
+//   then waits for as many peers as possible to answer that query within
+//   a timeout. This allows for doing things like checking cfilter checkpoints.
+//
+// * queryPeers allows a single query to be passed to one peer at a time until
+//   the query is deemed answered. This is good for getting a single piece of
+//   data, such as a filter or a block.
+//
+// * queryBatch allows a batch of queries to be distributed among all peers,
+//   recirculating upon timeout.
+//
+// TODO(aakselrod): maybe abstract the query scheduler into a functional option
+// and provide some presets (including the ones below) prior to factoring out
+// the query API into its own package?
+
+// queryBatch is a helper function that sends a batch of queries to the entire
+// pool of peers, attempting to get them all answered unless the quit channel
+// is closed. It continues to update its view of the connected peers in case
+// peers connect or disconnect during the query. The package-level QueryTimeout
+// parameter, overridable by the Timeout option, determines how long a peer
+// waits for a query before moving onto the next one. The NumRetries option
+// and the QueryNumRetries package-level variable are ignored; the query
+// continues until it either completes or the passed quit channel is closed.
+// For memory efficiency, we attempt to get responses as close to ordered as
+// we can, so that the caller can cache as few responses as possible before
+// committing to storage.
+//
+// TODO(aakselrod): support for more than one in-flight query per peer to
+// reduce effects of latency.
+func (s *ChainService) queryBatch(
+	// queryMsgs is a slice of queries for which the caller wants responses.
+	queryMsgs []wire.Message,
+
+	// checkResponse is called for every received message to see if it
+	// answers the query message. It should return true if so.
+	checkResponse func(sp *ServerPeer, query wire.Message,
+		resp wire.Message) bool,
+
+	// quit forces the query to end before it's complete.
+	quit <-chan struct{},
+
+	// options takes functional options for executing the query.
+	options ...QueryOption) {
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+
+	// Shared state between this goroutine and the per-peer goroutines.
+	queryStates := make([]uint32, len(queryMsgs))
+
+	// subscription allows us to subscribe to notifications from peers.
+	msgChan := make(chan spMsg)
+	subQuit := make(chan struct{})
+	subscription := spMsgSubscription{
+		msgChan:  msgChan,
+		quitChan: subQuit,
+	}
+	defer close(subQuit)
+	// peerStates and its companion mutex allow the peer goroutines to
+	// tell the main goroutine what query they're currently working on.
+	peerStates := make(map[string]wire.Message)
+	var mtxPeerStates sync.RWMutex
+
+	peerGoroutine := func(sp *ServerPeer, quit <-chan struct{},
+		matchSignal <-chan struct{}) {
+
+		// Subscribe to messages from the peer.
+		sp.subscribeRecvMsg(subscription)
+		defer sp.unsubscribeRecvMsgs(subscription)
+		defer func() {
+			mtxPeerStates.Lock()
+			delete(peerStates, sp.Addr())
+			mtxPeerStates.Unlock()
+		}()
+
+		// Track the last query our peer failed to answer and skip over
+		// it for the next attempt. This helps prevent most instances
+		// of the same peer being asked for the same query every time.
+		lastFailed, firstUnfinished, handleQuery := -1, 0, -1
+
+		for firstUnfinished < len(queryMsgs) {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+
+			handleQuery = -1
+
+			for i := firstUnfinished; i < len(queryMsgs); i++ {
+				// If this query is finished and we're at
+				// firstUnfinished, update firstUnfinished.
+				if i == firstUnfinished &&
+					atomic.LoadUint32(&queryStates[i]) ==
+						uint32(queryAnswered) {
+					firstUnfinished++
+					continue
+				}
+
+				// If we last failed at this query, skip it.
+				if i == lastFailed {
+					continue
+				}
+
+				// We check to see if the query is waiting to
+				// be handled. If so, we mark it as being
+				// handled. If not, we move to the next one.
+				if !atomic.CompareAndSwapUint32(
+					&queryStates[i],
+					uint32(queryWaitSubmit),
+					uint32(queryWaitResponse),
+				) {
+					continue
+				}
+
+				// The query is now marked as in-process. We
+				// begin to process it.
+				handleQuery = i
+				sp.QueueMessageWithEncoding(queryMsgs[i],
+					nil, qo.encoding)
+				break
+			}
+
+			// Regardless of whether we have a query or not, we
+			// need a timeout.
+			timeout := time.After(qo.timeout)
+			if handleQuery == -1 {
+				if firstUnfinished == len(queryMsgs) {
+					// We've now answered all the queries.
+					return
+				}
+
+				// We have nothing to work on but not all
+				// queries are answered yet. Wait for a query
+				// timeout, or a quit signal, then see if
+				// anything needs our help.
+				select {
+				case <-quit:
+					return
+				case <-timeout:
+					if sp.Connected() {
+						continue
+					} else {
+						return
+					}
+				}
+			}
+
+			// We have a query we're working on.
+			mtxPeerStates.Lock()
+			peerStates[sp.Addr()] = queryMsgs[handleQuery]
+			mtxPeerStates.Unlock()
+			select {
+			case <-quit:
+				return
+			case <-timeout:
+				// We failed, so set the query state back to
+				// zero and update our lastFailed state.
+				atomic.StoreUint32(&queryStates[handleQuery],
+					uint32(queryWaitSubmit))
+				if !sp.Connected() {
+					return
+				}
+				lastFailed = handleQuery
+			case <-matchSignal:
+				// We got a match signal so we can mark this
+				// query a success.
+				atomic.StoreUint32(&queryStates[handleQuery],
+					uint32(queryAnswered))
+			}
+		}
+	}
+
+	// peerQuits holds per-peer quit channels so we can kill the goroutines
+	// when they disconnect.
+	peerQuits := make(map[string]chan struct{})
+
+	// matchSignals holds per-peer answer channels that get a notice that
+	// the query got a match. If it's the peer's match, the peer can
+	// mark the query a success and move on to the next query ahead of
+	// timeout.
+	matchSignals := make(map[string]chan struct{})
+
+	// Clean up on exit.
+	defer func() {
+		for _, quitChan := range peerQuits {
+			close(quitChan)
+		}
+	}()
+
+	for {
+		// Update our view of peers, starting new workers for new peers
+		// and removing disconnected/banned peers.
+		for _, peer := range s.Peers() {
+			sp := peer.Addr()
+			if _, ok := peerQuits[sp]; !ok && peer.Connected() {
+				peerQuits[sp] = make(chan struct{})
+				matchSignals[sp] = make(chan struct{})
+				go peerGoroutine(peer, peerQuits[sp],
+					matchSignals[sp])
+			}
+
+		}
+
+		for peer, quitChan := range peerQuits {
+			if !s.PeerByAddr(peer).Connected() {
+				close(quitChan)
+				close(matchSignals[peer])
+				delete(peerQuits, peer)
+				delete(matchSignals, peer)
+			}
+		}
+
+		ticker := time.NewTicker(qo.timeout)
+		defer ticker.Stop()
+		for {
+			select {
+			case msg := <-msgChan:
+				mtxPeerStates.RLock()
+				curQuery := peerStates[msg.sp.Addr()]
+				mtxPeerStates.RUnlock()
+				if checkResponse(msg.sp, curQuery, msg.msg) {
+					select {
+					case <-quit:
+						return
+					case matchSignals[msg.sp.Addr()] <- struct{}{}:
+					}
+				}
+			case <-ticker.C:
+				// Check if we're done; if so, quit.
+				allDone := true
+				for i := 0; i < len(queryStates); i++ {
+					if atomic.LoadUint32(&queryStates[i]) !=
+						uint32(queryAnswered) {
+						allDone = false
+					}
+				}
+				if allDone {
+					return
+				}
+			case <-quit:
+				return
+			}
+		}
+	}
+}
+
+// queryAllPeers is a helper function that sends a query to all peers and waits
+// for a timeout specified by the QueryTimeout package-level variable or the
+// Timeout functional option. The NumRetries option is set to 1 by default
+// unless overridden by the caller.
+func (s *ChainService) queryAllPeers(
+	// queryMsg is the message to broadcast to all peers.
+	queryMsg wire.Message,
+
+	// checkResponse is called for every message within the timeout period.
+	// The quit channel lets the query know to terminate because the
+	// required response has been found. This is done by closing the
+	// channel. The peerQuit lets the query know to terminate the query for
+	// the peer which sent the response, allowing releasing resources for
+	// peers which respond quickly while continuing to wait for slower
+	// peers to respond and nonresponsive peers to time out.
+	checkResponse func(sp *ServerPeer, resp wire.Message,
+		quit chan<- struct{}, peerQuit chan<- struct{}),
+
+	// options takes functional options for executing the query.
+	options ...QueryOption) {
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query.
+	qo := defaultQueryOptions()
+	qo.numRetries = 1
+	qo.applyQueryOptions(options...)
+
+	// This is done in a single-threaded query because the peerState is
+	// held in a single thread. This is the only part of the query
+	// framework that requires access to peerState, so it's done once per
+	// query.
+	peers := s.Peers()
+
+	// This will be shared state between the per-peer goroutines.
+	quit := make(chan struct{})
+	allQuit := make(chan struct{})
+	var wg sync.WaitGroup
+	msgChan := make(chan spMsg)
+	subscription := spMsgSubscription{
+		msgChan:  msgChan,
+		quitChan: allQuit,
+	}
+
+	// Now we start a goroutine for each peer which manages the peer's
+	// message subscription.
+	peerQuits := make(map[string]chan struct{})
+	for _, sp := range peers {
+		sp.subscribeRecvMsg(subscription)
+		wg.Add(1)
+		peerQuits[sp.Addr()] = make(chan struct{})
+		go func(sp *ServerPeer, peerQuit <-chan struct{}) {
+			defer wg.Done()
+
+			defer sp.unsubscribeRecvMsgs(subscription)
+
+			for i := uint8(0); i < qo.numRetries; i++ {
+				timeout := time.After(qo.timeout)
+				sp.QueueMessageWithEncoding(queryMsg,
+					nil, qo.encoding)
+				select {
+				case <-quit:
+					return
+				case <-peerQuit:
+					return
+				case <-timeout:
+				}
+			}
+		}(sp, peerQuits[sp.Addr()])
+	}
+
+	// This goroutine will wait until all of the peer-query goroutines have
+	// terminated, and then initiate a query shutdown.
+	go func() {
+		wg.Wait()
+
+		// Make sure our main goroutine and the subscription know to
+		// quit.
+		close(allQuit)
+
+		// Close the done channel, if any.
+		if qo.doneChan != nil {
+			close(qo.doneChan)
+		}
+	}()
+
+	// Loop for any messages sent to us via our subscription channel and
+	// check them for whether they satisfy the query. Break the loop when
+	// allQuit is closed.
+checkResponses:
+	for {
+		select {
+		case <-quit:
+			break checkResponses
+
+		case <-allQuit:
+			break checkResponses
+
+		// A message has arrived over the subscription channel, so we
+		// execute the checkResponses callback to see if this ends our
+		// query session.
+		case sm := <-msgChan:
+			// TODO: This will get stuck if checkResponse gets
+			// stuck. This is a caveat for callers that should be
+			// fixed before exposing this function for public use.
+			select {
+			case <-peerQuits[sm.sp.Addr()]:
+			default:
+				checkResponse(sm.sp, sm.msg, quit,
+					peerQuits[sm.sp.Addr()])
+			}
+		}
+	}
+}
+
 // queryPeers is a helper function that sends a query to one or more peers and
 // waits for an answer. The timeout for queries is set by the QueryTimeout
-// package-level variable.
+// package-level variable or the Timeout functional option.
 func (s *ChainService) queryPeers(
 	// queryMsg is the message to send to each peer selected by selectPeer.
 	queryMsg wire.Message,
 
-	// checkResponse is caled for every message within the timeout period.
+	// checkResponse is called for every message within the timeout period.
 	// The quit channel lets the query know to terminate because the
 	// required response has been found. This is done by closing the
 	// channel.
@@ -120,12 +533,10 @@ func (s *ChainService) queryPeers(
 	// options takes functional options for executing the query.
 	options ...QueryOption) {
 
-	// Starting witht he set of default options, we'll apply any specified
+	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query.
 	qo := defaultQueryOptions()
-	for _, option := range options {
-		option(qo)
-	}
+	qo.applyQueryOptions(options...)
 
 	// We get an initial view of our peers, to be updated each time a peer
 	// query times out.
@@ -154,8 +565,7 @@ func (s *ChainService) queryPeers(
 	if curPeer != nil {
 		peerTries[curPeer.Addr()]++
 		curPeer.subscribeRecvMsg(subscription)
-		curPeer.QueueMessageWithEncoding(queryMsg, nil,
-			wire.WitnessEncoding)
+		curPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
 	}
 checkResponses:
 	for {
@@ -199,8 +609,7 @@ checkResponses:
 					peerTries[curPeer.Addr()]++
 					curPeer.subscribeRecvMsg(subscription)
 					curPeer.QueueMessageWithEncoding(
-						queryMsg, nil,
-						wire.WitnessEncoding)
+						queryMsg, nil, qo.encoding)
 					break
 				}
 			}
@@ -347,11 +756,18 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 // GetBlockFromNetwork gets a block by requesting it from the network, one peer
 // at a time, until one answers.
-//
-// TODO(roasbeef): add query option to indicate if the caller wants witness
-// data or not.
 func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query so that we can check what inv type
+	// to use.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	invType := wire.InvTypeWitnessBlock
+	if qo.encoding == wire.BaseEncoding {
+		invType = wire.InvTypeBlock
+	}
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block s we can't
@@ -364,8 +780,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(wire.InvTypeWitnessBlock,
-		&blockHash))
+	getData.AddInvVect(wire.NewInvVect(invType, &blockHash))
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -444,7 +859,7 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
-// SendTransaction sends a transaction to each peer. It returns an error if any
+// SendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
 // TODO: Better privacy by sending to only one random peer and watching
@@ -452,12 +867,38 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 
 	var err error
-	s.queryPeers(
-		tx,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
+
+	// Starting with the set of default options, we'll apply any specified
+	// functional options to the query so that we can check what inv type
+	// to use. Broadcast the inv to all peers, responding to any getdata
+	// messages for the transaction.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+	invType := wire.InvTypeWitnessTx
+	if qo.encoding == wire.BaseEncoding {
+		invType = wire.InvTypeTx
+	}
+
+	// Create an inv.
+	txHash := tx.TxHash()
+	inv := wire.NewMsgInv()
+	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+
+	// Send the peer query and listen for getdata.
+	s.queryAllPeers(
+		inv,
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+			peerQuit chan<- struct{}) {
 			switch response := resp.(type) {
+			case *wire.MsgGetData:
+				for _, vec := range response.InvList {
+					if vec.Hash == txHash {
+						sp.QueueMessageWithEncoding(
+							tx, nil, qo.encoding)
+					}
+				}
 			case *wire.MsgReject:
-				if response.Hash == tx.TxHash() {
+				if response.Hash == txHash {
 					err = fmt.Errorf("Transaction %s "+
 						"rejected by %s: %s",
 						tx.TxHash(), sp.Addr(),
@@ -467,7 +908,12 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				}
 			}
 		},
-		options...,
+		// Default to 500ms timeout. Default for queryAllPeers is a
+		// single try.
+		append(
+			[]QueryOption{Timeout(time.Millisecond * 500)},
+			options...,
+		)...,
 	)
 
 	return err

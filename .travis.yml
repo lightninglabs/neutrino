@@ -12,6 +12,7 @@ install:
   - pushd $GOPATH/src/github.com/btcsuite/
   - git clone https://github.com/btcsuite/btcd
   - pushd btcd
+  - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
   - glide install
   - go install . ./cmd/...
   - popd

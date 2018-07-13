@@ -19,3 +19,12 @@ vendor/
 #GoLand config files
 .idea
 *.DS_Store
+
+# vim swap files
+*.swp
+
+# delve breakpoints
+breakpoints.txt
+
+# coverage output
+profile.cov
