@@ -433,11 +433,29 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// have the same filter hash. If we find a difference, get the block,
 	// calculate the filter, and throw out any mismatching peers.
 	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
-		err = b.checkForCFHeaderMismatch(store, fType, headers, i,
-			startHeight, nil)
-		if err != nil {
-			return fmt.Errorf("error checking cfheaders for "+
-				"mismatch: %v", err)
+		if checkForCFHeaderMismatch(headers, i) {
+			u32i := uint32(i)
+			// Get the block header for this height.
+			header, err := b.server.BlockHeaders.
+				FetchHeaderByHeight(startHeight + u32i)
+			if err != nil {
+				return err
+			}
+			block, err := b.server.GetBlockFromNetwork(header.
+				BlockHash())
+			if err != nil {
+				return err
+			}
+			badPeers, err := resolveCFHeaderMismatch(
+				block.MsgBlock(), fType, i, headers)
+			for _, peer := range badPeers {
+				sp := b.server.PeerByAddr(peer)
+				if sp != nil {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}
+				delete(headers, peer)
+			}
 		}
 	}
 
@@ -772,10 +790,30 @@ func (b *blockManager) resolveConflict(
 	// have the same filter hash. If we find a difference, get the block,
 	// calculate the filter, and throw out any mismatching peers.
 	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
-		err = b.checkForCFHeaderMismatch(store, fType, headers, i,
-			startHeight, checkpoints)
-		if err != nil {
-			return nil, err
+		if checkForCFHeaderMismatch(headers, i) {
+			u32i := uint32(i)
+			// Get the block header for this height.
+			header, err := b.server.BlockHeaders.
+				FetchHeaderByHeight(startHeight + u32i)
+			if err != nil {
+				return nil, err
+			}
+			block, err := b.server.GetBlockFromNetwork(header.
+				BlockHash())
+			if err != nil {
+				return nil, err
+			}
+			badPeers, err := resolveCFHeaderMismatch(
+				block.MsgBlock(), fType, i, headers)
+			for _, peer := range badPeers {
+				sp := b.server.PeerByAddr(peer)
+				if sp != nil {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}
+				delete(headers, peer)
+				delete(checkpoints, peer)
+			}
 		}
 	}
 
@@ -815,18 +853,12 @@ func (b *blockManager) resolveConflict(
 }
 
 // checkForCFHeaderMismatch checks all peers' responses at a specific position
-// and bans any incorrect peers in case of mismatch. It returns true if a
-// mismatch is found; false otherwise. In the case of a mismatch, it deletes
-// incorrect peers from the passed header map. If a checkpoint map is passed,
-// any incorrect peers are deleted from that as well.
-func (b *blockManager) checkForCFHeaderMismatch(
-	store *headerfs.FilterHeaderStore, fType wire.FilterType,
-	headers map[string]*wire.MsgCFHeaders, idx int,
-	startHeight uint32, checkpoints map[string][]*chainhash.Hash) error {
+// and detects a mismatch. It returns true if a mismatch has occurred.
+func checkForCFHeaderMismatch(headers map[string]*wire.MsgCFHeaders,
+	idx int) bool {
 
 	// First, see if we have a mismatch.
 	hash := zeroHash
-	var mismatch bool
 	for _, msg := range headers {
 		if len(msg.FilterHashes) <= idx {
 			continue
@@ -839,73 +871,66 @@ func (b *blockManager) checkForCFHeaderMismatch(
 
 		if hash != *msg.FilterHashes[idx] {
 			// We've found a mismatch!
-			mismatch = true
-			break
+			return true
+		}
+	}
+	return false
+}
+
+// resolveCFHeaderMismatch returns a list of peers to ban based on the passed
+// parameters.
+func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
+	idx int, headers map[string]*wire.MsgCFHeaders) ([]string, error) {
+
+	badPeers := make(map[string]struct{})
+	returnPeers := func() []string {
+		ret := make([]string, 0, len(badPeers))
+		for peer := range badPeers {
+			ret = append(ret, peer)
+		}
+		return ret
+	}
+
+	// Calculate the filter.
+	var filter *gcs.Filter
+	var err error
+	switch fType {
+	case wire.GCSFilterRegular:
+		filter, err = builder.BuildBasicFilter(block)
+	case wire.GCSFilterExtended:
+		filter, err = builder.BuildExtFilter(block)
+	default:
+		return returnPeers(), fmt.Errorf("unknown filter type")
+	}
+	if err != nil {
+		return returnPeers(), err
+	}
+
+	// Hash the filter to see what the correct value should be.
+	fHash, err := builder.GetFilterHash(filter)
+	if err != nil {
+		return returnPeers(), err
+	}
+
+	// Compare the calculated filter hash against received filter hashes
+	// and throw out any mismatching peers.
+	for peer, msg := range headers {
+		if len(msg.FilterHashes) <= idx {
+			continue
+		}
+
+		if *msg.FilterHashes[idx] != fHash {
+			// Got a mismatching peer
+			badPeers[peer] = struct{}{}
 		}
 	}
 
-	if mismatch {
-		u32i := uint32(idx)
-		// Get the block header for this height.
-		header, err := b.server.BlockHeaders.FetchHeaderByHeight(
-			startHeight + u32i)
-		if err != nil {
-			return err
-		}
-		block, err := b.server.GetBlockFromNetwork(header.BlockHash())
-		if err != nil {
-			return err
-		}
+	// TODO: We can add an after-the-fact countermeasure here
+	// against eclipse attacks. If the checkpoints don't match
+	// the store, we can check whether the store or the
+	// checkpoints we got from the network are correct.
 
-		// Calculate the filter.
-		var filter *gcs.Filter
-		switch fType {
-		case wire.GCSFilterRegular:
-			filter, err = builder.BuildBasicFilter(block.MsgBlock())
-		case wire.GCSFilterExtended:
-			filter, err = builder.BuildExtFilter(block.MsgBlock())
-		default:
-			return fmt.Errorf("unknown filter type")
-		}
-		if err != nil {
-			return err
-		}
-
-		// Hash the filter to see what the correct value
-		// should be.
-		fHash, err := builder.GetFilterHash(filter)
-		if err != nil {
-			return err
-		}
-
-		// Compare the calculated filter hash against received
-		// filter hashes and throw out any mismatching peers.
-		for peer, msg := range headers {
-			if len(msg.FilterHashes) <= idx {
-				continue
-			}
-
-			if *msg.FilterHashes[idx] != fHash {
-				// Got a mismatching peer
-				sp := b.server.PeerByAddr(peer)
-				if sp != nil {
-					b.server.BanPeer(sp)
-					sp.Disconnect()
-				}
-				delete(headers, peer)
-				if checkpoints != nil {
-					delete(checkpoints, peer)
-				}
-			}
-		}
-
-		// TODO: We can add an after-the-fact countermeasure here
-		// against eclipse attacks. If the checkpoints don't match
-		// the store, we can check whether the store or the
-		// checkpoints we got from the network are correct.
-	}
-
-	return nil
+	return returnPeers(), nil
 }
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
@@ -1016,9 +1041,10 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 				return i, nil
 			}
 		}
-		if uint32((i+1)*wire.CFCheckptInterval) <= storeTip {
+		ckptHeight := uint32((i+1)*wire.CFCheckptInterval - 1)
+		if ckptHeight <= storeTip {
 			header, err := headerStore.FetchHeaderByHeight(
-				uint32((i + 1) * wire.CFCheckptInterval))
+				ckptHeight)
 			if err != nil {
 				return i, err
 			}

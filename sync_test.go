@@ -253,12 +253,12 @@ type neutrinoHarness struct {
 	svc        *neutrino.ChainService
 }
 
-type testCase struct {
+type syncTestCase struct {
 	name string
 	test func(harness *neutrinoHarness, t *testing.T)
 }
 
-var testCases = []*testCase{
+var testCases = []*syncTestCase{
 	{
 		name: "initial sync",
 		test: testInitialSync,
@@ -1180,9 +1180,6 @@ func TestNeutrinoSync(t *testing.T) {
 	defer db.Close()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
-	}
-	if err != nil {
-		t.Fatalf("Error geting namespace: %s\n", err)
 	}
 	config := neutrino.Config{
 		DataDir:     tempDir,
