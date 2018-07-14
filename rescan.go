@@ -794,7 +794,7 @@ func AddAddrs(addrs ...btcutil.Address) UpdateOption {
 	}
 }
 
-// AddOutPoints adds inputs to watch to the filter.
+// AddInputs adds inputs to watch to the filter.
 func AddInputs(inputs ...InputWithScript) UpdateOption {
 	return func(uo *updateOptions) {
 		uo.inputs = append(uo.inputs, inputs...)
