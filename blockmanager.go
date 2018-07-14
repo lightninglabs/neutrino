@@ -429,20 +429,32 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// calculate the filter, and throw out any mismatching peers.
 	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
 		if checkForCFHeaderMismatch(headers, i) {
-			u32i := uint32(i)
-			// Get the block header for this height.
-			header, err := b.server.BlockHeaders.
-				FetchHeaderByHeight(startHeight + u32i)
+			// Get the block header for this height, along with the
+			// block as well.
+			targetHeight := startHeight + uint32(i)
+			header, err := b.server.BlockHeaders.FetchHeaderByHeight(
+				targetHeight,
+			)
 			if err != nil {
 				return err
 			}
-			block, err := b.server.GetBlockFromNetwork(header.
-				BlockHash())
+			block, err := b.server.GetBlockFromNetwork(
+				header.BlockHash(),
+			)
 			if err != nil {
 				return err
 			}
+
+			// We'll also fetch each of the filters from the peers
+			// that reported check points, as we may need this in
+			// order to determine which peers are faulty.
+			filtersFromPeers := b.fetchFilterFromAllPeers(
+				targetHeight, header.BlockHash(), fType,
+			)
+
 			badPeers, err := resolveCFHeaderMismatch(
-				block.MsgBlock(), fType, i, headers)
+				block.MsgBlock(), fType, filtersFromPeers,
+			)
 			for _, peer := range badPeers {
 				sp := b.server.PeerByAddr(peer)
 				if sp != nil {
@@ -783,20 +795,32 @@ func (b *blockManager) resolveConflict(
 	// calculate the filter, and throw out any mismatching peers.
 	for i := 0; i < wire.MaxCFHeadersPerMsg; i++ {
 		if checkForCFHeaderMismatch(headers, i) {
-			u32i := uint32(i)
-			// Get the block header for this height.
-			header, err := b.server.BlockHeaders.
-				FetchHeaderByHeight(startHeight + u32i)
+			// Get the block header for this height, along with the
+			// block as well.
+			targetHeight := startHeight + uint32(i)
+			header, err := b.server.BlockHeaders.FetchHeaderByHeight(
+				targetHeight,
+			)
 			if err != nil {
 				return nil, err
 			}
-			block, err := b.server.GetBlockFromNetwork(header.
-				BlockHash())
+			block, err := b.server.GetBlockFromNetwork(
+				header.BlockHash(),
+			)
 			if err != nil {
 				return nil, err
 			}
+
+			// We'll also fetch each of the filters from the peers
+			// that reported check points, as we may need this in
+			// order to determine which peers are faulty.
+			filtersFromPeers := b.fetchFilterFromAllPeers(
+				targetHeight, header.BlockHash(), fType,
+			)
+
 			badPeers, err := resolveCFHeaderMismatch(
-				block.MsgBlock(), fType, i, headers)
+				block.MsgBlock(), fType, filtersFromPeers,
+			)
 			for _, peer := range badPeers {
 				sp := b.server.PeerByAddr(peer)
 				if sp != nil {
@@ -869,58 +893,78 @@ func checkForCFHeaderMismatch(headers map[string]*wire.MsgCFHeaders,
 	return false
 }
 
-// resolveCFHeaderMismatch returns a list of peers to ban based on the passed
-// parameters.
+// resolveCFHeaderMismatch will attempt to cross-reference each filter received
+// by each peer based on what we can reconstruct and verify from the filter in
+// question. We'll return all the peers that returned what we believe to in
+// invalid filter.
 func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
-	idx int, headers map[string]*wire.MsgCFHeaders) ([]string, error) {
+	filtersFromPeers map[string]*gcs.Filter) ([]string, error) {
 
 	badPeers := make(map[string]struct{})
-	returnPeers := func() []string {
-		ret := make([]string, 0, len(badPeers))
-		for peer := range badPeers {
-			ret = append(ret, peer)
-		}
-		return ret
-	}
 
-	// Calculate the filter.
-	var filter *gcs.Filter
-	var err error
+	blockHash := block.BlockHash()
+	filterKey := builder.DeriveKey(&blockHash)
+
+	// Based on the type of filter, our verification algorithm will differ.
 	switch fType {
+
+	// With the current set of items that we can fetch from the p2p
+	// network, we're forced to only verify what we can at this point. So
+	// we'll just ensure that each of the filters returned
+	//
+	// TODO(roasbeef): update after BLOCK_WITH_PREV_OUTS is a thing
 	case wire.GCSFilterRegular:
-		filter, err = builder.BuildBasicFilter(block)
+
+		// We'll now run through each peer and ensure that each output
+		// script is included in the filter that they responded with to
+		// our query.
+		for peerAddr, filter := range filtersFromPeers {
+		peerVerification:
+
+			// We'll ensure that all the filters include every
+			// output script within the block.
+			for _, tx := range block.Transactions {
+				for _, txOut := range tx.TxOut {
+					match, err := filter.Match(
+						filterKey, txOut.PkScript,
+					)
+					if err != nil {
+						// If we're unable to query
+						// this filter, then we'll skip
+						// this peer all together.
+						continue peerVerification
+					}
+
+					if match {
+						continue
+					}
+
+					// If this filter doesn't match, then
+					// we'll mark this peer as bad and move
+					// on to the next peer.
+					badPeers[peerAddr] = struct{}{}
+					continue peerVerification
+				}
+			}
+		}
+
 	default:
-		return returnPeers(), fmt.Errorf("unknown filter type")
-	}
-	if err != nil {
-		return returnPeers(), err
+		return nil, fmt.Errorf("unknown filter: %v", fType)
 	}
 
-	// Hash the filter to see what the correct value should be.
-	fHash, err := builder.GetFilterHash(filter)
-	if err != nil {
-		return returnPeers(), err
+	// TODO: We can add an after-the-fact countermeasure here against
+	// eclipse attacks. If the checkpoints don't match the store, we can
+	// check whether the store or the checkpoints we got from the network
+	// are correct.
+
+	// With the set of bad peers known, we'll collect a slice of all the
+	// faulty peers.
+	invalidPeers := make([]string, 0, len(badPeers))
+	for peer := range badPeers {
+		invalidPeers = append(invalidPeers, peer)
 	}
 
-	// Compare the calculated filter hash against received filter hashes
-	// and throw out any mismatching peers.
-	for peer, msg := range headers {
-		if len(msg.FilterHashes) <= idx {
-			continue
-		}
-
-		if *msg.FilterHashes[idx] != fHash {
-			// Got a mismatching peer
-			badPeers[peer] = struct{}{}
-		}
-	}
-
-	// TODO: We can add an after-the-fact countermeasure here
-	// against eclipse attacks. If the checkpoints don't match
-	// the store, we can check whether the store or the
-	// checkpoints we got from the network are correct.
-
-	return returnPeers(), nil
+	return invalidPeers, nil
 }
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
