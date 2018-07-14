@@ -968,6 +968,62 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	return headers
 }
 
+// fetchFilterFromAllPeers attempts to fetch a filter for the target filter
+// type and blocks from all peers connected to the block manager. This method
+// returns a map which allows the caller to match a peer to the filter it
+// responded with.
+func (b *blockManager) fetchFilterFromAllPeers(
+	height uint32, blockHash chainhash.Hash,
+	filterType wire.FilterType) map[string]*gcs.Filter {
+
+	// We'll use this map to collate all responses we receive from each
+	// peer.
+	filterResponses := make(map[string]*gcs.Filter)
+
+	// We'll now request the target filter from each peer, using a stop
+	// hash at the target block hash to ensure we only get a single filter.
+	fitlerReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
+	b.server.queryAllPeers(
+		fitlerReqMsg,
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+			peerQuit chan<- struct{}) {
+
+			switch response := resp.(type) {
+			// We're only interested in "cfilter" messages.
+			case *wire.MsgCFilter:
+				// If the response doesn't match our request.
+				// Ignore this message.
+				if blockHash != response.BlockHash ||
+					filterType != response.FilterType {
+					return
+				}
+
+				// Now that we know we have the proper filter,
+				// we'll decode it into an object the caller
+				// can utilize.
+				gcsFilter, err := gcs.FromNBytes(
+					builder.DefaultP, builder.DefaultM,
+					response.Data,
+				)
+				if err != nil {
+					// Malformed filter data. We can ignore
+					// this message.
+					return
+				}
+
+				// Now that we're able to properly parse this
+				// filter, we'll assign it to its source peer,
+				// and wait for the next response.
+				filterResponses[sp.Addr()] = gcsFilter
+
+			default:
+			}
+		},
+	)
+
+	return filterResponses
+}
+
 // getCheckpts runs a query for cfcheckpts against all peers and returns a map
 // of responses.
 func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
