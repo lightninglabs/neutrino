@@ -62,8 +62,7 @@ test_with_coverage_profile() {
 test_race_conditions() {
     print "* Running tests with the race condition detector"
 
-    test_targets=$(go list ./... | grep -v '/vendor/')
-    env GORACE="history_size=7 halt_on_error=1" go test -v -p 1 -race $test_targets
+    env GORACE="history_size=7 halt_on_error=1" go test -v -p 1 -race $(go list ./...)
 }
 
 # lint_check runs static checks.
@@ -71,23 +70,22 @@ lint_check() {
     print "* Run static checks"
 
     # Make sure gometalinter is installed and $GOPATH/bin is in your path.
-    if [ ! -x "$(type -p gometalinter.v1)" ]; then
+    if [ ! -x "$(type -p gometalinter)" ]; then
         print "** Install gometalinter"
-        go get -u gopkg.in/alecthomas/gometalinter.v1
-        gometalinter.v1 --install
+        go get -u github.com/alecthomas/gometalinter
+        gometalinter --install
     fi
 
     # Update metalinter if needed.
-    gometalinter.v1 --install 1>/dev/null
+    gometalinter --install 1>/dev/null
 
     # Automatic checks
-    linter_targets=$(glide novendor | grep -v lnrpc)
-    test -z "$(gometalinter.v1 --disable-all \
+    test -z "$(gometalinter --disable-all \
     --enable=gofmt \
     --enable=vet \
     --enable=golint \
     --line-length=72 \
-    --deadline=4m $linter_targets 2>&1 | grep -v 'ALL_CAPS\|OP_' 2>&1 | tee /dev/stderr)"
+    --deadline=4m $(go list ./...) 2>&1 | grep -v 'ALL_CAPS\|OP_' 2>&1 | tee /dev/stderr)"
 }
 
 set -e
@@ -119,17 +117,17 @@ while getopts "lrcio" flag; do
 # remove the options from the positional parameters
 shift $(( OPTIND - 1 ))
 
-# Make sure glide is installed and $GOPATH/bin is in your path.
-if [ ! -x "$(type -p glide)" ]; then
-    print "* Install glide"
-    go get -u github.com/Masterminds/glide
+# Make sure dep is installed and $GOPATH/bin is in your path.
+if [ ! -x "$(type -p dep)" ]; then
+    print "* Install dep"
+    go get -u github.com/golang/dep/cmd/dep
 fi
 
 # Install the dependency if vendor directory not exist or if flag have been
 # specified.
 if [ "$NEED_INSTALL" == "true" ] || [ ! -d "./vendor" ]; then
     print "* Install dependencies"
-    glide install
+    dep ensure
 fi
 
 # Lint check is first because we shouldn't run tests on garbage code.

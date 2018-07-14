@@ -10,15 +10,14 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-# Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
-.glide/
-
-# Glide vendor subdirectory
+# Dependencies from dep tool
 vendor/
 
 #GoLand config files
 .idea
 *.DS_Store
+.vscode
+.atom
 
 # vim swap files
 *.swp
