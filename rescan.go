@@ -539,7 +539,7 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
 	key := builder.DeriveKey(blockHash)
-	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
+	bFilter, err := s.GetCFilter(wire.GCSFilterRegular, 0, *blockHash)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
@@ -960,8 +960,8 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	for {
 		// Check the basic filter for the spend and the extended filter
 		// for the transaction in which the outpoint is funded.
-		filter, err := s.GetCFilter(curStamp.Hash,
-			wire.GCSFilterRegular, ro.queryOptions...)
+		filter, err := s.GetCFilter(wire.GCSFilterRegular, 0, curStamp.Hash,
+			ro.queryOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("Couldn't get basic "+
 				"filter for block %d (%s)", curStamp.Height,
