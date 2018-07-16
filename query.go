@@ -696,16 +696,17 @@ func (s *ChainService) GetCFilter(filterType wire.FilterType,
 	// In addition to fetching the block header, we'll fetch the filter
 	// headers (for this particular filter type) from the database. These
 	// are required in order to verify the authenticity of the filter.
-	curHeader, err := getHeader(&stopHash)
-	if err != nil {
-		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
-			"from database", stopHash)
-	}
-	prevHeader, err := getHeader(&block.PrevBlock)
-	if err != nil {
-		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
-			"from database", stopHash)
-	}
+	// NEED TO BATCH VERIFY.
+	// curHeader, err := getHeader(&stopHash)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+	// 		"from database", stopHash)
+	// }
+	// prevHeader, err := getHeader(&block.PrevBlock)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+	// 		"from database", stopHash)
+	// }
 
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
@@ -752,12 +753,13 @@ func (s *ChainService) GetCFilter(filterType wire.FilterType,
 				// for the header _after_ the filter in the
 				// chain checks out. If not, we can ignore this
 				// response.
-				if gotHeader, err := builder.
-					MakeHeaderForFilter(gotFilter,
-						*prevHeader); err != nil ||
-					gotHeader != *curHeader {
-					return
-				}
+				// WILL NEED TO KEEP TRACK OF HEADERS TO BATCH VERIFY
+				// if gotHeader, err := builder.
+				// 	MakeHeaderForFilter(gotFilter,
+				// 		*prevHeader); err != nil ||
+				// 	gotHeader != *curHeader {
+				// 	return
+				// }
 
 				// At this point, the filter matches what we
 				// know about it and we declare it sane. We can
