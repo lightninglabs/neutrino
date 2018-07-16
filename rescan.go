@@ -285,6 +285,13 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// ChainService API to send blockConnected and blockDisconnected
 	// notifications in the correct order.
 	current := false
+
+	// Pseudocode, something like:
+	// batchEndHash := ro.endBlock.Hash if it falls within the 1000 block distance
+	// 		from startBlock or the hash of a block 1000 away from start block
+	//		should batch sizes be configurable ?
+	// if (ro.endBlock.Height - curStamp.Height) > 20 <some arbitrary size>
+	// 		filters := GetCFilter(regular, curStamp.Height, batchEndHash)
 rescanLoop:
 	for {
 		// If we've reached the ending height or hash for this rescan,
@@ -427,6 +434,8 @@ rescanLoop:
 				return err
 			}
 
+			// Update filters if we reached the end of the batch.
+
 			curHeader = *header
 			curStamp.Height++
 			curStamp.Hash = header.BlockHash()
@@ -434,7 +443,10 @@ rescanLoop:
 			if !scanning {
 				scanning = ro.startTime.Before(curHeader.Timestamp)
 			}
-			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning
+				// Pass filters to notifyBlock which can simply lookup a filter
+				// instead of calling getcfilter from scratch ?
+			)
 			if err != nil {
 				return err
 			}
@@ -539,7 +551,12 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
 	key := builder.DeriveKey(blockHash)
-	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
+	height, err := s.BlockHeaders.HeightFromHash(blockHash)
+	if err != nil {
+		return false, err
+	}
+	bFilters, err := s.GetCFilter(wire.GCSFilterRegular, height, *blockHash)
+	bFilter := bFilters[0]
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
@@ -960,8 +977,13 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	for {
 		// Check the basic filter for the spend and the extended filter
 		// for the transaction in which the outpoint is funded.
-		filter, err := s.GetCFilter(curStamp.Hash,
-			wire.GCSFilterRegular, ro.queryOptions...)
+		height, err := s.BlockHeaders.HeightFromHash(&curStamp.Hash)
+		if err != nil {
+			return nil, err
+		}
+		filters, err := s.GetCFilter(wire.GCSFilterRegular, height, curStamp.Hash,
+			ro.queryOptions...)
+		filter := filters[0]
 		if err != nil {
 			return nil, fmt.Errorf("Couldn't get basic "+
 				"filter for block %d (%s)", curStamp.Height,

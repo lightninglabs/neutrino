@@ -628,8 +628,10 @@ checkResponses:
 // cfilter from the network and writes it to the database. If extended is true,
 // an extended filter will be queried for. Otherwise, we'll fetch the regular
 // filter.
-func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
-	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter,
+func (s *ChainService) GetCFilter(filterType wire.FilterType,
+	startHeight uint32,
+	stopHash chainhash.Hash,
+	options ...QueryOption) ([]*gcs.Filter,
 	error) {
 	// Only get one CFilter at a time to avoid redundancy from mutliple
 	// rescans running at once.
@@ -645,48 +647,72 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		dbFilterType = filterdb.ExtendedFilter
 	}
 
-	// First check the database to see if we already have this filter. If
-	// so, then we can return it an exit early.
-	filter, err := s.FilterDB.FetchFilter(&blockHash, dbFilterType)
-	if err == nil && filter != nil {
-		return filter, nil
+	stopHeight, err := s.BlockHeaders.HeightFromHash(&stopHash)
+	if err != nil {
+		return nil, err
+	}
+	if stopHeight < startHeight {
+		return nil, fmt.Errorf("startHeight less than stopHash block height")
 	}
 
-	// We didn't get the filter from the DB, so we'll set it to nil and try
-	// to get it from the network.
-	filter = nil
+	nFilters := stopHeight - startHeight + 1
+	filters := make([]*gcs.Filter, nFilters)
+	foundFilters := uint32(0)
+
+	// First check the database to see if we already have this filter. If
+	// so, then we can return it an exit early.
+	for i := range filters {
+		blockHeight := uint32(i) + startHeight
+		blockHeader, err := s.BlockHeaders.FetchHeaderByHeight(blockHeight)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't get hash for height %v",
+				blockHeight)
+		}
+		blockHash := blockHeader.BlockHash()
+		filter, err := s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+		if err == nil && filter != nil {
+			filters[i] = filter
+			foundFilters++
+		}
+	}
+
+	// Found all filters in local cache and DB.
+	if foundFilters == nFilters {
+		return filters, nil
+	}
 
 	// In order to verify the authenticity of the filter, we'll fetch the
 	// target block header so we can retrieve the hash of the prior block,
 	// which is required to fetch the filter header for that block.
-	block, height, err := s.BlockHeaders.FetchHeader(&blockHash)
+	block, height, err := s.BlockHeaders.FetchHeader(&stopHash)
 	if err != nil {
 		return nil, err
 	}
-	if block.BlockHash() != blockHash {
+	if block.BlockHash() != stopHash {
 		return nil, fmt.Errorf("Couldn't get header for block %s "+
-			"from database", blockHash)
+			"from database", stopHash)
 	}
 
 	// In addition to fetching the block header, we'll fetch the filter
 	// headers (for this particular filter type) from the database. These
 	// are required in order to verify the authenticity of the filter.
-	curHeader, err := getHeader(&blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
-			"from database", blockHash)
-	}
-	prevHeader, err := getHeader(&block.PrevBlock)
-	if err != nil {
-		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
-			"from database", blockHash)
-	}
+	// NEED TO BATCH VERIFY.
+	// curHeader, err := getHeader(&stopHash)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+	// 		"from database", stopHash)
+	// }
+	// prevHeader, err := getHeader(&block.PrevBlock)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+	// 		"from database", stopHash)
+	// }
 
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
 	s.queryPeers(
 		// Send a wire.MsgGetCFilters
-		wire.NewMsgGetCFilters(filterType, height, &blockHash),
+		wire.NewMsgGetCFilters(filterType, height, &stopHash),
 
 		// Check responses and if we get one that matches, end the
 		// query early.
@@ -695,16 +721,22 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			// We're only interested in "cfilter" messages.
 			case *wire.MsgCFilter:
 				// Only keep this going if we haven't already
-				// found a filter, or we risk closing an
+				// found all the filters, or we risk closing an
 				// already closed channel.
-				if filter != nil {
+				if foundFilters == nFilters {
 					return
 				}
 
 				// If the response doesn't match our request.
 				// Ignore this message.
-				if blockHash != response.BlockHash ||
-					filterType != response.FilterType {
+				if filterType != response.FilterType {
+					return
+				}
+				rHeight, err := s.BlockHeaders.HeightFromHash(&response.BlockHash)
+				if err != nil {
+					return
+				}
+				if rHeight < startHeight || rHeight > stopHeight {
 					return
 				}
 
@@ -721,18 +753,20 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 				// for the header _after_ the filter in the
 				// chain checks out. If not, we can ignore this
 				// response.
-				if gotHeader, err := builder.
-					MakeHeaderForFilter(gotFilter,
-						*prevHeader); err != nil ||
-					gotHeader != *curHeader {
-					return
-				}
+				// WILL NEED TO KEEP TRACK OF HEADERS TO BATCH VERIFY
+				// if gotHeader, err := builder.
+				// 	MakeHeaderForFilter(gotFilter,
+				// 		*prevHeader); err != nil ||
+				// 	gotHeader != *curHeader {
+				// 	return
+				// }
 
 				// At this point, the filter matches what we
 				// know about it and we declare it sane. We can
 				// kill the query and pass the response back to
 				// the caller.
-				filter = gotFilter
+				filters[rHeight] = gotFilter
+				foundFilters++
 				close(quit)
 			default:
 			}
@@ -741,17 +775,20 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	)
 
 	// If we've found a filter, write it to the database for next time.
-	if filter != nil {
-		err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
-		if err != nil {
-			return nil, err
-		}
+	for _, filter := range filters {
 
-		log.Tracef("Wrote filter for block %s, type %d",
-			blockHash, filterType)
+		if filter != nil {
+			err := s.FilterDB.PutFilter(&stopHash, filter, dbFilterType)
+			if err != nil {
+				return nil, err
+			}
+
+			log.Tracef("Wrote filter for block %s, type %d",
+				stopHash, filterType)
+		}
 	}
 
-	return filter, nil
+	return filters, nil
 }
 
 // GetBlockFromNetwork gets a block by requesting it from the network, one peer
