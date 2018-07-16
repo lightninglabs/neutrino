@@ -285,6 +285,13 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// ChainService API to send blockConnected and blockDisconnected
 	// notifications in the correct order.
 	current := false
+
+	// Pseudocode, something like:
+	// batchEndHash := ro.endBlock.Hash if it falls within the 1000 block distance
+	// 		from startBlock or the hash of a block 1000 away from start block
+	//		should batch sizes be configurable ?
+	// if (ro.endBlock.Height - curStamp.Height) > 20 <some arbitrary size>
+	// 		filters := GetCFilter(regular, curStamp.Height, batchEndHash)
 rescanLoop:
 	for {
 		// If we've reached the ending height or hash for this rescan,
@@ -427,6 +434,8 @@ rescanLoop:
 				return err
 			}
 
+			// Update filters if we reached the end of the batch.
+
 			curHeader = *header
 			curStamp.Height++
 			curStamp.Hash = header.BlockHash()
@@ -434,7 +443,10 @@ rescanLoop:
 			if !scanning {
 				scanning = ro.startTime.Before(curHeader.Timestamp)
 			}
-			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning
+				// Pass filters to notifyBlock which can simply lookup a filter
+				// instead of calling getcfilter from scratch ?
+			)
 			if err != nil {
 				return err
 			}
