@@ -691,8 +691,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			}
 
 			r.FilterHashes = r.FilterHashes[offset:]
-			err := b.writeCFHeadersMsg(r, store)
-			if err != nil {
+			if _, err := b.writeCFHeadersMsg(r, store); err != nil {
 				panic(fmt.Sprintf("couldn't write cfheaders "+
 					"msg: %v", err))
 			}
@@ -701,6 +700,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// them to the batch and deleting them from the cache.
 			for {
 				checkPointIndex++
+
+				// We'll also update the current height of the
+				// last written set of cfheaders.
+				curHeight = uint32(checkPointIndex * wire.CFCheckptInterval)
 
 				// Break if we've gotten to the end of the
 				// responses or we don't have the next one.
@@ -720,6 +723,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				// it from the cache and write it.
 				queryResponses[checkPointIndex] = nil
 
+				// As we write the set of headers to disk, we
+				// also obtain the hash of the last filter
+				// header we've written to disk so we can
+				// properly set the PrevFilterHeader field of
+				// the next message.
+				curHeader, err = b.writeCFHeadersMsg(r, store)
 				if err != nil {
 					panic(fmt.Sprintf("couldn't write "+
 						"cfheaders msg: %v", err))
@@ -776,7 +785,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		&msg.StopHash,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// We'll walk through the set of headers we need to write backwards, so
@@ -797,7 +806,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 			&curHeader.PrevBlock,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -806,7 +815,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// Write the header batch.
 	err = store.WriteHeaders(headerBatch...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Notify subscribers.
@@ -818,7 +827,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		})
 	}
 
-	return nil
+	return &lastHeader, nil
 }
 
 // verifyHeaderCheckpoint verifies that a CFHeaders message matches the passed
