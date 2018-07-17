@@ -56,10 +56,6 @@ const (
 	// RegularFilter is a header type that represents the basic filter
 	// header type for the filter header chain.
 	RegularFilter
-
-	// ExtendedFilter is a header type that represents the extended filter
-	// header type for the filter header chain.
-	ExtendedFilter
 )
 
 // headerIndex is an index stored within the database that allows for random
@@ -156,8 +152,8 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
-		case ExtendedFilter:
-			tipKey = extFilterTip
+		default:
+			return fmt.Errorf("unknown index type: %v", h.indexType)
 		}
 
 		var (
@@ -230,8 +226,8 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
-		case ExtendedFilter:
-			tipKey = extFilterTip
+		default:
+			return fmt.Errorf("unknown chain tip index type: %v", h.indexType)
 		}
 
 		// Now that we have the particular tip key for this header
@@ -279,8 +275,8 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
 			tipKey = bitcoinTip
 		case RegularFilter:
 			tipKey = regFilterTip
-		case ExtendedFilter:
-			tipKey = extFilterTip
+		default:
+			return fmt.Errorf("unknown index type: %v", h.indexType)
 		}
 
 		// If the delete flag is set, then we'll also delete this entry

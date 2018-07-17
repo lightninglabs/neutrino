@@ -489,7 +489,6 @@ type ChainService struct {
 	FilterDB         filterdb.FilterDatabase
 	BlockHeaders     *headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
-	ExtFilterHeaders *headerfs.FilterHeaderStore
 
 	chainParams       chaincfg.Params
 	addrManager       *addrmgr.AddrManager
@@ -593,11 +592,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(cfg.DataDir,
 		cfg.Database, headerfs.RegularFilter, &cfg.ChainParams)
-	if err != nil {
-		return nil, err
-	}
-	s.ExtFilterHeaders, err = headerfs.NewFilterHeaderStore(cfg.DataDir,
-		cfg.Database, headerfs.ExtendedFilter, &cfg.ChainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -748,11 +742,6 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		return nil, err
 	}
 
-	_, extHeight, err := s.ExtFilterHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-
 	for uint32(bs.Height) > height {
 		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
 		if err != nil {
@@ -760,15 +749,10 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 		}
 
 		newTip := &header.PrevBlock
+
 		// Only roll back filter headers if they've caught up this far.
 		if uint32(bs.Height) <= regHeight {
 			_, err = s.RegFilterHeaders.RollbackLastBlock(newTip)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if uint32(bs.Height) <= extHeight {
-			_, err = s.ExtFilterHeaders.RollbackLastBlock(newTip)
 			if err != nil {
 				return nil, err
 			}

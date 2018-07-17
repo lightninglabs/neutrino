@@ -2,6 +2,7 @@ package headerfs
 
 import (
 	"bytes"
+	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -27,10 +28,12 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	switch h.indexType {
 	case Block:
 		headerSize = 80
+
 	case RegularFilter:
-		fallthrough
-	case ExtendedFilter:
 		headerSize = 32
+
+	default:
+		return nil, fmt.Errorf("unknown index type: %v", h.indexType)
 	}
 
 	// TODO(roasbeef): add buffer pool

@@ -368,66 +368,8 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
-	// Do a rescan that searches only for a specific prevOut
-	startBlock = waddrmgr.BlockStamp{Height: 1095}
-	endBlock := waddrmgr.BlockStamp{Height: 1101}
-	var foundTx *btcutil.Tx
-	err = harness.svc.Rescan(
-		neutrino.StartBlock(&startBlock),
-		neutrino.EndBlock(&endBlock),
-		neutrino.WatchOutPoints(tx1.TxIn[0].PreviousOutPoint),
-		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
-			OnFilteredBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				relevantTxs []*btcutil.Tx) {
-				if height == 1101 {
-					if len(relevantTxs) != 1 {
-						t.Fatalf("Didn't get expected "+
-							"number of relevant "+
-							"transactions from "+
-							"rescan: want 1, got "+
-							"%d", len(relevantTxs))
-					}
-					if *(relevantTxs[0].Hash()) !=
-						tx1.TxHash() {
-						t.Fatalf("Didn't get expected "+
-							"relevant transaction:"+
-							" want %s, got %s",
-							tx1.TxHash(),
-							relevantTxs[0].Hash())
-					}
-					foundTx = relevantTxs[0]
-				}
-			},
-		}),
-	)
-	if err != nil || foundTx == nil || *(foundTx.Hash()) != tx1.TxHash() {
-		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
-			tx1.TxHash(), err)
-	}
-	// Check that we got the right transaction index.
-	blockHeader, err := harness.svc.BlockHeaders.FetchHeaderByHeight(1101)
-	if err != nil {
-		t.Fatalf("Couldn't get block hash for block 1101: %s", err)
-	}
-	blockHash := blockHeader.BlockHash()
-	block, err := harness.h1.Node.GetBlock(&blockHash)
-	if err != nil {
-		t.Fatalf("Couldn't get block %s via RPC: %s", blockHash, err)
-	}
-	ourIndex := 0
-	for i, tx := range block.Transactions {
-		if tx.TxHash() == tx1.TxHash() {
-			ourIndex = i
-		}
-	}
-	if foundTx.Index() != ourIndex {
-		t.Fatalf("Index of found transaction incorrect: want 1, got %d",
-			foundTx.Index())
-	}
-
 	// Call GetUtxo for our output in tx1 to see if it's spent.
-	ourIndex = 1 << 30 // Should work on 32-bit systems
+	ourIndex := 1 << 30 // Should work on 32-bit systems
 	for i, txo := range tx1.TxOut {
 		if bytes.Equal(txo.PkScript, script1) {
 			ourIndex = i
@@ -443,8 +385,11 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			" %s", tx1.TxHash())
 	}
 	spendReport, err := harness.svc.GetUtxo(
-		neutrino.WatchOutPoints(ourOutPoint),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
+		neutrino.WatchInputs(neutrino.InputWithScript{
+			PkScript: script1,
+			OutPoint: ourOutPoint,
+		}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -530,6 +475,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 			return
 		}
 	}
+
 	// Create another address to send to so we don't trip the rescan with
 	// the old address and we can test monitoring both OutPoint usage and
 	// receipt by addresses.
@@ -666,8 +612,11 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 
 	// Check and make sure the previous UTXO is now spent.
 	spendReport, err := harness.svc.GetUtxo(
-		neutrino.WatchOutPoints(ourOutPoint),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
+		neutrino.WatchInputs(neutrino.InputWithScript{
+			PkScript: script1,
+			OutPoint: ourOutPoint,
+		}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -677,6 +626,31 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 			"transaction: want %s, got %s", authTx1.Tx.TxHash(),
 			spendReport.SpendingTx.TxHash())
 	}
+}
+
+func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]byte, error) {
+	var inputScripts [][]byte
+	for i, tx := range block.Transactions {
+		if i == 0 {
+			continue
+		}
+
+		for _, txIn := range tx.TxIn {
+			prevTxHash := txIn.PreviousOutPoint.Hash
+
+			prevTx, err := client.Node.GetRawTransaction(&prevTxHash)
+			if err != nil {
+				return nil, err
+			}
+
+			prevIndex := txIn.PreviousOutPoint.Index
+			prevOutput := prevTx.MsgTx().TxOut[prevIndex]
+
+			inputScripts = append(inputScripts, prevOutput.PkScript)
+		}
+	}
+
+	return inputScripts, nil
 }
 
 func testRescanResults(harness *neutrinoHarness, t *testing.T) {
@@ -895,9 +869,21 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 					hex.EncodeToString(haveBytes))
 				return
 			}
+
+			inputScripts, err := fetchPrevInputScripts(
+				haveBlock.MsgBlock(),
+				harness.h1,
+			)
+			if err != nil {
+				errChan <- fmt.Errorf("unable to create prev "+
+					"input scripts: %v", err)
+				return
+			}
+
 			// Calculate basic filter from block.
 			calcFilter, err := builder.BuildBasicFilter(
-				haveBlock.MsgBlock())
+				haveBlock.MsgBlock(), inputScripts,
+			)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build basic "+
 					"filter for block %d (%s): %s", height,
@@ -944,104 +930,6 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't calculate "+
 					"header for basic filter for block "+
-					"%d (%s): %s", height, blockHash, err)
-				return
-			}
-			if !bytes.Equal(curHeader[:], calcHeader[:]) {
-				errChan <- fmt.Errorf("Filter header doesn't "+
-					"match. Want: %s, got: %s", curHeader,
-					calcHeader)
-				return
-			}
-			// Get extended cfilter from network
-			haveFilter, err = harness.svc.GetCFilter(blockHash,
-				wire.GCSFilterExtended, queryOptions...)
-			if err != nil {
-				errChan <- err
-				return
-			}
-			// Get extended cfilter from RPC
-			wantFilter, err = harness.h1.Node.GetCFilter(
-				&blockHash, wire.GCSFilterExtended)
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended "+
-					"filter for block %d (%s) via RPC: %s",
-					height, blockHash, err)
-				return
-			}
-			// Check that network and RPC cfilters match
-			if haveFilter != nil {
-				haveBytes, err = haveFilter.NBytes()
-				if err != nil {
-					errChan <- fmt.Errorf("Couldn't get "+
-						"extended filter for block %d "+
-						"(%s) via P2P: %s", height,
-						blockHash, err)
-					return
-				}
-			} else {
-				haveBytes = nil
-			}
-			if !bytes.Equal(haveBytes, wantFilter.Data) {
-				errChan <- fmt.Errorf("Extended filter from "+
-					"P2P network/DB doesn't match RPC "+
-					"for block %d (%s):\nRPC: %s\nNet: %s",
-					height, blockHash,
-					hex.EncodeToString(wantFilter.Data),
-					hex.EncodeToString(haveBytes))
-				return
-			}
-			// Calculate extended filter from block
-			calcFilter, err = builder.BuildExtFilter(
-				haveBlock.MsgBlock())
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't build extended"+
-					" filter for block %d (%s): %s", height,
-					blockHash, err)
-				return
-			}
-			calcBytes, err = calcFilter.NBytes()
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get bytes from"+
-					" calculated extended filter for block"+
-					" %d (%s): %s", height, blockHash, err)
-			}
-			// Check that the network value matches the calculated
-			// value from the block.
-			if !bytes.Equal(haveBytes, calcBytes) {
-				errChan <- fmt.Errorf("Extended filter from "+
-					"P2P network/DB doesn't match "+
-					"calculated value for block %d (%s): "+
-					"got\n%+v\nwant\n%+v\n", height,
-					blockHash, haveFilter, calcFilter)
-				return
-			}
-			// Get previous extended filter header from the
-			// database.
-			prevHeader, err = harness.svc.ExtFilterHeaders.
-				FetchHeader(&blockHeader.PrevBlock)
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended "+
-					"filter header for block %d (%s) from "+
-					"DB: %s", height-1,
-					blockHeader.PrevBlock, err)
-				return
-			}
-			// Get current basic filter header from the database.
-			curHeader, err = harness.svc.ExtFilterHeaders.
-				FetchHeader(&blockHash)
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended "+
-					"filter header for block %d (%s) from "+
-					"DB: %s", height, blockHash, err)
-				return
-			}
-			// Check that the filter and header line up.
-			calcHeader, err = builder.MakeHeaderForFilter(
-				calcFilter, *prevHeader)
-			if err != nil {
-				errChan <- fmt.Errorf("Couldn't calculate "+
-					"header for extended filter for block "+
 					"%d (%s): %s", height, blockHash, err)
 				return
 			}
@@ -1281,11 +1169,13 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"ChainService: %s", err)
 		}
 	}
+
 	// Check if we're current.
 	if !svc.IsCurrent() {
 		return fmt.Errorf("the ChainService doesn't see itself as " +
 			"current")
 	}
+
 	// Check if we have all of the cfheaders.
 	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
 		knownBestHash, wire.GCSFilterRegular)
@@ -1293,16 +1183,9 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		return fmt.Errorf("Couldn't get latest basic header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
-	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
-		knownBestHash, wire.GCSFilterExtended)
-	if err != nil {
-		return fmt.Errorf("Couldn't get latest extended header from "+
-			"%s: %s", correctSyncNode.P2PAddress(), err)
-	}
 	haveBasicHeader := &chainhash.Hash{}
-	haveExtHeader := &chainhash.Hash{}
-	for (knownBasicHeader.PrevFilterHeader != *haveBasicHeader) &&
-		(knownExtHeader.PrevFilterHeader != *haveExtHeader) {
+
+	for knownBasicHeader.PrevFilterHeader != *haveBasicHeader {
 		if total > syncTimeout {
 			return fmt.Errorf("Timed out after %v waiting for "+
 				"cfheaders synchronization.\n%s", syncTimeout,
@@ -1319,24 +1202,15 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Couldn't get regular filter header"+
 				" for %s: %s", knownBestHash, err)
 		}
-		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(knownBestHash)
-		if err != nil {
-			if err == io.EOF {
-				haveExtHeader = &chainhash.Hash{}
-				time.Sleep(syncUpdate)
-				total += syncUpdate
-				continue
-			}
-			return fmt.Errorf("Couldn't get extended filter header"+
-				" for %s: %s", knownBestHash, err)
-		}
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 	}
+
 	if logLevel != btclog.LevelOff {
 		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
 			haveBest.Hash)
 	}
+
 	// At this point, we know we have good cfheaders. Now we wait for the
 	// rescan, if one is going, to catch up.
 	for {
@@ -1371,6 +1245,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		}
 		rescanMtx.RUnlock()
 	}
+
 	// At this point, we know the latest cfheader is stored in the
 	// ChainService database. We now compare each cfheader the
 	// harness knows about to what's stored in the ChainService
@@ -1387,6 +1262,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 			return fmt.Errorf("Couldn't read block by "+
 				"height: %s", err)
 		}
+
 		hash := head.BlockHash()
 		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(&hash)
 		if err == io.EOF {
@@ -1403,47 +1279,21 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"for %d (%s) from DB: %v\n%s", i, hash,
 				err, goroutineDump())
 		}
-		haveExtHeader, err = svc.ExtFilterHeaders.FetchHeader(&hash)
-		if err == io.EOF {
-			// This sometimes happens due to reorgs after the
-			// service decides it's current. Just wait for the
-			// DB to catch up and try again.
-			time.Sleep(syncUpdate)
-			total += syncUpdate
-			i--
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("Couldn't get extended "+
-				"header for %d (%s) from DB: %v\n%s", i, hash,
-				err, goroutineDump())
-		}
 		knownBasicHeader, err = correctSyncNode.Node.GetCFilterHeader(
-			&hash, wire.GCSFilterRegular)
+			&hash, wire.GCSFilterRegular,
+		)
 		if err != nil {
 			return fmt.Errorf("Couldn't get basic header "+
 				"for %d (%s) from node %s", i, hash,
 				correctSyncNode.P2PAddress())
 		}
-		knownExtHeader, err = correctSyncNode.Node.GetCFilterHeader(
-			&hash, wire.GCSFilterExtended)
-		if err != nil {
-			return fmt.Errorf("Couldn't get extended "+
-				"header for %d (%s) from node %s", i,
-				hash, correctSyncNode.P2PAddress())
-		}
+
 		if *haveBasicHeader != knownBasicHeader.PrevFilterHeader {
 			return fmt.Errorf("Basic header for %d (%s) "+
 				"doesn't match node %s. DB: %s, node: %s", i,
 				hash, correctSyncNode.P2PAddress(),
 				haveBasicHeader,
 				knownBasicHeader.PrevFilterHeader)
-		}
-		if *haveExtHeader != knownExtHeader.PrevFilterHeader {
-			return fmt.Errorf("Extended header for %d (%s)"+
-				" doesn't match node %s. DB: %s, node: %s", i,
-				hash, correctSyncNode.P2PAddress(),
-				haveExtHeader, knownExtHeader.PrevFilterHeader)
 		}
 	}
 	return nil

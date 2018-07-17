@@ -54,8 +54,6 @@ func newHeaderStore(db walletdb.DB, filePath string,
 		flatFileName = "block_headers.bin"
 	case RegularFilter:
 		flatFileName = "reg_filter_headers.bin"
-	case ExtendedFilter:
-		flatFileName = "ext_filter_headers.bin"
 	default:
 		return nil, fmt.Errorf("unrecognized filter type: %v", hType)
 	}
@@ -527,7 +525,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		switch filterType {
 		case RegularFilter:
 			basicFilter, err := builder.BuildBasicFilter(
-				netParams.GenesisBlock,
+				netParams.GenesisBlock, nil,
 			)
 			if err != nil {
 				return nil, err
@@ -541,21 +539,8 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 				return nil, err
 			}
 
-		case ExtendedFilter:
-			extFilter, err := builder.BuildExtFilter(
-				netParams.GenesisBlock,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			genesisFilterHash, err = builder.MakeHeaderForFilter(
-				extFilter,
-				netParams.GenesisBlock.Header.PrevBlock,
-			)
-			if err != nil {
-				return nil, err
-			}
+		default:
+			return nil, fmt.Errorf("unknown filter type: %v", filterType)
 		}
 
 		genesisHeader := FilterHeader{
@@ -707,12 +692,12 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 
 	_, tipHeight, err := f.chainTip()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("unable to fetch chain tip: %v", err)
 	}
 
 	latestHeader, err := f.readHeader(tipHeight)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("unable to read header: %v", err)
 	}
 
 	return latestHeader, tipHeight, nil

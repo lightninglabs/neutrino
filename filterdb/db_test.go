@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
@@ -47,8 +48,8 @@ func TestGenesisFilterCreation(t *testing.T) {
 
 	genesisHash := chaincfg.SimNetParams.GenesisHash
 
-	// With the database initialized, we should be able to fetch both the
-	// regular and extended filter for the genesis block.
+	// With the database initialized, we should be able to fetch the
+	// regular filter for the genesis block.
 	regGenesisFilter, err := database.FetchFilter(genesisHash, RegularFilter)
 	if err != nil {
 		t.Fatalf("unable to fetch regular genesis filter: %v", err)
@@ -58,14 +59,6 @@ func TestGenesisFilterCreation(t *testing.T) {
 	// and the coinbase txid should be indexed.
 	if regGenesisFilter == nil {
 		t.Fatalf("regular genesis filter is nil")
-	}
-
-	// We don't test the extended genesis filter for nullness because it
-	// only has a coinbase tx, which has no inputs to be indexed.
-	// Therefore, we only check if there's an error on retrieval.
-	_, err = database.FetchFilter(genesisHash, ExtendedFilter)
-	if err != nil {
-		t.Fatalf("unable to fetch ext genesis filter: %v", err)
 	}
 }
 
@@ -85,7 +78,9 @@ func genRandFilter(numElements uint32) (*gcs.Filter, error) {
 		return nil, err
 	}
 
-	filter, err := gcs.BuildGCSFilter(20, key, elements)
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP, builder.DefaultM, key, elements,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -119,16 +114,6 @@ func TestFilterStorage(t *testing.T) {
 		t.Fatalf("unable to store regular filter: %v", err)
 	}
 
-	// Next, we'll do the same for the exteended fitler type.
-	extFilter, err := genRandFilter(100)
-	if err != nil {
-		t.Fatalf("unable to create random filter: %v", err)
-	}
-	err = database.PutFilter(&randHash, extFilter, ExtendedFilter)
-	if err != nil {
-		t.Fatalf("unable to store extended filter: %v", err)
-	}
-
 	// With the filter stored, we should be able to retrieve the filter
 	// without any issue, and it should match the stored filter exactly.
 	regFilterDB, err := database.FetchFilter(&randHash, RegularFilter)
@@ -137,15 +122,5 @@ func TestFilterStorage(t *testing.T) {
 	}
 	if !reflect.DeepEqual(regFilter, regFilterDB) {
 		t.Fatalf("regular filter doesn't match!")
-	}
-
-	// Similarly, we should also be able to retrive the extended fitler,
-	// and it should match what we initially put in.
-	extFitlerDB, err := database.FetchFilter(&randHash, ExtendedFilter)
-	if err != nil {
-		t.Fatalf("unable to retrieve ext filter: %v", err)
-	}
-	if !reflect.DeepEqual(extFilter, extFitlerDB) {
-		t.Fatalf("extended filter doesn't match!")
 	}
 }

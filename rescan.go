@@ -22,19 +22,24 @@ import (
 
 // rescanOptions holds the set of functional parameters for Rescan.
 type rescanOptions struct {
-	chain          *ChainService
-	queryOptions   []QueryOption
-	ntfn           rpcclient.NotificationHandlers
-	startBlock     *waddrmgr.BlockStamp
-	startTime      time.Time
-	endBlock       *waddrmgr.BlockStamp
-	watchAddrs     []btcutil.Address
-	watchOutPoints []wire.OutPoint
-	watchTxIDs     []chainhash.Hash
-	watchList      [][]byte
-	txIdx          uint32
-	update         <-chan *updateOptions
-	quit           <-chan struct{}
+	chain *ChainService
+
+	queryOptions []QueryOption
+
+	ntfn rpcclient.NotificationHandlers
+
+	startTime  time.Time
+	startBlock *waddrmgr.BlockStamp
+
+	endBlock *waddrmgr.BlockStamp
+
+	watchAddrs  []btcutil.Address
+	watchInputs []InputWithScript
+	watchList   [][]byte
+	txIdx       uint32
+
+	update <-chan *updateOptions
+	quit   <-chan struct{}
 }
 
 // RescanOption is a functional option argument to any of the rescan and
@@ -106,21 +111,24 @@ func WatchAddrs(watchAddrs ...btcutil.Address) RescanOption {
 	}
 }
 
-// WatchOutPoints specifies the outpoints to watch for on-chain spends. Each
-// call to this function adds to the list of outpoints being watched rather
-// than replacing the list.
-func WatchOutPoints(watchOutPoints ...wire.OutPoint) RescanOption {
-	return func(ro *rescanOptions) {
-		ro.watchOutPoints = append(ro.watchOutPoints, watchOutPoints...)
-	}
+// InputWithScript couples an previous outpoint along with its input script.
+// We'll use the prev script to match the filter itself, but then scan for the
+// particular outpoint when we need to make a notification decision.
+type InputWithScript struct {
+	// OutPoint identifies the previous output to watch.
+	OutPoint wire.OutPoint
+
+	// PkScript is the script of the previous output.
+	PkScript []byte
 }
 
-// WatchTxIDs specifies the outpoints to watch for on-chain spends. Each call
-// to this function adds to the list of outpoints being watched rather than
-// replacing the list.
-func WatchTxIDs(watchTxIDs ...chainhash.Hash) RescanOption {
+// WatchInputs specifies the outpoints to watch for on-chain spends. We also
+// require the script as we'll match on the script, but then notify based on
+// the outpoint. Each call to this function adds to the list of outpoints being
+// watched rather than replacing the list.
+func WatchInputs(watchInputs ...InputWithScript) RescanOption {
 	return func(ro *rescanOptions) {
-		ro.watchTxIDs = append(ro.watchTxIDs, watchTxIDs...)
+		ro.watchInputs = append(ro.watchInputs, watchInputs...)
 	}
 }
 
@@ -176,12 +184,8 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 
 		ro.watchList = append(ro.watchList, script)
 	}
-	for _, op := range ro.watchOutPoints {
-		ro.watchList = append(ro.watchList,
-			builder.OutPointToFilterEntry(op))
-	}
-	for _, txid := range ro.watchTxIDs {
-		ro.watchList = append(ro.watchList, txid[:])
+	for _, input := range ro.watchInputs {
+		ro.watchList = append(ro.watchList, input.PkScript)
 	}
 
 	// Check that we have either an end block or a quit channel.
@@ -486,9 +490,9 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 				txDetails := blockDetails
 				txDetails.Index = txIdx
 
-				relevant := ro.watchingTxID(tx)
+				var relevant bool
 
-				if ro.spendsWatchedOutpoint(tx) {
+				if ro.spendsWatchedInput(tx) {
 					relevant = true
 					if ro.ntfn.OnRedeemingTx != nil {
 						ro.ntfn.OnRedeemingTx(tx, &txDetails)
@@ -572,8 +576,7 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 // headers for a particular height are known.
 func (s *ChainService) hasFilterHeadersByHeight(height uint32) bool {
 	_, regFetchErr := s.RegFilterHeaders.FetchHeaderByHeight(height)
-	_, extFetchErr := s.ExtFilterHeaders.FetchHeaderByHeight(height)
-	return regFetchErr == nil && extFetchErr == nil
+	return regFetchErr == nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
@@ -582,8 +585,7 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
 
 	ro.watchAddrs = append(ro.watchAddrs, update.addrs...)
-	ro.watchOutPoints = append(ro.watchOutPoints, update.outPoints...)
-	ro.watchTxIDs = append(ro.watchTxIDs, update.txIDs...)
+	ro.watchInputs = append(ro.watchInputs, update.inputs...)
 
 	for _, addr := range update.addrs {
 		script, err := txscript.PayToAddrScript(addr)
@@ -593,8 +595,8 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 
 		ro.watchList = append(ro.watchList, script)
 	}
-	for _, op := range update.outPoints {
-		ro.watchList = append(ro.watchList, builder.OutPointToFilterEntry(op))
+	for _, input := range update.inputs {
+		ro.watchList = append(ro.watchList, input.PkScript)
 	}
 	for _, txid := range update.txIDs {
 		ro.watchList = append(ro.watchList, txid[:])
@@ -647,23 +649,12 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 	return rewound, nil
 }
 
-// watchingTxID returns whether the transaction matches the filter based
-// directly on its hash.
-func (ro *rescanOptions) watchingTxID(tx *btcutil.Tx) bool {
-	for _, hash := range ro.watchTxIDs {
-		if hash == *tx.Hash() {
-			return true
-		}
-	}
-	return false
-}
-
-// spendsWatchedOutpoint returns whether the transaction matches the filter by
-// spending a watched outpoint.
-func (ro *rescanOptions) spendsWatchedOutpoint(tx *btcutil.Tx) bool {
+// spendsWatchedInput returns whether the transaction matches the filter by
+// spending a watched input.
+func (ro *rescanOptions) spendsWatchedInput(tx *btcutil.Tx) bool {
 	for _, in := range tx.MsgTx().TxIn {
-		for _, op := range ro.watchOutPoints {
-			if in.PreviousOutPoint == op {
+		for _, input := range ro.watchInputs {
+			if in.PreviousOutPoint == input.OutPoint {
 				return true
 			}
 		}
@@ -707,10 +698,11 @@ txOutLoop:
 				Hash:  *hash,
 				Index: uint32(outIdx),
 			}
-			ro.watchOutPoints = append(ro.watchOutPoints, outPoint)
-			ro.watchList = append(
-				ro.watchList, builder.OutPointToFilterEntry(outPoint),
-			)
+			ro.watchInputs = append(ro.watchInputs, InputWithScript{
+				PkScript: pkScript,
+				OutPoint: outPoint,
+			})
+			ro.watchList = append(ro.watchList, pkScript)
 
 			continue txOutLoop
 		}
@@ -782,7 +774,7 @@ func (r *Rescan) Start() <-chan error {
 // updateOptions are a set of functional parameters for Update.
 type updateOptions struct {
 	addrs                    []btcutil.Address
-	outPoints                []wire.OutPoint
+	inputs                   []InputWithScript
 	txIDs                    []chainhash.Hash
 	rewind                   uint32
 	disableDisconnectedNtfns bool
@@ -802,17 +794,10 @@ func AddAddrs(addrs ...btcutil.Address) UpdateOption {
 	}
 }
 
-// AddOutPoints adds outpoints to the filter.
-func AddOutPoints(outPoints ...wire.OutPoint) UpdateOption {
+// AddInputs adds inputs to watch to the filter.
+func AddInputs(inputs ...InputWithScript) UpdateOption {
 	return func(uo *updateOptions) {
-		uo.outPoints = append(uo.outPoints, outPoints...)
-	}
-}
-
-// AddTxIDs adds TxIDs to the filter.
-func AddTxIDs(txIDs ...chainhash.Hash) UpdateOption {
-	return func(uo *updateOptions) {
-		uo.txIDs = append(uo.txIDs, txIDs...)
+		uo.inputs = append(uo.inputs, inputs...)
 	}
 }
 
@@ -907,14 +892,13 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	}
 
 	// As this is meant to fetch UTXO's, the options MUST specify at least
-	// a single outpoint.
-	if len(ro.watchOutPoints) != 1 {
-		return nil, fmt.Errorf("must pass exactly one OutPoint")
+	// a single input.
+	if len(ro.watchInputs) != 1 {
+		return nil, fmt.Errorf("must pass exactly one InputWithScript")
 	}
-	watchList := [][]byte{
-		builder.OutPointToFilterEntry(ro.watchOutPoints[0]),
-		ro.watchOutPoints[0].Hash[:],
-	}
+	watchList := [][]byte{ro.watchInputs[0].PkScript}
+
+	originTxID := ro.watchInputs[0].OutPoint.Hash
 
 	// Track our position in the chain.
 	curHeader, curHeight, err := s.BlockHeaders.ChainTip()
@@ -927,7 +911,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		Height: int32(curHeight),
 	}
 
-	// Find our earliest possible block.
+	// Find our earliest possible block, which may be a hash.
 	if (ro.startBlock.Hash != chainhash.Hash{}) {
 		_, height, err := s.BlockHeaders.FetchHeader(&ro.startBlock.Hash)
 		if err == nil {
@@ -936,6 +920,8 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 			ro.startBlock.Hash = chainhash.Hash{}
 		}
 	}
+
+	// Alternatively, our earliest possible block by actually be a height.
 	if (ro.startBlock.Hash == chainhash.Hash{}) {
 		if ro.startBlock.Height == 0 {
 			ro.startBlock.Hash = *s.chainParams.GenesisHash
@@ -953,6 +939,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 			ro.startBlock.Hash = curHeader.BlockHash()
 		}
 	}
+
 	log.Tracef("Starting scan for output spend from known block %d (%s) "+
 		"back to block %d (%s)", curStamp.Height, curStamp.Hash,
 		ro.startBlock.Height, ro.startBlock.Hash)
@@ -960,8 +947,9 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	for {
 		// Check the basic filter for the spend and the extended filter
 		// for the transaction in which the outpoint is funded.
-		filter, err := s.GetCFilter(curStamp.Hash,
-			wire.GCSFilterRegular, ro.queryOptions...)
+		filter, err := s.GetCFilter(
+			curStamp.Hash, wire.GCSFilterRegular, ro.queryOptions...,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("Couldn't get basic "+
 				"filter for block %d (%s)", curStamp.Height,
@@ -979,8 +967,9 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		// If either is matched, download the block and check to see
 		// what we have.
 		if matched {
-			block, err := s.GetBlockFromNetwork(curStamp.Hash,
-				ro.queryOptions...)
+			block, err := s.GetBlockFromNetwork(
+				curStamp.Hash, ro.queryOptions...,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -994,7 +983,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 			// error stating that the output is spent.
 			for _, tx := range block.Transactions() {
 				for i, ti := range tx.MsgTx().TxIn {
-					if ti.PreviousOutPoint == ro.watchOutPoints[0] {
+					if ti.PreviousOutPoint == ro.watchInputs[0].OutPoint {
 						return &SpendReport{
 							SpendingTx:         tx.MsgTx(),
 							SpendingInputIndex: uint32(i),
@@ -1007,10 +996,13 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 			// If we found the transaction that created the output,
 			// then it's not spent and we can return the TxOut.
 			for _, tx := range block.Transactions() {
-				if *(tx.Hash()) == ro.watchOutPoints[0].Hash {
+				if *(tx.Hash()) == originTxID {
 					outputs := tx.MsgTx().TxOut
+					outputIndex := ro.watchInputs[0].OutPoint.Index
+					targetOutput := outputs[outputIndex]
+
 					return &SpendReport{
-						Output: outputs[ro.watchOutPoints[0].Index],
+						Output: targetOutput,
 					}, nil
 				}
 			}
@@ -1021,13 +1013,15 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 		if curStamp.Height < ro.startBlock.Height {
 			return nil, fmt.Errorf("Transaction %s not found "+
 				"since start block %d (%s)",
-				ro.watchOutPoints[0].Hash, curStamp.Height+1,
+				originTxID, curStamp.Height+1,
 				curStamp.Hash)
 		}
 
 		// Fetch the previous header so we can continue our walk
 		// backwards.
-		header, err := s.BlockHeaders.FetchHeaderByHeight(uint32(curStamp.Height))
+		header, err := s.BlockHeaders.FetchHeaderByHeight(
+			uint32(curStamp.Height),
+		)
 		if err != nil {
 			return nil, err
 		}
