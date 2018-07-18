@@ -3,7 +3,6 @@ package neutrino
 import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
 // batchSpendReporter orchestrates the delivery of spend reports to
@@ -129,7 +128,7 @@ func (b *batchSpendReporter) ProcessBlock(blk *wire.MsgBlock,
 // watchlist.
 func (b *batchSpendReporter) addNewRequests(reqs []*GetUtxoRequest) {
 	for _, req := range reqs {
-		outpoint := *req.OutPoint
+		outpoint := req.Input.OutPoint
 
 		log.Debugf("Adding outpoint=%s height=%d to watchlist",
 			outpoint, req.BirthHeight)
@@ -139,7 +138,7 @@ func (b *batchSpendReporter) addNewRequests(reqs []*GetUtxoRequest) {
 		// Build the filter entry only if it is the first time seeing
 		// the outpoint.
 		if _, ok := b.outpoints[outpoint]; !ok {
-			entry := builder.OutPointToFilterEntry(outpoint)
+			entry := req.Input.PkScript
 			b.outpoints[outpoint] = entry
 			b.filterEntries = append(b.filterEntries, entry)
 		}
@@ -159,8 +158,8 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 	// whose outputs share the same txid.
 	txidReverseIndex := make(map[chainhash.Hash][]*GetUtxoRequest)
 	for _, req := range newReqs {
-		txidReverseIndex[req.OutPoint.Hash] = append(
-			txidReverseIndex[req.OutPoint.Hash], req,
+		txidReverseIndex[req.Input.OutPoint.Hash] = append(
+			txidReverseIndex[req.Input.OutPoint.Hash], req,
 		)
 	}
 
@@ -184,19 +183,19 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 		// index of each to grab the initial output.
 		txOuts := tx.TxOut
 		for _, req := range txidReqs {
-			op := req.OutPoint
+			op := req.Input.OutPoint
 
 			// Ensure that the outpoint's index references an actual
 			// output on the transaction. If not, we will be unable
 			// to find the initial output.
 			if op.Index >= uint32(len(txOuts)) {
 				log.Errorf("Failed to find outpoint %s -- "+
-					"invalid output index", req.OutPoint)
-				initialTxns[*op] = nil
+					"invalid output index", op)
+				initialTxns[op] = nil
 				continue
 			}
 
-			initialTxns[*op] = &SpendReport{
+			initialTxns[op] = &SpendReport{
 				Output: txOuts[op.Index],
 			}
 		}
@@ -208,19 +207,19 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 	// above. The copied values can include valid initial txns, as well as
 	// nil spend report if the output index was invalid.
 	for _, req := range newReqs {
-		tx, ok := initialTxns[*req.OutPoint]
+		tx, ok := initialTxns[req.Input.OutPoint]
 		switch {
 		case !ok:
 			log.Errorf("Failed to find outpoint %s -- "+
-				"txid not found in block", req.OutPoint)
-			initialTxns[*req.OutPoint] = nil
+				"txid not found in block", req.Input.OutPoint)
+			initialTxns[req.Input.OutPoint] = nil
 		case tx != nil:
 			log.Tracef("Block %d creates output %s",
-				height, req.OutPoint)
+				height, req.Input.OutPoint)
 		default:
 		}
 
-		b.initialTxns[*req.OutPoint] = tx
+		b.initialTxns[req.Input.OutPoint] = tx
 	}
 
 	return initialTxns
