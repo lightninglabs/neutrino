@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil"
@@ -106,16 +107,18 @@ type UtxoScanner struct {
 	mu sync.Mutex
 	cv *sync.Cond
 
-	wg   sync.WaitGroup
-	quit chan struct{}
+	wg       sync.WaitGroup
+	quit     chan struct{}
+	shutdown chan struct{}
 }
 
 // NewUtxoScanner creates a new instance of UtxoScanner using the given chain
 // interface.
 func NewUtxoScanner(cfg *UtxoScannerConfig) *UtxoScanner {
 	scanner := &UtxoScanner{
-		cfg:  cfg,
-		quit: make(chan struct{}),
+		cfg:      cfg,
+		quit:     make(chan struct{}),
+		shutdown: make(chan struct{}),
 	}
 	scanner.cv = sync.NewCond(&scanner.mu)
 
@@ -141,11 +144,15 @@ func (s *UtxoScanner) Stop() error {
 	}
 
 	close(s.quit)
-	s.cv.Signal()
 
-	s.wg.Wait()
-
-	return nil
+	for {
+		select {
+		case <-s.shutdown:
+			return nil
+		case <-time.After(50 * time.Millisecond):
+			s.cv.Signal()
+		}
+	}
 }
 
 // Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
@@ -186,7 +193,7 @@ func (s *UtxoScanner) Enqueue(input *InputWithScript,
 //
 // NOTE: This method MUST be spawned as a goroutine.
 func (s *UtxoScanner) batchManager() {
-	defer s.wg.Done()
+	defer close(s.shutdown)
 
 	for {
 		s.cv.L.Lock()
