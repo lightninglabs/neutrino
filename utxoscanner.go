@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
@@ -17,10 +16,11 @@ type getUtxoResult struct {
 	err    error
 }
 
-// GetUtxoRequest is a request to scan for OutPoint from the height BirthHeight.
+// GetUtxoRequest is a request to scan for InputWithScript from the height
+// BirthHeight.
 type GetUtxoRequest struct {
-	// OutPoint is the target outpoint to watch for spentness.
-	OutPoint *wire.OutPoint
+	// Input is the target outpoint with script to watch for spentness.
+	Input *InputWithScript
 
 	// BirthHeight is the height at which we expect to find the original
 	// unspent outpoint. This is also the height used when starting the
@@ -49,7 +49,7 @@ func (r *GetUtxoRequest) deliver(report *SpendReport, err error) {
 	default:
 		log.Warnf("duplicate getutxo result delivered for "+
 			"outpoint=%v, spend=%v, err=%v",
-			r.OutPoint, report, err)
+			r.Input.OutPoint, report, err)
 	}
 }
 
@@ -149,14 +149,14 @@ func (s *UtxoScanner) Stop() error {
 }
 
 // Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
-func (s *UtxoScanner) Enqueue(outPoint *wire.OutPoint,
+func (s *UtxoScanner) Enqueue(input *InputWithScript,
 	birthHeight uint32) (*GetUtxoRequest, error) {
 
 	log.Debugf("Enqueuing request for %s with birth height %d",
-		outPoint.String(), birthHeight)
+		input.OutPoint.String(), birthHeight)
 
 	req := &GetUtxoRequest{
-		OutPoint:    outPoint,
+		Input:       input,
 		BirthHeight: birthHeight,
 		resultChan:  make(chan *getUtxoResult, 1),
 		quit:        s.quit,
