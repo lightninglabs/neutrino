@@ -893,12 +893,12 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 	// As this is meant to fetch UTXO's, the options MUST specify exactly
 	// one outpoint.
-	if len(ro.watchOutPoints) != 1 {
+	if len(ro.watchInputs) != 1 {
 		return nil, fmt.Errorf("must pass exactly one OutPoint")
 	}
 
 	req, err := s.utxoScanner.Enqueue(
-		&ro.watchOutPoints[0], uint32(ro.startBlock.Height),
+		&ro.watchInputs[0], uint32(ro.startBlock.Height),
 	)
 	if err != nil {
 		return nil, err
@@ -909,7 +909,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	report, err := req.Result()
 	if err != nil {
 		log.Debugf("Error finding spends for %s: %v",
-			ro.watchOutPoints[0].String(), err)
+			ro.watchInputs[0].OutPoint.String(), err)
 		return nil, err
 	}
 
