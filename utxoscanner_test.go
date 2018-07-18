@@ -63,19 +63,27 @@ func (c *MockChainClient) blockFilterMatches(ro *rescanOptions,
 	return true, nil
 }
 
-func makeTestOutpoint() *wire.OutPoint {
+func makeTestInputWithScript() *InputWithScript {
 	hash, _ := chainhash.NewHashFromStr("87a157f3fd88ac7907c05fc55e271dc4acdc5605d187d646604ca8c0e9382e03")
-	return &wire.OutPoint{Hash: *hash, Index: 0}
+	pkScript := []byte("76a91471d7dd96d9edda09180fe9d57a477b5acc9cad118")
+
+	return &InputWithScript{
+		OutPoint: wire.OutPoint{
+			Hash:  *hash,
+			Index: 0,
+		},
+		PkScript: pkScript,
+	}
+
 }
 
 // TestFindSpends tests that findSpends properly returns spend reports.
 func TestFindSpends(t *testing.T) {
-	outpoint := makeTestOutpoint()
 	height := uint32(100000)
 
 	reqs := []*GetUtxoRequest{
 		{
-			OutPoint:    outpoint,
+			Input:       makeTestInputWithScript(),
 			BirthHeight: height,
 		},
 	}
@@ -106,11 +114,15 @@ func TestFindSpends(t *testing.T) {
 func TestFindInitialTransactions(t *testing.T) {
 	hash, _ := chainhash.NewHashFromStr("e9a66845e05d5abc0ad04ec80f774a7e585c6e8db975962d069a522137b80c1d")
 	outpoint := &wire.OutPoint{Hash: *hash, Index: 0}
+	pkScript := []byte("76a91439aa3d569e06a1d7926dc4be1193c99bf2eb9ee08")
 	height := uint32(100000)
 
 	reqs := []*GetUtxoRequest{
 		{
-			OutPoint:    outpoint,
+			Input: &InputWithScript{
+				OutPoint: *outpoint,
+				PkScript: pkScript,
+			},
 			BirthHeight: height,
 		},
 	}
@@ -182,11 +194,11 @@ func TestDequeueAtHeight(t *testing.T) {
 	})
 
 	// Add the requests in order of their block heights.
-	req100000, err := scanner.Enqueue(makeTestOutpoint(), 100000)
+	req100000, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	req100001, err := scanner.Enqueue(makeTestOutpoint(), 100001)
+	req100001, err := scanner.Enqueue(makeTestInputWithScript(), 100001)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -216,11 +228,11 @@ func TestDequeueAtHeight(t *testing.T) {
 	}
 
 	// Now, add the requests in order of their block heights.
-	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	req100000, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	req100001, err = scanner.Enqueue(makeTestInputWithScript(), 100001)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -245,11 +257,11 @@ func TestDequeueAtHeight(t *testing.T) {
 	}
 
 	// Now, add the requests out of order wrt. their block heights.
-	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	req100001, err = scanner.Enqueue(makeTestInputWithScript(), 100001)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	req100000, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -278,11 +290,11 @@ func TestDequeueAtHeight(t *testing.T) {
 	}
 
 	// Again, add the requests out of order wrt. their block heights.
-	req100001, err = scanner.Enqueue(makeTestOutpoint(), 100001)
+	req100001, err = scanner.Enqueue(makeTestInputWithScript(), 100001)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-	req100000, err = scanner.Enqueue(makeTestOutpoint(), 100000)
+	req100000, err = scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
@@ -331,7 +343,7 @@ func TestUtxoScannerScanBasic(t *testing.T) {
 		scanErr     error
 	)
 
-	req, err := scanner.Enqueue(makeTestOutpoint(), 100000)
+	req, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
 	if err != nil {
 		t.Fatalf("unable to enqueue utxo scan request: %v", err)
 	}
@@ -386,7 +398,7 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 		scanErr     error
 	)
 
-	req, err := scanner.Enqueue(makeTestOutpoint(), 99999)
+	req, err := scanner.Enqueue(makeTestInputWithScript(), 99999)
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
