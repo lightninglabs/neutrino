@@ -3,6 +3,7 @@
 package neutrino
 
 import (
+	"bytes"
 	"container/list"
 	"fmt"
 	"math/big"
@@ -92,11 +93,9 @@ type headerNode struct {
 // blockManager provides a concurrency safe block manager for handling all
 // incoming blocks.
 type blockManager struct {
-	server          *ChainService
-	started         int32
-	shutdown        int32
-	syncPeer        *ServerPeer
-	syncPeerMutex   sync.Mutex
+	started  int32
+	shutdown int32
+
 	// blkHeaderProgressLogger is a progress logger that we'll use to
 	// update the number of blocker headers we've processed in the past 10
 	// seconds within the log.
@@ -106,6 +105,49 @@ type blockManager struct {
 	// above, but we'll use it to update the progress of the set of filter
 	// headers that we've verified in the past 10 seconds.
 	fltrHeaderProgessLogger *blockProgressLogger
+
+	// headerTip will be set to the current block header tip at all times.
+	// Callers MUST hold the block below each time they read/write from
+	// this field.
+	headerTip uint32
+
+	// newHeadersMtx is the mutex that should be held when reading/writing
+	// the headerTip variable above.
+	newHeadersMtx sync.Mutex
+
+	// newHeadersSignal is condition variable which will be used to notify
+	// any waiting callers (via Broadcast()) that the tip of the current
+	// chain has changed. This is useful when callers need to know we have
+	// a new tip, but not necessarily each block that was connected during
+	// switch over.
+	newHeadersSignal *sync.Cond
+
+	// filterHeaderTip will be set to the current filter header tip at all
+	// times.  Callers MUST hold the block below each time they read/write
+	// from this field.
+	filterHeaderTip uint32
+
+	// newFilterHeadersMtx is the mutex that should be held when
+	// reading/writing the filterHeaderTip variable above.
+	newFilterHeadersMtx sync.Mutex
+
+	// newFilterHeadersSignal is condition variable which will be used to
+	// notify any waiting callers (via Broadcast()) that the tip of the
+	// current filter header chain has changed. This is useful when callers
+	// need to know we have a new tip, but not necessarily each filter
+	// header that was connected during switch over.
+	newFilterHeadersSignal *sync.Cond
+
+	// syncPeer points to the peer that we're currently syncing block
+	// headers from.
+	syncPeer *ServerPeer
+
+	// syncPeerMutex protects the above syncPeer pointer at all times.
+	syncPeerMutex sync.Mutex
+
+	// server is a pointer to the main p2p server for Neutrino, we'll use
+	// this pointer at times to do things like access the database, etc
+	server *ChainService
 
 	// peerChan is a channel for messages that come from peers
 	peerChan chan interface{}
@@ -118,8 +160,6 @@ type blockManager struct {
 	startHeader    *list.Element
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
-
-	startCFHeaderSync chan struct{}
 
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
@@ -134,8 +174,8 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	adjustmentFactor := s.chainParams.RetargetAdjustmentFactor
 
 	bm := blockManager{
-		server:              s,
-		peerChan:            make(chan interface{}, MaxPeers*3),
+		server:   s,
+		peerChan: make(chan interface{}, MaxPeers*3),
 		blkHeaderProgressLogger: newBlockProgressLogger(
 			"Processed", "block", log,
 		),
@@ -148,8 +188,13 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
-		startCFHeaderSync:   make(chan struct{}),
 	}
+
+	// Next we'll create the two signals that goroutines will use to wait
+	// on a particular header chain height before starting their normal
+	// duties.
+	bm.newHeadersSignal = sync.NewCond(&bm.newHeadersMtx)
+	bm.newFilterHeadersSignal = sync.NewCond(&bm.newFilterHeadersMtx)
 
 	// Initialize the next checkpoint based on the current height.
 	header, height, err := s.BlockHeaders.ChainTip()
