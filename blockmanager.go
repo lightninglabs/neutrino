@@ -1386,7 +1386,9 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 				return i, nil
 			}
 		}
-		ckptHeight := uint32((i+1)*wire.CFCheckptInterval - 1)
+
+		ckptHeight := uint32((i + 1) * wire.CFCheckptInterval)
+
 		if ckptHeight <= storeTip {
 			header, err := headerStore.FetchHeaderByHeight(
 				ckptHeight,
