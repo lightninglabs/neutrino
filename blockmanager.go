@@ -1647,10 +1647,8 @@ func (b *blockManager) current() bool {
 	return b.SyncPeer().LastBlock() >= b.SyncPeer().StartingHeight()
 }
 
-// IsCurrent returns whether or not the block manager believes it is synced with
-// the connected peers.
-//
-// TODO(roasbeef): hook into WC implementation
+// IsCurrent returns whether or not the block manager believes it is synced
+// with the connected peers.
 func (b *blockManager) IsCurrent() bool {
 	reply := make(chan bool)
 	b.peerChan <- isCurrentMsg{reply: reply}
@@ -1786,8 +1784,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
 	receivedCheckpoint := false
-	var finalHash *chainhash.Hash
-	var finalHeight int32
+	var (
+		finalHash   *chainhash.Hash
+		finalHeight int32
+	)
 	for i, blockHeader := range msg.Headers {
 		blockHash := blockHeader.BlockHash()
 		finalHash = &blockHash
@@ -2058,6 +2058,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	log.Tracef("Writing header batch of %v block headers",
 		len(headerWriteBatch))
+
 	if len(headerWriteBatch) > 0 {
 		// With all the headers in this batch validated, we'll write
 		// them all in a single transaction such that this entire batch
@@ -2090,19 +2091,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		}
 	}
 
-	// If we've caught up to the headers, we can let the cfheader sync
-	// know to catch up to the block header store.
-	if b.current() {
-		select {
-		case b.startCFHeaderSync <- struct{}{}:
-			log.Infof("Sent startcfheadersync at height %d",
-				finalHeight)
-		case <-b.quit:
-		// If the cfheader sync is too busy to notice our notification,
-		// we move along. It'll catch up next time.
-		default:
-		}
-	}
+	// Since we have a new set of headers written to disk, we'll send out a
+	// new signal to notify any waiting sub-systems that they can now maybe
+	// proceed do to us extending the header chain.
+	b.newHeadersMtx.Lock()
+	b.headerTip = uint32(finalHeight)
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
