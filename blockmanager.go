@@ -397,7 +397,7 @@ func (b *blockManager) cfHandler() {
 
 			defer wg.Done()
 
-			log.Debugf("Starting cfheaders sync for "+
+			log.Infof("Starting cfheaders sync for "+
 				"filter_type=%v", fType)
 
 			var (
@@ -459,21 +459,37 @@ func (b *blockManager) cfHandler() {
 			log.Infof("Fully caught up with cfheaders, waiting at " +
 				"tip for new blocks")
 
-			// Catch the filter headers up to the tip of the block
-			// header store and then stay caught up with each
-			// signal while watching for reorgs. We ignore
-			// checkpoints because at this point, we're past any
-			// valid checkpoints.
-			//
-			// TODO: We can read startCFHeaderSync and split it out
-			// into a signal for each goroutine instead of using
-			// the ticker. This would make cfheaders stay caught up
-			// constantly rather than catch up every tick in the
-			// event of fast blocks coming in.
-			ticker := time.NewTicker(QueryTimeout)
-			defer ticker.Stop()
+			// Now that we've been fully caught up to the tip of
+			// the current header chain, we'll wait here for a
+			// signal that more blocks have been connected. If this
+			// happens then we'll do another round to fetch the new
+			// set of filter new  set of filter headers
 			for {
-				// Get/write the next set of cfheaders, if any.
+				// We'll wait until the filter header tip and
+				// the header tip are mismatched.
+				//
+				// NOTE: We can grab the filterHeaderTip here
+				// without a lock, as this is the only
+				// goroutine that can modify this value.
+				b.newHeadersSignal.L.Lock()
+				for b.filterHeaderTip == b.headerTip {
+					// We'll wait here until we're woken up
+					// by the broadcast signal.
+					b.newHeadersSignal.Wait()
+
+					// Before we proceed, we'll check if we
+					// need to exit at all
+					select {
+					case <-b.quit:
+						return
+					default:
+					}
+				}
+				b.newHeadersSignal.L.Unlock()
+
+				// At this point, we know that there're a set
+				// of new filter headers to fetch, so we'll
+				// grab them now.
 				if err = b.getUncheckpointedCFHeaders(
 					store, fType,
 				); err != nil {
@@ -486,10 +502,11 @@ func (b *blockManager) cfHandler() {
 				select {
 				case <-b.quit:
 					return
-				case <-ticker.C:
+				default:
 				}
 
 			}
+
 		}(fType, storeLookup)
 	}
 	wg.Wait()
