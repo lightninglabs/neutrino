@@ -823,6 +823,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				// it from the cache and write it.
 				queryResponses[checkPointIndex] = nil
 
+				log.Debugf("Writing cfheaders at height=%v to "+
+					"next checkpoint", curHeight)
+
 				// As we write the set of headers to disk, we
 				// also obtain the hash of the last filter
 				// header we've written to disk so we can
@@ -986,7 +989,7 @@ func (b *blockManager) resolveConflict(
 		}
 	}
 
-	log.Warnf("Detected mismatch at index=%v for checkpoints!!!")
+	log.Warnf("Detected mismatch at index=%v for checkpoints!!!", heightDiff)
 
 	// Delete any responses that have fewer checkpoints than where we see a
 	// mismatch.
@@ -1377,6 +1380,9 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 				checkpoint = *checkpoints[i]
 			}
 			if checkpoint != *checkpoints[i] {
+				log.Warnf("mismatch at %v, expected %v got "+
+					"%v", i, checkpoint, checkpoints[i])
+
 				return i, nil
 			}
 		}
@@ -1390,6 +1396,8 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 			}
 
 			if *header != checkpoint {
+				log.Warnf("mismatch at height %v, expected %v got "+
+					"%v", ckptHeight, header, checkpoint)
 				return i, nil
 			}
 		}
