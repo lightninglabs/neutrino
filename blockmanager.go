@@ -506,7 +506,6 @@ func (b *blockManager) cfHandler() {
 					return
 				default:
 				}
-
 			}
 
 		}(fType, storeLookup)
@@ -640,30 +639,51 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		panic("getting chaintip from store")
 	}
 
+	initialFilterHeader := curHeader
+
 	log.Infof("Fetching set of checkpointed cfheaders filters from "+
 		"height=%v, hash=%v", curHeight, curHeader)
+
+	// The starting interval is the checkpoint index that we'll be starting
+	// from based on our current height in the filter header index.
+	startingInterval := curHeight / wire.CFCheckptInterval
+
+	log.Infof("Starting to query for cfheaders from "+
+		"checkpoint_interval=%v", startingInterval)
+
+	queryMsgs := make([]wire.Message, 0, len(checkpoints))
+
+	// We'll also create an additional set of maps that we'll use to
+	// re-order the responses as we get them in.
+	queryResponses := make(map[uint32]*wire.MsgCFHeaders)
+	stopHashes := make(map[chainhash.Hash]uint32)
 
 	// Generate all of the requests we'll be batching and space to store
 	// the responses. Also make a map of stophash to index to make it
 	// easier to match against incoming responses.
-	queryMsgs := make([]wire.Message, len(checkpoints))
-	queryResponses := make([]*wire.MsgCFHeaders, len(checkpoints))
-	stopHashes := make(map[chainhash.Hash]int)
-	for i := 0; i < len(checkpoints); i++ {
+	//
+	// TODO(roasbeef): extract to func to test
+	currentInterval := startingInterval
+	for currentInterval < uint32(len(checkpoints)) {
 		// Each checkpoint is spaced wire.CFCheckptInterval after the
 		// prior one, so we'll fetch headers in batches using the
 		// checkpoints as a guide.
-		startHeightRange := uint32(i * wire.CFCheckptInterval)
-		if i == 0 {
+		startHeightRange := uint32(
+			currentInterval * wire.CFCheckptInterval,
+		)
+		endHeightRange := uint32(
+			(currentInterval + 1) * wire.CFCheckptInterval,
+		)
+
+		// If this is the very first interval, then we'll skip a block
+		// as we already have the filter for the genesis block, so we
+		// know it's filter hash.
+		if currentInterval == 0 {
 			startHeightRange++
 		}
-		endHeightRange := uint32((i+1)*wire.CFCheckptInterval - 1)
 
-		// If we have the header for this checkpoint, we can skip doing
-		// anything with it.
-		if endHeightRange <= curHeight {
-			continue
-		}
+		log.Tracef("Checkpointed cfheaders request start_range=%v, "+
+			"end_range=%v", startHeightRange, endHeightRange)
 
 		// In order to fetch the range, we'll need the block header for
 		// the end of the height range.
@@ -676,7 +696,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			case <-b.quit:
 				return
 			default:
-				i--
+				currentInterval--
 				time.Sleep(QueryTimeout)
 				continue
 			}
@@ -691,22 +711,22 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 		// We'll mark that the ith interval is queried by this message,
 		// and also map the top hash back to the index of this message.
-		queryMsgs[i] = queryMsg
-		stopHashes[stopHash] = i
+		queryMsgs = append(queryMsgs, queryMsg)
+		stopHashes[stopHash] = currentInterval
+
+		// With the queries for this interval constructed, we'll move
+		// onto the next one.
+		currentInterval++
 	}
 
-	// Query for all headers, skipping any checkpoint intervals we
-	// have all of. Record them as necessary.
-	headersToQuery := queryMsgs[curHeight/wire.CFCheckptInterval:]
-
-	log.Infof("Attempting to query for %v cfheader batches", len(headersToQuery))
+	log.Infof("Attempting to query for %v cfheader batches", len(queryMsgs))
 
 	// With the set of messages constructed, we'll now request the batch
 	// all at once. This message will distributed the header requests
 	// amongst all active peers, effectively sharding each query
 	// dynamically.
 	b.server.queryBatch(
-		headersToQuery,
+		queryMsgs,
 
 		// Callback to process potential replies. Always called from
 		// the same goroutine as the outer function, so we don't have
@@ -758,15 +778,18 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// Find the first and last height for the blocks
 			// represented by this message.
 			startHeight := checkPointIndex * wire.CFCheckptInterval
-			lastHeight := startHeight + wire.CFCheckptInterval - 1
+			lastHeight := startHeight + wire.CFCheckptInterval
 			if checkPointIndex == 0 {
 				startHeight++
 			}
 
+			log.Debugf("Got cfheaders from height=%v to height=%v",
+				startHeight, lastHeight)
+
 			// If this is out of order but not yet written, we can
 			// verify that the checkpoints match, and then store
 			// them.
-			if startHeight > int(curHeight)+1 {
+			if startHeight > curHeight+1 {
 				log.Debugf("Got response for headers at "+
 					"height=%v, only at height=%v, stashing",
 					startHeight, curHeight)
@@ -778,7 +801,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 			// If this is out of order stuff that's already been
 			// written, we can ignore it.
-			if lastHeight <= int(curHeight) {
+			if lastHeight <= curHeight {
+				log.Debugf("Received out of order reply "+
+					"end_height=%v, already written", lastHeight)
 				return true
 			}
 
