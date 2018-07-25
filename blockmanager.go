@@ -96,9 +96,17 @@ type blockManager struct {
 	started         int32
 	shutdown        int32
 	requestedBlocks map[chainhash.Hash]struct{}
-	progressLogger  *blockProgressLogger
 	syncPeer        *ServerPeer
 	syncPeerMutex   sync.Mutex
+	// blkHeaderProgressLogger is a progress logger that we'll use to
+	// update the number of blocker headers we've processed in the past 10
+	// seconds within the log.
+	blkHeaderProgressLogger *blockProgressLogger
+
+	// fltrHeaderProgessLogger is a process logger similar to the one
+	// above, but we'll use it to update the progress of the set of filter
+	// headers that we've verified in the past 10 seconds.
+	fltrHeaderProgessLogger *blockProgressLogger
 
 	// peerChan is a channel for messages that come from peers
 	peerChan chan interface{}
@@ -130,7 +138,12 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		server:              s,
 		requestedBlocks:     make(map[chainhash.Hash]struct{}),
 		peerChan:            make(chan interface{}, MaxPeers*3),
-		progressLogger:      newBlockProgressLogger("Processed", log),
+		blkHeaderProgressLogger: newBlockProgressLogger(
+			"Processed", "block", log,
+		),
+		fltrHeaderProgessLogger: newBlockProgressLogger(
+			"Verified", "filter header", log,
+		),
 		headerList:          list.New(),
 		reorgList:           list.New(),
 		quit:                make(chan struct{}),
@@ -818,9 +831,15 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, err
 	}
 
-	// Notify subscribers.
+	// Notify subscribers, and also update the filter header progress
+	// logger at the same time.
 	msgType := connectBasic
-	for _, header := range processedHeaders {
+	for i, header := range processedHeaders {
+		headerHeight := height - uint32(numHeaders) + uint32(i)
+		b.fltrHeaderProgessLogger.LogBlockHeight(
+			header.Timestamp, int32(headerHeight),
+		)
+
 		b.server.sendSubscribedMsg(&blockMessage{
 			msgType: msgType,
 			header:  header,
@@ -1730,7 +1749,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			})
 
 			hmsg.peer.UpdateLastBlockHeight(node.height)
-			b.progressLogger.LogBlockHeight(blockHeader, node.height)
+
+			b.blkHeaderProgressLogger.LogBlockHeight(
+				blockHeader.Timestamp, node.height,
+			)
 
 			// Finally initialize the header ->
 			// map[filterHash]*peer map for filter header
