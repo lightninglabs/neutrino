@@ -237,6 +237,9 @@ func (b *blockManager) Stop() error {
 		return nil
 	}
 
+	// We'll send out update signals before the quit to ensure that any
+	// goroutines waiting on them will properly exit.
+	b.newHeadersSignal.Broadcast()
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.wg.Wait()
@@ -350,14 +353,28 @@ func (b *blockManager) cfHandler() {
 	log.Infof("Waiting for block headers to sync, then will start " +
 		"cfheaders sync...")
 
-	// Wait for block header sync to complete first.
-	select {
-	case <-b.startCFHeaderSync:
-	case <-b.quit:
-		return
-	}
+	// We'll wait until the main header sync is mostly finished before we
+	// actually start to sync the set of cfheaders. We do this to speed up
+	// the sync, as the check pointed sync is faster, then fetching each
+	// header from each peer during the normal "at tip" syncing.
+	b.newHeadersSignal.L.Lock()
+	for !b.IsCurrent() {
+		b.newHeadersSignal.Wait()
+		log.Infof("checking to see if sync fin")
 
-	// Query all peers for their checkpoints.
+		// While we're awake, we'll quickly check to see if we need to
+		// quit early.
+		select {
+		case <-b.quit:
+			return
+		default:
+
+		}
+	}
+	b.newHeadersSignal.L.Unlock()
+
+	// Now that we know the header sync is mostly finished, we'll grab the
+	// current chain tip so we can base our header sync off of that.
 	lastHeader, lastHeight, err := b.server.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Critical(err)
@@ -368,8 +385,8 @@ func (b *blockManager) cfHandler() {
 	log.Infof("Starting cfheaders sync at height=%v, hash=%v", lastHeight,
 		lastHeader.BlockHash())
 
-	// We'll sync the headers and checkpoints for all filter types in pare
-	// ll, by using a goroutine for each filter type.
+	// We'll sync the headers and checkpoints for all filter types in
+	// parallel, by using a goroutine for each filter type.
 	var wg sync.WaitGroup
 	wg.Add(len(filterTypes))
 	for fType, storeLookup := range filterTypes {
