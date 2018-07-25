@@ -95,7 +95,6 @@ type blockManager struct {
 	server          *ChainService
 	started         int32
 	shutdown        int32
-	requestedBlocks map[chainhash.Hash]struct{}
 	syncPeer        *ServerPeer
 	syncPeerMutex   sync.Mutex
 	// blkHeaderProgressLogger is a progress logger that we'll use to
@@ -136,7 +135,6 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 
 	bm := blockManager{
 		server:              s,
-		requestedBlocks:     make(map[chainhash.Hash]struct{}),
 		peerChan:            make(chan interface{}, MaxPeers*3),
 		blkHeaderProgressLogger: newBlockProgressLogger(
 			"Processed", "block", log,
@@ -1469,11 +1467,6 @@ func (b *blockManager) startSync(peers *list.List) {
 
 	// Start syncing from the best peer if one was selected.
 	if bestPeer != nil {
-		// Clear the requestedBlocks if the sync peer changes,
-		// otherwise we may ignore blocks we need that the last sync
-		// peer failed to send.
-		b.requestedBlocks = make(map[chainhash.Hash]struct{})
-
 		locator, err := b.server.BlockHeaders.LatestBlockLocator()
 		if err != nil {
 			log.Errorf("Failed to get block locator for the "+
