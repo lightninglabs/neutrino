@@ -240,6 +240,8 @@ func (b *blockManager) Stop() error {
 	// We'll send out update signals before the quit to ensure that any
 	// goroutines waiting on them will properly exit.
 	b.newHeadersSignal.Broadcast()
+	b.newFilterHeadersSignal.Broadcast()
+
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.wg.Wait()
@@ -886,6 +888,8 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, err
 	}
 
+	lastHeight := height
+
 	// We'll walk through the set of headers we need to write backwards, so
 	// we can properly populate the target header hash as well as the
 	// height. Both are these are needed for the internal indexes.
@@ -900,15 +904,18 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		// we can send a notification to all our subscribers below.
 		processedHeaders[numHeaders-i-1] = curHeader
 
+		// TODO(roasbeef): modify s.t only a single read to populate
+		// set
 		curHeader, height, err = b.server.BlockHeaders.FetchHeader(
 			&curHeader.PrevBlock,
 		)
 		if err != nil {
 			return nil, err
 		}
+
 	}
 
-	log.Debugf("Writing filter headers up to height=%v", height)
+	log.Debugf("Writing filter headers up to height=%v", lastHeight)
 
 	// Write the header batch.
 	err = store.WriteHeaders(headerBatch...)
@@ -930,6 +937,15 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 			header:  header,
 		})
 	}
+
+	// We'll also set the new header tip and notify any peers that the tip
+	// has changed as well. Unlike the set of notifications above, this is
+	// for sub-system that only need to know the height has changed rather
+	// than know each new header that's been added to the tip.
+	b.newFilterHeadersMtx.Lock()
+	b.filterHeaderTip = lastHeight
+	b.newFilterHeadersMtx.Unlock()
+	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, nil
 }
