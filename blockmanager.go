@@ -203,6 +203,14 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	}
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
 	bm.resetHeaderState(header, int32(height))
+	bm.headerTip = height
+
+	// Finally, we'll set the filter header tip so any goroutines waiting
+	// on the condition obtain the correct initial state.
+	_, bm.filterHeaderTip, err = s.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
 
 	return &bm, nil
 }
