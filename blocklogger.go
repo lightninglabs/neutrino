@@ -4,7 +4,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 )
 
@@ -15,6 +14,8 @@ type blockProgressLogger struct {
 	receivedLogBlocks int64
 	lastBlockLogTime  time.Time
 
+	entityType string
+
 	subsystemLogger btclog.Logger
 	progressAction  string
 	sync.Mutex
@@ -24,8 +25,11 @@ type blockProgressLogger struct {
 // The progress message is templated as follows:
 //  {progressAction} {numProcessed} {blocks|block} in the last {timePeriod}
 //  ({numTxs}, height {lastBlockHeight}, {lastBlockTimeStamp})
-func newBlockProgressLogger(progressMessage string, logger btclog.Logger) *blockProgressLogger {
+func newBlockProgressLogger(progressMessage string,
+	entityType string, logger btclog.Logger) *blockProgressLogger {
+
 	return &blockProgressLogger{
+		entityType:       entityType,
 		lastBlockLogTime: time.Now(),
 		progressAction:   progressMessage,
 		subsystemLogger:  logger,
@@ -35,7 +39,7 @@ func newBlockProgressLogger(progressMessage string, logger btclog.Logger) *block
 // LogBlockHeight logs a new block height as an information message to show
 // progress to the user. In order to prevent spam, it limits logging to one
 // message every 10 seconds with duration and totals included.
-func (b *blockProgressLogger) LogBlockHeight(header *wire.BlockHeader, height int32) {
+func (b *blockProgressLogger) LogBlockHeight(timestamp time.Time, height int32) {
 	b.Lock()
 	defer b.Unlock()
 
@@ -55,13 +59,13 @@ func (b *blockProgressLogger) LogBlockHeight(header *wire.BlockHeader, height in
 	tDuration := 10 * time.Millisecond * time.Duration(durationMillis/10)
 
 	// Log information about new block height.
-	blockStr := "blocks"
-	if b.receivedLogBlocks == 1 {
-		blockStr = "block"
+	entityStr := b.entityType
+	if b.receivedLogBlocks > 1 {
+		entityStr += "s"
 	}
 	b.subsystemLogger.Infof("%s %d %s in the last %s (height %d, %s)",
-		b.progressAction, b.receivedLogBlocks, blockStr, tDuration,
-		height, header.Timestamp)
+		b.progressAction, b.receivedLogBlocks, entityStr, tDuration,
+		height, timestamp)
 
 	b.receivedLogBlocks = 0
 	b.lastBlockLogTime = now
