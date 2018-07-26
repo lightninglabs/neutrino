@@ -254,7 +254,12 @@ func (b *blockManager) NewPeer(sp *ServerPeer) {
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
 	}
-	b.peerChan <- &newPeerMsg{peer: sp}
+
+	select {
+	case b.peerChan <- &newPeerMsg{peer: sp}:
+	case <-b.quit:
+		return
+	}
 }
 
 // handleNewPeerMsg deals with new peers that have signalled they may be
@@ -308,7 +313,11 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 		return
 	}
 
-	b.peerChan <- &donePeerMsg{peer: sp}
+	select {
+	case b.peerChan <- &donePeerMsg{peer: sp}:
+	case <-b.quit:
+		return
+	}
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It
@@ -362,7 +371,6 @@ func (b *blockManager) cfHandler() {
 	b.newHeadersSignal.L.Lock()
 	for !b.IsCurrent() {
 		b.newHeadersSignal.Wait()
-		log.Infof("checking to see if sync fin")
 
 		// While we're awake, we'll quickly check to see if we need to
 		// quit early.
@@ -1709,9 +1717,20 @@ func (b *blockManager) current() bool {
 // IsCurrent returns whether or not the block manager believes it is synced
 // with the connected peers.
 func (b *blockManager) IsCurrent() bool {
-	reply := make(chan bool)
-	b.peerChan <- isCurrentMsg{reply: reply}
-	return <-reply
+	reply := make(chan bool, 1)
+
+	select {
+	case b.peerChan <- isCurrentMsg{reply: reply}:
+	case <-b.quit:
+		return false
+	}
+
+	select {
+	case resp := <-reply:
+		return resp
+	case <-b.quit:
+		return false
+	}
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.
@@ -1722,7 +1741,11 @@ func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 		return
 	}
 
-	b.peerChan <- &invMsg{inv: inv, peer: sp}
+	select {
+	case b.peerChan <- &invMsg{inv: inv, peer: sp}:
+	case <-b.quit:
+		return
+	}
 }
 
 // handleInvMsg handles inv messages from all peers.
@@ -1818,7 +1841,11 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 		return
 	}
 
-	b.peerChan <- &headersMsg{headers: headers, peer: sp}
+	select {
+	case b.peerChan <- &headersMsg{headers: headers, peer: sp}:
+	case <-b.quit:
+		return
+	}
 }
 
 // handleHeadersMsg handles headers messages from all peers.
