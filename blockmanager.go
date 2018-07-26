@@ -99,12 +99,12 @@ type blockManager struct {
 	// blkHeaderProgressLogger is a progress logger that we'll use to
 	// update the number of blocker headers we've processed in the past 10
 	// seconds within the log.
-	blkHeaderProgressLogger *blockProgressLogger
+	blkHeaderProgressLogger *headerProgressLogger
 
 	// fltrHeaderProgessLogger is a process logger similar to the one
 	// above, but we'll use it to update the progress of the set of filter
 	// headers that we've verified in the past 10 seconds.
-	fltrHeaderProgessLogger *blockProgressLogger
+	fltrHeaderProgessLogger *headerProgressLogger
 
 	// headerTip will be set to the current block header tip at all times.
 	// Callers MUST hold the block below each time they read/write from
@@ -1388,6 +1388,7 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 	// Get the known best header to compare against checkpoints.
 	_, storeTip, err := headerStore.ChainTip()
 	if err != nil {
+		fmt.Println("unable to get chain tip")
 		return 0, err
 	}
 
@@ -1415,7 +1416,6 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 			if checkpoint != *checkpoints[i] {
 				log.Warnf("mismatch at %v, expected %v got "+
 					"%v", i, checkpoint, checkpoints[i])
-
 				return i, nil
 			}
 		}

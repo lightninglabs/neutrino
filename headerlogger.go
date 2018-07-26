@@ -7,10 +7,10 @@ import (
 	"github.com/btcsuite/btclog"
 )
 
-// blockProgressLogger provides periodic logging for other services in order
+// headerProgressLogger provides periodic logging for other services in order
 // to show users progress of certain "actions" involving some or all current
 // blocks. Ex: syncing to best chain, indexing all blocks, etc.
-type blockProgressLogger struct {
+type headerProgressLogger struct {
 	receivedLogBlocks int64
 	lastBlockLogTime  time.Time
 
@@ -26,9 +26,9 @@ type blockProgressLogger struct {
 //  {progressAction} {numProcessed} {blocks|block} in the last {timePeriod}
 //  ({numTxs}, height {lastBlockHeight}, {lastBlockTimeStamp})
 func newBlockProgressLogger(progressMessage string,
-	entityType string, logger btclog.Logger) *blockProgressLogger {
+	entityType string, logger btclog.Logger) *headerProgressLogger {
 
-	return &blockProgressLogger{
+	return &headerProgressLogger{
 		entityType:       entityType,
 		lastBlockLogTime: time.Now(),
 		progressAction:   progressMessage,
@@ -39,7 +39,7 @@ func newBlockProgressLogger(progressMessage string,
 // LogBlockHeight logs a new block height as an information message to show
 // progress to the user. In order to prevent spam, it limits logging to one
 // message every 10 seconds with duration and totals included.
-func (b *blockProgressLogger) LogBlockHeight(timestamp time.Time, height int32) {
+func (b *headerProgressLogger) LogBlockHeight(timestamp time.Time, height int32) {
 	b.Lock()
 	defer b.Unlock()
 
@@ -71,6 +71,6 @@ func (b *blockProgressLogger) LogBlockHeight(timestamp time.Time, height int32) 
 	b.lastBlockLogTime = now
 }
 
-func (b *blockProgressLogger) SetLastLogTime(time time.Time) {
+func (b *headerProgressLogger) SetLastLogTime(time time.Time) {
 	b.lastBlockLogTime = time
 }
