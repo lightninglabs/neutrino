@@ -9,7 +9,12 @@ import "github.com/btcsuite/btcd/wire"
 type messageType int
 
 const (
+	// connectBasic is a type of notification sent whenever we connect a
+	// new set of basic filter headers to the end of the main chain.
 	connectBasic messageType = iota
+
+	// disconnect is a type of filter notification that is sent whenever a
+	// block is disconnected from the end of the main chain.
 	disconnect
 )
 
@@ -35,31 +40,48 @@ type blockSubscription struct {
 
 // sendSubscribedMsg sends all block subscribers a message if they request this
 // type.
+//
 // TODO(aakselrod): Refactor so we're able to handle more message types in new
 // package.
 func (s *ChainService) sendSubscribedMsg(bm *blockMessage) {
-	var subChan chan<- wire.BlockHeader
+
 	s.mtxSubscribers.RLock()
 	for sub := range s.blockSubscribers {
-		switch bm.msgType {
-		case connectBasic:
-			subChan = sub.onConnectBasic
-		case disconnect:
-			subChan = sub.onDisconnect
-		default:
-			// TODO: Return a useful error when factored out into
-			// its own package.
-			panic("invalid message type")
-		}
-		if subChan != nil {
-			select {
-			case sub.notifyBlock <- bm:
-			case <-sub.quit:
-			case <-sub.intQuit:
-			}
-		}
+		sendMsgToSubscriber(sub, bm)
 	}
 	s.mtxSubscribers.RUnlock()
+}
+
+// sendMsgToSubscriber is a helper function that sends the target message to
+// the subscription client over the proper channel based on the type of the new
+// block notification.
+func sendMsgToSubscriber(sub *blockSubscription, bm *blockMessage) {
+
+	var subChan chan<- wire.BlockHeader
+
+	switch bm.msgType {
+	case connectBasic:
+		subChan = sub.onConnectBasic
+	case disconnect:
+		subChan = sub.onDisconnect
+	default:
+		// TODO: Return a useful error when factored out into its own
+		// package.
+		panic("invalid message type")
+	}
+
+	// If the subscription channel was found for this subscription based on
+	// the new update, then we'll wait to either send this notification, or
+	// quit from either signal.
+	if subChan != nil {
+		select {
+		case sub.notifyBlock <- bm:
+
+		case <-sub.quit:
+
+		case <-sub.intQuit:
+		}
+	}
 }
 
 // subscribeBlockMsg handles adding block subscriptions to the ChainService.
