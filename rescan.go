@@ -304,7 +304,11 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	// Listen for notifications.
 	blockConnected := make(chan wire.BlockHeader)
 	blockDisconnected := make(chan wire.BlockHeader)
-	var subscription *blockSubscription
+
+	var (
+		subscription *blockSubscription
+		err          error
+	)
 
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
@@ -320,7 +324,9 @@ rescanLoop:
 			return nil
 		}
 
-		// If we're current, we wait for notifications.
+		// If we're current, we wait for notifications that will be
+		// delivered each time a block is connecting, disconnecting, or
+		// we can an update to the filter we should be looking for.
 		switch current {
 		case true:
 			// Wait for a signal that we have a newly connected
@@ -337,14 +343,21 @@ rescanLoop:
 			// rewind a bit in order to provide the client all its
 			// requested client.
 			case update := <-ro.update:
-				rewound, err := ro.updateFilter(update, &curStamp,
-					&curHeader)
+				rewound, err := ro.updateFilter(
+					update, &curStamp, &curHeader,
+				)
 				if err != nil {
 					return err
 				}
 
+				// If we have to rewind our state, then we'll
+				// mark ourselves as not current so we can walk
+				// forward in the chain again until we we are
+				// current. This is our way of doing a manual
+				// rescan.
 				if rewound {
-					log.Tracef("Rewound to block %d (%s), no longer current",
+					log.Tracef("Rewound to block %d (%s), "+
+						"no longer current",
 						curStamp.Height, curStamp.Hash)
 
 					current = false
@@ -366,8 +379,9 @@ rescanLoop:
 					continue rescanLoop
 				}
 
-				// Do not process block until we have all filter headers. Don't
-				// worry, the block will get requeued every time there is a new
+				// Do not process block until we have all
+				// filter headers. Don't worry, the block will
+				// get requeued every time there is a new
 				// filter available.
 				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
 					log.Warnf("Missing filter header for "+
@@ -410,13 +424,17 @@ rescanLoop:
 							curStamp.Height,
 							curHeader.Timestamp)
 					}
-					header := s.getReorgTip(
-						header.PrevBlock)
+
+					header := s.getReorgTip(header.PrevBlock)
 					curHeader = *header
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
 				}
 			}
+
+		// If we're not yet current, then we'll walk down the chain
+		// until we reach the tip of the chain as we know it. At this
+		// point, we'll be "current" again.
 		case false:
 
 			// Apply all queued filter updates.
@@ -452,10 +470,14 @@ rescanLoop:
 				current = true
 
 				// Subscribe to block notifications.
-				subscription = s.subscribeBlockMsg(
-					blockConnected, blockConnected,
+				subscription, err = s.subscribeBlockMsg(
+					uint32(curStamp.Height), blockConnected,
 					blockDisconnected, nil,
 				)
+				if err != nil {
+					return fmt.Errorf("unable to register "+
+						"block subscription: %v", err)
+				}
 				defer func() {
 					if subscription != nil {
 						s.unsubscribeBlockMsgs(subscription)

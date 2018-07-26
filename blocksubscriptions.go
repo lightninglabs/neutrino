@@ -3,7 +3,11 @@
 
 package neutrino
 
-import "github.com/btcsuite/btcd/wire"
+import (
+	"fmt"
+
+	"github.com/btcsuite/btcd/wire"
+)
 
 // messageType describes the type of blockMessage.
 type messageType int
@@ -32,7 +36,8 @@ type blockMessage struct {
 type blockSubscription struct {
 	onConnectBasic chan<- wire.BlockHeader
 	onDisconnect   chan<- wire.BlockHeader
-	quit           <-chan struct{}
+
+	quit <-chan struct{}
 
 	notifyBlock chan *blockMessage
 	intQuit     chan struct{}
@@ -85,12 +90,16 @@ func sendMsgToSubscriber(sub *blockSubscription, bm *blockMessage) {
 }
 
 // subscribeBlockMsg handles adding block subscriptions to the ChainService.
-// TODO(aakselrod): move this to its own package and refactor so that we're
-// not modifying an object held by the caller.
-func (s *ChainService) subscribeBlockMsg(onConnectBasic, onConnectExt,
-	quit <-chan struct{}) *blockSubscription {
-	s.mtxSubscribers.Lock()
-	defer s.mtxSubscribers.Unlock()
+// The best known height to the caller should be passed in, such that we can
+// send a backlog of notifications to the caller if they're behind the current
+// best tip.
+//
+// TODO(aakselrod): move this to its own package and refactor so that we're not
+// modifying an object held by the caller.
+func (s *ChainService) subscribeBlockMsg(bestHeight uint32,
+	onConnectBasic, onDisconnect chan<- wire.BlockHeader,
+	quit <-chan struct{}) (*blockSubscription, error) {
+
 	subscription := blockSubscription{
 		onConnectBasic: onConnectBasic,
 		onDisconnect:   onDisconnect,
@@ -98,9 +107,53 @@ func (s *ChainService) subscribeBlockMsg(onConnectBasic, onConnectExt,
 		notifyBlock:    make(chan *blockMessage),
 		intQuit:        make(chan struct{}),
 	}
-	s.blockSubscribers[&subscription] = struct{}{}
-	go subscription.subscriptionHandler()
-	return &subscription
+
+	// At this point, we'll now check to see if we need to deliver any
+	// backlog notifications as its possible that while the caller is
+	// requesting right after a new set of blocks has been connected.
+	err := s.blockManager.SynchronizeFilterHeaders(func(filterHeaderTip uint32) error {
+		s.mtxSubscribers.Lock()
+		defer s.mtxSubscribers.Unlock()
+
+		s.blockSubscribers[&subscription] = struct{}{}
+		go subscription.subscriptionHandler()
+
+		// If the best height matches the filter header tip, then we're
+		// done and don't need to proceed any further.
+		if filterHeaderTip == bestHeight {
+			return nil
+		}
+
+		log.Debugf("Delivering backlog block notifications from "+
+			"height=%v, to height=%v", bestHeight, filterHeaderTip)
+
+		// Otherwise, we need to read block headers from disk to
+		// deliver a backlog to the caller before we proceed. We'll use
+		// this synchronization method to ensure the filter header
+		// state doesn't change until we're finished catching up the
+		// caller.
+		for currentHeight := bestHeight + 1; currentHeight <= filterHeaderTip; currentHeight++ {
+			blockHeader, err := s.BlockHeaders.FetchHeaderByHeight(
+				currentHeight,
+			)
+			if err != nil {
+				return fmt.Errorf("unable to read header at "+
+					"height: %v: %v", currentHeight, err)
+			}
+
+			sendMsgToSubscriber(&subscription, &blockMessage{
+				msgType: connectBasic,
+				header:  blockHeader,
+			})
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &subscription, nil
 }
 
 // unsubscribeBlockMsgs handles removing block subscriptions from the
@@ -148,15 +201,20 @@ func (s *blockSubscription) subscriptionHandler() {
 				return true
 			}
 		}
+
 		select {
+
 		case notify <- *next.header:
 			next = nil
 			return true
+
 		case queueMsg := <-s.notifyBlock:
 			ntfns = append(ntfns, queueMsg)
 			return true
+
 		case <-s.quit:
 			return false
+
 		case <-s.intQuit:
 			return false
 		}
@@ -168,10 +226,12 @@ func (s *blockSubscription) subscriptionHandler() {
 			// If selectChan returns false, we were signalled on
 			// s.quit or s.intQuit.
 			switch next.msgType {
+
 			case connectBasic:
 				if !selectChan(s.onConnectBasic) {
 					return
 				}
+
 			case disconnect:
 				if !selectChan(s.onDisconnect) {
 					return
