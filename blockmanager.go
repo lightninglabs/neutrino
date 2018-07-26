@@ -113,7 +113,7 @@ type blockManager struct {
 
 	// newHeadersMtx is the mutex that should be held when reading/writing
 	// the headerTip variable above.
-	newHeadersMtx sync.Mutex
+	newHeadersMtx sync.RWMutex
 
 	// newHeadersSignal is condition variable which will be used to notify
 	// any waiting callers (via Broadcast()) that the tip of the current
@@ -129,7 +129,7 @@ type blockManager struct {
 
 	// newFilterHeadersMtx is the mutex that should be held when
 	// reading/writing the filterHeaderTip variable above.
-	newFilterHeadersMtx sync.Mutex
+	newFilterHeadersMtx sync.RWMutex
 
 	// newFilterHeadersSignal is condition variable which will be used to
 	// notify any waiting callers (via Broadcast()) that the tip of the
@@ -392,7 +392,7 @@ func (b *blockManager) cfHandler() {
 	}
 	lastHash := lastHeader.BlockHash()
 
-	log.Infof("Starting cfheaders sync at height=%v, hash=%v", lastHeight,
+	log.Infof("Starting cfheaders sync at block_height=%v, hash=%v", lastHeight,
 		lastHeader.BlockHash())
 
 	// We'll sync the headers and checkpoints for all filter types in
@@ -1731,6 +1731,26 @@ func (b *blockManager) IsCurrent() bool {
 	case <-b.quit:
 		return false
 	}
+}
+
+// FilterHeaderTip returns the current height of the filter header chain tip.
+//
+// NOTE: This method is safe for concurrent access.
+func (b *blockManager) FilterHeaderTip() uint32 {
+	b.newFilterHeadersMtx.RLock()
+	defer b.newFilterHeadersMtx.RUnlock()
+
+	return b.filterHeaderTip
+}
+
+// BlockHeaderTip returns the current height of the block header chain tip.
+//
+// NOTE: This method is safe for concurrent access.
+func (b *blockManager) BlockHeaderTip() uint32 {
+	b.newHeadersMtx.RLock()
+	defer b.newHeadersMtx.RUnlock()
+
+	return b.headerTip
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.
