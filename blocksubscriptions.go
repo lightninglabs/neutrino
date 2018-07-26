@@ -10,7 +10,6 @@ type messageType int
 
 const (
 	connectBasic messageType = iota
-	connectExt
 	disconnect
 )
 
@@ -27,7 +26,6 @@ type blockMessage struct {
 // access internals, in particular the notifyBlock and intQuit members.
 type blockSubscription struct {
 	onConnectBasic chan<- wire.BlockHeader
-	onConnectExt   chan<- wire.BlockHeader
 	onDisconnect   chan<- wire.BlockHeader
 	quit           <-chan struct{}
 
@@ -46,8 +44,6 @@ func (s *ChainService) sendSubscribedMsg(bm *blockMessage) {
 		switch bm.msgType {
 		case connectBasic:
 			subChan = sub.onConnectBasic
-		case connectExt:
-			subChan = sub.onConnectExt
 		case disconnect:
 			subChan = sub.onDisconnect
 		default:
@@ -70,13 +66,11 @@ func (s *ChainService) sendSubscribedMsg(bm *blockMessage) {
 // TODO(aakselrod): move this to its own package and refactor so that we're
 // not modifying an object held by the caller.
 func (s *ChainService) subscribeBlockMsg(onConnectBasic, onConnectExt,
-	onDisconnect chan<- wire.BlockHeader,
 	quit <-chan struct{}) *blockSubscription {
 	s.mtxSubscribers.Lock()
 	defer s.mtxSubscribers.Unlock()
 	subscription := blockSubscription{
 		onConnectBasic: onConnectBasic,
-		onConnectExt:   onConnectExt,
 		onDisconnect:   onDisconnect,
 		quit:           quit,
 		notifyBlock:    make(chan *blockMessage),
@@ -89,6 +83,7 @@ func (s *ChainService) subscribeBlockMsg(onConnectBasic, onConnectExt,
 
 // unsubscribeBlockMsgs handles removing block subscriptions from the
 // ChainService.
+//
 // TODO(aakselrod): move this to its own package and refactor so that we're
 // not depending on the caller to not modify the argument between subscribe and
 // unsubscribe.
@@ -96,6 +91,7 @@ func (s *ChainService) unsubscribeBlockMsgs(subscription *blockSubscription) {
 	s.mtxSubscribers.Lock()
 	delete(s.blockSubscribers, subscription)
 	s.mtxSubscribers.Unlock()
+
 	close(subscription.intQuit)
 
 	// Drain the inbound notification channel
@@ -117,8 +113,8 @@ func (s *blockSubscription) subscriptionHandler() {
 	var next *blockMessage
 
 	// Try to send on the specified channel. If a new message arrives while
-	// we try to send, queue it and continue with the loop. If a quit signal
-	// is sent, let the loop know.
+	// we try to send, queue it and continue with the loop. If a quit
+	// signal is sent, let the loop know.
 	selectChan := func(notify chan<- wire.BlockHeader) bool {
 		if notify == nil {
 			select {
@@ -152,10 +148,6 @@ func (s *blockSubscription) subscriptionHandler() {
 			switch next.msgType {
 			case connectBasic:
 				if !selectChan(s.onConnectBasic) {
-					return
-				}
-			case connectExt:
-				if !selectChan(s.onConnectExt) {
 					return
 				}
 			case disconnect:
