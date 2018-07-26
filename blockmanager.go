@@ -588,7 +588,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 				return err
 			}
 
-			log.Infof("Attempting to reconcile cfheader mismatch "+
+			log.Warnf("Attempting to reconcile cfheader mismatch "+
 				"amongst %v peers", len(headers))
 
 			// We'll also fetch each of the filters from the peers
@@ -1742,6 +1742,19 @@ func (b *blockManager) FilterHeaderTip() uint32 {
 	defer b.newFilterHeadersMtx.RUnlock()
 
 	return b.filterHeaderTip
+}
+
+// SynchronizeFilterHeaders allows the caller to execute a function closure
+// that depends on synchronization with the current set of filter headers. This
+// allows the caller to execute an action that depends on the current filter
+// header state, thereby ensuring that the state would shift from underneath
+// them. Each execution of the closure will have the current filter header tip
+// passed in to ensue that the caller gets a consistent view.
+func (b *blockManager) SynchronizeFilterHeaders(f func(uint32) error) error {
+	b.newFilterHeadersMtx.RLock()
+	defer b.newFilterHeadersMtx.RUnlock()
+
+	return f(b.filterHeaderTip)
 }
 
 // BlockHeaderTip returns the current height of the block header chain tip.
