@@ -161,7 +161,6 @@ func updateChan(update <-chan *updateOptions) RescanOption {
 // Rescan is a single-threaded function that uses headers from the database and
 // functional options as arguments.
 func (s *ChainService) Rescan(options ...RescanOption) error {
-
 	// First, we'll apply the set of default options, then serially apply
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
@@ -242,7 +241,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 
 	// To find our starting block, either the start hash should be set, or
 	// the start height should be set. If neither is, then we'll be
-	// starting from the gensis block.
+	// starting from the genesis block.
 	if (curStamp.Hash != chainhash.Hash{}) {
 		header, height, err := s.BlockHeaders.FetchHeader(&curStamp.Hash)
 		if err == nil {
@@ -269,7 +268,29 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		}
 	}
 
-	log.Tracef("Starting rescan from known block %d (%s)", curStamp.Height,
+	s.blockManager.newFilterHeadersMtx.Lock()
+	filterHeaderHeight := s.blockManager.filterHeaderTip
+	s.blockManager.newFilterHeadersMtx.Unlock()
+
+	log.Debugf("Waiting for filter headers (height=%v) to catch up the "+
+		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
+
+	// We'll wait here at this point until we have enough filter headers to
+	// actually start walking forwards in the chain.
+	s.blockManager.newFilterHeadersMtx.Lock()
+	for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
+		s.blockManager.newFilterHeadersSignal.Wait()
+
+		// While we're awake, check to see if we need to exit.
+		select {
+		case <-ro.quit:
+			return nil
+		default:
+		}
+	}
+	s.blockManager.newFilterHeadersMtx.Unlock()
+
+	log.Debugf("Starting rescan from known block %d (%s)", curStamp.Height,
 		curStamp.Hash)
 
 	// Compare the start time to the start block. If the start time is
@@ -335,8 +356,13 @@ rescanLoop:
 				// Only deal with the next block from what we
 				// know about. Otherwise, it's in the future.
 				if header.PrevBlock != curStamp.Hash {
-					log.Debugf("Rescan got out of order block %s with "+
-						"prevblock %s", header.BlockHash(), header.PrevBlock)
+					log.Debugf("Rescan got out of order "+
+						"block %s with prevblock %s, "+
+						"curHeader: %s",
+						header.BlockHash(),
+						header.PrevBlock,
+						curStamp.Hash)
+
 					continue rescanLoop
 				}
 
@@ -344,12 +370,16 @@ rescanLoop:
 				// worry, the block will get requeued every time there is a new
 				// filter available.
 				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
+					log.Warnf("Missing filter header for "+
+						"height=%v, skipping",
+						curStamp.Height+1)
 					continue rescanLoop
 				}
 
 				curHeader = header
 				curStamp.Hash = header.BlockHash()
 				curStamp.Height++
+
 				log.Tracef("Rescan got block %d (%s)", curStamp.Height, curStamp.Hash)
 
 				if !scanning {
@@ -404,29 +434,45 @@ rescanLoop:
 				}
 			}
 
-			// Since we're not current, we try to manually advance the block. We
-			// are only interested in blocks that we already have both filter
-			// headers for. If we fail, we mark outselves as current and follow
-			// notifications.
+			// Since we're not current, we try to manually advance
+			// the block. We are only interested in blocks that we
+			// already have both filter headers for. If we fail to
+			// find the next filter header, but have the filter
+			// header for this height, then we mark ourselves as
+			// current and follow notifications.
 			nextHeight := uint32(curStamp.Height + 1)
-			if !s.hasFilterHeadersByHeight(nextHeight) {
-				log.Tracef("Rescan became current at %d (%s), "+
+			haveNextFilter := s.hasFilterHeadersByHeight(
+				nextHeight,
+			)
+			if !haveNextFilter {
+				log.Debugf("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
+
 				current = true
+
 				// Subscribe to block notifications.
-				subscription = s.subscribeBlockMsg(blockConnected,
-					blockConnected, blockDisconnected, nil)
+				subscription = s.subscribeBlockMsg(
+					blockConnected, blockConnected,
+					blockDisconnected, nil,
+				)
 				defer func() {
 					if subscription != nil {
 						s.unsubscribeBlockMsgs(subscription)
 						subscription = nil
 					}
 				}()
+
 				continue rescanLoop
 			}
 
-			header, err := s.BlockHeaders.FetchHeaderByHeight(nextHeight)
+			// If we have the filter for both this height and the
+			// next, then we'll fetch the next block and send a
+			// notification, maybe also scanning the filters for
+			// the block.
+			header, err := s.BlockHeaders.FetchHeaderByHeight(
+				nextHeight,
+			)
 			if err != nil {
 				return err
 			}
