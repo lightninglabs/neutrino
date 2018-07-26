@@ -431,14 +431,9 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 		cfBatch := make([]headerfs.FilterHeader, 0, wire.CFCheckptInterval)
 		hdrBatch := make([]headerfs.BlockHeader, 0, wire.CFCheckptInterval)
 
-		startHeader := 0
-		if i == 0 {
-			startHeader++
-		}
-
-		for j := startHeader; j < wire.CFCheckptInterval-1; j++ {
-			height = uint32(i*wire.CFCheckptInterval + j)
-			header = heightToHeader(height)
+		for j := 1; j < wire.CFCheckptInterval; j++ {
+			height := uint32(i*wire.CFCheckptInterval + j)
+			header := heightToHeader(height)
 
 			hdrBatch = append(hdrBatch, headerfs.BlockHeader{
 				BlockHeader: header,
@@ -452,9 +447,9 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 			})
 		}
 
-		height = uint32((i+1)*wire.CFCheckptInterval - 1)
+		height := uint32((i + 1) * wire.CFCheckptInterval)
 
-		header = heightToHeader(height)
+		header := heightToHeader(height)
 		hdrBatch = append(hdrBatch, headerfs.BlockHeader{
 			BlockHeader: header,
 			Height:      height,
