@@ -183,6 +183,7 @@ func (s *blockSubscription) subscriptionHandler() {
 			// notification on s.notifyBlock or quit if signalled.
 			if len(ntfns) > 0 {
 				next = ntfns[0]
+				ntfns[0] = nil // Set to nil to avoid GC leak.
 				ntfns = ntfns[1:]
 			} else {
 				select {
