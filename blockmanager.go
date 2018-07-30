@@ -113,7 +113,7 @@ type blockManager struct {
 
 	// newHeadersMtx is the mutex that should be held when reading/writing
 	// the headerTip variable above.
-	newHeadersMtx sync.Mutex
+	newHeadersMtx sync.RWMutex
 
 	// newHeadersSignal is condition variable which will be used to notify
 	// any waiting callers (via Broadcast()) that the tip of the current
@@ -129,7 +129,7 @@ type blockManager struct {
 
 	// newFilterHeadersMtx is the mutex that should be held when
 	// reading/writing the filterHeaderTip variable above.
-	newFilterHeadersMtx sync.Mutex
+	newFilterHeadersMtx sync.RWMutex
 
 	// newFilterHeadersSignal is condition variable which will be used to
 	// notify any waiting callers (via Broadcast()) that the tip of the
@@ -392,7 +392,7 @@ func (b *blockManager) cfHandler() {
 	}
 	lastHash := lastHeader.BlockHash()
 
-	log.Infof("Starting cfheaders sync at height=%v, hash=%v", lastHeight,
+	log.Infof("Starting cfheaders sync at block_height=%v, hash=%v", lastHeight,
 		lastHeader.BlockHash())
 
 	// We'll sync the headers and checkpoints for all filter types in
@@ -588,7 +588,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 				return err
 			}
 
-			log.Infof("Attempting to reconcile cfheader mismatch "+
+			log.Warnf("Attempting to reconcile cfheader mismatch "+
 				"amongst %v peers", len(headers))
 
 			// We'll also fetch each of the filters from the peers
@@ -895,6 +895,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	store *headerfs.FilterHeaderStore) (*chainhash.Hash, error) {
 
+	b.newFilterHeadersMtx.Lock()
+	defer b.newFilterHeadersMtx.Unlock()
+
 	// Check that the PrevFilterHeader is the same as the last stored so we
 	// can prevent misalignment.
 	tip, _, err := store.ChainTip()
@@ -986,9 +989,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// has changed as well. Unlike the set of notifications above, this is
 	// for sub-system that only need to know the height has changed rather
 	// than know each new header that's been added to the tip.
-	b.newFilterHeadersMtx.Lock()
 	b.filterHeaderTip = lastHeight
-	b.newFilterHeadersMtx.Unlock()
 	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, nil
@@ -1731,6 +1732,39 @@ func (b *blockManager) IsCurrent() bool {
 	case <-b.quit:
 		return false
 	}
+}
+
+// FilterHeaderTip returns the current height of the filter header chain tip.
+//
+// NOTE: This method is safe for concurrent access.
+func (b *blockManager) FilterHeaderTip() uint32 {
+	b.newFilterHeadersMtx.RLock()
+	defer b.newFilterHeadersMtx.RUnlock()
+
+	return b.filterHeaderTip
+}
+
+// SynchronizeFilterHeaders allows the caller to execute a function closure
+// that depends on synchronization with the current set of filter headers. This
+// allows the caller to execute an action that depends on the current filter
+// header state, thereby ensuring that the state would shift from underneath
+// them. Each execution of the closure will have the current filter header tip
+// passed in to ensue that the caller gets a consistent view.
+func (b *blockManager) SynchronizeFilterHeaders(f func(uint32) error) error {
+	b.newFilterHeadersMtx.RLock()
+	defer b.newFilterHeadersMtx.RUnlock()
+
+	return f(b.filterHeaderTip)
+}
+
+// BlockHeaderTip returns the current height of the block header chain tip.
+//
+// NOTE: This method is safe for concurrent access.
+func (b *blockManager) BlockHeaderTip() uint32 {
+	b.newHeadersMtx.RLock()
+	defer b.newHeadersMtx.RUnlock()
+
+	return b.headerTip
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.
