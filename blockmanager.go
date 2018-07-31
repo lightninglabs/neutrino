@@ -239,12 +239,28 @@ func (b *blockManager) Stop() error {
 
 	// We'll send out update signals before the quit to ensure that any
 	// goroutines waiting on them will properly exit.
-	b.newHeadersSignal.Broadcast()
-	b.newFilterHeadersSignal.Broadcast()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Millisecond * 50)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+
+			b.newHeadersSignal.Broadcast()
+			b.newFilterHeadersSignal.Broadcast()
+		}
+	}()
 
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.wg.Wait()
+
+	close(done)
 	return nil
 }
 
