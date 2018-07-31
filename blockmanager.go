@@ -376,6 +376,7 @@ func (b *blockManager) cfHandler() {
 		// quit early.
 		select {
 		case <-b.quit:
+			b.newHeadersSignal.L.Unlock()
 			return
 		default:
 
@@ -491,6 +492,7 @@ func (b *blockManager) cfHandler() {
 					// need to exit at all
 					select {
 					case <-b.quit:
+						b.newHeadersSignal.L.Unlock()
 						return
 					default:
 					}

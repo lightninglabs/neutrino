@@ -284,6 +284,7 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		// While we're awake, check to see if we need to exit.
 		select {
 		case <-ro.quit:
+			s.blockManager.newFilterHeadersMtx.Unlock()
 			return nil
 		default:
 		}
