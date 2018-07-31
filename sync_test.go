@@ -389,7 +389,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			PkScript: script1,
 			OutPoint: ourOutPoint,
 		}),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
