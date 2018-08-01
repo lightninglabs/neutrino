@@ -2,7 +2,10 @@
 
 package headerfs
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // singleTruncate truncates a single header from the end of the header file.
 // This can be used in the case of a re-org to remove the last header from the
@@ -26,9 +29,9 @@ func (h *headerStore) singleTruncate() error {
 	case Block:
 		truncateLength = 80
 	case RegularFilter:
-		fallthrough
-	case ExtendedFilter:
 		truncateLength = 32
+	default:
+		return fmt.Errorf("unknown index type: %v", h.indexType)
 	}
 
 	// Finally, we'll use both of these values to calculate the new size of
