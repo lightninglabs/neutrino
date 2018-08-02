@@ -42,16 +42,19 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	// for that number of bytes, and read directly from the file into the
 	// buffer.
 	rawHeader := make([]byte, headerSize)
-	if _, err := h.file.ReadAt(rawHeader, int64(seekDist)); err != nil {
+	if _, err := h.file.ReadAt(rawHeader[:], int64(seekDist)); err != nil {
 		return nil, err
 	}
 
-	return rawHeader, nil
+	return rawHeader[:], nil
+}
 }
 
 // readHeader reads a full block header from the flat-file. The header read is
 // determined by the hight value.
-func (h *BlockHeaderStore) readHeader(height uint32) (*wire.BlockHeader, error) {
+func (h *BlockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
+	var header wire.BlockHeader
+
 	// Each header is 80 bytes, so using this information, we'll seek a
 	// distance to cover that height based on the size of block headers.
 	seekDistance := uint64(height) * 80
@@ -60,17 +63,16 @@ func (h *BlockHeaderStore) readHeader(height uint32) (*wire.BlockHeader, error) 
 	// offset.
 	rawHeader, err := h.readRaw(seekDistance)
 	if err != nil {
-		return nil, err
+		return header, err
 	}
 	headerReader := bytes.NewReader(rawHeader)
 
 	// Finally, decode the raw bytes into a proper bitcoin header.
-	var header wire.BlockHeader
 	if err := header.Deserialize(headerReader); err != nil {
-		return nil, err
+		return header, err
 	}
 
-	return &header, nil
+	return header, nil
 }
 
 // readHeader reads a single filter header at the specified height from the
