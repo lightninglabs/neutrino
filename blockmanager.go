@@ -1618,39 +1618,35 @@ func (b *blockManager) startSync(peers *list.List) {
 		log.Infof("Syncing to block height %d from peer %s",
 			bestPeer.LastBlock(), bestPeer.Addr())
 
-		// When the current height is less than a known checkpoint we
-		// can use block headers to learn about which blocks comprise
-		// the chain up to the checkpoint and perform less validation
-		// for them.  This is possible since each header contains the
-		// hash of the previous header and a merkle root.  Therefore if
-		// we validate all of the received headers link together
-		// properly and the checkpoint hashes match, we can be sure the
-		// hashes for the blocks in between are accurate.  Further,
-		// once the full blocks are downloaded, the merkle root is
-		// computed and compared against the value in the header which
-		// proves the full block hasn't been tampered with.
-		//
-		// Once we have passed the final checkpoint, or checkpoints are
-		// disabled, use standard inv messages learn about the blocks
-		// and fully validate them.  Finally, regression test mode does
-		// not support the headers-first approach so do normal block
-		// downloads when in regression test mode.
+		// Now that we know we have a new sync peer, we'll lock it in
+		// within the proper attribute.
 		b.syncPeerMutex.Lock()
 		b.syncPeer = bestPeer
 		b.syncPeerMutex.Unlock()
-		if b.nextCheckpoint != nil && best.Height < b.nextCheckpoint.Height {
 
-			b.SyncPeer().PushGetHeadersMsg(locator, b.nextCheckpoint.Hash)
+		// By default will use the zero hash as our stop hash to query
+		// for all the headers beyond our view of the network based on
+		// our latest block locator.
+		stopHash := &zeroHash
+
+		// If we're still within the range of the set checkpoints, then
+		// we'll use the next checkpoint to guide the set of headers we
+		// fetch, setting our stop hash to the next checkpoint hash.
+		if b.nextCheckpoint != nil && best.Height < b.nextCheckpoint.Height {
 			log.Infof("Downloading headers for blocks %d to "+
 				"%d from peer %s", best.Height+1,
 				b.nextCheckpoint.Height, bestPeer.Addr())
 
-			// This will get adjusted when we process headers if we
-			// request more headers than the peer is willing to
-			// give us in one message.
+			stopHash = b.nextCheckpoint.Hash
 		} else {
-			b.SyncPeer().PushGetBlocksMsg(locator, &zeroHash)
+			log.Infof("Fetching set of headers from tip "+
+				"(height=%v) from peer %s", best.Height,
+				bestPeer.Addr())
 		}
+
+		// With our stop hash selected, we'll kick off the sync from
+		// this peer with an initial GetHeaders message.
+		b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}
