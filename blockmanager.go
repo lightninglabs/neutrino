@@ -909,59 +909,45 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, fmt.Errorf("attempt to write cfheaders out of order")
 	}
 
-	// Cycle through the headers and create a batch to be written.
+	// Cycle through the headers and compute each header based on the prev
+	// header and the filter hash from the cfheaders response entries.
 	lastHeader := msg.PrevFilterHeader
 	headerBatch := make([]headerfs.FilterHeader, 0, wire.CFCheckptInterval)
 	for _, hash := range msg.FilterHashes {
+		// header = dsha256(filterHash || prevHeader)
 		lastHeader = chainhash.DoubleHashH(
 			append(hash[:], lastHeader[:]...),
 		)
 
-		fHeader := headerfs.FilterHeader{
+		headerBatch = append(headerBatch, headerfs.FilterHeader{
 			FilterHash: lastHeader,
-		}
-		headerBatch = append(headerBatch, fHeader)
+		})
 	}
 
-	// Add the block hashes by walking backwards through the headers.
-	// Also, cache the block headers for notification dispatch.
-	//
-	// TODO: Add DB-layer support for fetching the blocks as a batch and
-	// use that here.
-	processedHeaders := make([]*wire.BlockHeader, len(headerBatch))
-	curHeader, height, err := b.server.BlockHeaders.FetchHeader(
-		&msg.StopHash,
+	numHeaders := len(headerBatch)
+
+	// We'll now query for the set of block headers which match each of
+	// these filters headers in their corresponding chains. Our query will
+	// return the headers for the entire checkpoint interval ending at the
+	// designated stop hash.
+	blockHeaders := b.server.BlockHeaders
+	matchingBlockHeaders, startHeight, err := blockHeaders.FetchHeaderAncestors(
+		uint32(numHeaders-1), &msg.StopHash,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	lastHeight := height
+	// The final height in our range will be offset to the end of this
+	// particular checkpoint interval.
+	lastHeight := startHeight + uint32(numHeaders) - 1
+	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
 
-	// We'll walk through the set of headers we need to write backwards, so
-	// we can properly populate the target header hash as well as the
-	// height. Both are these are needed for the internal indexes.
-	numHeaders := len(headerBatch)
-	for i := 0; i < numHeaders; i++ {
-		// Based on the current header, set the header hash and height
-		// that this filter header corresponds to.
-		headerBatch[numHeaders-i-1].HeaderHash = curHeader.BlockHash()
-		headerBatch[numHeaders-i-1].Height = height
-
-		// We'll also note that we've connected this filter header so
-		// we can send a notification to all our subscribers below.
-		processedHeaders[numHeaders-i-1] = curHeader
-
-		// TODO(roasbeef): modify s.t only a single read to populate
-		// set
-		curHeader, height, err = b.server.BlockHeaders.FetchHeader(
-			&curHeader.PrevBlock,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	}
+	// We only need to set the height and hash of the very last filter
+	// header in the range to ensure that the index properly updates the
+	// tip of the chain.
+	headerBatch[numHeaders-1].HeaderHash = lastBlockHeader.BlockHash()
+	headerBatch[numHeaders-1].Height = lastHeight
 
 	log.Debugf("Writing filter headers up to height=%v", lastHeight)
 
@@ -974,15 +960,17 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
 	msgType := connectBasic
-	for i, header := range processedHeaders {
-		headerHeight := height - uint32(numHeaders) + uint32(i)
+	for i, header := range matchingBlockHeaders {
+		header := header
+
+		headerHeight := startHeight + uint32(i)
 		b.fltrHeaderProgessLogger.LogBlockHeight(
 			header.Timestamp, int32(headerHeight),
 		)
 
 		b.server.sendSubscribedMsg(&blockMessage{
 			msgType: msgType,
-			header:  header,
+			header:  &header,
 		})
 	}
 
@@ -1398,7 +1386,6 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 	// Get the known best header to compare against checkpoints.
 	_, storeTip, err := headerStore.ChainTip()
 	if err != nil {
-		fmt.Println("unable to get chain tip")
 		return 0, err
 	}
 
