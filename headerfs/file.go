@@ -58,10 +58,6 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 func (h *BlockHeaderStore) readHeaderRange(startHeight uint32,
 	endHeight uint32) ([]wire.BlockHeader, error) {
 
-	// Each header is 80 bytes, so using this information, we'll seek a
-	// distance to cover that height based on the size of block headers.
-	seekDistance := uint64(startHeight) * 80
-
 	// Based on the defined header type, we'll determine the number of
 	// bytes that we need to read past the sync point.
 	var headerSize uint32
@@ -75,6 +71,10 @@ func (h *BlockHeaderStore) readHeaderRange(startHeight uint32,
 	default:
 		return nil, fmt.Errorf("unknown index type: %v", h.indexType)
 	}
+
+	// Each header is 80 bytes, so using this information, we'll seek a
+	// distance to cover that height based on the size of block headers.
+	seekDistance := uint64(startHeight) * uint64(headerSize)
 
 	// Based on the number of headers in the range, we'll allocate a single
 	// slice that's able to hold the entire range of headers.

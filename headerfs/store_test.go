@@ -445,4 +445,67 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	}
 }
 
+// TestBlockHeadersFetchHeaderAncestors tests that we're able to properly fetch
+// the ancestors of a particular block, going from a set distance back to the
+// target block.
+func TestBlockHeadersFetchHeaderAncestors(t *testing.T) {
+	t.Parallel()
+
+	cleanUp, _, _, bhs, err := createTestBlockHeaderStore()
+	if cleanUp != nil {
+		defer cleanUp()
+	}
+	if err != nil {
+		t.Fatalf("unable to create new block header store: %v", err)
+	}
+
+	rand.Seed(time.Now().Unix())
+
+	// With our test instance created, we'll now generate a series of
+	// "fake" block headers to insert into the database.
+	const numHeaders = 100
+	blockHeaders := createTestBlockHeaderChain(numHeaders)
+
+	// With all the headers inserted, we'll now insert them into the
+	// database in a single batch.
+	if err := bhs.WriteHeaders(blockHeaders...); err != nil {
+		t.Fatalf("unable to write block headers: %v", err)
+	}
+
+	// Now that the headers have been written to disk, we'll attempt to
+	// query for all the ancestors of the final header written, to query
+	// the entire range.
+	lastHeader := blockHeaders[numHeaders-1]
+	lastHash := lastHeader.BlockHash()
+	diskHeaders, startHeight, err := bhs.FetchHeaderAncestors(
+		numHeaders-1, &lastHash,
+	)
+	if err != nil {
+		t.Fatalf("unable to fetch headers: %v", err)
+	}
+
+	// Ensure that the first height of the block is height 1, and not the
+	// genesis block.
+	if startHeight != 1 {
+		t.Fatalf("expected start height of %v got %v", 1, startHeight)
+	}
+
+	// Ensure that we retrieve the correct number of headers.
+	if len(diskHeaders) != numHeaders {
+		t.Fatalf("expected %v headers got %v headers",
+			numHeaders, len(diskHeaders))
+	}
+
+	// We should get back the exact same set of headers that we inserted in
+	// the first place.
+	for i := 0; i < len(diskHeaders); i++ {
+		diskHeader := diskHeaders[i]
+		blockHeader := blockHeaders[i].BlockHeader
+		if !reflect.DeepEqual(diskHeader, *blockHeader) {
+			t.Fatalf("header mismatch, expected %v got %v",
+				spew.Sdump(blockHeader), spew.Sdump(diskHeader))
+		}
+	}
+}
+
 // TODO(roasbeef): combined re-org scenarios

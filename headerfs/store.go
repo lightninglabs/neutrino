@@ -190,7 +190,7 @@ func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 		return nil, 0, err
 	}
 
-	return header, height, nil
+	return &header, height, nil
 }
 
 // FetchHeaderByHeight attempts to retrieve a target block header based on a
@@ -203,7 +203,37 @@ func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader
 	// For this query, we don't need to consult the index, and can instead
 	// just seek into the flat file based on the target height and return
 	// the full header.
-	return h.readHeader(height)
+	header, err := h.readHeader(height)
+	if err != nil {
+		return nil, err
+	}
+
+	return &header, nil
+}
+
+// FetchHeaderAncestors fetches the numHeaders block headers that are the
+// ancestors of the target stop hash. A total of numHeaders+1 headers will be
+// returned, as we'll walk back numHeaders distance to collect each header,
+// then return the final header specified by the stop hash. We'll also return
+// the starting height of the header range as well so callers can compute the
+// height of each header without knowing the height of the stop hash.
+func (h *BlockHeaderStore) FetchHeaderAncestors(numHeaders uint32,
+	stopHash *chainhash.Hash) ([]wire.BlockHeader, uint32, error) {
+
+	// First, we'll find the final header in the range, this will be the
+	// ending height of our scan.
+	endHeight, err := h.heightFromHash(stopHash)
+	if err != nil {
+		return nil, 0, err
+	}
+	startHeight := endHeight - numHeaders
+
+	headers, err := h.readHeaderRange(startHeight, endHeight)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return headers, startHeight, nil
 }
 
 // HeightFromHash returns the height of a particular block header given its
@@ -413,7 +443,7 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 		// header file to ensure each header connects properly and the
 		// index entries are also accurate. To do this, we start from a
 		// height of one before our current tip.
-		var newHeader *wire.BlockHeader
+		var newHeader wire.BlockHeader
 		for height := tipHeight - 1; height > 0; height-- {
 			// First, read the block header for this block height,
 			// and also compute the block hash for it.
@@ -479,7 +509,7 @@ func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 		return nil, 0, err
 	}
 
-	return latestHeader, tipHeight, nil
+	return &latestHeader, tipHeight, nil
 }
 
 // FilterHeaderStore is an implementation of a fully fledged database for any
