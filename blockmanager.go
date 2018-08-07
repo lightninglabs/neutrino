@@ -500,11 +500,11 @@ func (b *blockManager) cfHandler() {
 				// We'll wait until the filter header tip and
 				// the header tip are mismatched.
 				//
-				// NOTE: We can grab the filterHeaderTip here
-				// without a lock, as this is the only
+				// NOTE: We can grab the filterHeaderTipHash
+				// here without a lock, as this is the only
 				// goroutine that can modify this value.
 				b.newHeadersSignal.L.Lock()
-				for b.filterHeaderTip == b.headerTip {
+				for b.filterHeaderTipHash == b.headerTipHash {
 					// We'll wait here until we're woken up
 					// by the broadcast signal.
 					b.newHeadersSignal.Wait()
