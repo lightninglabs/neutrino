@@ -428,9 +428,14 @@ rescanLoop:
 					continue rescanLoop
 				}
 
-				curHeader = header
-				curStamp.Hash = header.BlockHash()
-				curStamp.Height++
+				// As this could be a re-try, we'll ensure that
+				// we don't incorrectly increment our currnet
+				// time stamp.
+				if curStamp.Hash != header.BlockHash() {
+					curHeader = header
+					curStamp.Hash = header.BlockHash()
+					curStamp.Height++
+				}
 
 				log.Tracef("Rescan got block %d (%s)", curStamp.Height,
 					curStamp.Hash)
@@ -444,7 +449,7 @@ rescanLoop:
 				}
 
 				// If we're actually scanning and we have a
-				// non-empty watch lsit, then we'll attempt to
+				// non-empty watch list, then we'll attempt to
 				// fetch the filter from the network.
 				var blockFilter *gcs.Filter
 				queryOptions := NumRetries(0)
@@ -452,6 +457,7 @@ rescanLoop:
 					curStamp.Hash, wire.GCSFilterRegular,
 					queryOptions,
 				)
+
 				switch {
 				// If the block index doesn't know about
 				// this block, then it's likely we're mid
@@ -777,6 +783,8 @@ func (s *ChainService) matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
 // to us.
 func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
+
+	// TODO(roasbeef): need to ENSURE always get filter
 
 	key := builder.DeriveKey(blockHash)
 	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
