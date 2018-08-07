@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -311,6 +312,42 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		err          error
 	)
 
+	// blockRefetchChan is a channel that we'll use to remind ourselves
+	// that we need to re-fetch a block. We'll use this to wake ourselves
+	// up in the scenario that we're unable to fetch the filters for a
+	// target block. It may be due to a re-org or if none of our peers
+	// actually have the filter.
+	blockRefetchChan := make(chan *wire.BlockHeader, 1)
+
+	// blockRetryInterval is the interval in which we'll continually re-try
+	// to fetch the latest filter from our peers.
+	//
+	// TODO(roasbeef): add exponential back-off
+	blockRetryInterval := time.Second
+
+	// blockReFetchTimer is a stoppable timer that we'll use to reminder
+	// ourselves to refetch a block in the case that we're unable to fetch
+	// the filter for a block the first time around.
+	var blockReFetchTimer *time.Timer
+
+	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height int32) {
+		// If so, then we'll avoid notifying the block, and will
+		// instead add this to our retry queue, as we should be getting
+		// block disconnected notifications in short order.
+		if blockReFetchTimer != nil {
+			blockReFetchTimer.Stop()
+		}
+
+		log.Debugf("Setting timer to attempt to re-fetch filter for "+
+			"hash=%v, height=%v", headerTip.BlockHash(), height)
+
+		// We'll start a timer to re-send this header so we re-process
+		// if in the case that we don't get a re-org soon afterwards.
+		blockReFetchTimer = time.AfterFunc(blockRetryInterval, func() {
+			blockRefetchChan <- &headerTip
+		})
+	}
+
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
 	// notifications in the correct order.
@@ -428,6 +465,17 @@ rescanLoop:
 						curStamp.Hash, err)
 				}
 
+				// If the filter is nil, then this either means
+				// that we don't have any peers to fetch this
+				// filter from, or the peer(s) that we're
+				// trying to fetch from are in the progress of
+				// a re-org.
+				if blockFilter == nil {
+					resetBlockReFetchTimer(
+						header, curStamp.Height,
+					)
+					continue
+				}
 
 				err := s.notifyBlockWithFilter(
 					ro, &curHeader, &curStamp, blockFilter,
@@ -435,6 +483,11 @@ rescanLoop:
 				if err != nil {
 					return err
 				}
+
+				// We'll successfully fetched this current
+				// block, so we'll reset the retry timer back
+				// to nil.
+				blockReFetchTimer = nil
 
 			case header := <-blockDisconnected:
 				log.Debugf("Rescan disconnect block %d (%s)\n",
@@ -464,6 +517,15 @@ rescanLoop:
 					curHeader = *header
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
+
+					// Now that we got a re-org, if we had
+					// a re-fetch timer going, we'll re-set
+					// is at the new header tip.
+					if blockReFetchTimer != nil {
+						resetBlockReFetchTimer(
+							*header, curStamp.Height,
+						)
+					}
 				}
 			}
 
