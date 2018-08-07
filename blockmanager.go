@@ -100,9 +100,14 @@ type blockManager struct {
 	fltrHeaderProgessLogger *headerProgressLogger
 
 	// headerTip will be set to the current block header tip at all times.
-	// Callers MUST hold the block below each time they read/write from
+	// Callers MUST hold the lock below each time they read/write from
 	// this field.
 	headerTip uint32
+
+	// headerTipHash will be set to the hash of the current block header
+	// tip at all times.  Callers MUST hold the lock below each time they
+	// read/write from this field.
+	headerTipHash chainhash.Hash
 
 	// newHeadersMtx is the mutex that should be held when reading/writing
 	// the headerTip variable above.
@@ -116,9 +121,14 @@ type blockManager struct {
 	newHeadersSignal *sync.Cond
 
 	// filterHeaderTip will be set to the current filter header tip at all
-	// times.  Callers MUST hold the block below each time they read/write
+	// times.  Callers MUST hold the lock below each time they read/write
 	// from this field.
 	filterHeaderTip uint32
+
+	// filterHeaderTipHash will be set to the current block hash of the
+	// fitler header tip at all times.  Callers MUST hold the lock below
+	// each time they read/write from this field.
+	filterHeaderTipHash chainhash.Hash
 
 	// newFilterHeadersMtx is the mutex that should be held when
 	// reading/writing the filterHeaderTip variable above.
@@ -197,6 +207,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
 	bm.resetHeaderState(header, int32(height))
 	bm.headerTip = height
+	bm.headerTipHash = header.BlockHash()
 
 	// Finally, we'll set the filter header tip so any goroutines waiting
 	// on the condition obtain the correct initial state.
@@ -204,6 +215,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	bm.filterHeaderTipHash = header.BlockHash()
 
 	return &bm, nil
 }
@@ -506,6 +518,7 @@ func (b *blockManager) cfHandler() {
 					default:
 					}
 				}
+
 				b.newHeadersSignal.L.Unlock()
 
 				// At this point, we know that there're a set
@@ -979,6 +992,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// for sub-system that only need to know the height has changed rather
 	// than know each new header that's been added to the tip.
 	b.filterHeaderTip = lastHeight
+	b.filterHeaderTipHash = lastBlockHeader.BlockHash()
 	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, nil
@@ -2182,6 +2196,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// proceed do to us extending the header chain.
 	b.newHeadersMtx.Lock()
 	b.headerTip = uint32(finalHeight)
+	b.headerTipHash = *finalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
 }
