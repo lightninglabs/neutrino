@@ -680,6 +680,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			"from database", blockHash)
 	}
 
+	log.Debugf("Fetching filter for height=%v, hash=%v", height, blockHash)
+
 	// In addition to fetching the block header, we'll fetch the filter
 	// headers (for this particular filter type) from the database. These
 	// are required in order to verify the authenticity of the filter.
