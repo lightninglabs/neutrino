@@ -617,6 +617,12 @@ checkResponses:
 					break
 				}
 			}
+
+			// If at this point, we don't yet have a query peer,
+			// then we'll exit now as all the peers are exhausted.
+			if queryPeer == nil {
+				break checkResponses
+			}
 		}
 	}
 
