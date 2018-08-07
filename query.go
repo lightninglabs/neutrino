@@ -540,7 +540,7 @@ func (s *ChainService) queryPeers(
 
 	// We get an initial view of our peers, to be updated each time a peer
 	// query times out.
-	curPeer := s.blockManager.SyncPeer()
+	queryPeer := s.blockManager.SyncPeer()
 	peerTries := make(map[string]uint8)
 
 	// This will be state used by the peer query goroutine.
@@ -562,25 +562,25 @@ func (s *ChainService) queryPeers(
 	// it's time to quit.
 	peerTimeout := time.NewTicker(qo.timeout)
 	timeout := time.After(qo.peerConnectTimeout)
-	if curPeer != nil {
-		peerTries[curPeer.Addr()]++
-		curPeer.subscribeRecvMsg(subscription)
-		curPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
+	if queryPeer != nil {
+		peerTries[queryPeer.Addr()]++
+		queryPeer.subscribeRecvMsg(subscription)
+		queryPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
 	}
 checkResponses:
 	for {
 		select {
 		case <-timeout:
 			// When we time out, we're done.
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 			break checkResponses
 
 		case <-quit:
 			// Same when we get a quit signal.
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 			break checkResponses
 
@@ -596,20 +596,24 @@ checkResponses:
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 
-			curPeer = nil
-			for _, curPeer = range s.Peers() {
+			queryPeer = nil
+			for _, curPeer := range s.Peers() {
 				if curPeer != nil && curPeer.Connected() &&
-					peerTries[curPeer.Addr()] <
-						qo.numRetries {
+					peerTries[curPeer.Addr()] < qo.numRetries {
+
+					curPeer = curPeer
+					queryPeer = curPeer
+
 					// Found a peer we can query.
-					peerTries[curPeer.Addr()]++
-					curPeer.subscribeRecvMsg(subscription)
-					curPeer.QueueMessageWithEncoding(
-						queryMsg, nil, qo.encoding)
+					peerTries[queryPeer.Addr()]++
+					queryPeer.subscribeRecvMsg(subscription)
+					queryPeer.QueueMessageWithEncoding(
+						queryMsg, nil, qo.encoding,
+					)
 					break
 				}
 			}
