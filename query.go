@@ -255,7 +255,7 @@ func (s *ChainService) queryBatch(
 					firstUnfinished++
 
 					log.Tracef("Query #%v already answered, "+
-						"skipping\n", i)
+						"skipping", i)
 					continue
 				}
 
@@ -268,7 +268,7 @@ func (s *ChainService) queryBatch(
 					uint32(queryWaitResponse),
 				) {
 					log.Tracef("Query #%v already being "+
-						"queried for, skipping\n", i)
+						"queried for, skipping", i)
 					continue
 				}
 
@@ -322,7 +322,7 @@ func (s *ChainService) queryBatch(
 				}
 
 				log.Tracef("Query for #%v failed, moving "+
-					"on: %v\n", handleQuery,
+					"on: %v", handleQuery,
 					newLogClosure(func() string {
 						return spew.Sdump(queryMsgs[handleQuery])
 					}))
@@ -333,7 +333,7 @@ func (s *ChainService) queryBatch(
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryAnswered))
 
-				log.Tracef("Query #%v answered, updating state\n",
+				log.Tracef("Query #%v answered, updating state",
 					handleQuery)
 			}
 		}
@@ -619,7 +619,7 @@ checkResponses:
 				if curPeer != nil && curPeer.Connected() &&
 					peerTries[curPeer.Addr()] < qo.numRetries {
 
-					curPeer = curPeer
+					curPeer := curPeer
 					queryPeer = curPeer
 
 					// Found a peer we can query.
