@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
 
@@ -206,13 +207,14 @@ func (s *ChainService) queryBatch(
 	queryStates := make([]uint32, len(queryMsgs))
 
 	// subscription allows us to subscribe to notifications from peers.
-	msgChan := make(chan spMsg)
+	msgChan := make(chan spMsg, len(queryMsgs))
 	subQuit := make(chan struct{})
 	subscription := spMsgSubscription{
 		msgChan:  msgChan,
 		quitChan: subQuit,
 	}
 	defer close(subQuit)
+
 	// peerStates and its companion mutex allow the peer goroutines to
 	// tell the main goroutine what query they're currently working on.
 	peerStates := make(map[string]wire.Message)
@@ -233,7 +235,7 @@ func (s *ChainService) queryBatch(
 		// Track the last query our peer failed to answer and skip over
 		// it for the next attempt. This helps prevent most instances
 		// of the same peer being asked for the same query every time.
-		lastFailed, firstUnfinished, handleQuery := -1, 0, -1
+		firstUnfinished, handleQuery := 0, -1
 
 		for firstUnfinished < len(queryMsgs) {
 			select {
@@ -251,11 +253,9 @@ func (s *ChainService) queryBatch(
 					atomic.LoadUint32(&queryStates[i]) ==
 						uint32(queryAnswered) {
 					firstUnfinished++
-					continue
-				}
 
-				// If we last failed at this query, skip it.
-				if i == lastFailed {
+					log.Tracef("Query #%v already answered, "+
+						"skipping\n", i)
 					continue
 				}
 
@@ -267,6 +267,8 @@ func (s *ChainService) queryBatch(
 					uint32(queryWaitSubmit),
 					uint32(queryWaitResponse),
 				) {
+					log.Tracef("Query #%v already being "+
+						"queried for, skipping\n", i)
 					continue
 				}
 
@@ -318,12 +320,21 @@ func (s *ChainService) queryBatch(
 				if !sp.Connected() {
 					return
 				}
-				lastFailed = handleQuery
+
+				log.Tracef("Query for #%v failed, moving "+
+					"on: %v\n", handleQuery,
+					newLogClosure(func() string {
+						return spew.Sdump(queryMsgs[handleQuery])
+					}))
+
 			case <-matchSignal:
 				// We got a match signal so we can mark this
 				// query a success.
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryAnswered))
+
+				log.Tracef("Query #%v answered, updating state\n",
+					handleQuery)
 			}
 		}
 	}
@@ -368,6 +379,8 @@ func (s *ChainService) queryBatch(
 			}
 		}
 
+		// TODO(roasbeef): remove lower loop
+
 		ticker := time.NewTicker(qo.timeout)
 		defer ticker.Stop()
 		for {
@@ -395,6 +408,7 @@ func (s *ChainService) queryBatch(
 				if allDone {
 					return
 				}
+
 			case <-quit:
 				return
 			}
