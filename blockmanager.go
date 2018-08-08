@@ -19,12 +19,21 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/headerlist"
 )
 
 const (
 	// maxTimeOffset is the maximum duration a block time is allowed to be
 	// ahead of the curent time. This is currently 2 hours.
 	maxTimeOffset = 2 * time.Hour
+
+	// numMaxMemHeaders is the max number of headers to store in memory for
+	// a particular peer. By bounding this value, we're able to closely
+	// control our effective memory usage during initial sync and re-org
+	// handling. This value should be set a "sane" re-org size, such that
+	// we're able to properly handle re-orgs in size strictly less than
+	// this value.
+	numMaxMemHeaders = 10000
 )
 
 // filterStoreLookup
@@ -74,13 +83,6 @@ type donePeerMsg struct {
 type txMsg struct {
 	tx   *btcutil.Tx
 	peer *ServerPeer
-}
-
-// headerNode is used as a node in a list of headers that are linked together
-// between checkpoints.
-type headerNode struct {
-	height int32
-	header *wire.BlockHeader
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -158,9 +160,9 @@ type blockManager struct {
 	wg   sync.WaitGroup
 	quit chan struct{}
 
-	headerList     *list.List
-	reorgList      *list.List
-	startHeader    *list.Element
+	headerList     headerlist.Chain
+	reorgList      headerlist.Chain
+	startHeader    *headerlist.Node
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
@@ -185,8 +187,12 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		fltrHeaderProgessLogger: newBlockProgressLogger(
 			"Verified", "filter header", log,
 		),
-		headerList:          list.New(),
-		reorgList:           list.New(),
+		headerList: headerlist.NewBoundedMemoryChain(
+			numMaxMemHeaders,
+		),
+		reorgList: headerlist.NewBoundedMemoryChain(
+			numMaxMemHeaders,
+		),
 		quit:                make(chan struct{}),
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
@@ -205,7 +211,10 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		return nil, err
 	}
 	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.resetHeaderState(header, int32(height))
+	bm.headerList.ResetHeaderState(headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	})
 	bm.headerTip = height
 	bm.headerTipHash = header.BlockHash()
 
@@ -366,7 +375,10 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		if err != nil {
 			return
 		}
-		b.resetHeaderState(header, int32(height))
+		b.headerList.ResetHeaderState(headerlist.Node{
+			Header: *header,
+			Height: int32(height),
+		})
 		b.startSync(peers)
 	}
 }
@@ -1562,21 +1574,6 @@ func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Chec
 	return prevCheckpoint
 }
 
-// resetHeaderState sets the headers-first mode state to values appropriate for
-// syncing from a new peer.
-func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
-	newestHeight int32) {
-
-	b.headerList.Init()
-	b.startHeader = nil
-
-	// Add an entry for the latest known block into the header pool.  This
-	// allows the next downloaded header to prove it links to the chain
-	// properly.
-	node := headerNode{header: newestHeader, height: newestHeight}
-	b.headerList.PushBack(&node)
-}
-
 // startSync will choose the best peer among the available candidate peers to
 // download/sync the blockchain from.  When syncing is already running, it
 // simply returns.  It also examines the candidates for any which are no longer
@@ -1813,7 +1810,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 		lastEl := b.headerList.Back()
 		var lastHash chainhash.Hash
 		if lastEl != nil {
-			lastHash = lastEl.Value.(*headerNode).header.BlockHash()
+			lastHash = lastEl.Header.BlockHash()
 		}
 
 		// Only send getheaders if we don't already know about the last
@@ -1905,9 +1902,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// that the proof of work is good, and that the header's
 		// timestamp isn't too far in the future, and add it to the
 		// list of headers.
-		node := headerNode{header: blockHeader}
-		prevNode := prevNodeEl.Value.(*headerNode)
-		prevHash := prevNode.header.BlockHash()
+		node := headerlist.Node{Header: *blockHeader}
+		prevNode := prevNodeEl
+		prevHash := prevNode.Header.BlockHash()
 		if prevHash.IsEqual(&blockHeader.PrevBlock) {
 			err := b.checkHeaderSanity(blockHeader, maxTimestamp,
 				false)
@@ -1918,26 +1915,26 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				return
 			}
 
-			node.height = prevNode.height + 1
-			finalHeight = node.height
+			node.Height = prevNode.Height + 1
+			finalHeight = node.Height
 
 			// This header checks out, so we'll add it to our write
 			// batch.
 			headerWriteBatch = append(headerWriteBatch, headerfs.BlockHeader{
 				BlockHeader: blockHeader,
-				Height:      uint32(node.height),
+				Height:      uint32(node.Height),
 			})
 
-			hmsg.peer.UpdateLastBlockHeight(node.height)
+			hmsg.peer.UpdateLastBlockHeight(node.Height)
 
 			b.blkHeaderProgressLogger.LogBlockHeight(
-				blockHeader.Timestamp, node.height,
+				blockHeader.Timestamp, node.Height,
 			)
 
 			// Finally initialize the header ->
 			// map[filterHash]*peer map for filter header
 			// validation purposes later.
-			e := b.headerList.PushBack(&node)
+			e := b.headerList.PushBack(node)
 			if b.startHeader == nil {
 				b.startHeader = e
 			}
@@ -1996,7 +1993,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// checkpoint, it's invalid and we need to disconnect
 			// the reporting peer.
 			prevCheckpoint := b.findPreviousHeaderCheckpoint(
-				prevNode.height)
+				prevNode.Height,
+			)
 			if backHeight < uint32(prevCheckpoint.Height) {
 				log.Errorf("Attempt at a reorg earlier than a "+
 					"checkpoint past which we've already "+
@@ -2011,10 +2009,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// peer.  We also keep track of the work represented by
 			// these headers so we can compare it to the work in
 			// the known good chain.
-			b.reorgList.Init()
-			b.reorgList.PushBack(&headerNode{
-				header: backHead,
-				height: int32(backHeight),
+			b.reorgList.ResetHeaderState(headerlist.Node{
+				Header: *backHead,
+				Height: int32(backHeight),
 			})
 			totalWork := big.NewInt(0)
 			for j, reorgHeader := range msg.Headers[i:] {
@@ -2029,9 +2026,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				}
 				totalWork.Add(totalWork,
 					blockchain.CalcWork(reorgHeader.Bits))
-				b.reorgList.PushBack(&headerNode{
-					header: reorgHeader,
-					height: int32(backHeight+1) + int32(j),
+				b.reorgList.PushBack(headerlist.Node{
+					Header: *reorgHeader,
+					Height: int32(backHeight+1) + int32(j),
 				})
 			}
 			log.Tracef("Sane reorg attempted. Total work from "+
@@ -2045,9 +2042,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// block is always pushed back by resetHeaderState
 			knownEl := b.headerList.Back()
 			var knownHead *wire.BlockHeader
-			for j := uint32(prevNode.height); j > backHeight; j-- {
+			for j := uint32(prevNode.Height); j > backHeight; j-- {
 				if knownEl != nil {
-					knownHead = knownEl.Value.(*headerNode).header
+					knownHead = &knownEl.Header
 					knownEl = knownEl.Prev()
 				} else {
 					knownHead, _, err = b.server.BlockHeaders.FetchHeader(
@@ -2108,31 +2105,34 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				// Should we panic here?
 			}
 
-			b.resetHeaderState(backHead, int32(backHeight))
-			b.headerList.PushBack(&headerNode{
-				header: blockHeader,
-				height: int32(backHeight + 1),
+			b.headerList.ResetHeaderState(headerlist.Node{
+				Header: *backHead,
+				Height: int32(backHeight),
+			})
+			b.headerList.PushBack(headerlist.Node{
+				Header: *blockHeader,
+				Height: int32(backHeight + 1),
 			})
 		}
 
 		// Verify the header at the next checkpoint height matches.
-		if b.nextCheckpoint != nil && node.height == b.nextCheckpoint.Height {
-			nodeHash := node.header.BlockHash()
+		if b.nextCheckpoint != nil && node.Height == b.nextCheckpoint.Height {
+			nodeHash := node.Header.BlockHash()
 			if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
 				receivedCheckpoint = true
 				log.Infof("Verified downloaded block "+
 					"header against checkpoint at height "+
-					"%d/hash %s", node.height, nodeHash)
+					"%d/hash %s", node.Height, nodeHash)
 			} else {
 				log.Warnf("Block header at height %d/hash "+
 					"%s from peer %s does NOT match "+
 					"expected checkpoint hash of %s -- "+
-					"disconnecting", node.height,
+					"disconnecting", node.Height,
 					nodeHash, hmsg.peer.Addr(),
 					b.nextCheckpoint.Hash)
 
 				prevCheckpoint := b.findPreviousHeaderCheckpoint(
-					node.height,
+					node.Height,
 				)
 
 				log.Infof("Rolling back to previous validated "+
@@ -2235,18 +2235,16 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 		hList = b.reorgList
 	}
 
-	lastNodeEl := hList.Back()
+	lastNode := hList.Back()
 
 	// Genesis block.
-	if lastNodeEl == nil {
+	if lastNode == nil {
 		return b.server.chainParams.PowLimitBits, nil
 	}
 
-	lastNode := lastNodeEl.Value.(*headerNode)
-
 	// Return the previous block's difficulty requirements if this block
 	// is not at a difficulty retarget interval.
-	if (lastNode.height+1)%b.blocksPerRetarget != 0 {
+	if (lastNode.Height+1)%b.blocksPerRetarget != 0 {
 		// For networks that support it, allow special reduction of the
 		// required difficulty once too much time has elapsed without
 		// mining a block.
@@ -2256,7 +2254,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 			reductionTime := int64(
 				b.server.chainParams.MinDiffReductionTime /
 					time.Second)
-			allowMinTime := lastNode.header.Timestamp.Unix() +
+			allowMinTime := lastNode.Header.Timestamp.Unix() +
 				reductionTime
 			if newBlockTime.Unix() > allowMinTime {
 				return b.server.chainParams.PowLimitBits, nil
@@ -2274,13 +2272,13 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 		// For the main network (or any unrecognized networks), simply
 		// return the previous block's difficulty requirements.
-		return lastNode.header.Bits, nil
+		return lastNode.Header.Bits, nil
 	}
 
 	// Get the block node at the previous retarget (targetTimespan days
 	// worth of blocks).
 	firstNode, err := b.server.BlockHeaders.FetchHeaderByHeight(
-		uint32(lastNode.height + 1 - b.blocksPerRetarget),
+		uint32(lastNode.Height + 1 - b.blocksPerRetarget),
 	)
 	if err != nil {
 		return 0, err
@@ -2288,7 +2286,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 	// Limit the amount of adjustment that can occur to the previous
 	// difficulty.
-	actualTimespan := lastNode.header.Timestamp.Unix() -
+	actualTimespan := lastNode.Header.Timestamp.Unix() -
 		firstNode.Timestamp.Unix()
 	adjustedTimespan := actualTimespan
 	if actualTimespan < b.minRetargetTimespan {
@@ -2302,7 +2300,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	// The result uses integer division which means it will be slightly
 	// rounded down.  Bitcoind also uses integer division to calculate this
 	// result.
-	oldTarget := blockchain.CompactToBig(lastNode.header.Bits)
+	oldTarget := blockchain.CompactToBig(lastNode.Header.Bits)
 	newTarget := new(big.Int).Mul(oldTarget, big.NewInt(adjustedTimespan))
 	targetTimeSpan := int64(b.server.chainParams.TargetTimespan /
 		time.Second)
@@ -2318,8 +2316,8 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	// newTarget since conversion to the compact representation loses
 	// precision.
 	newTargetBits := blockchain.BigToCompact(newTarget)
-	log.Debugf("Difficulty retarget at block height %d", lastNode.height+1)
-	log.Debugf("Old target %08x (%064x)", lastNode.header.Bits, oldTarget)
+	log.Debugf("Difficulty retarget at block height %d", lastNode.Height+1)
+	log.Debugf("Old target %08x (%064x)", lastNode.Header.Bits, oldTarget)
 	log.Debugf("New target %08x (%064x)", newTargetBits,
 		blockchain.CompactToBig(newTargetBits))
 	log.Debugf("Actual timespan %v, adjusted timespan %v, target timespan %v",
@@ -2332,21 +2330,19 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 // findPrevTestNetDifficulty returns the difficulty of the previous block which
 // did not have the special testnet minimum difficulty rule applied.
-func (b *blockManager) findPrevTestNetDifficulty(hList *list.List) (uint32, error) {
-	startNodeEl := hList.Back()
+func (b *blockManager) findPrevTestNetDifficulty(hList headerlist.Chain) (uint32, error) {
+	startNode := hList.Back()
 
 	// Genesis block.
-	if startNodeEl == nil {
+	if startNode == nil {
 		return b.server.chainParams.PowLimitBits, nil
 	}
 
-	startNode := startNodeEl.Value.(*headerNode)
-
 	// Search backwards through the chain for the last block without
 	// the special rule applied.
-	iterEl := startNodeEl
-	iterNode := startNode.header
-	iterHeight := startNode.height
+	iterEl := startNode
+	iterNode := &startNode.Header
+	iterHeight := startNode.Height
 	for iterNode != nil && iterHeight%b.blocksPerRetarget != 0 &&
 		iterNode.Bits == b.server.chainParams.PowLimitBits {
 
@@ -2358,7 +2354,7 @@ func (b *blockManager) findPrevTestNetDifficulty(hList *list.List) (uint32, erro
 		iterHeight--
 		el := iterEl.Prev()
 		if el != nil {
-			iterNode = el.Value.(*headerNode).header
+			iterNode = &el.Header
 		} else {
 			node, err := b.server.BlockHeaders.FetchHeaderByHeight(
 				uint32(iterHeight),
