@@ -192,8 +192,8 @@ func (s *ChainService) queryBatch(
 	checkResponse func(sp *ServerPeer, query wire.Message,
 		resp wire.Message) bool,
 
-	// quit forces the query to end before it's complete.
-	quit <-chan struct{},
+	// queryQuit forces the query to end before it's complete.
+	queryQuit <-chan struct{},
 
 	// options takes functional options for executing the query.
 	options ...QueryOption) {
@@ -239,6 +239,10 @@ func (s *ChainService) queryBatch(
 
 		for firstUnfinished < len(queryMsgs) {
 			select {
+			case <-queryQuit:
+				return
+			case <-s.quit:
+				return
 			case <-quit:
 				return
 			default:
@@ -294,6 +298,10 @@ func (s *ChainService) queryBatch(
 				// timeout, or a quit signal, then see if
 				// anything needs our help.
 				select {
+				case <-queryQuit:
+					return
+				case <-s.quit:
+					return
 				case <-quit:
 					return
 				case <-timeout:
@@ -310,6 +318,10 @@ func (s *ChainService) queryBatch(
 			peerStates[sp.Addr()] = queryMsgs[handleQuery]
 			mtxPeerStates.Unlock()
 			select {
+			case <-queryQuit:
+				return
+			case <-s.quit:
+				return
 			case <-quit:
 				return
 			case <-timeout:
@@ -364,8 +376,9 @@ func (s *ChainService) queryBatch(
 			if _, ok := peerQuits[sp]; !ok && peer.Connected() {
 				peerQuits[sp] = make(chan struct{})
 				matchSignals[sp] = make(chan struct{})
-				go peerGoroutine(peer, peerQuits[sp],
-					matchSignals[sp])
+				go peerGoroutine(
+					peer, peerQuits[sp], matchSignals[sp],
+				)
 			}
 
 		}
@@ -379,8 +392,6 @@ func (s *ChainService) queryBatch(
 			}
 		}
 
-		// TODO(roasbeef): remove lower loop
-
 		ticker := time.NewTicker(qo.timeout)
 		defer ticker.Stop()
 		for {
@@ -391,7 +402,9 @@ func (s *ChainService) queryBatch(
 				mtxPeerStates.RUnlock()
 				if checkResponse(msg.sp, curQuery, msg.msg) {
 					select {
-					case <-quit:
+					case <-queryQuit:
+						return
+					case <-s.quit:
 						return
 					case matchSignals[msg.sp.Addr()] <- struct{}{}:
 					}
@@ -408,8 +421,10 @@ func (s *ChainService) queryBatch(
 				if allDone {
 					return
 				}
+			case <-queryQuit:
+				return
 
-			case <-quit:
+			case <-s.quit:
 				return
 			}
 		}
@@ -450,7 +465,7 @@ func (s *ChainService) queryAllPeers(
 	peers := s.Peers()
 
 	// This will be shared state between the per-peer goroutines.
-	quit := make(chan struct{})
+	queryQuit := make(chan struct{})
 	allQuit := make(chan struct{})
 	var wg sync.WaitGroup
 	msgChan := make(chan spMsg)
@@ -476,7 +491,9 @@ func (s *ChainService) queryAllPeers(
 				sp.QueueMessageWithEncoding(queryMsg,
 					nil, qo.encoding)
 				select {
-				case <-quit:
+				case <-queryQuit:
+					return
+				case <-s.quit:
 					return
 				case <-peerQuit:
 					return
@@ -507,7 +524,10 @@ func (s *ChainService) queryAllPeers(
 checkResponses:
 	for {
 		select {
-		case <-quit:
+		case <-queryQuit:
+			break checkResponses
+
+		case <-s.quit:
 			break checkResponses
 
 		case <-allQuit:
@@ -523,7 +543,7 @@ checkResponses:
 			select {
 			case <-peerQuits[sm.sp.Addr()]:
 			default:
-				checkResponse(sm.sp, sm.msg, quit,
+				checkResponse(sm.sp, sm.msg, queryQuit,
 					peerQuits[sm.sp.Addr()])
 			}
 		}
@@ -558,7 +578,7 @@ func (s *ChainService) queryPeers(
 	peerTries := make(map[string]uint8)
 
 	// This will be state used by the peer query goroutine.
-	quit := make(chan struct{})
+	queryQuit := make(chan struct{})
 	subQuit := make(chan struct{})
 
 	// Increase this number to be able to handle more queries at once as
@@ -591,8 +611,15 @@ checkResponses:
 			}
 			break checkResponses
 
-		case <-quit:
+		case <-queryQuit:
 			// Same when we get a quit signal.
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
+			}
+			break checkResponses
+
+		case <-s.quit:
+			// Same when chain server's quit is signaled.
 			if queryPeer != nil {
 				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
@@ -605,7 +632,7 @@ checkResponses:
 			// TODO: This will get stuck if checkResponse gets
 			// stuck. This is a caveat for callers that should be
 			// fixed before exposing this function for public use.
-			checkResponse(sm.sp, sm.msg, quit)
+			checkResponse(sm.sp, sm.msg, queryQuit)
 
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
