@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -311,6 +312,42 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		err          error
 	)
 
+	// blockRefetchChan is a channel that we'll use to remind ourselves
+	// that we need to re-fetch a block. We'll use this to wake ourselves
+	// up in the scenario that we're unable to fetch the filters for a
+	// target block. It may be due to a re-org or if none of our peers
+	// actually have the filter.
+	blockRefetchChan := make(chan *wire.BlockHeader, 1)
+
+	// blockRetryInterval is the interval in which we'll continually re-try
+	// to fetch the latest filter from our peers.
+	//
+	// TODO(roasbeef): add exponential back-off
+	blockRetryInterval := time.Second
+
+	// blockReFetchTimer is a stoppable timer that we'll use to reminder
+	// ourselves to refetch a block in the case that we're unable to fetch
+	// the filter for a block the first time around.
+	var blockReFetchTimer *time.Timer
+
+	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height int32) {
+		// If so, then we'll avoid notifying the block, and will
+		// instead add this to our retry queue, as we should be getting
+		// block disconnected notifications in short order.
+		if blockReFetchTimer != nil {
+			blockReFetchTimer.Stop()
+		}
+
+		log.Debugf("Setting timer to attempt to re-fetch filter for "+
+			"hash=%v, height=%v", headerTip.BlockHash(), height)
+
+		// We'll start a timer to re-send this header so we re-process
+		// if in the case that we don't get a re-org soon afterwards.
+		blockReFetchTimer = time.AfterFunc(blockRetryInterval, func() {
+			blockRefetchChan <- &headerTip
+		})
+	}
+
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
 	// notifications in the correct order.
@@ -391,21 +428,77 @@ rescanLoop:
 					continue rescanLoop
 				}
 
-				curHeader = header
-				curStamp.Hash = header.BlockHash()
-				curStamp.Height++
-
-				log.Tracef("Rescan got block %d (%s)", curStamp.Height, curStamp.Hash)
-
-				if !scanning {
-					scanning = ro.startTime.Before(curHeader.Timestamp)
+				// As this could be a re-try, we'll ensure that
+				// we don't incorrectly increment our currnet
+				// time stamp.
+				if curStamp.Hash != header.BlockHash() {
+					curHeader = header
+					curStamp.Hash = header.BlockHash()
+					curStamp.Height++
 				}
-				err := s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+
+				log.Tracef("Rescan got block %d (%s)", curStamp.Height,
+					curStamp.Hash)
+
+				// We're only scanning if the header is beyond
+				// the horizon of our start time.
+				if !scanning {
+					scanning = ro.startTime.Before(
+						curHeader.Timestamp,
+					)
+				}
+
+				// If we're actually scanning and we have a
+				// non-empty watch list, then we'll attempt to
+				// fetch the filter from the network.
+				var blockFilter *gcs.Filter
+				queryOptions := NumRetries(0)
+				blockFilter, err = s.GetCFilter(
+					curStamp.Hash, wire.GCSFilterRegular,
+					queryOptions,
+				)
+
+				switch {
+				// If the block index doesn't know about
+				// this block, then it's likely we're mid
+				// re-org so we'll accept this as we
+				// account for it below.
+				case err == headerfs.ErrHashNotFound:
+
+				case err != nil:
+					return fmt.Errorf("unable to get "+
+						"filter for hash=%v: %v",
+						curStamp.Hash, err)
+				}
+
+				// If the filter is nil, then this either means
+				// that we don't have any peers to fetch this
+				// filter from, or the peer(s) that we're
+				// trying to fetch from are in the progress of
+				// a re-org.
+				if blockFilter == nil {
+					resetBlockReFetchTimer(
+						header, curStamp.Height,
+					)
+					continue
+				}
+
+				err := s.notifyBlockWithFilter(
+					ro, &curHeader, &curStamp, blockFilter,
+				)
 				if err != nil {
 					return err
 				}
 
+				// We'll successfully fetched this current
+				// block, so we'll reset the retry timer back
+				// to nil.
+				blockReFetchTimer = nil
+
 			case header := <-blockDisconnected:
+				log.Debugf("Rescan disconnect block %d (%s)\n",
+					curStamp.Height, curStamp.Hash)
+
 				// Only deal with it if it's the current block
 				// we know about. Otherwise, it's in the
 				// future.
@@ -430,6 +523,15 @@ rescanLoop:
 					curHeader = *header
 					curStamp.Hash = header.BlockHash()
 					curStamp.Height--
+
+					// Now that we got a re-org, if we had
+					// a re-fetch timer going, we'll re-set
+					// is at the new header tip.
+					if blockReFetchTimer != nil {
+						resetBlockReFetchTimer(
+							*header, curStamp.Height,
+						)
+					}
 				}
 			}
 
@@ -520,74 +622,22 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
 	scanning bool) error {
 
-	// Find relevant transactions based on watch list. If scanning is false,
-	// we can safely assume this block has no relevant transactions.
+	// Find relevant transactions based on watch list. If scanning is
+	// false, we can safely assume this block has no relevant transactions.
 	var relevantTxs []*btcutil.Tx
 	if len(ro.watchList) != 0 && scanning {
-		// If we have a non-empty watch list, then we need to
-		// see if it matches the rescan's filters, so we get
-		// the basic filter from the DB or network.
+		// If we have a non-empty watch list, then we need to see if it
+		// matches the rescan's filters, so we get the basic filter
+		// from the DB or network.
 		matched, err := s.blockFilterMatches(ro, &curStamp.Hash)
 		if err != nil {
 			return err
 		}
 
 		if matched {
-			// We've matched. Now we actually get the block and
-			// cycle through the transactions to see which ones are
-			// relevant.
-			block, err := s.GetBlockFromNetwork(curStamp.Hash,
-				ro.queryOptions...)
+			relevantTxs, err = s.extractBlockMatches(ro, curStamp)
 			if err != nil {
 				return err
-			}
-			if block == nil {
-				return fmt.Errorf("Couldn't get block %d "+
-					"(%s) from network", curStamp.Height,
-					curStamp.Hash)
-			}
-
-			blockHeader := block.MsgBlock().Header
-			blockDetails := btcjson.BlockDetails{
-				Height: block.Height(),
-				Hash:   block.Hash().String(),
-				Time:   blockHeader.Timestamp.Unix(),
-			}
-
-			relevantTxs = make([]*btcutil.Tx, 0, len(block.Transactions()))
-			for txIdx, tx := range block.Transactions() {
-				txDetails := blockDetails
-				txDetails.Index = txIdx
-
-				var relevant bool
-
-				if ro.spendsWatchedInput(tx) {
-					relevant = true
-					if ro.ntfn.OnRedeemingTx != nil {
-						ro.ntfn.OnRedeemingTx(tx, &txDetails)
-					}
-				}
-
-				// Even though the transaction may already be
-				// known as relevant and there might not be a
-				// notification callback, we need to call
-				// paysWatchedAddr anyway as it updates the
-				// rescan options.
-				pays, err := ro.paysWatchedAddr(tx)
-				if err != nil {
-					return err
-				}
-
-				if pays {
-					relevant = true
-					if ro.ntfn.OnRecvTx != nil {
-						ro.ntfn.OnRecvTx(tx, &txDetails)
-					}
-				}
-
-				if relevant {
-					relevantTxs = append(relevantTxs, tx)
-				}
 			}
 		}
 	}
@@ -605,11 +655,136 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	return nil
 }
 
+// extractBlockMatches fetches the target block from the network, and filters
+// out any relevant transactions found within the block.
+func (s *ChainService) extractBlockMatches(ro *rescanOptions,
+	curStamp *waddrmgr.BlockStamp) ([]*btcutil.Tx, error) {
+
+	// We've matched. Now we actually get the block and cycle through the
+	// transactions to see which ones are relevant.
+	block, err := s.GetBlockFromNetwork(curStamp.Hash, ro.queryOptions...)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil {
+		return nil, fmt.Errorf("Couldn't get block %d (%s) from "+
+			"network", curStamp.Height, curStamp.Hash)
+	}
+
+	blockHeader := block.MsgBlock().Header
+	blockDetails := btcjson.BlockDetails{
+		Height: block.Height(),
+		Hash:   block.Hash().String(),
+		Time:   blockHeader.Timestamp.Unix(),
+	}
+
+	relevantTxs := make([]*btcutil.Tx, 0, len(block.Transactions()))
+	for txIdx, tx := range block.Transactions() {
+		txDetails := blockDetails
+		txDetails.Index = txIdx
+
+		var relevant bool
+
+		if ro.spendsWatchedInput(tx) {
+			relevant = true
+			if ro.ntfn.OnRedeemingTx != nil {
+				ro.ntfn.OnRedeemingTx(tx, &txDetails)
+			}
+		}
+
+		// Even though the transaction may already be known as relevant
+		// and there might not be a notification callback, we need to
+		// call paysWatchedAddr anyway as it updates the rescan
+		// options.
+		pays, err := ro.paysWatchedAddr(tx)
+		if err != nil {
+			return nil, err
+		}
+
+		if pays {
+			relevant = true
+			if ro.ntfn.OnRecvTx != nil {
+				ro.ntfn.OnRecvTx(tx, &txDetails)
+			}
+		}
+
+		if relevant {
+			relevantTxs = append(relevantTxs, tx)
+		}
+	}
+
+	return relevantTxs, nil
+}
+
+// notifyBlockWithFilter calls appropriate listeners based on the block filter.
+// This differs from notifyBlock in that is expects the caller to already have
+// obtained the target filter.
+func (s *ChainService) notifyBlockWithFilter(ro *rescanOptions,
+	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	filter *gcs.Filter) error {
+
+	// Based on what we find within the block or the filter, we'll be
+	// sending out a set of notifications with transactions that are
+	// relevant to the rescan.
+	var relevantTxs []*btcutil.Tx
+
+	// If we actually have a filter, then we'll go ahead an attempt to
+	// match the items within the filter to ensure we create any relevant
+	// notifications.
+	if filter != nil {
+		matched, err := s.matchBlockFilter(ro, filter, &curStamp.Hash)
+		if err != nil {
+			return err
+		}
+
+		if matched {
+			relevantTxs, err = s.extractBlockMatches(ro, curStamp)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if ro.ntfn.OnFilteredBlockConnected != nil {
+		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
+			relevantTxs)
+	}
+
+	if ro.ntfn.OnBlockConnected != nil {
+		ro.ntfn.OnBlockConnected(&curStamp.Hash,
+			curStamp.Height, curHeader.Timestamp)
+	}
+
+	return nil
+}
+
+// matchBlockFilter returns whether the block filter matches the watched items.
+// If this returns false, it means the block is certainly not interesting to
+// us. This method differs from blockFilterMatches in that it expects the
+// filter to already be obtained, rather than fetching the filter from the
+// network.
+func (s *ChainService) matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
+	blockHash *chainhash.Hash) (bool, error) {
+
+	// Now that we have the filter as well as the block hash of the block
+	// used to construct the filter, we'll check to see if the block
+	// matches any items in our watch list.
+	key := builder.DeriveKey(blockHash)
+	matched, err := filter.MatchAny(key, ro.watchList)
+	if err != nil {
+		return false, err
+	}
+
+	return matched, nil
+}
+
 // blockFilterMatches returns whether the block filter matches the watched
 // items. If this returns false, it means the block is certainly not interesting
 // to us.
 func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
+
+	// TODO(roasbeef): need to ENSURE always get filter
 
 	key := builder.DeriveKey(blockHash)
 	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)

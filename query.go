@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
 
@@ -206,13 +207,14 @@ func (s *ChainService) queryBatch(
 	queryStates := make([]uint32, len(queryMsgs))
 
 	// subscription allows us to subscribe to notifications from peers.
-	msgChan := make(chan spMsg)
+	msgChan := make(chan spMsg, len(queryMsgs))
 	subQuit := make(chan struct{})
 	subscription := spMsgSubscription{
 		msgChan:  msgChan,
 		quitChan: subQuit,
 	}
 	defer close(subQuit)
+
 	// peerStates and its companion mutex allow the peer goroutines to
 	// tell the main goroutine what query they're currently working on.
 	peerStates := make(map[string]wire.Message)
@@ -233,7 +235,7 @@ func (s *ChainService) queryBatch(
 		// Track the last query our peer failed to answer and skip over
 		// it for the next attempt. This helps prevent most instances
 		// of the same peer being asked for the same query every time.
-		lastFailed, firstUnfinished, handleQuery := -1, 0, -1
+		firstUnfinished, handleQuery := 0, -1
 
 		for firstUnfinished < len(queryMsgs) {
 			select {
@@ -251,11 +253,9 @@ func (s *ChainService) queryBatch(
 					atomic.LoadUint32(&queryStates[i]) ==
 						uint32(queryAnswered) {
 					firstUnfinished++
-					continue
-				}
 
-				// If we last failed at this query, skip it.
-				if i == lastFailed {
+					log.Tracef("Query #%v already answered, "+
+						"skipping", i)
 					continue
 				}
 
@@ -267,6 +267,8 @@ func (s *ChainService) queryBatch(
 					uint32(queryWaitSubmit),
 					uint32(queryWaitResponse),
 				) {
+					log.Tracef("Query #%v already being "+
+						"queried for, skipping", i)
 					continue
 				}
 
@@ -318,12 +320,21 @@ func (s *ChainService) queryBatch(
 				if !sp.Connected() {
 					return
 				}
-				lastFailed = handleQuery
+
+				log.Tracef("Query for #%v failed, moving "+
+					"on: %v", handleQuery,
+					newLogClosure(func() string {
+						return spew.Sdump(queryMsgs[handleQuery])
+					}))
+
 			case <-matchSignal:
 				// We got a match signal so we can mark this
 				// query a success.
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryAnswered))
+
+				log.Tracef("Query #%v answered, updating state",
+					handleQuery)
 			}
 		}
 	}
@@ -368,6 +379,8 @@ func (s *ChainService) queryBatch(
 			}
 		}
 
+		// TODO(roasbeef): remove lower loop
+
 		ticker := time.NewTicker(qo.timeout)
 		defer ticker.Stop()
 		for {
@@ -395,6 +408,7 @@ func (s *ChainService) queryBatch(
 				if allDone {
 					return
 				}
+
 			case <-quit:
 				return
 			}
@@ -540,7 +554,7 @@ func (s *ChainService) queryPeers(
 
 	// We get an initial view of our peers, to be updated each time a peer
 	// query times out.
-	curPeer := s.blockManager.SyncPeer()
+	queryPeer := s.blockManager.SyncPeer()
 	peerTries := make(map[string]uint8)
 
 	// This will be state used by the peer query goroutine.
@@ -562,25 +576,25 @@ func (s *ChainService) queryPeers(
 	// it's time to quit.
 	peerTimeout := time.NewTicker(qo.timeout)
 	timeout := time.After(qo.peerConnectTimeout)
-	if curPeer != nil {
-		peerTries[curPeer.Addr()]++
-		curPeer.subscribeRecvMsg(subscription)
-		curPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
+	if queryPeer != nil {
+		peerTries[queryPeer.Addr()]++
+		queryPeer.subscribeRecvMsg(subscription)
+		queryPeer.QueueMessageWithEncoding(queryMsg, nil, qo.encoding)
 	}
 checkResponses:
 	for {
 		select {
 		case <-timeout:
 			// When we time out, we're done.
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 			break checkResponses
 
 		case <-quit:
 			// Same when we get a quit signal.
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 			break checkResponses
 
@@ -596,22 +610,32 @@ checkResponses:
 		// The current peer we're querying has failed to answer the
 		// query. Time to select a new peer and query it.
 		case <-peerTimeout.C:
-			if curPeer != nil {
-				curPeer.unsubscribeRecvMsgs(subscription)
+			if queryPeer != nil {
+				queryPeer.unsubscribeRecvMsgs(subscription)
 			}
 
-			curPeer = nil
-			for _, curPeer = range s.Peers() {
+			queryPeer = nil
+			for _, curPeer := range s.Peers() {
 				if curPeer != nil && curPeer.Connected() &&
-					peerTries[curPeer.Addr()] <
-						qo.numRetries {
+					peerTries[curPeer.Addr()] < qo.numRetries {
+
+					curPeer := curPeer
+					queryPeer = curPeer
+
 					// Found a peer we can query.
-					peerTries[curPeer.Addr()]++
-					curPeer.subscribeRecvMsg(subscription)
-					curPeer.QueueMessageWithEncoding(
-						queryMsg, nil, qo.encoding)
+					peerTries[queryPeer.Addr()]++
+					queryPeer.subscribeRecvMsg(subscription)
+					queryPeer.QueueMessageWithEncoding(
+						queryMsg, nil, qo.encoding,
+					)
 					break
 				}
+			}
+
+			// If at this point, we don't yet have a query peer,
+			// then we'll exit now as all the peers are exhausted.
+			if queryPeer == nil {
+				break checkResponses
 			}
 		}
 	}
@@ -669,6 +693,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		return nil, fmt.Errorf("Couldn't get header for block %s "+
 			"from database", blockHash)
 	}
+
+	log.Debugf("Fetching filter for height=%v, hash=%v", height, blockHash)
 
 	// In addition to fetching the block header, we'll fetch the filter
 	// headers (for this particular filter type) from the database. These

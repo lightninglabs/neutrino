@@ -80,7 +80,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 			lastEntry.hash[:], dbTip[:])
 	}
 
-	// For each header written, check that we're able to retreive the entry
+	// For each header written, check that we're able to retrieve the entry
 	// both by hash and height.
 	for i, headerEntry := range headerEntries {
 		height, err := hIndex.heightFromHash(&headerEntry.hash)
@@ -93,7 +93,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 		}
 	}
 
-	// Next if we trunate the index by one, then we should end up at the
+	// Next if we truncate the index by one, then we should end up at the
 	// second to last entry for the tip.
 	newTip := headerIndex[numHeaders-2]
 	if err := hIndex.truncateIndex(&newTip.hash, true); err != nil {

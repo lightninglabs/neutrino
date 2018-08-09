@@ -42,7 +42,7 @@ var (
 
 	// UserAgentVersion is the user agent version and is used to help
 	// identify ourselves to other bitcoin peers.
-	UserAgentVersion = "0.0.1-alpha"
+	UserAgentVersion = "0.0.4-beta"
 
 	// Services describes the services that are supported by the server.
 	Services = wire.SFNodeWitness | wire.SFNodeCF
@@ -809,11 +809,11 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
 func (s *ChainService) peerHandler() {
-	// Start the address manager and block manager, both of which are needed
-	// by peers.  This is done here since their lifecycle is closely tied
-	// to this handler and rather than adding more channels to sychronize
-	// things, it's easier and slightly faster to simply start and stop them
-	// in this handler.
+	// Start the address manager and block manager, both of which are
+	// needed by peers.  This is done here since their lifecycle is closely
+	// tied to this handler and rather than adding more channels to
+	// synchronize things, it's easier and slightly faster to simply start
+	// and stop them in this handler.
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.utxoScanner.Start()
@@ -829,11 +829,12 @@ func (s *ChainService) peerHandler() {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddress) {
-				// Bitcoind uses a lookup of the dns seeder here. This
-				// is rather strange since the values looked up by the
-				// DNS seed lookups will vary quite a lot.
-				// to replicate this behaviour we put all addresses as
-				// having come from the first one.
+				// Bitcoind uses a lookup of the dns seeder
+				// here. This is rather strange since the
+				// values looked up by the DNS seed lookups
+				// will vary quite a lot.  to replicate this
+				// behaviour we put all addresses as having
+				// come from the first one.
 				s.addrManager.AddAddresses(addrs, addrs[0])
 			})
 	}
