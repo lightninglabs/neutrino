@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
@@ -1230,8 +1231,27 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 
 			// We'll ensure that all the filters include every
 			// output script within the block.
+			//
+			// TODO(roasbeef): eventually just do a comparison
+			// against decompressed filters
 			for _, tx := range block.Transactions {
 				for _, txOut := range tx.TxOut {
+					switch {
+					// If the script itself is blank, then
+					// we'll skip this as it doesn't
+					// contain any useful information.
+					case len(txOut.PkScript) == 0:
+						continue
+
+					// We'll also skip any OP_RETURN
+					// scripts as well since we don't index
+					// these in order to avoid a circular
+					// dependency.
+					case txOut.PkScript[0] == txscript.OP_RETURN &&
+						txscript.IsPushOnlyScript(txOut.PkScript[1:]):
+						continue
+					}
+
 					match, err := filter.Match(
 						filterKey, txOut.PkScript,
 					)
