@@ -667,7 +667,17 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 		}
 	}
 
-	_, err = b.writeCFHeadersMsg(headers[key], store)
+	// We'll now fetch the set of pristine headers from the map. If ALL the
+	// peers were banned, then we won't have a set of headers at all. We'll
+	// return nil so we can go to the top of the loop and fetch from a new
+	// set of peers.
+	pristineHeaders, ok := headers[key]
+	if !ok {
+		return fmt.Errorf("All peers served bogus headers! Retrying " +
+			"with new set")
+	}
+
+	_, err = b.writeCFHeadersMsg(pristineHeaders, store)
 	return err
 }
 
