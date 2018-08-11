@@ -65,7 +65,6 @@ func (r *GetUtxoRequest) Result() (*SpendReport, error) {
 		// readers calling Result.
 		if r.result == nil {
 			r.result = result
-			close(r.resultChan)
 		}
 
 		return r.result.report, r.result.err
