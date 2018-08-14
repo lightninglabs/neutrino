@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
 
@@ -70,6 +71,12 @@ type queryOptions struct {
 	// almost never need to re-match a filter once it's been fetched unless
 	// they're doing something like a key import.
 	persistToDisk bool
+}
+
+// filterCacheKey represents the key used for FilterCache of the ChainService.
+type filterCacheKey struct {
+	blockHash  *chainhash.Hash
+	filterType filterdb.FilterType
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -662,6 +669,29 @@ checkResponses:
 	}
 }
 
+// getFilterFromCache returns a filter from ChainService's FilterCache if it
+// exists, returning nil and error if it doesn't.
+func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
+	filterType filterdb.FilterType) (*gcs.Filter, error) {
+
+	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+
+	filterValue, err := s.FilterCache.Get(cacheKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return filterValue.(*cache.CacheableFilter).Filter, nil
+}
+
+// putFilterToCache inserts a given filter in ChainService's FilterCache.
+func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
+	filterType filterdb.FilterType, filter *gcs.Filter) error {
+
+	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
+}
+
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
 // cfilter from the network and writes it to the database. If extended is true,
 // an extended filter will be queried for. Otherwise, we'll fetch the regular
@@ -685,11 +715,23 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	getHeader := s.RegFilterHeaders.FetchHeader
 	dbFilterType := filterdb.RegularFilter
 
-	// First check the database to see if we already have this filter. If
+	// First check the cache to see if we already have this filter. If
 	// so, then we can return it an exit early.
-	filter, err := s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+	filter, err := s.getFilterFromCache(&blockHash, dbFilterType)
 	if err == nil && filter != nil {
 		return filter, nil
+	}
+	if err != nil && err != cache.ErrElementNotFound {
+		return nil, err
+	}
+
+	// If not in cache, check if it's in database, returning early if yes.
+	filter, err = s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+	if err == nil && filter != nil {
+		return filter, nil
+	}
+	if err != nil && err != filterdb.ErrFilterNotFound {
+		return nil, err
 	}
 
 	// We didn't get the filter from the DB, so we'll set it to nil and try
@@ -784,15 +826,25 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		options...,
 	)
 
-	// If we've found a filter, write it to the database for next time.
 	if filter != nil {
-		err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
+		// If we found a filter, put it in the cache and persistToDisk if
+		// the caller requested it.
+		err := s.putFilterToCache(&blockHash, dbFilterType, filter)
 		if err != nil {
-			return nil, err
+			log.Warnf("couldn't write filter to cache: %v", err)
 		}
 
-		log.Tracef("Wrote filter for block %s, type %d",
-			blockHash, filterType)
+		qo := defaultQueryOptions()
+		qo.applyQueryOptions(options...)
+		if qo.persistToDisk {
+			err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
+			if err != nil {
+				return nil, err
+			}
+
+			log.Tracef("Wrote filter for block %s, type %d",
+				blockHash, filterType)
+		}
 	}
 
 	return filter, nil
