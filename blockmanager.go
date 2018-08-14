@@ -618,9 +618,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 			if err != nil {
 				return err
 			}
-			block, err := b.server.GetBlockFromNetwork(
-				header.BlockHash(),
-			)
+			block, err := b.server.GetBlock(header.BlockHash())
 			if err != nil {
 				return err
 			}
@@ -1106,9 +1104,7 @@ func (b *blockManager) resolveConflict(
 			if err != nil {
 				return nil, err
 			}
-			block, err := b.server.GetBlockFromNetwork(
-				header.BlockHash(),
-			)
+			block, err := b.server.GetBlock(header.BlockHash())
 			if err != nil {
 				return nil, err
 			}

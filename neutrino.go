@@ -733,7 +733,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BestSnapshot:       s.BestSnapshot,
 		GetBlockHash:       s.GetBlockHash,
 		BlockFilterMatches: s.blockFilterMatches,
-		GetBlock:           s.GetBlockFromNetwork,
+		GetBlock:           s.GetBlock,
 	})
 
 	return &s, nil
