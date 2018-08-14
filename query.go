@@ -905,9 +905,21 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 		invType = wire.InvTypeBlock
 	}
 
+	// Create an inv vector for getting this block.
+	inv := wire.NewInvVect(invType, &blockHash)
+
+	// If the block is already in the cache, we can return it immediately.
+	blockValue, err := s.BlockCache.Get(*inv)
+	if err == nil && blockValue != nil {
+		return blockValue.(*cache.CacheableBlock).Block, err
+	}
+	if err != nil && err != lru.ErrElementNotFound {
+		return nil, err
+	}
+
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(invType, &blockHash))
+	getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -981,6 +993,12 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	if foundBlock == nil {
 		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
 			"network", blockHash)
+	}
+
+	// Add block to the cache before returning it.
+	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	if err != nil {
+		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
 	return foundBlock, nil
