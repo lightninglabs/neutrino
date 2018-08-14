@@ -1,17 +1,106 @@
 package neutrino
 
 import (
+	"compress/bzip2"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
+
+var (
+	// blockDataNet is the expected network in the test block data.
+	blockDataNet = wire.MainNet
+
+	// blockDataFile is the path to a file containing the first 256 blocks
+	// of the block chain.
+	blockDataFile = filepath.Join("testdata", "blocks1-256.bz2")
+)
+
+// loadBlocks loads the blocks contained in the testdata directory and returns
+// a slice of them.
+//
+// NOTE: copied from btcsuite/btcd/database/ffldb/interface_test.go
+func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
+	[]*btcutil.Block, error) {
+	// Open the file that contains the blocks for reading.
+	fi, err := os.Open(dataFile)
+	if err != nil {
+		t.Errorf("failed to open file %v, err %v", dataFile, err)
+		return nil, err
+	}
+	defer func() {
+		if err := fi.Close(); err != nil {
+			t.Errorf("failed to close file %v %v", dataFile,
+				err)
+		}
+	}()
+	dr := bzip2.NewReader(fi)
+
+	// Set the first block as the genesis block.
+	blocks := make([]*btcutil.Block, 0, 256)
+	genesis := btcutil.NewBlock(chaincfg.MainNetParams.GenesisBlock)
+	blocks = append(blocks, genesis)
+
+	// Load the remaining blocks.
+	for height := 1; ; height++ {
+		var net uint32
+		err := binary.Read(dr, binary.LittleEndian, &net)
+		if err == io.EOF {
+			// Hit end of file at the expected offset.  No error.
+			break
+		}
+		if err != nil {
+			t.Errorf("Failed to load network type for block %d: %v",
+				height, err)
+			return nil, err
+		}
+		if net != uint32(network) {
+			t.Errorf("Block doesn't match network: %v expects %v",
+				net, network)
+			return nil, err
+		}
+
+		var blockLen uint32
+		err = binary.Read(dr, binary.LittleEndian, &blockLen)
+		if err != nil {
+			t.Errorf("Failed to load block size for block %d: %v",
+				height, err)
+			return nil, err
+		}
+
+		// Read the block.
+		blockBytes := make([]byte, blockLen)
+		_, err = io.ReadFull(dr, blockBytes)
+		if err != nil {
+			t.Errorf("Failed to load block %d: %v", height, err)
+			return nil, err
+		}
+
+		// Deserialize and store the block.
+		block, err := btcutil.NewBlockFromBytes(blockBytes)
+		if err != nil {
+			t.Errorf("Failed to parse block %v: %v", height, err)
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+
+	return blocks, nil
+}
 
 // genRandomBlockHash generates a random block hash using math/rand.
 func genRandomBlockHash() *chainhash.Hash {
