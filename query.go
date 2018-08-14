@@ -80,9 +80,9 @@ type filterCacheKey struct {
 }
 
 // QueryOption is a functional option argument to any of the network query
-// methods, such as GetBlockFromNetwork and GetCFilter (when that resorts to a
-// network query). These are always processed in order, with later options
-// overriding earlier ones.
+// methods, such as GetBlock and GetCFilter (when that resorts to a network
+// query). These are always processed in order, with later options overriding
+// earlier ones.
 type QueryOption func(*queryOptions)
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
@@ -571,10 +571,14 @@ checkResponses:
 	}
 }
 
-// queryPeers is a helper function that sends a query to one or more peers and
-// waits for an answer. The timeout for queries is set by the QueryTimeout
-// package-level variable or the Timeout functional option.
-func (s *ChainService) queryPeers(
+// queryChainServicePeers is a helper function that sends a query to one or
+// more peers of the given ChainService, and waits for an answer. The timeout
+// for queries is set by the QueryTimeout package-level variable or the Timeout
+// functional option.
+func queryChainServicePeers(
+	// s is the ChainService to use.
+	s *ChainService,
+
 	// queryMsg is the message to send to each peer selected by selectPeer.
 	queryMsg wire.Message,
 
