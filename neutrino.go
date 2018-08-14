@@ -71,6 +71,10 @@ var (
 	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino will
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultFilterCacheSize uint64 = 4096 * 1000
+
+	// DefaultBlockCacheSize is the size (in bytes) of blocks neutrino will
+	// keep in memory if no size is specified in the neutrino.Config.
+	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
@@ -484,6 +488,10 @@ type Config struct {
 	// FilterCacheSize indicates the size (in bytes) of filters the cache will
 	// hold in memory at most.
 	FilterCacheSize uint64
+
+	// BlockCacheSize indicates the size (in bytes) of blocks the block
+	// cache will hold in memory at most.
+	BlockCacheSize uint64
 }
 
 // ChainService is instantiated with functional options
@@ -496,9 +504,11 @@ type ChainService struct {
 	shutdown      int32
 
 	FilterDB         filterdb.FilterDatabase
-	FilterCache      *lru.Cache
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
+
+	FilterCache *lru.Cache
+	BlockCache  *lru.Cache
 
 	// queryPeers will be called to send messages to one or more peers,
 	// expecting a response.
@@ -613,6 +623,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		filterCacheSize = cfg.FilterCacheSize
 	}
 	s.FilterCache = lru.NewCache(filterCacheSize)
+
+	blockCacheSize := DefaultBlockCacheSize
+	if cfg.BlockCacheSize != 0 {
+		blockCacheSize = cfg.BlockCacheSize
+	}
+	s.BlockCache = lru.NewCache(blockCacheSize)
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(cfg.DataDir,
 		cfg.Database, &cfg.ChainParams)
