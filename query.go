@@ -859,6 +859,15 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
 
+	// Fetch the corresponding block header from the database. If this
+	// isn't found, then we don't have the header for this block so we
+	// can't request it.
+	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
+	if err != nil || blockHeader.BlockHash() != blockHash {
+		return nil, fmt.Errorf("Couldn't get header for block %s "+
+			"from database", blockHash)
+	}
+
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query so that we can check what inv type
 	// to use.
@@ -867,15 +876,6 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	invType := wire.InvTypeWitnessBlock
 	if qo.encoding == wire.BaseEncoding {
 		invType = wire.InvTypeBlock
-	}
-
-	// Fetch the corresponding block header from the database. If this
-	// isn't found, then we don't have the header for this block s we can't
-	// request it.
-	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
-	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
-			"from database", blockHash)
 	}
 
 	// Construct the appropriate getdata message to fetch the target block.
