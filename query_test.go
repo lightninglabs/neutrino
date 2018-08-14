@@ -5,11 +5,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -19,9 +22,15 @@ import (
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 var (
+	// maxPowLimit is used as the max block target to ensure all PoWs are
+	// valid.
+	bigOne      = big.NewInt(1)
+	maxPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 255), bigOne)
+
 	// blockDataNet is the expected network in the test block data.
 	blockDataNet = wire.MainNet
 
@@ -230,4 +239,168 @@ func TestBigFilterEvictsEverything(t *testing.T) {
 	cs.putFilterToCache(b3, filterdb.RegularFilter, f3)
 	assertEqual(t, cs.FilterCache.Len(), 1, "")
 	assertEqual(t, getFilter(cs, b3, t), f3, "")
+}
+
+// TestBlockCache checks that blocks are inserted and fetched from the cache
+// before peers are queried.
+func TestBlockCache(t *testing.T) {
+	t.Parallel()
+
+	// Load the first 255 blocks from disk.
+	blocks, err := loadBlocks(t, blockDataFile, blockDataNet)
+	if err != nil {
+		t.Fatalf("loadBlocks: Unexpected error: %v", err)
+	}
+
+	// We'll use a simple mock header store since the GetBlocks method
+	// assumes we only query for blocks with an already known header.
+	headers := headerfs.NewMockBlockHeaderStore()
+
+	// Iterate through the blocks, calculating the size of half of them,
+	// and writing them to the header store.
+	var size uint64
+	for i, b := range blocks {
+		header := headerfs.BlockHeader{
+			BlockHeader: &b.MsgBlock().Header,
+			Height:      uint32(i),
+		}
+		headers.WriteHeaders(header)
+
+		sz, _ := (&cache.CacheableBlock{b}).Size()
+		if i < len(blocks)/2 {
+			size += sz
+		}
+	}
+
+	// Set up a ChainService with a BlockCache that can fit the first half
+	// of the blocks.
+	cs := &ChainService{
+		BlockCache:   lru.NewCache(size),
+		BlockHeaders: headers,
+		chainParams: chaincfg.Params{
+			PowLimit: maxPowLimit,
+		},
+		timeSource: blockchain.NewMedianTime(),
+	}
+
+	// We'll set up the queryPeers method to make sure we are only querying
+	// for blocks, and send the block hashes queried over the queries
+	// channel.
+	queries := make(chan chainhash.Hash, 1)
+	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
+		wire.Message, chan<- struct{}), qo ...QueryOption) {
+
+		getData, ok := msg.(*wire.MsgGetData)
+		if !ok {
+			t.Fatalf("unexpected type: %T", msg)
+		}
+
+		if len(getData.InvList) != 1 {
+			t.Fatalf("expected 1 element in inv list, found %v",
+				len(getData.InvList))
+		}
+
+		inv := getData.InvList[0]
+		if inv.Type != wire.InvTypeWitnessBlock {
+			t.Fatalf("unexpected inv type: %v", inv.Type)
+		}
+
+		// Serve the block that matches the requested block header.
+		for _, b := range blocks {
+			if *b.Hash() == inv.Hash {
+
+				// Execute the callback with the found block,
+				// and wait for the quit channel to be closed.
+				quit := make(chan struct{})
+				f(nil, b.MsgBlock(), quit)
+
+				select {
+				case <-quit:
+				case <-time.After(1 * time.Second):
+					t.Fatalf("channel not closed")
+				}
+
+				// Notify the test about the query.
+				select {
+				case queries <- inv.Hash:
+				case <-time.After(1 * time.Second):
+					t.Fatalf("query was not handled")
+				}
+
+				return
+			}
+		}
+
+		t.Fatalf("queried for unknown block: %v", inv.Hash)
+	}
+
+	// fetchAndAssertPeersQueried calls GetBlock and makes sure the block
+	// is fetched from the peers.
+	fetchAndAssertPeersQueried := func(hash chainhash.Hash) {
+		found, err := cs.GetBlock(hash)
+		if err != nil {
+			t.Fatalf("error getting block: %v", err)
+		}
+
+		if *found.Hash() != hash {
+			t.Fatalf("requested block with hash %v, got %v",
+				hash, found.Hash())
+		}
+
+		select {
+		case q := <-queries:
+			if q != hash {
+				t.Fatalf("expected hash %v to be queried, "+
+					"got %v", hash, q)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatalf("did not query peers for block")
+		}
+	}
+
+	// fetchAndAssertInCache calls GetBlock and makes sure the block is not
+	// fetched from the peers.
+	fetchAndAssertInCache := func(hash chainhash.Hash) {
+		found, err := cs.GetBlock(hash)
+		if err != nil {
+			t.Fatalf("error getting block: %v", err)
+		}
+
+		if *found.Hash() != hash {
+			t.Fatalf("requested block with hash %v, got %v",
+				hash, found.Hash())
+		}
+
+		// Make sure we didn't query the peers for this block.
+		select {
+		case q := <-queries:
+			t.Fatalf("did not expect query for block %v", q)
+		default:
+		}
+	}
+
+	// Get the first half of the blocks. Since this is the first time we
+	// request them, we expect them all to be fetched from peers.
+	for _, b := range blocks[:len(blocks)/2] {
+		fetchAndAssertPeersQueried(*b.Hash())
+	}
+
+	// Get the first half of the blocks again. This time we expect them all
+	// to be fetched from the cache.
+	for _, b := range blocks[:len(blocks)/2] {
+		fetchAndAssertInCache(*b.Hash())
+	}
+
+	// Get the second half of the blocks. These have not been fetched
+	// before, and we expect them to be fetched from peers.
+	for _, b := range blocks[len(blocks)/2:] {
+		fetchAndAssertPeersQueried(*b.Hash())
+	}
+
+	// Since the cache only had capacity for the first half of the blocks,
+	// some of these should now have been evicted. We only check the first
+	// one, since we cannot know for sure how many because of the variable
+	// size.
+	b := blocks[0]
+	fetchAndAssertPeersQueried(*b.Hash())
 }
