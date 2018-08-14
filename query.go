@@ -854,9 +854,10 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	return filter, nil
 }
 
-// GetBlockFromNetwork gets a block by requesting it from the network, one peer
-// at a time, until one answers.
-func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
+// GetBlock gets a block by requesting it from the network, one peer at a
+// time, until one answers. If the block is found in the cache, it will be
+// returned immediately.
+func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
 
 	// Fetch the corresponding block header from the database. If this

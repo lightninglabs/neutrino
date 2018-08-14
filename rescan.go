@@ -662,7 +662,7 @@ func (s *ChainService) extractBlockMatches(ro *rescanOptions,
 
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
-	block, err := s.GetBlockFromNetwork(curStamp.Hash, ro.queryOptions...)
+	block, err := s.GetBlock(curStamp.Hash, ro.queryOptions...)
 	if err != nil {
 		return nil, err
 	}
