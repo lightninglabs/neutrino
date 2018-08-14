@@ -19,7 +19,8 @@ import (
 	"github.com/davecgh/go-spew/spew"
 )
 
-func createTestBlockHeaderStore() (func(), walletdb.DB, string, *BlockHeaderStore, error) {
+func createTestBlockHeaderStore() (func(), walletdb.DB, string,
+	*blockHeaderStore, error) {
 	tempDir, err := ioutil.TempDir("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
@@ -41,7 +42,7 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string, *BlockHeaderStor
 		db.Close()
 	}
 
-	return cleanUp, db, tempDir, hStore, nil
+	return cleanUp, db, tempDir, hStore.(*blockHeaderStore), nil
 }
 
 func createTestBlockHeaderChain(numHeaders uint32) []BlockHeader {
@@ -199,10 +200,11 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
-	bhs, err = NewBlockHeaderStore(tempDir, db, &chaincfg.SimNetParams)
+	hs, err := NewBlockHeaderStore(tempDir, db, &chaincfg.SimNetParams)
 	if err != nil {
 		t.Fatalf("unable to re-create bhs: %v", err)
 	}
+	bhs = hs.(*blockHeaderStore)
 
 	// The chain tip of this new instance should be of height 5, and match
 	// the 5th to last block header.
