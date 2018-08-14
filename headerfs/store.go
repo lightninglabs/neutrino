@@ -17,6 +17,52 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
+// BlockHeaderStore is an interface that provides an abstraction for a generic
+// store for block headers.
+type BlockHeaderStore interface {
+	// ChainTip returns the best known block header and height for the
+	// BlockHeaderStore.
+	ChainTip() (*wire.BlockHeader, uint32, error)
+
+	// LatestBlockLocator returns the latest block locator object based on
+	// the tip of the current main chain from the PoV of the
+	// BlockHeaderStore.
+	LatestBlockLocator() (blockchain.BlockLocator, error)
+
+	// FetchHeaderByHeight attempts to retrieve a target block header based
+	// on a block height.
+	FetchHeaderByHeight(height uint32) (*wire.BlockHeader, error)
+
+	// FetchHeaderAncestors fetches the numHeaders block headers that are
+	// the ancestors of the target stop hash. A total of numHeaders+1
+	// headers will be returned, as we'll walk back numHeaders distance to
+	// collect each header, then return the final header specified by the
+	// stop hash. We'll also return the starting height of the header range
+	// as well so callers can compute the height of each header without
+	// knowing the height of the stop hash.
+	FetchHeaderAncestors(uint32, *chainhash.Hash) ([]wire.BlockHeader,
+		uint32, error)
+
+	// HeightFromHash returns the height of a particular block header given
+	// its hash.
+	HeightFromHash(*chainhash.Hash) (uint32, error)
+
+	// FetchHeader attempts to retrieve a block header determined by the
+	// passed block height.
+	FetchHeader(*chainhash.Hash) (*wire.BlockHeader, uint32, error)
+
+	// WriteHeaders adds a set of headers to the BlockHeaderStore in a
+	// single atomic transaction.
+	WriteHeaders(...BlockHeader) error
+
+	// RollbackLastBlock rolls back the BlockHeaderStore by a _single_
+	// header. This method is meant to be used in the case of re-org which
+	// disconnects the latest block header from the end of the main chain.
+	// The information about the new header tip after truncation is
+	// returned.
+	RollbackLastBlock() (*waddrmgr.BlockStamp, error)
+}
+
 // headerBufPool is a pool of bytes.Buffer that will be re-used by the various
 // headerStore implementations to batch their header writes to disk. By
 // utilizing this variable we can minimize the total number of allocations when
@@ -82,21 +128,25 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}, nil
 }
 
-// BlockHeaderStore is an implementation of a fully fledged database for
-// Bitcoin block headers. The BlockHeaderStore combines a flat file to store
-// the block headers with a database instance for managing the index into the
-// set of flat files.
-type BlockHeaderStore struct {
+// blockHeaderStore is an implementation of the BlockHeaderStore interface, a
+// fully fledged database for Bitcoin block headers. The blockHeaderStore
+// combines a flat file to store the block headers with a database instance for
+// managing the index into the set of flat files.
+type blockHeaderStore struct {
 	*headerStore
 }
 
-// NewBlockHeaderStore creates a new instance of the BlockHeaderStore based on
+// A compile-time check to ensure the blockHeaderStore adheres to the
+// BlockHeaderStore interface.
+var _ BlockHeaderStore = (*blockHeaderStore)(nil)
+
+// NewBlockHeaderStore creates a new instance of the blockHeaderStore based on
 // a target file path, an open database instance, and finally a set of
 // parameters for the target chain. These parameters are required as if this is
-// the initial start up of the BlockHeaderStore, then the initial genesis
+// the initial start up of the blockHeaderStore, then the initial genesis
 // header will need to be inserted.
 func NewBlockHeaderStore(filePath string, db walletdb.DB,
-	netParams *chaincfg.Params) (*BlockHeaderStore, error) {
+	netParams *chaincfg.Params) (BlockHeaderStore, error) {
 
 	hStore, err := newHeaderStore(db, filePath, Block)
 	if err != nil {
@@ -110,7 +160,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 		return nil, err
 	}
 
-	bhs := &BlockHeaderStore{
+	bhs := &blockHeaderStore{
 		headerStore: hStore,
 	}
 
@@ -172,7 +222,9 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 // FetchHeader attempts to retrieve a block header determined by the passed
 // block height.
-func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
@@ -195,7 +247,9 @@ func (h *BlockHeaderStore) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 
 // FetchHeaderByHeight attempts to retrieve a target block header based on a
 // block height.
-func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader, error) {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader, error) {
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
@@ -217,7 +271,9 @@ func (h *BlockHeaderStore) FetchHeaderByHeight(height uint32) (*wire.BlockHeader
 // then return the final header specified by the stop hash. We'll also return
 // the starting height of the header range as well so callers can compute the
 // height of each header without knowing the height of the stop hash.
-func (h *BlockHeaderStore) FetchHeaderAncestors(numHeaders uint32,
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) FetchHeaderAncestors(numHeaders uint32,
 	stopHash *chainhash.Hash) ([]wire.BlockHeader, uint32, error) {
 
 	// First, we'll find the final header in the range, this will be the
@@ -238,7 +294,9 @@ func (h *BlockHeaderStore) FetchHeaderAncestors(numHeaders uint32,
 
 // HeightFromHash returns the height of a particular block header given its
 // hash.
-func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) {
 	return h.heightFromHash(hash)
 }
 
@@ -246,7 +304,9 @@ func (h *BlockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 // _single_ header. This method is meant to be used in the case of re-org which
 // disconnects the latest block header from the end of the main chain. The
 // information about the new header tip after truncation is returned.
-func (h *BlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 	// Lock store for write.
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
@@ -302,7 +362,9 @@ func (b *BlockHeader) toIndexEntry() headerEntry {
 
 // WriteHeaders writes a set of headers to disk and updates the index in a
 // single atomic transaction.
-func (h *BlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	// Lock store for write.
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
@@ -345,7 +407,9 @@ func (h *BlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 // 10 locators.
 //
 // TODO(roasbeef): make into single transaction.
-func (h *BlockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (blockchain.BlockLocator, error) {
+func (h *blockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (
+	blockchain.BlockLocator, error) {
+
 	var locator blockchain.BlockLocator
 
 	// Append the initial hash
@@ -386,7 +450,9 @@ func (h *BlockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (blockchai
 
 // LatestBlockLocator returns the latest block locator object based on the tip
 // of the current main chain from the PoV of the database and flat files.
-func (h *BlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error) {
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error) {
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
@@ -403,7 +469,9 @@ func (h *BlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator, error)
 
 // BlockLocatorFromHash computes a block locator given a particular hash. The
 // standard Bitcoin algorithm to compute block locators are employed.
-func (h *BlockHeaderStore) BlockLocatorFromHash(hash *chainhash.Hash) (blockchain.BlockLocator, error) {
+func (h *blockHeaderStore) BlockLocatorFromHash(hash *chainhash.Hash) (
+	blockchain.BlockLocator, error) {
+
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
@@ -415,7 +483,7 @@ func (h *BlockHeaderStore) BlockLocatorFromHash(hash *chainhash.Hash) (blockchai
 // to first, and makes sure they all connect to each other. Additionally, at
 // each block header, we also ensure that the index entry for that height and
 // hash also match up properly.
-func (h *BlockHeaderStore) CheckConnectivity() error {
+func (h *blockHeaderStore) CheckConnectivity() error {
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
@@ -493,8 +561,10 @@ func (h *BlockHeaderStore) CheckConnectivity() error {
 }
 
 // ChainTip returns the best known block header and height for the
-// BlockHeaderStore.
-func (h *BlockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
+// blockHeaderStore.
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 	// Lock store for read.
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()

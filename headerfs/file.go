@@ -55,7 +55,7 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 //
 // NOTE: The end height is _inclusive_ so we'll fetch all headers from the
 // startHeight up to the end height, including the final header.
-func (h *BlockHeaderStore) readHeaderRange(startHeight uint32,
+func (h *blockHeaderStore) readHeaderRange(startHeight uint32,
 	endHeight uint32) ([]wire.BlockHeader, error) {
 
 	// Based on the defined header type, we'll determine the number of
@@ -106,7 +106,7 @@ func (h *BlockHeaderStore) readHeaderRange(startHeight uint32,
 
 // readHeader reads a full block header from the flat-file. The header read is
 // determined by the hight value.
-func (h *BlockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
+func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 	var header wire.BlockHeader
 
 	// Each header is 80 bytes, so using this information, we'll seek a

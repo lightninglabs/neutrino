@@ -497,7 +497,7 @@ type ChainService struct {
 
 	FilterDB         filterdb.FilterDatabase
 	FilterCache      *lru.Cache
-	BlockHeaders     *headerfs.BlockHeaderStore
+	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
 
 	// queryPeers will be called to send messages to one or more peers,
