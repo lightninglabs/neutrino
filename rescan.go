@@ -403,9 +403,20 @@ rescanLoop:
 				}
 
 			case header := <-blockConnected:
-				// Only deal with the next block from what we
-				// know about. Otherwise, it's in the future.
-				if header.PrevBlock != curStamp.Hash {
+				// If we've somehow missed a header in the
+				// range, then we'll mark ourselves as not
+				// current so we can walk down the chain and
+				// notify the callers of blocks we may have
+				// missed.
+				//
+				// It's possible due to the nature of the
+				// current subscription system that we get a
+				// duplicate block. We'll catch this and
+				// continue forwards to avoid an unnecessary
+				// state transition back to the !current state.
+				if header.PrevBlock != curStamp.Hash &&
+					header.BlockHash() != curStamp.Hash {
+
 					log.Debugf("Rescan got out of order "+
 						"block %s with prevblock %s, "+
 						"curHeader: %s",
@@ -413,18 +424,13 @@ rescanLoop:
 						header.PrevBlock,
 						curStamp.Hash)
 
-					// If we've somehow missed a header in
-					// the range, then we'll mark ourselves
-					// as not current so we can walk down
-					// the chain and notify the callers of
-					// blocks we may have missed.
 					current = false
 					continue rescanLoop
 				}
 
 				// Do not process block until we have all
 				// filter headers. Don't worry, the block will
-				// get requeued every time there is a new
+				// get re-queued every time there is a new
 				// filter available.
 				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
 					log.Warnf("Missing filter header for "+
@@ -434,7 +440,7 @@ rescanLoop:
 				}
 
 				// As this could be a re-try, we'll ensure that
-				// we don't incorrectly increment our currnet
+				// we don't incorrectly increment our current
 				// time stamp.
 				if curStamp.Hash != header.BlockHash() {
 					curHeader = header
