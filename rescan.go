@@ -413,6 +413,12 @@ rescanLoop:
 						header.PrevBlock,
 						curStamp.Hash)
 
+					// If we've somehow missed a header in
+					// the range, then we'll mark ourselves
+					// as not current so we can walk down
+					// the chain and notify the callers of
+					// blocks we may have missed.
+					current = false
 					continue rescanLoop
 				}
 
