@@ -312,18 +312,11 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		err          error
 	)
 
-	// blockRefetchChan is a channel that we'll use to remind ourselves
-	// that we need to re-fetch a block. We'll use this to wake ourselves
-	// up in the scenario that we're unable to fetch the filters for a
-	// target block. It may be due to a re-org or if none of our peers
-	// actually have the filter.
-	blockRefetchChan := make(chan *wire.BlockHeader, 1)
-
 	// blockRetryInterval is the interval in which we'll continually re-try
 	// to fetch the latest filter from our peers.
 	//
 	// TODO(roasbeef): add exponential back-off
-	blockRetryInterval := time.Second
+	blockRetryInterval := time.Millisecond * 100
 
 	// blockReFetchTimer is a stoppable timer that we'll use to reminder
 	// ourselves to refetch a block in the case that we're unable to fetch
@@ -338,13 +331,19 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 			blockReFetchTimer.Stop()
 		}
 
-		log.Debugf("Setting timer to attempt to re-fetch filter for "+
+		log.Infof("Setting timer to attempt to re-fetch filter for "+
 			"hash=%v, height=%v", headerTip.BlockHash(), height)
 
 		// We'll start a timer to re-send this header so we re-process
 		// if in the case that we don't get a re-org soon afterwards.
 		blockReFetchTimer = time.AfterFunc(blockRetryInterval, func() {
-			blockRefetchChan <- &headerTip
+			log.Infof("Resending rescan header for block hash=%v, "+
+				"height=%v", headerTip.BlockHash(), height)
+
+			select {
+			case blockConnected <- headerTip:
+			case <-ro.quit:
+			}
 		})
 	}
 
@@ -404,9 +403,20 @@ rescanLoop:
 				}
 
 			case header := <-blockConnected:
-				// Only deal with the next block from what we
-				// know about. Otherwise, it's in the future.
-				if header.PrevBlock != curStamp.Hash {
+				// If we've somehow missed a header in the
+				// range, then we'll mark ourselves as not
+				// current so we can walk down the chain and
+				// notify the callers of blocks we may have
+				// missed.
+				//
+				// It's possible due to the nature of the
+				// current subscription system that we get a
+				// duplicate block. We'll catch this and
+				// continue forwards to avoid an unnecessary
+				// state transition back to the !current state.
+				if header.PrevBlock != curStamp.Hash &&
+					header.BlockHash() != curStamp.Hash {
+
 					log.Debugf("Rescan got out of order "+
 						"block %s with prevblock %s, "+
 						"curHeader: %s",
@@ -414,12 +424,13 @@ rescanLoop:
 						header.PrevBlock,
 						curStamp.Hash)
 
+					current = false
 					continue rescanLoop
 				}
 
 				// Do not process block until we have all
 				// filter headers. Don't worry, the block will
-				// get requeued every time there is a new
+				// get re-queued every time there is a new
 				// filter available.
 				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
 					log.Warnf("Missing filter header for "+
@@ -429,7 +440,7 @@ rescanLoop:
 				}
 
 				// As this could be a re-try, we'll ensure that
-				// we don't incorrectly increment our currnet
+				// we don't incorrectly increment our current
 				// time stamp.
 				if curStamp.Hash != header.BlockHash() {
 					curHeader = header
@@ -571,6 +582,12 @@ rescanLoop:
 					curStamp.Height, curStamp.Hash)
 
 				current = true
+
+				// Ensure we cancel the old subscroption if
+				// we're going back to scan for missed blocks.
+				if subscription != nil {
+					s.unsubscribeBlockMsgs(subscription)
+				}
 
 				// Subscribe to block notifications.
 				subscription, err = s.subscribeBlockMsg(
