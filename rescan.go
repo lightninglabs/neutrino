@@ -577,6 +577,12 @@ rescanLoop:
 
 				current = true
 
+				// Ensure we cancel the old subscroption if
+				// we're going back to scan for missed blocks.
+				if subscription != nil {
+					s.unsubscribeBlockMsgs(subscription)
+				}
+
 				// Subscribe to block notifications.
 				subscription, err = s.subscribeBlockMsg(
 					uint32(curStamp.Height), blockConnected,
