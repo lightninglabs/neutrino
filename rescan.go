@@ -312,18 +312,11 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		err          error
 	)
 
-	// blockRefetchChan is a channel that we'll use to remind ourselves
-	// that we need to re-fetch a block. We'll use this to wake ourselves
-	// up in the scenario that we're unable to fetch the filters for a
-	// target block. It may be due to a re-org or if none of our peers
-	// actually have the filter.
-	blockRefetchChan := make(chan *wire.BlockHeader, 1)
-
 	// blockRetryInterval is the interval in which we'll continually re-try
 	// to fetch the latest filter from our peers.
 	//
 	// TODO(roasbeef): add exponential back-off
-	blockRetryInterval := time.Second
+	blockRetryInterval := time.Millisecond * 100
 
 	// blockReFetchTimer is a stoppable timer that we'll use to reminder
 	// ourselves to refetch a block in the case that we're unable to fetch
@@ -338,13 +331,19 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 			blockReFetchTimer.Stop()
 		}
 
-		log.Debugf("Setting timer to attempt to re-fetch filter for "+
+		log.Infof("Setting timer to attempt to re-fetch filter for "+
 			"hash=%v, height=%v", headerTip.BlockHash(), height)
 
 		// We'll start a timer to re-send this header so we re-process
 		// if in the case that we don't get a re-org soon afterwards.
 		blockReFetchTimer = time.AfterFunc(blockRetryInterval, func() {
-			blockRefetchChan <- &headerTip
+			log.Infof("Resending rescan header for block hash=%v, "+
+				"height=%v", headerTip.BlockHash(), height)
+
+			select {
+			case blockConnected <- headerTip:
+			case <-ro.quit:
+			}
 		})
 	}
 
