@@ -847,7 +847,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			//
 			// TODO(roasbeef): can eventually special case handle
 			// this at the top
-			if bytes.Equal(curHeader[:], initialFilterHeader[:]) && startHeight < curHeight+1 {
+			if bytes.Equal(curHeader[:], initialFilterHeader[:]) {
 				// So we'll set the prev header to our best
 				// known header, and seek within the header
 				// range a bit so we don't write any duplicate
