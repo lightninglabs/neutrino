@@ -348,7 +348,7 @@ func TestUtxoScannerScanBasic(t *testing.T) {
 		t.Fatalf("unable to enqueue utxo scan request: %v", err)
 	}
 
-	spendReport, scanErr = req.Result()
+	spendReport, scanErr = req.Result(nil)
 	if scanErr != nil {
 		t.Fatalf("unable to complete scan for utxo: %v", scanErr)
 	}
@@ -420,7 +420,7 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 	waitForSnapshot <- struct{}{}
 	waitForSnapshot <- struct{}{}
 
-	spendReport, scanErr = req.Result()
+	spendReport, scanErr = req.Result(nil)
 
 	if scanErr != nil {
 		t.Fatalf("unable to complete scan for utxo: %v", scanErr)
