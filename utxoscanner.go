@@ -55,7 +55,7 @@ func (r *GetUtxoRequest) deliver(report *SpendReport, err error) {
 }
 
 // Result is callback returning either a spend report or an error.
-func (r *GetUtxoRequest) Result() (*SpendReport, error) {
+func (r *GetUtxoRequest) Result(cancel <-chan struct{}) (*SpendReport, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -68,6 +68,9 @@ func (r *GetUtxoRequest) Result() (*SpendReport, error) {
 		}
 
 		return r.result.report, r.result.err
+
+	case <-cancel:
+		return nil, ErrGetUtxoCancelled
 
 	case <-r.quit:
 		return nil, ErrShuttingDown
@@ -144,14 +147,24 @@ func (s *UtxoScanner) Stop() error {
 
 	close(s.quit)
 
+batchShutdown:
 	for {
 		select {
 		case <-s.shutdown:
-			return nil
+			break batchShutdown
 		case <-time.After(50 * time.Millisecond):
 			s.cv.Signal()
 		}
 	}
+
+	// Cancel all pending get utxo requests that were not pulled into the
+	// batchManager's main goroutine.
+	for !s.pq.IsEmpty() {
+		pendingReq := heap.Pop(&s.pq).(*GetUtxoRequest)
+		pendingReq.deliver(nil, ErrShuttingDown)
+	}
+
+	return nil
 }
 
 // Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
