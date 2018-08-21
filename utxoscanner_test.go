@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -421,7 +422,6 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 	waitForSnapshot <- struct{}{}
 
 	spendReport, scanErr = req.Result(nil)
-
 	if scanErr != nil {
 		t.Fatalf("unable to complete scan for utxo: %v", scanErr)
 	}
@@ -430,6 +430,133 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 		t.Fatalf("Expected scanned output to be spent -- "+
 			"scan report: %v", spendReport)
 	}
+}
+
+// TestUtxoScannerCancelRequest tests the ability to cancel pending GetUtxo
+// requests, as well as the scanners ability to exit and cancel request when
+// stopped during a batch scan.
+func TestUtxoScannerCancelRequest(t *testing.T) {
+	mockChainClient := NewMockChainClient()
+
+	block100000Hash := Block100000.BlockHash()
+	mockChainClient.SetBlockHash(100000, &block100000Hash)
+	mockChainClient.SetBlock(&block100000Hash, btcutil.NewBlock(&Block100000))
+	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
+
+	fetchErr := errors.New("cannot fetch block")
+
+	// Create a mock function that will block when the utxoscanner tries to
+	// retrieve a block from the network. It will return fetchErr when it
+	// finally returns.
+	block := make(chan struct{})
+	scanner := NewUtxoScanner(&UtxoScannerConfig{
+		GetBlock: func(chainhash.Hash, ...QueryOption,
+		) (*btcutil.Block, error) {
+			<-block
+			return nil, fetchErr
+		},
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
+		BlockFilterMatches: mockChainClient.blockFilterMatches,
+	})
+
+	scanner.Start()
+	defer scanner.Stop()
+
+	// Add the requests in order of their block heights.
+	req100000, err := scanner.Enqueue(makeTestInputWithScript(), 100000)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+	req100001, err := scanner.Enqueue(makeTestInputWithScript(), 100001)
+	if err != nil {
+		t.Fatalf("unable to enqueue scan request: %v", err)
+	}
+
+	// Spawn our first task with a cancel chan, which we'll test to make
+	// sure it can break away early.
+	cancel100000 := make(chan struct{})
+	err100000 := make(chan error, 1)
+	go func() {
+		_, err := req100000.Result(cancel100000)
+		err100000 <- err
+	}()
+
+	// Spawn our second task without a cancel chan, we'll be testing it's
+	// ability to break if the scanner is stopped.
+	err100001 := make(chan error, 1)
+	go func() {
+		_, err := req100001.Result(nil)
+		err100001 <- err
+	}()
+
+	// Check that neither succeed without any further action.
+	select {
+	case <-err100000:
+		t.Fatalf("getutxo should not have been cancelled yet")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	select {
+	case <-err100001:
+		t.Fatalf("getutxo should not have been cancelled yet")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Cancel the first request, which should cause it to return
+	// ErrGetUtxoCancelled.
+	close(cancel100000)
+
+	select {
+	case err := <-err100000:
+		if err != ErrGetUtxoCancelled {
+			t.Fatalf("unexpected error returned "+
+				"from Result, want: %v, got %v",
+				ErrGetUtxoCancelled, err)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("getutxo should have been cancelled")
+	}
+
+	// The second task shouldn't have been started yet, and should deliver a
+	// message since it wasn't tied to the same cancel chan.
+	select {
+	case <-err100001:
+		t.Fatalf("getutxo should not have been cancelled yet")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Spawn a goroutine to stop the scanner, we add a wait group to make
+	// sure it cleans up at the end of the test.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner.Stop()
+	}()
+
+	// The second request should be cancelled as soon as the utxoscanner
+	// begins shut down, returning ErrShuttingDown.
+	select {
+	case err := <-err100001:
+		if err != ErrShuttingDown {
+			t.Fatalf("unexpected error returned "+
+				"from Result, want: %v, got %v",
+				ErrShuttingDown, err)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("getutxo should have been cancelled")
+	}
+
+	// Ensure that GetBlock gets unblocked so the batchManager can properly
+	// exit.
+	select {
+	case block <- struct{}{}:
+	default:
+	}
+
+	// Wait for the utxo scanner to exit fully.
+	wg.Wait()
 }
 
 // Block99999 defines block 99,999 of the main chain. It is used to test a
