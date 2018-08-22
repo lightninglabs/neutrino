@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -66,6 +67,14 @@ var (
 	// DisableDNSSeed disables getting initial addresses for Bitcoin nodes
 	// from DNS.
 	DisableDNSSeed = false
+
+	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino will
+	// keep in memory if no size is specified in the neutrino.Config.
+	DefaultFilterCacheSize uint64 = 4096 * 1000
+
+	// DefaultBlockCacheSize is the size (in bytes) of blocks neutrino will
+	// keep in memory if no size is specified in the neutrino.Config.
+	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
@@ -475,6 +484,14 @@ type Config struct {
 	// along with regular outbound connection attempts will use this
 	// instead.
 	NameResolver func(host string) ([]net.IP, error)
+
+	// FilterCacheSize indicates the size (in bytes) of filters the cache will
+	// hold in memory at most.
+	FilterCacheSize uint64
+
+	// BlockCacheSize indicates the size (in bytes) of blocks the block
+	// cache will hold in memory at most.
+	BlockCacheSize uint64
 }
 
 // ChainService is instantiated with functional options
@@ -487,8 +504,16 @@ type ChainService struct {
 	shutdown      int32
 
 	FilterDB         filterdb.FilterDatabase
-	BlockHeaders     *headerfs.BlockHeaderStore
+	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
+
+	FilterCache *lru.Cache
+	BlockCache  *lru.Cache
+
+	// queryPeers will be called to send messages to one or more peers,
+	// expecting a response.
+	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
+		chan<- struct{}), ...QueryOption)
 
 	chainParams       chaincfg.Params
 	addrManager       *addrmgr.AddrManager
@@ -579,12 +604,31 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		dialer:              dialer,
 	}
 
+	// We set the queryPeers method to point to queryChainServicePeers,
+	// passing a reference to the newly created ChainService.
+	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
+		wire.Message, chan<- struct{}), qo ...QueryOption) {
+		queryChainServicePeers(&s, msg, f, qo...)
+	}
+
 	var err error
 
 	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
 	if err != nil {
 		return nil, err
 	}
+
+	filterCacheSize := DefaultFilterCacheSize
+	if cfg.FilterCacheSize != 0 {
+		filterCacheSize = cfg.FilterCacheSize
+	}
+	s.FilterCache = lru.NewCache(filterCacheSize)
+
+	blockCacheSize := DefaultBlockCacheSize
+	if cfg.BlockCacheSize != 0 {
+		blockCacheSize = cfg.BlockCacheSize
+	}
+	s.BlockCache = lru.NewCache(blockCacheSize)
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(cfg.DataDir,
 		cfg.Database, &cfg.ChainParams)
@@ -689,7 +733,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BestSnapshot:       s.BestSnapshot,
 		GetBlockHash:       s.GetBlockHash,
 		BlockFilterMatches: s.blockFilterMatches,
-		GetBlock:           s.GetBlockFromNetwork,
+		GetBlock:           s.GetBlock,
 	})
 
 	return &s, nil

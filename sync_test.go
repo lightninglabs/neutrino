@@ -806,8 +806,9 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 				return
 			}
 			// Get block from network.
-			haveBlock, err := harness.svc.GetBlockFromNetwork(
-				blockHash, queryOptions...)
+			haveBlock, err := harness.svc.GetBlock(
+				blockHash, queryOptions...,
+			)
 			if err != nil {
 				errChan <- err
 				return

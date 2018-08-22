@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
 
@@ -64,12 +65,24 @@ type queryOptions struct {
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
+
+	// persistToDisk indicates whether the filter should also be written
+	// to disk in addition to the memory cache. For "normal" wallets, they'll
+	// almost never need to re-match a filter once it's been fetched unless
+	// they're doing something like a key import.
+	persistToDisk bool
+}
+
+// filterCacheKey represents the key used for FilterCache of the ChainService.
+type filterCacheKey struct {
+	blockHash  *chainhash.Hash
+	filterType filterdb.FilterType
 }
 
 // QueryOption is a functional option argument to any of the network query
-// methods, such as GetBlockFromNetwork and GetCFilter (when that resorts to a
-// network query). These are always processed in order, with later options
-// overriding earlier ones.
+// methods, such as GetBlock and GetCFilter (when that resorts to a network
+// query). These are always processed in order, with later options overriding
+// earlier ones.
 type QueryOption func(*queryOptions)
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
@@ -127,6 +140,14 @@ func Encoding(encoding wire.MessageEncoding) QueryOption {
 func DoneChan(doneChan chan<- struct{}) QueryOption {
 	return func(qo *queryOptions) {
 		qo.doneChan = doneChan
+	}
+}
+
+// PersistToDisk allows the caller to tell that the filter should be kept
+// on disk once it's found.
+func PersistToDisk() QueryOption {
+	return func(qo *queryOptions) {
+		qo.persistToDisk = true
 	}
 }
 
@@ -550,10 +571,14 @@ checkResponses:
 	}
 }
 
-// queryPeers is a helper function that sends a query to one or more peers and
-// waits for an answer. The timeout for queries is set by the QueryTimeout
-// package-level variable or the Timeout functional option.
-func (s *ChainService) queryPeers(
+// queryChainServicePeers is a helper function that sends a query to one or
+// more peers of the given ChainService, and waits for an answer. The timeout
+// for queries is set by the QueryTimeout package-level variable or the Timeout
+// functional option.
+func queryChainServicePeers(
+	// s is the ChainService to use.
+	s *ChainService,
+
 	// queryMsg is the message to send to each peer selected by selectPeer.
 	queryMsg wire.Message,
 
@@ -675,6 +700,29 @@ checkResponses:
 	}
 }
 
+// getFilterFromCache returns a filter from ChainService's FilterCache if it
+// exists, returning nil and error if it doesn't.
+func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
+	filterType filterdb.FilterType) (*gcs.Filter, error) {
+
+	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+
+	filterValue, err := s.FilterCache.Get(cacheKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return filterValue.(*cache.CacheableFilter).Filter, nil
+}
+
+// putFilterToCache inserts a given filter in ChainService's FilterCache.
+func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
+	filterType filterdb.FilterType, filter *gcs.Filter) error {
+
+	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
+}
+
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
 // cfilter from the network and writes it to the database. If extended is true,
 // an extended filter will be queried for. Otherwise, we'll fetch the regular
@@ -698,11 +746,23 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	getHeader := s.RegFilterHeaders.FetchHeader
 	dbFilterType := filterdb.RegularFilter
 
-	// First check the database to see if we already have this filter. If
+	// First check the cache to see if we already have this filter. If
 	// so, then we can return it an exit early.
-	filter, err := s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+	filter, err := s.getFilterFromCache(&blockHash, dbFilterType)
 	if err == nil && filter != nil {
 		return filter, nil
+	}
+	if err != nil && err != cache.ErrElementNotFound {
+		return nil, err
+	}
+
+	// If not in cache, check if it's in database, returning early if yes.
+	filter, err = s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+	if err == nil && filter != nil {
+		return filter, nil
+	}
+	if err != nil && err != filterdb.ErrFilterNotFound {
+		return nil, err
 	}
 
 	// We didn't get the filter from the DB, so we'll set it to nil and try
@@ -797,24 +857,44 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		options...,
 	)
 
-	// If we've found a filter, write it to the database for next time.
 	if filter != nil {
-		err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
+		// If we found a filter, put it in the cache and persistToDisk if
+		// the caller requested it.
+		err := s.putFilterToCache(&blockHash, dbFilterType, filter)
 		if err != nil {
-			return nil, err
+			log.Warnf("couldn't write filter to cache: %v", err)
 		}
 
-		log.Tracef("Wrote filter for block %s, type %d",
-			blockHash, filterType)
+		qo := defaultQueryOptions()
+		qo.applyQueryOptions(options...)
+		if qo.persistToDisk {
+			err := s.FilterDB.PutFilter(&blockHash, filter, dbFilterType)
+			if err != nil {
+				return nil, err
+			}
+
+			log.Tracef("Wrote filter for block %s, type %d",
+				blockHash, filterType)
+		}
 	}
 
 	return filter, nil
 }
 
-// GetBlockFromNetwork gets a block by requesting it from the network, one peer
-// at a time, until one answers.
-func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
+// GetBlock gets a block by requesting it from the network, one peer at a
+// time, until one answers. If the block is found in the cache, it will be
+// returned immediately.
+func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+
+	// Fetch the corresponding block header from the database. If this
+	// isn't found, then we don't have the header for this block so we
+	// can't request it.
+	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
+	if err != nil || blockHeader.BlockHash() != blockHash {
+		return nil, fmt.Errorf("Couldn't get header for block %s "+
+			"from database", blockHash)
+	}
 
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query so that we can check what inv type
@@ -826,18 +906,21 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 		invType = wire.InvTypeBlock
 	}
 
-	// Fetch the corresponding block header from the database. If this
-	// isn't found, then we don't have the header for this block s we can't
-	// request it.
-	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
-	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
-			"from database", blockHash)
+	// Create an inv vector for getting this block.
+	inv := wire.NewInvVect(invType, &blockHash)
+
+	// If the block is already in the cache, we can return it immediately.
+	blockValue, err := s.BlockCache.Get(*inv)
+	if err == nil && blockValue != nil {
+		return blockValue.(*cache.CacheableBlock).Block, err
+	}
+	if err != nil && err != lru.ErrElementNotFound {
+		return nil, err
 	}
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(invType, &blockHash))
+	getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -911,6 +994,12 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	if foundBlock == nil {
 		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
 			"network", blockHash)
+	}
+
+	// Add block to the cache before returning it.
+	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	if err != nil {
+		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
 	return foundBlock, nil
