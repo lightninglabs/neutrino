@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -66,6 +67,10 @@ var (
 	// DisableDNSSeed disables getting initial addresses for Bitcoin nodes
 	// from DNS.
 	DisableDNSSeed = false
+
+	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino will
+	// keep in memory if no size is specified in the neutrino.Config.
+	DefaultFilterCacheSize uint64 = 4096 * 1000
 )
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
@@ -475,6 +480,10 @@ type Config struct {
 	// along with regular outbound connection attempts will use this
 	// instead.
 	NameResolver func(host string) ([]net.IP, error)
+
+	// FilterCacheSize indicates the size (in bytes) of filters the cache will
+	// hold in memory at most.
+	FilterCacheSize uint64
 }
 
 // ChainService is instantiated with functional options
@@ -487,6 +496,7 @@ type ChainService struct {
 	shutdown      int32
 
 	FilterDB         filterdb.FilterDatabase
+	FilterCache      *lru.Cache
 	BlockHeaders     *headerfs.BlockHeaderStore
 	RegFilterHeaders *headerfs.FilterHeaderStore
 
@@ -585,6 +595,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	filterCacheSize := DefaultFilterCacheSize
+	if cfg.FilterCacheSize != 0 {
+		filterCacheSize = cfg.FilterCacheSize
+	}
+	s.FilterCache = lru.NewCache(filterCacheSize)
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(cfg.DataDir,
 		cfg.Database, &cfg.ChainParams)
