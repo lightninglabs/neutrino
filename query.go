@@ -914,7 +914,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	if err == nil && blockValue != nil {
 		return blockValue.(*cache.CacheableBlock).Block, err
 	}
-	if err != nil && err != lru.ErrElementNotFound {
+	if err != nil && err != cache.ErrElementNotFound {
 		return nil, err
 	}
 
