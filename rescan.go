@@ -431,8 +431,11 @@ rescanLoop:
 				// Do not process block until we have all
 				// filter headers. Don't worry, the block will
 				// get re-queued every time there is a new
-				// filter available.
-				if !s.hasFilterHeadersByHeight(uint32(curStamp.Height + 1)) {
+				// filter available. However, if it's a
+				// duplicate block notification, then we can
+				// re-process it without any issues.
+				if header.BlockHash() != curStamp.Hash &&
+					!s.hasFilterHeadersByHeight(uint32(curStamp.Height+1)) {
 					log.Warnf("Missing filter header for "+
 						"height=%v, skipping",
 						curStamp.Height+1)
