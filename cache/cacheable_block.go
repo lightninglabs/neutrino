@@ -10,9 +10,5 @@ type CacheableBlock struct {
 
 // Size returns size of this block in bytes.
 func (c *CacheableBlock) Size() (uint64, error) {
-	f, err := c.Block.Bytes()
-	if err != nil {
-		return 0, err
-	}
-	return uint64(len(f)), nil
+	return uint64(c.Block.MsgBlock().SerializeSize()), nil
 }
