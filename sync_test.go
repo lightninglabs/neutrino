@@ -621,6 +621,9 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
 	}
+	if spendReport.SpendingTx == nil {
+		t.Fatalf("Unable to find initial transaction")
+	}
 	if spendReport.SpendingTx.TxHash() != authTx1.Tx.TxHash() {
 		t.Fatalf("Redeeming transaction doesn't match expected "+
 			"transaction: want %s, got %s", authTx1.Tx.TxHash(),
