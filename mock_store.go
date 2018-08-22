@@ -1,4 +1,4 @@
-package headerfs
+package neutrino
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // mockBlockHeaderStore is an implementation of the BlockHeaderStore backed by
@@ -17,10 +18,13 @@ type mockBlockHeaderStore struct {
 
 // A compile-time check to ensure the mockBlockHeaderStore adheres to the
 // BlockHeaderStore interface.
-var _ BlockHeaderStore = (*mockBlockHeaderStore)(nil)
+var _ headerfs.BlockHeaderStore = (*mockBlockHeaderStore)(nil)
 
-// NewMockBlockHeaderStore ...
-func NewMockBlockHeaderStore() BlockHeaderStore {
+// NewMockBlockHeaderStore returns a version of the BlockHeaderStore that's
+// backed by an in-memory map. This instance is meant to be used by callers
+// outside the package to unit test components that require a BlockHeaderStore
+// interface.
+func newMockBlockHeaderStore() headerfs.BlockHeaderStore {
 	return &mockBlockHeaderStore{
 		headers: make(map[chainhash.Hash]wire.BlockHeader),
 	}
@@ -31,27 +35,27 @@ func (m *mockBlockHeaderStore) ChainTip() (*wire.BlockHeader,
 	return nil, 0, nil
 
 }
-
 func (m *mockBlockHeaderStore) LatestBlockLocator() (
 	blockchain.BlockLocator, error) {
 	return nil, nil
 }
-
 func (m *mockBlockHeaderStore) FetchHeaderByHeight(height uint32) (
 	*wire.BlockHeader, error) {
 
 	return nil, nil
 }
-
 func (m *mockBlockHeaderStore) FetchHeaderAncestors(uint32,
 	*chainhash.Hash) ([]wire.BlockHeader, uint32, error) {
 
 	return nil, 0, nil
 }
-
 func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 	return 0, nil
 
+}
+func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
+	error) {
+	return nil, nil
 }
 
 func (m *mockBlockHeaderStore) FetchHeader(h *chainhash.Hash) (
@@ -62,14 +66,10 @@ func (m *mockBlockHeaderStore) FetchHeader(h *chainhash.Hash) (
 	return nil, 0, fmt.Errorf("not found")
 }
 
-func (m *mockBlockHeaderStore) WriteHeaders(headers ...BlockHeader) error {
+func (m *mockBlockHeaderStore) WriteHeaders(headers ...headerfs.BlockHeader) error {
 	for _, h := range headers {
 		m.headers[h.BlockHash()] = *h.BlockHeader
 	}
-	return nil
-}
 
-func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
-	error) {
-	return nil, nil
+	return nil
 }
