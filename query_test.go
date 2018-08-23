@@ -254,7 +254,7 @@ func TestBlockCache(t *testing.T) {
 
 	// We'll use a simple mock header store since the GetBlocks method
 	// assumes we only query for blocks with an already known header.
-	headers := headerfs.NewMockBlockHeaderStore()
+	headers := newMockBlockHeaderStore()
 
 	// Iterate through the blocks, calculating the size of half of them,
 	// and writing them to the header store.

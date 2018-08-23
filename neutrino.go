@@ -630,13 +630,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.BlockCache = lru.NewCache(blockCacheSize)
 
-	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(cfg.DataDir,
-		cfg.Database, &cfg.ChainParams)
+	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
+		cfg.DataDir, cfg.Database, &cfg.ChainParams,
+	)
 	if err != nil {
 		return nil, err
 	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(cfg.DataDir,
-		cfg.Database, headerfs.RegularFilter, &cfg.ChainParams)
+	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
+		cfg.DataDir, cfg.Database, headerfs.RegularFilter, &cfg.ChainParams,
+	)
 	if err != nil {
 		return nil, err
 	}
