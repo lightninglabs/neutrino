@@ -862,7 +862,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				// range a bit so we don't write any duplicate
 				// headers.
 				r.PrevFilterHeader = *curHeader
-				offset := startHeight - curHeight - 1
+				offset := curHeight + 1 - startHeight
 				r.FilterHashes = r.FilterHashes[offset:]
 			}
 
