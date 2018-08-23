@@ -1170,7 +1170,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 
 	// Wait for the result to be delivered by the rescan or until a shutdown
 	// is signaled.
-	report, err := req.Result()
+	report, err := req.Result(ro.quit)
 	if err != nil {
 		log.Debugf("Error finding spends for %s: %v",
 			ro.watchInputs[0].OutPoint.String(), err)
