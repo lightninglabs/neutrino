@@ -80,9 +80,9 @@ type filterCacheKey struct {
 }
 
 // QueryOption is a functional option argument to any of the network query
-// methods, such as GetBlockFromNetwork and GetCFilter (when that resorts to a
-// network query). These are always processed in order, with later options
-// overriding earlier ones.
+// methods, such as GetBlock and GetCFilter (when that resorts to a network
+// query). These are always processed in order, with later options overriding
+// earlier ones.
 type QueryOption func(*queryOptions)
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
@@ -571,10 +571,14 @@ checkResponses:
 	}
 }
 
-// queryPeers is a helper function that sends a query to one or more peers and
-// waits for an answer. The timeout for queries is set by the QueryTimeout
-// package-level variable or the Timeout functional option.
-func (s *ChainService) queryPeers(
+// queryChainServicePeers is a helper function that sends a query to one or
+// more peers of the given ChainService, and waits for an answer. The timeout
+// for queries is set by the QueryTimeout package-level variable or the Timeout
+// functional option.
+func queryChainServicePeers(
+	// s is the ChainService to use.
+	s *ChainService,
+
 	// queryMsg is the message to send to each peer selected by selectPeer.
 	queryMsg wire.Message,
 
@@ -877,10 +881,20 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	return filter, nil
 }
 
-// GetBlockFromNetwork gets a block by requesting it from the network, one peer
-// at a time, until one answers.
-func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
+// GetBlock gets a block by requesting it from the network, one peer at a
+// time, until one answers. If the block is found in the cache, it will be
+// returned immediately.
+func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+
+	// Fetch the corresponding block header from the database. If this
+	// isn't found, then we don't have the header for this block so we
+	// can't request it.
+	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
+	if err != nil || blockHeader.BlockHash() != blockHash {
+		return nil, fmt.Errorf("Couldn't get header for block %s "+
+			"from database", blockHash)
+	}
 
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query so that we can check what inv type
@@ -892,18 +906,21 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 		invType = wire.InvTypeBlock
 	}
 
-	// Fetch the corresponding block header from the database. If this
-	// isn't found, then we don't have the header for this block s we can't
-	// request it.
-	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
-	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
-			"from database", blockHash)
+	// Create an inv vector for getting this block.
+	inv := wire.NewInvVect(invType, &blockHash)
+
+	// If the block is already in the cache, we can return it immediately.
+	blockValue, err := s.BlockCache.Get(*inv)
+	if err == nil && blockValue != nil {
+		return blockValue.(*cache.CacheableBlock).Block, err
+	}
+	if err != nil && err != cache.ErrElementNotFound {
+		return nil, err
 	}
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(invType, &blockHash))
+	getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -977,6 +994,12 @@ func (s *ChainService) GetBlockFromNetwork(blockHash chainhash.Hash,
 	if foundBlock == nil {
 		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
 			"network", blockHash)
+	}
+
+	// Add block to the cache before returning it.
+	err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	if err != nil {
+		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
 	return foundBlock, nil
