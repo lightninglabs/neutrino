@@ -413,41 +413,37 @@ func (s *ChainService) queryBatch(
 			}
 		}
 
-		ticker := time.NewTicker(qo.timeout)
-		defer ticker.Stop()
-		for {
-			select {
-			case msg := <-msgChan:
-				mtxPeerStates.RLock()
-				curQuery := peerStates[msg.sp.Addr()]
-				mtxPeerStates.RUnlock()
-				if checkResponse(msg.sp, curQuery, msg.msg) {
-					select {
-					case <-queryQuit:
-						return
-					case <-s.quit:
-						return
-					case matchSignals[msg.sp.Addr()] <- struct{}{}:
-					}
-				}
-			case <-ticker.C:
-				// Check if we're done; if so, quit.
-				allDone := true
-				for i := 0; i < len(queryStates); i++ {
-					if atomic.LoadUint32(&queryStates[i]) !=
-						uint32(queryAnswered) {
-						allDone = false
-					}
-				}
-				if allDone {
+		select {
+		case msg := <-msgChan:
+			mtxPeerStates.RLock()
+			curQuery := peerStates[msg.sp.Addr()]
+			mtxPeerStates.RUnlock()
+			if checkResponse(msg.sp, curQuery, msg.msg) {
+				select {
+				case <-queryQuit:
 					return
+				case <-s.quit:
+					return
+				case matchSignals[msg.sp.Addr()] <- struct{}{}:
 				}
-			case <-queryQuit:
-				return
-
-			case <-s.quit:
+			}
+		case <-time.After(qo.timeout):
+			// Check if we're done; if so, quit.
+			allDone := true
+			for i := 0; i < len(queryStates); i++ {
+				if atomic.LoadUint32(&queryStates[i]) !=
+					uint32(queryAnswered) {
+					allDone = false
+				}
+			}
+			if allDone {
 				return
 			}
+		case <-queryQuit:
+			return
+
+		case <-s.quit:
+			return
 		}
 	}
 }
