@@ -326,7 +326,9 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		Value:    1000000000,
 	}
 	// Fee rate is satoshis per byte
-	tx1, err = harness.h1.CreateTransaction([]*wire.TxOut{&out1}, 1000)
+	tx1, err = harness.h1.CreateTransaction(
+		[]*wire.TxOut{&out1}, 1000, true,
+	)
 	if err != nil {
 		t.Fatalf("Couldn't create transaction from script: %s", err)
 	}
@@ -351,7 +353,9 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		Value:    1000000000,
 	}
 	// Fee rate is satoshis per byte
-	tx2, err = harness.h1.CreateTransaction([]*wire.TxOut{&out2}, 1000)
+	tx2, err = harness.h1.CreateTransaction(
+		[]*wire.TxOut{&out2}, 1000, true,
+	)
 	if err != nil {
 		t.Fatalf("Couldn't create transaction from script: %s", err)
 	}
@@ -979,7 +983,9 @@ func TestNeutrinoSync(t *testing.T) {
 	rpcclient.UseLogger(rpcLogger)
 
 	// Create a btcd SimNet node and generate 800 blocks
-	h1, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	h1, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
@@ -994,7 +1000,9 @@ func TestNeutrinoSync(t *testing.T) {
 	}
 
 	// Create a second btcd SimNet node
-	h2, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	h2, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
@@ -1005,7 +1013,9 @@ func TestNeutrinoSync(t *testing.T) {
 	}
 
 	// Create a third btcd SimNet node and generate 1200 blocks
-	h3, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	h3, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
 	}
