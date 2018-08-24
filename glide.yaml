@@ -3,7 +3,7 @@ import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/btcsuite/btcd
-  version: f899737d7f2764dc13e4d01ff00108ec58f766a9
+  version: 79e00513b1011888b1e675157ab89f527f901cae
   subpackages:
   - blockchain
   - btcec
