@@ -405,7 +405,8 @@ func (s *ChainService) queryBatch(
 		}
 
 		for peer, quitChan := range peerQuits {
-			if !s.PeerByAddr(peer).Connected() {
+			p := s.PeerByAddr(peer)
+			if p == nil || !p.Connected() {
 				close(quitChan)
 				close(matchSignals[peer])
 				delete(peerQuits, peer)
