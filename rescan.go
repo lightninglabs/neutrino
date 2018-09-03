@@ -1033,10 +1033,11 @@ func (r *Rescan) Start() <-chan error {
 
 	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
+
 		rescanArgs := append(r.options, updateChan(r.updateChan))
 		err := r.chain.rescan(rescanArgs...)
 
-		r.wg.Done()
 		close(r.running)
 
 		r.errMtx.Lock()
