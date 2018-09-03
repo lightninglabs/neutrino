@@ -987,7 +987,7 @@ txOutLoop:
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
-	running    uint32
+	running    chan struct{}
 	updateChan chan *updateOptions
 
 	options []RescanOption
@@ -1005,7 +1005,7 @@ type Rescan struct {
 // which returns any error on termination of the rescan process.
 func (s *ChainService) NewRescan(options ...RescanOption) *Rescan {
 	return &Rescan{
-		running:    1,
+		running:    make(chan struct{}),
 		options:    options,
 		updateChan: make(chan *updateOptions),
 		chain:      s,
@@ -1030,7 +1030,7 @@ func (r *Rescan) Start() <-chan error {
 		err := r.chain.rescan(rescanArgs...)
 
 		r.wg.Done()
-		atomic.StoreUint32(&r.running, 0)
+		close(r.running)
 
 		r.errMtx.Lock()
 		r.err = err
@@ -1092,8 +1092,23 @@ func DisableDisconnectedNtfns(disabled bool) UpdateOption {
 
 // Update sends an update to a long-running rescan/notification goroutine.
 func (r *Rescan) Update(options ...UpdateOption) error {
-	running := atomic.LoadUint32(&r.running)
-	if running != 1 {
+
+	ro := defaultRescanOptions()
+	for _, option := range r.options {
+		option(ro)
+	}
+
+	uo := defaultUpdateOptions()
+	for _, option := range options {
+		option(uo)
+	}
+
+	select {
+	case r.updateChan <- uo:
+	case <-ro.quit:
+		return ErrRescanExit
+
+	case <-r.running:
 		errStr := "Rescan is already done and cannot be updated."
 		r.errMtx.Lock()
 		if r.err != nil {
@@ -1102,11 +1117,7 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 		r.errMtx.Unlock()
 		return fmt.Errorf(errStr)
 	}
-	uo := defaultUpdateOptions()
-	for _, option := range options {
-		option(uo)
-	}
-	r.updateChan <- uo
+
 	return nil
 }
 
