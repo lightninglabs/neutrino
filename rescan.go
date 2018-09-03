@@ -284,20 +284,36 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
 
 	// We'll wait here at this point until we have enough filter headers to
-	// actually start walking forwards in the chain.
-	s.blockManager.newFilterHeadersMtx.Lock()
-	for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
-		s.blockManager.newFilterHeadersSignal.Wait()
+	// actually start walking forwards in the chain. To be able to wake up
+	// in cause we are being asked to exit, we'll launch a new goroutine to
+	// wait.
+	done := make(chan struct{})
+	go func() {
+		s.blockManager.newFilterHeadersMtx.Lock()
+		for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
+			s.blockManager.newFilterHeadersSignal.Wait()
 
-		// While we're awake, check to see if we need to exit.
-		select {
-		case <-ro.quit:
-			s.blockManager.newFilterHeadersMtx.Unlock()
-			return ErrRescanExit
-		default:
+			// While we're awake, check to see if we need to exit.
+			select {
+			case <-ro.quit:
+				s.blockManager.newFilterHeadersMtx.Unlock()
+				return
+			default:
+			}
 		}
+		s.blockManager.newFilterHeadersMtx.Unlock()
+		close(done)
+	}()
+
+	// Now wait for either filter headers are updated, or we are quitting.
+	select {
+	case <-done:
+	case <-ro.quit:
+		// Broadcast the header signal such that the goroutine can wake
+		// up and exit.
+		s.blockManager.newFilterHeadersSignal.Broadcast()
+		return ErrRescanExit
 	}
-	s.blockManager.newFilterHeadersMtx.Unlock()
 
 	log.Debugf("Starting rescan from known block %d (%s)", curStamp.Height,
 		curStamp.Hash)
