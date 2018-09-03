@@ -987,6 +987,8 @@ txOutLoop:
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
+	started uint32
+
 	running    chan struct{}
 	updateChan chan *updateOptions
 
@@ -1023,6 +1025,11 @@ func (r *Rescan) WaitForShutdown() {
 // according to the specified rescan options.
 func (r *Rescan) Start() <-chan error {
 	errChan := make(chan error, 1)
+
+	if !atomic.CompareAndSwapUint32(&r.started, 0, 1) {
+		errChan <- fmt.Errorf("Rescan already started")
+		return errChan
+	}
 
 	r.wg.Add(1)
 	go func() {
