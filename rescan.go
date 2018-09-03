@@ -159,9 +159,9 @@ func updateChan(update <-chan *updateOptions) RescanOption {
 	}
 }
 
-// Rescan is a single-threaded function that uses headers from the database and
+// rescan is a single-threaded function that uses headers from the database and
 // functional options as arguments.
-func (s *ChainService) Rescan(options ...RescanOption) error {
+func (s *ChainService) rescan(options ...RescanOption) error {
 	// First, we'll apply the set of default options, then serially apply
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
@@ -1020,7 +1020,7 @@ func (r *Rescan) Start() <-chan error {
 	r.wg.Add(1)
 	go func() {
 		rescanArgs := append(r.options, updateChan(r.updateChan))
-		err := r.chain.Rescan(rescanArgs...)
+		err := r.chain.rescan(rescanArgs...)
 
 		r.wg.Done()
 		atomic.StoreUint32(&r.running, 0)
