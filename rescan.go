@@ -305,14 +305,34 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		close(done)
 	}()
 
-	// Now wait for either filter headers are updated, or we are quitting.
-	select {
-	case <-done:
-	case <-ro.quit:
-		// Broadcast the header signal such that the goroutine can wake
-		// up and exit.
-		s.blockManager.newFilterHeadersSignal.Broadcast()
-		return ErrRescanExit
+	// Now wait for either filter headers to be fully synced, or we are
+	// quitting. We also queue any incoming rescan updates, such that we
+	// can apply them when the filters are synced.
+	var updates []*updateOptions
+filterHeaderWaitLoop:
+	for {
+		select {
+		case update := <-ro.update:
+			updates = append(updates, update)
+
+		case <-done:
+			break filterHeaderWaitLoop
+
+		case <-ro.quit:
+			// Broadcast the header signal such that the goroutine
+			// can wake up and exit.
+			s.blockManager.newFilterHeadersSignal.Broadcast()
+			return ErrRescanExit
+		}
+	}
+
+	// If any updates were queued while waiting for the filter headers to
+	// sync, apply them now.
+	for _, upd := range updates {
+		_, err := ro.updateFilter(upd, &curStamp, &curHeader)
+		if err != nil {
+			return err
+		}
 	}
 
 	log.Debugf("Starting rescan from known block %d (%s)", curStamp.Height,
