@@ -4,6 +4,7 @@ package neutrino
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,12 @@ import (
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/headerfs"
+)
+
+var (
+	// ErrRescanExit is an error returned to the caller in case the ongoing
+	// rescan exits.
+	ErrRescanExit = errors.New("rescan exited")
 )
 
 // rescanOptions holds the set of functional parameters for Rescan.
@@ -286,7 +293,7 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		select {
 		case <-ro.quit:
 			s.blockManager.newFilterHeadersMtx.Unlock()
-			return nil
+			return ErrRescanExit
 		default:
 		}
 	}
@@ -373,7 +380,7 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				return nil
+				return ErrRescanExit
 
 			// An update mesage has just come across, if it points
 			// to a prior point in the chain, then we may need to

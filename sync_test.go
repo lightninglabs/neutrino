@@ -759,7 +759,7 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	close(quitRescan)
 	err = <-errChan
 	quitRescan = nil
-	if err != nil {
+	if err != neutrino.ErrRescanExit {
 		t.Fatalf("Rescan ended with error: %s", err)
 	}
 }
