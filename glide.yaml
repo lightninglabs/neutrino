@@ -21,7 +21,7 @@ import:
   - gcs/builder
   - hdkeychain
 - package: github.com/btcsuite/btcwallet
-  version: 64b5b448f5e6853a2d870f388504a7807bc951f1
+  version: 8ae4afc70174bacc745e8dd89fc6db2d817909bd
   subpackages:
   - waddrmgr
   - wallet/txauthor

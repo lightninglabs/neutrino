@@ -1,5 +1,5 @@
-hash: f5b811040c851a720b49a648209c49a6ed4ea27e6e3c44e3a9ca061f6b6651e3
-updated: 2018-08-23T23:46:00.366611817-07:00
+hash: d643fb2b4e206b1cf65711308cb3719f2a6a6e259065d18de92722ef3d2bbba2
+updated: 2018-09-03T18:17:04.668851582-07:00
 imports:
 - name: github.com/aead/siphash
   version: 83563a290f60225eb120d724600b9690c3fb536f
@@ -30,7 +30,7 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: github.com/btcsuite/btcwallet
-  version: 64b5b448f5e6853a2d870f388504a7807bc951f1
+  version: 8ae4afc70174bacc745e8dd89fc6db2d817909bd
   subpackages:
   - internal/helpers
   - internal/zero
@@ -78,11 +78,11 @@ imports:
   subpackages:
   - ripemd160
 - name: golang.org/x/net
-  version: faa378e6dbaed88bd8100f8bcf09939375c6e8fa
+  version: 8a410e7b638dca158bf9e766925842f6651ff828
   subpackages:
   - context
 - name: golang.org/x/sys
-  version: 11551d06cbcc94edc80a0facaccbda56473c19c1
+  version: 2b024373dcd9800f0cae693839fac6ede8d64a8c
   subpackages:
   - unix
 - name: google.golang.org/grpc
