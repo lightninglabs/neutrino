@@ -759,8 +759,16 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	close(quitRescan)
 	err = <-errChan
 	quitRescan = nil
-	if err != nil {
+	if err != neutrino.ErrRescanExit {
 		t.Fatalf("Rescan ended with error: %s", err)
+	}
+
+	// Immediately try to add a new update to to the rescan that was just
+	// shut down. This should fail as it is no longer running.
+	rescan.WaitForShutdown()
+	err = rescan.Update(neutrino.AddAddrs(addr2), neutrino.Rewind(1095))
+	if err == nil {
+		t.Fatalf("Expected update call to fail, it did not")
 	}
 }
 

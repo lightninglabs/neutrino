@@ -4,6 +4,7 @@ package neutrino
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,12 @@ import (
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/headerfs"
+)
+
+var (
+	// ErrRescanExit is an error returned to the caller in case the ongoing
+	// rescan exits.
+	ErrRescanExit = errors.New("rescan exited")
 )
 
 // rescanOptions holds the set of functional parameters for Rescan.
@@ -159,9 +166,9 @@ func updateChan(update <-chan *updateOptions) RescanOption {
 	}
 }
 
-// Rescan is a single-threaded function that uses headers from the database and
+// rescan is a single-threaded function that uses headers from the database and
 // functional options as arguments.
-func (s *ChainService) Rescan(options ...RescanOption) error {
+func (s *ChainService) rescan(options ...RescanOption) error {
 	// First, we'll apply the set of default options, then serially apply
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
@@ -277,20 +284,56 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
 
 	// We'll wait here at this point until we have enough filter headers to
-	// actually start walking forwards in the chain.
-	s.blockManager.newFilterHeadersMtx.Lock()
-	for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
-		s.blockManager.newFilterHeadersSignal.Wait()
+	// actually start walking forwards in the chain. To be able to wake up
+	// in cause we are being asked to exit, we'll launch a new goroutine to
+	// wait.
+	done := make(chan struct{})
+	go func() {
+		s.blockManager.newFilterHeadersMtx.Lock()
+		for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
+			s.blockManager.newFilterHeadersSignal.Wait()
 
-		// While we're awake, check to see if we need to exit.
+			// While we're awake, check to see if we need to exit.
+			select {
+			case <-ro.quit:
+				s.blockManager.newFilterHeadersMtx.Unlock()
+				return
+			default:
+			}
+		}
+		s.blockManager.newFilterHeadersMtx.Unlock()
+		close(done)
+	}()
+
+	// Now wait for either filter headers to be fully synced, or we are
+	// quitting. We also queue any incoming rescan updates, such that we
+	// can apply them when the filters are synced.
+	var updates []*updateOptions
+filterHeaderWaitLoop:
+	for {
 		select {
+		case update := <-ro.update:
+			updates = append(updates, update)
+
+		case <-done:
+			break filterHeaderWaitLoop
+
 		case <-ro.quit:
-			s.blockManager.newFilterHeadersMtx.Unlock()
-			return nil
-		default:
+			// Broadcast the header signal such that the goroutine
+			// can wake up and exit.
+			s.blockManager.newFilterHeadersSignal.Broadcast()
+			return ErrRescanExit
 		}
 	}
-	s.blockManager.newFilterHeadersMtx.Unlock()
+
+	// If any updates were queued while waiting for the filter headers to
+	// sync, apply them now.
+	for _, upd := range updates {
+		_, err := ro.updateFilter(upd, &curStamp, &curHeader)
+		if err != nil {
+			return err
+		}
+	}
 
 	log.Debugf("Starting rescan from known block %d (%s)", curStamp.Height,
 		curStamp.Hash)
@@ -373,7 +416,7 @@ rescanLoop:
 			select {
 
 			case <-ro.quit:
-				return nil
+				return ErrRescanExit
 
 			// An update mesage has just come across, if it points
 			// to a prior point in the chain, then we may need to
@@ -980,7 +1023,9 @@ txOutLoop:
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
 type Rescan struct {
-	running    uint32
+	started uint32
+
+	running    chan struct{}
 	updateChan chan *updateOptions
 
 	options []RescanOption
@@ -998,7 +1043,7 @@ type Rescan struct {
 // which returns any error on termination of the rescan process.
 func (s *ChainService) NewRescan(options ...RescanOption) *Rescan {
 	return &Rescan{
-		running:    1,
+		running:    make(chan struct{}),
 		options:    options,
 		updateChan: make(chan *updateOptions),
 		chain:      s,
@@ -1017,13 +1062,19 @@ func (r *Rescan) WaitForShutdown() {
 func (r *Rescan) Start() <-chan error {
 	errChan := make(chan error, 1)
 
+	if !atomic.CompareAndSwapUint32(&r.started, 0, 1) {
+		errChan <- fmt.Errorf("Rescan already started")
+		return errChan
+	}
+
 	r.wg.Add(1)
 	go func() {
-		rescanArgs := append(r.options, updateChan(r.updateChan))
-		err := r.chain.Rescan(rescanArgs...)
+		defer r.wg.Done()
 
-		r.wg.Done()
-		atomic.StoreUint32(&r.running, 0)
+		rescanArgs := append(r.options, updateChan(r.updateChan))
+		err := r.chain.rescan(rescanArgs...)
+
+		close(r.running)
 
 		r.errMtx.Lock()
 		r.err = err
@@ -1085,8 +1136,23 @@ func DisableDisconnectedNtfns(disabled bool) UpdateOption {
 
 // Update sends an update to a long-running rescan/notification goroutine.
 func (r *Rescan) Update(options ...UpdateOption) error {
-	running := atomic.LoadUint32(&r.running)
-	if running != 1 {
+
+	ro := defaultRescanOptions()
+	for _, option := range r.options {
+		option(ro)
+	}
+
+	uo := defaultUpdateOptions()
+	for _, option := range options {
+		option(uo)
+	}
+
+	select {
+	case r.updateChan <- uo:
+	case <-ro.quit:
+		return ErrRescanExit
+
+	case <-r.running:
 		errStr := "Rescan is already done and cannot be updated."
 		r.errMtx.Lock()
 		if r.err != nil {
@@ -1095,11 +1161,7 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 		r.errMtx.Unlock()
 		return fmt.Errorf(errStr)
 	}
-	uo := defaultUpdateOptions()
-	for _, option := range options {
-		option(uo)
-	}
-	r.updateChan <- uo
+
 	return nil
 }
 
