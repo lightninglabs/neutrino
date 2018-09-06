@@ -221,11 +221,12 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 
 	// Finally, we'll set the filter header tip so any goroutines waiting
 	// on the condition obtain the correct initial state.
-	_, bm.filterHeaderTip, err = s.RegFilterHeaders.ChainTip()
+	filterHeaderTipHash, filterHeaderTip, err := s.RegFilterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
-	bm.filterHeaderTipHash = header.BlockHash()
+	bm.filterHeaderTipHash = *filterHeaderTipHash
+	bm.filterHeaderTip = filterHeaderTip
 
 	return &bm, nil
 }
@@ -501,8 +502,8 @@ func (b *blockManager) cfHandler() {
 				goodCheckpoints, store, fType,
 			)
 
-			log.Infof("Fully caught up with cfheaders, waiting at " +
-				"tip for new blocks")
+			log.Infof("Fully caught up with cfheaders at height "+
+				"%v, waiting at tip for new blocks", lastHeight)
 
 			// Now that we've been fully caught up to the tip of
 			// the current header chain, we'll wait here for a
