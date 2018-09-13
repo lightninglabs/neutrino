@@ -501,8 +501,8 @@ func (b *blockManager) cfHandler() {
 				goodCheckpoints, store, fType,
 			)
 
-			log.Infof("Fully caught up with cfheaders, waiting at " +
-				"tip for new blocks")
+			log.Infof("Fully caught up with cfheaders at height "+
+				"%v, waiting at tip for new blocks", lastHeight)
 
 			// Now that we've been fully caught up to the tip of
 			// the current header chain, we'll wait here for a
