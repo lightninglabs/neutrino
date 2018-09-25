@@ -238,8 +238,11 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		curHeader wire.BlockHeader
 		curStamp  waddrmgr.BlockStamp
 	)
+
+	// If no start block is specified, start the scan from our current best
+	// block.
 	if ro.startBlock == nil {
-		bs, err := s.BestSnapshot()
+		bs, err := s.BestBlock()
 		if err != nil {
 			return err
 		}
