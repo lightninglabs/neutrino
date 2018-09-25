@@ -200,7 +200,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		// If the end block hash is non-nil, then we'll query the
 		// database to find out the stop height.
 		if (ro.endBlock.Hash != chainhash.Hash{}) {
-			_, height, err := s.BlockHeaders.FetchHeader(&ro.endBlock.Hash)
+			_, height, err := s.BlockHeaders.FetchHeader(
+				&ro.endBlock.Hash,
+			)
 			if err != nil {
 				ro.endBlock.Hash = chainhash.Hash{}
 			} else {
@@ -279,9 +281,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		}
 	}
 
-	s.blockManager.newFilterHeadersMtx.Lock()
+	s.blockManager.newFilterHeadersMtx.RLock()
 	filterHeaderHeight := s.blockManager.filterHeaderTip
-	s.blockManager.newFilterHeadersMtx.Unlock()
+	s.blockManager.newFilterHeadersMtx.RUnlock()
 
 	log.Debugf("Waiting for filter headers (height=%v) to catch up the "+
 		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
@@ -605,7 +607,9 @@ rescanLoop:
 			for {
 				select {
 				case update := <-ro.update:
-					_, err := ro.updateFilter(update, &curStamp, &curHeader)
+					_, err := ro.updateFilter(
+						update, &curStamp, &curHeader,
+					)
 					if err != nil {
 						return err
 					}
