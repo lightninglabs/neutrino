@@ -525,6 +525,9 @@ rescanLoop:
 				// trying to fetch from are in the progress of
 				// a re-org.
 				if blockFilter == nil {
+					// TODO(halseth): this is racy, as
+					// blocks can come in before we
+					// refetch.
 					resetBlockReFetchTimer(
 						header, curStamp.Height,
 					)
