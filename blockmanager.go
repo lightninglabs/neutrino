@@ -881,23 +881,17 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				// last written set of cfheaders.
 				curHeight = checkPointIndex * wire.CFCheckptInterval
 
-				// Break if we've gotten to the end of the
-				// responses or we don't have the next one.
-				if checkPointIndex >= uint32(len(queryResponses)) {
-					break
-				}
-
 				// If we don't yet have the next response, then
 				// we'll break out so we can wait for the peers
 				// to respond with this message.
-				r := queryResponses[checkPointIndex]
-				if r == nil {
+				r, ok := queryResponses[checkPointIndex]
+				if !ok {
 					break
 				}
 
 				// We have another response to write, so delete
 				// it from the cache and write it.
-				queryResponses[checkPointIndex] = nil
+				delete(queryResponses, checkPointIndex)
 
 				log.Debugf("Writing cfheaders at height=%v to "+
 					"next checkpoint", curHeight)
