@@ -330,7 +330,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 			err)
 		return
 	}
-	if b.BlockHeadersSynced() && height < uint32(sp.StartingHeight()) {
+	if height < uint32(sp.StartingHeight()) && b.BlockHeadersSynced() {
 		locator, err := b.server.BlockHeaders.LatestBlockLocator()
 		if err != nil {
 			log.Criticalf("Couldn't retrieve latest block "+
@@ -2296,7 +2296,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if !b.BlockHeadersSynced() || b.server.chainParams.Net == chaincfg.SimNetParams.Net {
+	if b.server.chainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
