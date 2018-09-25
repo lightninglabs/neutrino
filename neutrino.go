@@ -1278,7 +1278,7 @@ func (s *ChainService) Stop() error {
 // IsCurrent lets the caller know whether the chain service's block manager
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
-	return s.blockManager.BlockHeadersSynced()
+	return s.blockManager.IsFullySynced()
 }
 
 // PeerByAddr lets the caller look up a peer address in the service's peer
