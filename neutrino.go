@@ -783,6 +783,24 @@ func (s *ChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
 	return &hash, err
 }
 
+// GetBlockHeader returns the block header for the given block hash, or an
+// error if the hash doesn't exist or is unknown.
+func (s *ChainService) GetBlockHeader(
+	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+	header, _, err := s.BlockHeaders.FetchHeader(blockHash)
+	return header, err
+}
+
+// GetBlockHeight gets the height of a block by its hash. An error is returned
+// if the given block hash is unknown.
+func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
+	_, height, err := s.BlockHeaders.FetchHeader(hash)
+	if err != nil {
+		return 0, err
+	}
+	return int32(height), nil
+}
+
 // BanPeer bans a peer that has already been connected to the server by ip.
 func (s *ChainService) BanPeer(sp *ServerPeer) {
 	s.banPeers <- sp
