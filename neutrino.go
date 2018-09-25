@@ -742,21 +742,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	return &s, nil
 }
 
-// BestSnapshot retrieves the most recent block headers's height and hash. Note
-// that filter headers may not be synced to the header chain yet, and you
-// probably want to use BestBlock.
-func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
-	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-
-	return &waddrmgr.BlockStamp{
-		Height: int32(bestHeight),
-		Hash:   bestHeader.BlockHash(),
-	}, nil
-}
-
 // BestBlock retrieves the most recent block's height and hash where we
 // have both the header and filter header ready.
 func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
