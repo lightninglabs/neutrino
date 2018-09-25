@@ -1698,7 +1698,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		return
 	}
 
-	best, err := b.server.BestSnapshot()
+	_, bestHeight, err := b.server.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Errorf("Failed to get hash and height for the "+
 			"latest block: %s", err)
@@ -1719,7 +1719,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		// equal, it will likely have one soon so it is a reasonable
 		// choice.  It also allows the case where both are at 0 such as
 		// during regression test.
-		if sp.LastBlock() < best.Height {
+		if sp.LastBlock() < int32(bestHeight) {
 			peers.Remove(e)
 			continue
 		}
@@ -1757,15 +1757,15 @@ func (b *blockManager) startSync(peers *list.List) {
 		// If we're still within the range of the set checkpoints, then
 		// we'll use the next checkpoint to guide the set of headers we
 		// fetch, setting our stop hash to the next checkpoint hash.
-		if b.nextCheckpoint != nil && best.Height < b.nextCheckpoint.Height {
+		if b.nextCheckpoint != nil && int32(bestHeight) < b.nextCheckpoint.Height {
 			log.Infof("Downloading headers for blocks %d to "+
-				"%d from peer %s", best.Height+1,
+				"%d from peer %s", bestHeight+1,
 				b.nextCheckpoint.Height, bestPeer.Addr())
 
 			stopHash = b.nextCheckpoint.Hash
 		} else {
 			log.Infof("Fetching set of headers from tip "+
-				"(height=%v) from peer %s", best.Height,
+				"(height=%v) from peer %s", bestHeight,
 				bestPeer.Addr())
 		}
 

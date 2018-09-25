@@ -175,11 +175,12 @@ func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 // newestBlock returns the current best block hash and height using the format
 // required by the configuration for the peer package.
 func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
-	best, err := sp.server.BestSnapshot()
+	bestHeader, bestHeight, err := sp.server.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, 0, err
 	}
-	return &best.Hash, best.Height, nil
+	bestHash := bestHeader.BlockHash()
+	return &bestHash, int32(bestHeight), nil
 }
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
@@ -829,9 +830,13 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
 func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
-	bs, err := s.BestSnapshot()
+	header, headerHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
+	}
+	bs := &waddrmgr.BlockStamp{
+		Height: int32(headerHeight),
+		Hash:   header.BlockHash(),
 	}
 
 	_, regHeight, err := s.RegFilterHeaders.ChainTip()
