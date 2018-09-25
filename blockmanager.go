@@ -1777,6 +1777,31 @@ func (b *blockManager) startSync(peers *list.List) {
 	}
 }
 
+// IsFullySynced returns whether or not the block manager believed it is fully
+// synced to the connected peers, meaning both block headers and filter headers
+// are current.
+func (b *blockManager) IsFullySynced() bool {
+	_, blockHeaderHeight, err := b.server.BlockHeaders.ChainTip()
+	if err != nil {
+		return false
+	}
+
+	_, filterHeaderHeight, err := b.server.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return false
+	}
+
+	// If the block headers and filter headers are not at the same height,
+	// we cannot be fully synced.
+	if blockHeaderHeight != filterHeaderHeight {
+		return false
+	}
+
+	// Block and filter headers being at the same height, return whether
+	// our block headers are synced.
+	return b.BlockHeadersSynced()
+}
+
 // BlockHeadersSynced returns whether or not the block manager believes its
 // block headers are synced with the connected peers.
 func (b *blockManager) BlockHeadersSynced() bool {
