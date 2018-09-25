@@ -619,17 +619,17 @@ rescanLoop:
 				}
 			}
 
+			bestBlock, err := s.BestBlock()
+			if err != nil {
+				return err
+			}
+
 			// Since we're not current, we try to manually advance
-			// the block. We are only interested in blocks that we
-			// already have both filter headers for. If we fail to
-			// find the next filter header, but have the filter
-			// header for this height, then we mark ourselves as
-			// current and follow notifications.
-			nextHeight := uint32(curStamp.Height + 1)
-			haveNextFilter := s.hasFilterHeadersByHeight(
-				nextHeight,
-			)
-			if !haveNextFilter {
+			// the block. If the next height is above the best
+			// height known to the chain service, then we mark
+			// ourselves as current and follow notifications.
+			nextHeight := curStamp.Height + 1
+			if nextHeight > bestBlock.Height {
 				log.Debugf("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
@@ -661,12 +661,12 @@ rescanLoop:
 				continue rescanLoop
 			}
 
-			// If we have the filter for both this height and the
-			// next, then we'll fetch the next block and send a
+			// If the next height is known to the chain service,
+			// then we'll fetch the next block and send a
 			// notification, maybe also scanning the filters for
 			// the block.
 			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				nextHeight,
+				uint32(nextHeight),
 			)
 			if err != nil {
 				return err
