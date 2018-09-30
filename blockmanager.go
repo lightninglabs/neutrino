@@ -123,14 +123,14 @@ type blockManager struct {
 	// switch over.
 	newHeadersSignal *sync.Cond
 
-	// filterHeaderTip will be set to the current filter header tip at all
-	// times.  Callers MUST hold the lock below each time they read/write
-	// from this field.
+	// filterHeaderTip will be set to the height of the current filter
+	// header tip at all times.  Callers MUST hold the lock below each time
+	// they read/write from this field.
 	filterHeaderTip uint32
 
 	// filterHeaderTipHash will be set to the current block hash of the
-	// fitler header tip at all times.  Callers MUST hold the lock below
-	// each time they read/write from this field.
+	// block at height filterHeaderTip at all times.  Callers MUST hold the
+	// lock below each time they read/write from this field.
 	filterHeaderTipHash chainhash.Hash
 
 	// newFilterHeadersMtx is the mutex that should be held when
@@ -225,7 +225,14 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	bm.filterHeaderTipHash = header.BlockHash()
+
+	// We must also ensure the the filter header tip hash is set to the
+	// block hash at the filter tip height.
+	fh, err := s.BlockHeaders.FetchHeaderByHeight(bm.filterHeaderTip)
+	if err != nil {
+		return nil, err
+	}
+	bm.filterHeaderTipHash = fh.BlockHash()
 
 	return &bm, nil
 }
