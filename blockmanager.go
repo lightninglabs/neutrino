@@ -437,132 +437,101 @@ func (b *blockManager) cfHandler() {
 	log.Infof("Starting cfheaders sync at block_height=%v, hash=%v", lastHeight,
 		lastHeader.BlockHash())
 
-	// We'll sync the headers and checkpoints for all filter types in
-	// parallel, by using a goroutine for each filter type.
-	var wg sync.WaitGroup
-	wg.Add(len(filterTypes))
-	for fType, storeLookup := range filterTypes {
-		// Launch a goroutine to get all of the filter headers for this
-		// filter type.
-		go func(fType wire.FilterType, storeLookup func(
-			s *ChainService) *headerfs.FilterHeaderStore) {
+	fType := wire.GCSFilterRegular
+	store := b.server.RegFilterHeaders
 
-			defer wg.Done()
+	log.Infof("Starting cfheaders sync for filter_type=%v", fType)
 
-			log.Infof("Starting cfheaders sync for "+
-				"filter_type=%v", fType)
+	// If we have less than a full checkpoint's worth of blocks, such as on
+	// simnet, we don't really need to request checkpoints as we'll get 0
+	// from all peers. We can go on and just request the cfheaders.
+	var goodCheckpoints []*chainhash.Hash
+	for len(goodCheckpoints) == 0 && lastHeight >= wire.CFCheckptInterval {
 
-			var (
-				goodCheckpoints []*chainhash.Hash
-				err             error
-			)
+		// Quit if requested.
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
 
-			// Get the header store for this filter type.
-			store := storeLookup(b.server)
+		// Try to get all checkpoints from current peers.
+		allCheckpoints := b.getCheckpts(&lastHash, fType)
+		if len(allCheckpoints) == 0 {
+			log.Warnf("Unable to fetch set of " +
+				"candidate checkpoints, trying again...")
 
-			// We're current as we received on startCFHeaderSync.
-			// If we have less than a full checkpoint's worth of
-			// blocks, such as on simnet, we don't really need to
-			// request checkpoints as we'll get 0 from all peers.
-			// We can go on and just request the cfheaders.
-			for len(goodCheckpoints) == 0 &&
-				lastHeight >= wire.CFCheckptInterval {
+			time.Sleep(QueryTimeout)
+			continue
+		}
 
-				// Quit if requested.
-				select {
-				case <-b.quit:
-					return
-				default:
-				}
-
-				// Try to get all checkpoints from current
-				// peers.
-				allCheckpoints := b.getCheckpts(&lastHash, fType)
-				if len(allCheckpoints) == 0 {
-					log.Warnf("Unable to fetch set of " +
-						"candidate checkpoints, trying again...")
-
-					time.Sleep(QueryTimeout)
-					continue
-				}
-
-				// See if we can detect which checkpoint list
-				// is correct. If not, we will cycle again.
-				goodCheckpoints, err = b.resolveConflict(
-					allCheckpoints, store, fType,
-				)
-				if err != nil {
-					log.Debugf("got error attempting "+
-						"to determine correct cfheader"+
-						" checkpoints: %v, trying "+
-						"again", err)
-				}
-				if len(goodCheckpoints) == 0 {
-					time.Sleep(QueryTimeout)
-				}
-			}
-
-			// Get all the headers up to the last known good
-			// checkpoint.
-			b.getCheckpointedCFHeaders(
-				goodCheckpoints, store, fType,
-			)
-
-			log.Infof("Fully caught up with cfheaders at height "+
-				"%v, waiting at tip for new blocks", lastHeight)
-
-			// Now that we've been fully caught up to the tip of
-			// the current header chain, we'll wait here for a
-			// signal that more blocks have been connected. If this
-			// happens then we'll do another round to fetch the new
-			// set of filter new  set of filter headers
-			for {
-				// We'll wait until the filter header tip and
-				// the header tip are mismatched.
-				//
-				// NOTE: We can grab the filterHeaderTipHash
-				// here without a lock, as this is the only
-				// goroutine that can modify this value.
-				b.newHeadersSignal.L.Lock()
-				for b.filterHeaderTipHash == b.headerTipHash {
-					// We'll wait here until we're woken up
-					// by the broadcast signal.
-					b.newHeadersSignal.Wait()
-
-					// Before we proceed, we'll check if we
-					// need to exit at all
-					select {
-					case <-b.quit:
-						b.newHeadersSignal.L.Unlock()
-						return
-					default:
-					}
-				}
-
-				b.newHeadersSignal.L.Unlock()
-
-				// At this point, we know that there're a set
-				// of new filter headers to fetch, so we'll
-				// grab them now.
-				if err = b.getUncheckpointedCFHeaders(
-					store, fType,
-				); err != nil {
-					log.Debugf("couldn't get "+
-						"uncheckpointed headers for "+
-						"%v: %v", fType, err)
-				}
-
-				// Quit if requested.
-				select {
-				case <-b.quit:
-					return
-				default:
-				}
-			}
-
-		}(fType, storeLookup)
+		// See if we can detect which checkpoint list is correct. If
+		// not, we will cycle again.
+		goodCheckpoints, err = b.resolveConflict(
+			allCheckpoints, store, fType,
+		)
+		if err != nil {
+			log.Debugf("got error attempting to determine correct "+
+				"cfheader checkpoints: %v, trying again", err)
+		}
+		if len(goodCheckpoints) == 0 {
+			time.Sleep(QueryTimeout)
+		}
 	}
-	wg.Wait()
+
+	// Get all the headers up to the last known good checkpoint.
+	b.getCheckpointedCFHeaders(
+		goodCheckpoints, store, fType,
+	)
+
+	log.Infof("Fully caught up with cfheaders at height %v, waiting at "+
+		"tip for new blocks", lastHeight)
+
+	// Now that we've been fully caught up to the tip of the current header
+	// chain, we'll wait here for a signal that more blocks have been
+	// connected. If this happens then we'll do another round to fetch the
+	// new set of filter new set of filter headers
+	for {
+		// We'll wait until the filter header tip and the header tip
+		// are mismatched.
+		//
+		// NOTE: We can grab the filterHeaderTipHash here without a
+		// lock, as this is the only goroutine that can modify this
+		// value.
+		b.newHeadersSignal.L.Lock()
+		for b.filterHeaderTipHash == b.headerTipHash {
+			// We'll wait here until we're woken up by the
+			// broadcast signal.
+			b.newHeadersSignal.Wait()
+
+			// Before we proceed, we'll check if we need to exit at
+			// all.
+			select {
+			case <-b.quit:
+				b.newHeadersSignal.L.Unlock()
+				return
+			default:
+			}
+		}
+
+		b.newHeadersSignal.L.Unlock()
+
+		// At this point, we know that there're a set of new filter
+		// headers to fetch, so we'll grab them now.
+		if err = b.getUncheckpointedCFHeaders(
+			store, fType,
+		); err != nil {
+			log.Debugf("couldn't get uncheckpointed headers for "+
+				"%v: %v", fType, err)
+		}
+
+		// Quit if requested.
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
+	}
 }
 
 // getUncheckpointedCFHeaders gets the next batch of cfheaders from the
