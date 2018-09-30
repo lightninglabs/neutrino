@@ -609,6 +609,8 @@ waitForHeaders:
 		); err != nil {
 			log.Debugf("couldn't get uncheckpointed headers for "+
 				"%v: %v", fType, err)
+
+			time.Sleep(QueryTimeout)
 		}
 
 		// Quit if requested.
