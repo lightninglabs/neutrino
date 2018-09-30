@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"container/list"
 	"fmt"
+	"math"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -402,6 +403,31 @@ func (b *blockManager) cfHandler() {
 		b.wg.Done()
 	}()
 
+	var (
+		// allCFCheckpoints is a map from our peers to the list of
+		// filter checkpoints they respond to us with. We'll attempt to
+		// get filter checkpoints immediately up to the latest block
+		// checkpoint we've got stored to avoid doing unnecessary
+		// fetches as the block headers are catching up.
+		allCFCheckpoints map[string][]*chainhash.Hash
+
+		// lastCp will point to the latest block checkpoint we have for
+		// the active chain, if any.
+		lastCp chaincfg.Checkpoint
+
+		// blockCheckpoints is the list of block checkpoints for the
+		// active chain.
+		blockCheckpoints = b.server.chainParams.Checkpoints
+	)
+
+	// Set the variable to the latest block checkpoint if we have any for
+	// this chain. Otherwise this block checkpoint will just stay at height
+	// 0, which will prompt us to look at the block headers to fetch
+	// checkpoints below.
+	if len(blockCheckpoints) > 0 {
+		lastCp = blockCheckpoints[len(blockCheckpoints)-1]
+	}
+
 waitForHeaders:
 	// We'll wait until the main header sync is either finished or the
 	// filter headers are lagging at least a checkpoint interval behind the
@@ -463,20 +489,55 @@ waitForHeaders:
 		default:
 		}
 
-		// Try to get all checkpoints from current peers.
-		allCheckpoints := b.getCheckpts(&lastHash, fType)
-		if len(allCheckpoints) == 0 {
-			log.Warnf("Unable to fetch set of " +
-				"candidate checkpoints, trying again...")
+		// If the height now exceeds the height at which we fetched the
+		// checkpoints last time, we must query our peers again.
+		if minCheckpointHeight(allCFCheckpoints) < lastHeight {
+			// Start by getting the filter checkpoints up to the
+			// latest block checkpoint we have for this chain. We
+			// do this so we don't have to fetch all filter
+			// checkpoints each time our block header chain
+			// advances. If our block header chain has already
+			// advanced past the last block checkpoint, we must
+			// fetch filter checkpoints to our last header hash.
+			// TODO(halseth): fetch filter checkpoints up to the
+			// best block of the connected peers.
+			bestHeight := uint32(lastCp.Height)
+			bestHash := *lastCp.Hash
+			if bestHeight < lastHeight {
+				bestHeight = lastHeight
+				bestHash = lastHash
+			}
 
-			time.Sleep(QueryTimeout)
-			continue
+			log.Debugf("Getting filter checkpoints up to "+
+				"height=%v, hash=%v", bestHeight, bestHash)
+			allCFCheckpoints = b.getCheckpts(&bestHash, fType)
+			if len(allCFCheckpoints) == 0 {
+				log.Warnf("Unable to fetch set of " +
+					"candidate checkpoints, trying again...")
+
+				time.Sleep(QueryTimeout)
+				continue
+			}
+		}
+
+		// Cap the received checkpoints at the current height, as we
+		// can only verify checkpoints up to the height we have block
+		// headers for.
+		checkpoints := make(map[string][]*chainhash.Hash)
+		for p, cps := range allCFCheckpoints {
+			for i, cp := range cps {
+				height := uint32(i+1) * wire.CFCheckptInterval
+				if height > lastHeight {
+					break
+				}
+				checkpoints[p] = append(checkpoints[p], cp)
+			}
 		}
 
 		// See if we can detect which checkpoint list is correct. If
 		// not, we will cycle again.
 		goodCheckpoints, err = b.resolveConflict(
-			allCheckpoints, store, fType,
+			checkpoints, store, fType,
 		)
 		if err != nil {
 			log.Debugf("got error attempting to determine correct "+
@@ -1012,6 +1073,25 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, nil
+}
+
+// minCheckpointHeight returns the height of the last filter checkpoint for the
+// shortest checkpoint list among the given lists.
+func minCheckpointHeight(checkpoints map[string][]*chainhash.Hash) uint32 {
+	// If the map is empty, return 0 immediately.
+	if len(checkpoints) == 0 {
+		return 0
+	}
+
+	// Otherwise return the length of the shortest one.
+	minHeight := uint32(math.MaxUint32)
+	for _, cps := range checkpoints {
+		height := uint32(len(cps) * wire.CFCheckptInterval)
+		if height < minHeight {
+			minHeight = height
+		}
+	}
+	return minHeight
 }
 
 // verifyHeaderCheckpoint verifies that a CFHeaders message matches the passed
