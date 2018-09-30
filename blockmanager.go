@@ -402,15 +402,20 @@ func (b *blockManager) cfHandler() {
 		b.wg.Done()
 	}()
 
-	log.Infof("Waiting for block headers to sync, then will start " +
-		"cfheaders sync...")
+waitForHeaders:
+	// We'll wait until the main header sync is either finished or the
+	// filter headers are lagging at least a checkpoint interval behind the
+	// block headers, before we actually start to sync the set of
+	// cfheaders. We do this to speed up the sync, as the check pointed
+	// sync is faster, than fetching each header from each peer during the
+	// normal "at tip" syncing.
+	log.Infof("Waiting for more block headers, then will start "+
+		"cfheaders sync from height %v...", b.filterHeaderTip)
 
-	// We'll wait until the main header sync is mostly finished before we
-	// actually start to sync the set of cfheaders. We do this to speed up
-	// the sync, as the check pointed sync is faster, then fetching each
-	// header from each peer during the normal "at tip" syncing.
+	// NOTE: We can grab the filterHeaderTip here without a lock, as this
+	// is the only goroutine that can modify this value.
 	b.newHeadersSignal.L.Lock()
-	for !b.IsCurrent() {
+	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip || b.IsCurrent()) {
 		b.newHeadersSignal.Wait()
 
 		// While we're awake, we'll quickly check to see if we need to
@@ -425,8 +430,9 @@ func (b *blockManager) cfHandler() {
 	}
 	b.newHeadersSignal.L.Unlock()
 
-	// Now that we know the header sync is mostly finished, we'll grab the
-	// current chain tip so we can base our header sync off of that.
+	// Now that the block headers are finished or ahead of the filter
+	// headers, we'll grab the current chain tip so we can base our filter
+	// header sync off of that.
 	lastHeader, lastHeight, err := b.server.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Critical(err)
@@ -434,7 +440,9 @@ func (b *blockManager) cfHandler() {
 	}
 	lastHash := lastHeader.BlockHash()
 
-	log.Infof("Starting cfheaders sync at block_height=%v, hash=%v", lastHeight,
+	log.Infof("Starting cfheaders sync from (block_height=%v, "+
+		"block_hash=%v) to (block_height=%v, block_hash=%v)",
+		b.filterHeaderTip, b.filterHeaderTipHash, lastHeight,
 		lastHeader.BlockHash())
 
 	fType := wire.GCSFilterRegular
@@ -484,8 +492,25 @@ func (b *blockManager) cfHandler() {
 		goodCheckpoints, store, fType,
 	)
 
-	log.Infof("Fully caught up with cfheaders at height %v, waiting at "+
-		"tip for new blocks", lastHeight)
+	// Now we check the headers again. If the block headers are not yet
+	// current, then we go back to the loop waiting for them to finish.
+	if !b.IsCurrent() {
+		goto waitForHeaders
+	}
+
+	// If block headers are current, but the filter header tip is still
+	// lagging more than a checkpoint interval behind the block header tip,
+	// we also go back to the loop to utilize the faster check pointed
+	// fetching.
+	b.newHeadersMtx.RLock()
+	if b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip {
+		b.newHeadersMtx.RUnlock()
+		goto waitForHeaders
+	}
+	b.newHeadersMtx.RUnlock()
+
+	log.Infof("Fully caught up with cfheaders at height "+
+		"%v, waiting at tip for new blocks", lastHeight)
 
 	// Now that we've been fully caught up to the tip of the current header
 	// chain, we'll wait here for a signal that more blocks have been
