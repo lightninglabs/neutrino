@@ -515,7 +515,11 @@ waitForHeaders:
 				log.Warnf("Unable to fetch set of " +
 					"candidate checkpoints, trying again...")
 
-				time.Sleep(QueryTimeout)
+				select {
+				case <-time.After(QueryTimeout):
+				case <-b.quit:
+					return
+				}
 				continue
 			}
 		}
@@ -544,7 +548,11 @@ waitForHeaders:
 				"cfheader checkpoints: %v, trying again", err)
 		}
 		if len(goodCheckpoints) == 0 {
-			time.Sleep(QueryTimeout)
+			select {
+			case <-time.After(QueryTimeout):
+			case <-b.quit:
+				return
+			}
 		}
 	}
 
@@ -610,7 +618,11 @@ waitForHeaders:
 			log.Debugf("couldn't get uncheckpointed headers for "+
 				"%v: %v", fType, err)
 
-			time.Sleep(QueryTimeout)
+			select {
+			case <-time.After(QueryTimeout):
+			case <-b.quit:
+				return
+			}
 		}
 
 		// Quit if requested.
@@ -805,9 +817,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			select {
 			case <-b.quit:
 				return
-			default:
+			case <-time.After(QueryTimeout):
 				currentInterval--
-				time.Sleep(QueryTimeout)
 				continue
 			}
 		}
