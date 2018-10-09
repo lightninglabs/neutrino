@@ -840,7 +840,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// With the set of messages constructed, we'll now request the batch
 	// all at once. This message will distributed the header requests
 	// amongst all active peers, effectively sharding each query
-	// dynamically.
+	// dynamically. Since the filter headers must be written in sequence,
+	// we define a mutex to make sure we handle only one response at a
+	// time.
+	var mtx sync.Mutex
 	b.server.queryBatch(
 		queryMsgs,
 
@@ -890,6 +893,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// before we write them; otherwise, we cache them if
 			// they're too far ahead, or discard them if we don't
 			// need them.
+
+			// Lock the mutex to ensure we have exclusive access to
+			// the shared variables.
+			mtx.Lock()
+			defer mtx.Unlock()
 
 			// Find the first and last height for the blocks
 			// represented by this message.
