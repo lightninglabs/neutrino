@@ -765,7 +765,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic("getting chaintip from store")
+		panic(fmt.Sprintf("failed getting chaintip from filter "+
+			"store: %v", err))
 	}
 
 	initialFilterHeader := curHeader
@@ -813,14 +814,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			// Try to recover this.
-			select {
-			case <-b.quit:
-				return
-			case <-time.After(QueryTimeout):
-				currentInterval--
-				continue
-			}
+			panic(fmt.Sprintf("failed getting block header at "+
+				"height %v: %v", endHeightRange, err))
 		}
 		stopHash := stopHeader.BlockHash()
 
