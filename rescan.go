@@ -668,7 +668,7 @@ rescanLoop:
 			if !scanning {
 				scanning = ro.startTime.Before(curHeader.Timestamp)
 			}
-			err = s.notifyBlock(ro, &curHeader, &curStamp, scanning)
+			err = s.notifyBlock(ro, curHeader, curStamp, scanning)
 			if err != nil {
 				return err
 			}
@@ -678,7 +678,7 @@ rescanLoop:
 
 // notifyBlock calls appropriate listeners based on the block filter.
 func (s *ChainService) notifyBlock(ro *rescanOptions,
-	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	curHeader wire.BlockHeader, curStamp waddrmgr.BlockStamp,
 	scanning bool) error {
 
 	// Find relevant transactions based on watch list. If scanning is
@@ -694,7 +694,7 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 		}
 
 		if matched {
-			relevantTxs, err = s.extractBlockMatches(ro, curStamp)
+			relevantTxs, err = s.extractBlockMatches(ro, &curStamp)
 			if err != nil {
 				return err
 			}
@@ -702,7 +702,7 @@ func (s *ChainService) notifyBlock(ro *rescanOptions,
 	}
 
 	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
+		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, &curHeader,
 			relevantTxs)
 	}
 
