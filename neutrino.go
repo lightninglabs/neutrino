@@ -175,11 +175,12 @@ func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 // newestBlock returns the current best block hash and height using the format
 // required by the configuration for the peer package.
 func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
-	best, err := sp.server.BestSnapshot()
+	bestHeader, bestHeight, err := sp.server.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, 0, err
 	}
-	return &best.Hash, best.Height, nil
+	bestHash := bestHeader.BlockHash()
+	return &bestHash, int32(bestHeight), nil
 }
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
@@ -732,7 +733,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
-		BestSnapshot:       s.BestSnapshot,
+		BestSnapshot:       s.BestBlock,
 		GetBlockHash:       s.GetBlockHash,
 		BlockFilterMatches: s.blockFilterMatches,
 		GetBlock:           s.GetBlock,
@@ -741,11 +742,29 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	return &s, nil
 }
 
-// BestSnapshot retrieves the most recent block's height and hash.
-func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
+// BestBlock retrieves the most recent block's height and hash where we
+// have both the header and filter header ready.
+func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
+	}
+
+	_, filterHeight, err := s.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter headers might lag behind block headers, so we can can fetch a
+	// previous block header if the filter headers are not caught up.
+	if filterHeight < bestHeight {
+		bestHeight = filterHeight
+		bestHeader, err = s.BlockHeaders.FetchHeaderByHeight(
+			bestHeight,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &waddrmgr.BlockStamp{
@@ -762,6 +781,24 @@ func (s *ChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
 	}
 	hash := header.BlockHash()
 	return &hash, err
+}
+
+// GetBlockHeader returns the block header for the given block hash, or an
+// error if the hash doesn't exist or is unknown.
+func (s *ChainService) GetBlockHeader(
+	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+	header, _, err := s.BlockHeaders.FetchHeader(blockHash)
+	return header, err
+}
+
+// GetBlockHeight gets the height of a block by its hash. An error is returned
+// if the given block hash is unknown.
+func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
+	_, height, err := s.BlockHeaders.FetchHeader(hash)
+	if err != nil {
+		return 0, err
+	}
+	return int32(height), nil
 }
 
 // BanPeer bans a peer that has already been connected to the server by ip.
@@ -796,9 +833,13 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
 func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
-	bs, err := s.BestSnapshot()
+	header, headerHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
+	}
+	bs := &waddrmgr.BlockStamp{
+		Height: int32(headerHeight),
+		Hash:   header.BlockHash(),
 	}
 
 	_, regHeight, err := s.RegFilterHeaders.ChainTip()
@@ -1255,7 +1296,7 @@ func (s *ChainService) Stop() error {
 // IsCurrent lets the caller know whether the chain service's block manager
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
-	return s.blockManager.IsCurrent()
+	return s.blockManager.IsFullySynced()
 }
 
 // PeerByAddr lets the caller look up a peer address in the service's peer

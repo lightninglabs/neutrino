@@ -330,7 +330,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 			err)
 		return
 	}
-	if b.IsCurrent() && height < uint32(sp.StartingHeight()) {
+	if height < uint32(sp.StartingHeight()) && b.BlockHeadersSynced() {
 		locator, err := b.server.BlockHeaders.LatestBlockLocator()
 		if err != nil {
 			log.Criticalf("Couldn't retrieve latest block "+
@@ -441,7 +441,7 @@ waitForHeaders:
 	// NOTE: We can grab the filterHeaderTip here without a lock, as this
 	// is the only goroutine that can modify this value.
 	b.newHeadersSignal.L.Lock()
-	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip || b.IsCurrent()) {
+	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip || b.BlockHeadersSynced()) {
 		b.newHeadersSignal.Wait()
 
 		// While we're awake, we'll quickly check to see if we need to
@@ -563,7 +563,7 @@ waitForHeaders:
 
 	// Now we check the headers again. If the block headers are not yet
 	// current, then we go back to the loop waiting for them to finish.
-	if !b.IsCurrent() {
+	if !b.BlockHeadersSynced() {
 		goto waitForHeaders
 	}
 
@@ -1698,7 +1698,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		return
 	}
 
-	best, err := b.server.BestSnapshot()
+	_, bestHeight, err := b.server.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Errorf("Failed to get hash and height for the "+
 			"latest block: %s", err)
@@ -1719,7 +1719,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		// equal, it will likely have one soon so it is a reasonable
 		// choice.  It also allows the case where both are at 0 such as
 		// during regression test.
-		if sp.LastBlock() < best.Height {
+		if sp.LastBlock() < int32(bestHeight) {
 			peers.Remove(e)
 			continue
 		}
@@ -1757,15 +1757,15 @@ func (b *blockManager) startSync(peers *list.List) {
 		// If we're still within the range of the set checkpoints, then
 		// we'll use the next checkpoint to guide the set of headers we
 		// fetch, setting our stop hash to the next checkpoint hash.
-		if b.nextCheckpoint != nil && best.Height < b.nextCheckpoint.Height {
+		if b.nextCheckpoint != nil && int32(bestHeight) < b.nextCheckpoint.Height {
 			log.Infof("Downloading headers for blocks %d to "+
-				"%d from peer %s", best.Height+1,
+				"%d from peer %s", bestHeight+1,
 				b.nextCheckpoint.Height, bestPeer.Addr())
 
 			stopHash = b.nextCheckpoint.Hash
 		} else {
 			log.Infof("Fetching set of headers from tip "+
-				"(height=%v) from peer %s", best.Height,
+				"(height=%v) from peer %s", bestHeight,
 				bestPeer.Addr())
 		}
 
@@ -1777,9 +1777,34 @@ func (b *blockManager) startSync(peers *list.List) {
 	}
 }
 
-// IsCurrent returns whether or not the block manager believes it is synced
-// with the connected peers.
-func (b *blockManager) IsCurrent() bool {
+// IsFullySynced returns whether or not the block manager believed it is fully
+// synced to the connected peers, meaning both block headers and filter headers
+// are current.
+func (b *blockManager) IsFullySynced() bool {
+	_, blockHeaderHeight, err := b.server.BlockHeaders.ChainTip()
+	if err != nil {
+		return false
+	}
+
+	_, filterHeaderHeight, err := b.server.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return false
+	}
+
+	// If the block headers and filter headers are not at the same height,
+	// we cannot be fully synced.
+	if blockHeaderHeight != filterHeaderHeight {
+		return false
+	}
+
+	// Block and filter headers being at the same height, return whether
+	// our block headers are synced.
+	return b.BlockHeadersSynced()
+}
+
+// BlockHeadersSynced returns whether or not the block manager believes its
+// block headers are synced with the connected peers.
+func (b *blockManager) BlockHeadersSynced() bool {
 	b.syncPeerMutex.RLock()
 	defer b.syncPeerMutex.RUnlock()
 
@@ -1825,16 +1850,6 @@ func (b *blockManager) IsCurrent() bool {
 	return b.syncPeer.LastBlock() >= b.syncPeer.StartingHeight()
 }
 
-// FilterHeaderTip returns the current height of the filter header chain tip.
-//
-// NOTE: This method is safe for concurrent access.
-func (b *blockManager) FilterHeaderTip() uint32 {
-	b.newFilterHeadersMtx.RLock()
-	defer b.newFilterHeadersMtx.RUnlock()
-
-	return b.filterHeaderTip
-}
-
 // SynchronizeFilterHeaders allows the caller to execute a function closure
 // that depends on synchronization with the current set of filter headers. This
 // allows the caller to execute an action that depends on the current filter
@@ -1846,16 +1861,6 @@ func (b *blockManager) SynchronizeFilterHeaders(f func(uint32) error) error {
 	defer b.newFilterHeadersMtx.RUnlock()
 
 	return f(b.filterHeaderTip)
-}
-
-// BlockHeaderTip returns the current height of the block header chain tip.
-//
-// NOTE: This method is safe for concurrent access.
-func (b *blockManager) BlockHeaderTip() uint32 {
-	b.newHeadersMtx.RLock()
-	defer b.newHeadersMtx.RUnlock()
-
-	return b.headerTip
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.
@@ -1892,19 +1897,19 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	// announced block for this peer. We'll use this information later to
 	// update the heights of peers based on blocks we've accepted that they
 	// previously announced.
-	if lastBlock != -1 && (imsg.peer != b.SyncPeer() || b.IsCurrent()) {
+	if lastBlock != -1 && (imsg.peer != b.SyncPeer() || b.BlockHeadersSynced()) {
 		imsg.peer.UpdateLastAnnouncedBlock(&invVects[lastBlock].Hash)
 	}
 
 	// Ignore invs from peers that aren't the sync if we are not current.
 	// Helps prevent dealing with orphans.
-	if imsg.peer != b.SyncPeer() && !b.IsCurrent() {
+	if imsg.peer != b.SyncPeer() && !b.BlockHeadersSynced() {
 		return
 	}
 
 	// If our chain is current and a peer announces a block we already
 	// know of, then update their current block height.
-	if lastBlock != -1 && b.IsCurrent() {
+	if lastBlock != -1 && b.BlockHeadersSynced() {
 		height, err := b.server.BlockHeaders.HeightFromHash(&invVects[lastBlock].Hash)
 		if err == nil {
 			imsg.peer.UpdateLastBlockHeight(int32(height))
@@ -1920,7 +1925,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 
 	// If this is the sync peer or we're current, get the headers for the
 	// announced blocks and update the last announced block.
-	if lastBlock != -1 && (imsg.peer == b.SyncPeer() || b.IsCurrent()) {
+	if lastBlock != -1 && (imsg.peer == b.SyncPeer() || b.BlockHeadersSynced()) {
 		lastEl := b.headerList.Back()
 		var lastHash chainhash.Hash
 		if lastEl != nil {
@@ -2065,7 +2070,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// reorg, in which case we'll either change our sync
 			// peer or disconnect the peer that sent us these bad
 			// headers.
-			if hmsg.peer != b.SyncPeer() && !b.IsCurrent() {
+			if hmsg.peer != b.SyncPeer() && !b.BlockHeadersSynced() {
 				return
 			}
 
@@ -2291,7 +2296,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if !b.IsCurrent() || b.server.chainParams.Net == chaincfg.SimNetParams.Net {
+	if b.server.chainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {

@@ -200,7 +200,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		// If the end block hash is non-nil, then we'll query the
 		// database to find out the stop height.
 		if (ro.endBlock.Hash != chainhash.Hash{}) {
-			_, height, err := s.BlockHeaders.FetchHeader(&ro.endBlock.Hash)
+			_, height, err := s.BlockHeaders.FetchHeader(
+				&ro.endBlock.Hash,
+			)
 			if err != nil {
 				ro.endBlock.Hash = chainhash.Hash{}
 			} else {
@@ -238,8 +240,11 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		curHeader wire.BlockHeader
 		curStamp  waddrmgr.BlockStamp
 	)
+
+	// If no start block is specified, start the scan from our current best
+	// block.
 	if ro.startBlock == nil {
-		bs, err := s.BestSnapshot()
+		bs, err := s.BestBlock()
 		if err != nil {
 			return err
 		}
@@ -276,9 +281,9 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		}
 	}
 
-	s.blockManager.newFilterHeadersMtx.Lock()
+	s.blockManager.newFilterHeadersMtx.RLock()
 	filterHeaderHeight := s.blockManager.filterHeaderTip
-	s.blockManager.newFilterHeadersMtx.Unlock()
+	s.blockManager.newFilterHeadersMtx.RUnlock()
 
 	log.Debugf("Waiting for filter headers (height=%v) to catch up the "+
 		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
@@ -471,20 +476,6 @@ rescanLoop:
 					continue rescanLoop
 				}
 
-				// Do not process block until we have all
-				// filter headers. Don't worry, the block will
-				// get re-queued every time there is a new
-				// filter available. However, if it's a
-				// duplicate block notification, then we can
-				// re-process it without any issues.
-				if header.BlockHash() != curStamp.Hash &&
-					!s.hasFilterHeadersByHeight(uint32(curStamp.Height+1)) {
-					log.Warnf("Missing filter header for "+
-						"height=%v, skipping",
-						curStamp.Height+1)
-					continue rescanLoop
-				}
-
 				// As this could be a re-try, we'll ensure that
 				// we don't incorrectly increment our current
 				// time stamp.
@@ -494,8 +485,8 @@ rescanLoop:
 					curStamp.Height++
 				}
 
-				log.Tracef("Rescan got block %d (%s)", curStamp.Height,
-					curStamp.Hash)
+				log.Tracef("Rescan got block %d (%s)",
+					curStamp.Height, curStamp.Hash)
 
 				// We're only scanning if the header is beyond
 				// the horizon of our start time.
@@ -534,6 +525,9 @@ rescanLoop:
 				// trying to fetch from are in the progress of
 				// a re-org.
 				if blockFilter == nil {
+					// TODO(halseth): this is racy, as
+					// blocks can come in before we
+					// refetch.
 					resetBlockReFetchTimer(
 						header, curStamp.Height,
 					)
@@ -602,7 +596,9 @@ rescanLoop:
 			for {
 				select {
 				case update := <-ro.update:
-					_, err := ro.updateFilter(update, &curStamp, &curHeader)
+					_, err := ro.updateFilter(
+						update, &curStamp, &curHeader,
+					)
 					if err != nil {
 						return err
 					}
@@ -612,17 +608,17 @@ rescanLoop:
 				}
 			}
 
+			bestBlock, err := s.BestBlock()
+			if err != nil {
+				return err
+			}
+
 			// Since we're not current, we try to manually advance
-			// the block. We are only interested in blocks that we
-			// already have both filter headers for. If we fail to
-			// find the next filter header, but have the filter
-			// header for this height, then we mark ourselves as
-			// current and follow notifications.
-			nextHeight := uint32(curStamp.Height + 1)
-			haveNextFilter := s.hasFilterHeadersByHeight(
-				nextHeight,
-			)
-			if !haveNextFilter {
+			// the block. If the next height is above the best
+			// height known to the chain service, then we mark
+			// ourselves as current and follow notifications.
+			nextHeight := curStamp.Height + 1
+			if nextHeight > bestBlock.Height {
 				log.Debugf("Rescan became current at %d (%s), "+
 					"subscribing to block notifications",
 					curStamp.Height, curStamp.Hash)
@@ -654,12 +650,12 @@ rescanLoop:
 				continue rescanLoop
 			}
 
-			// If we have the filter for both this height and the
-			// next, then we'll fetch the next block and send a
+			// If the next height is known to the chain service,
+			// then we'll fetch the next block and send a
 			// notification, maybe also scanning the filters for
 			// the block.
 			header, err := s.BlockHeaders.FetchHeaderByHeight(
-				nextHeight,
+				uint32(nextHeight),
 			)
 			if err != nil {
 				return err
@@ -877,13 +873,6 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	// meantime, we return false if the basic filter didn't match our
 	// watch list.
 	return false, nil
-}
-
-// hasFilterHeadersByHeight checks whether both the basic and extended filter
-// headers for a particular height are known.
-func (s *ChainService) hasFilterHeadersByHeight(height uint32) bool {
-	_, regFetchErr := s.RegFilterHeaders.FetchHeaderByHeight(height)
-	return regFetchErr == nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
