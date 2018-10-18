@@ -765,7 +765,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic("getting chaintip from store")
+		panic(fmt.Sprintf("failed getting chaintip from filter "+
+			"store: %v", err))
 	}
 
 	initialFilterHeader := curHeader
@@ -813,14 +814,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			// Try to recover this.
-			select {
-			case <-b.quit:
-				return
-			case <-time.After(QueryTimeout):
-				currentInterval--
-				continue
-			}
+			panic(fmt.Sprintf("failed getting block header at "+
+				"height %v: %v", endHeightRange, err))
 		}
 		stopHash := stopHeader.BlockHash()
 
@@ -845,7 +840,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// With the set of messages constructed, we'll now request the batch
 	// all at once. This message will distributed the header requests
 	// amongst all active peers, effectively sharding each query
-	// dynamically.
+	// dynamically. Since the filter headers must be written in sequence,
+	// we define a mutex to make sure we handle only one response at a
+	// time.
+	var mtx sync.Mutex
 	b.server.queryBatch(
 		queryMsgs,
 
@@ -895,6 +893,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// before we write them; otherwise, we cache them if
 			// they're too far ahead, or discard them if we don't
 			// need them.
+
+			// Lock the mutex to ensure we have exclusive access to
+			// the shared variables.
+			mtx.Lock()
+			defer mtx.Unlock()
 
 			// Find the first and last height for the blocks
 			// represented by this message.
