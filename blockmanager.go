@@ -765,7 +765,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic("getting chaintip from store")
+		panic(fmt.Sprintf("failed getting chaintip from filter "+
+			"store: %v", err))
 	}
 
 	initialFilterHeader := curHeader
@@ -813,14 +814,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			// Try to recover this.
-			select {
-			case <-b.quit:
-				return
-			case <-time.After(QueryTimeout):
-				currentInterval--
-				continue
-			}
+			panic(fmt.Sprintf("failed getting block header at "+
+				"height %v: %v", endHeightRange, err))
 		}
 		stopHash := stopHeader.BlockHash()
 
@@ -901,8 +896,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			startHeight := checkPointIndex*wire.CFCheckptInterval + 1
 			lastHeight := startHeight + wire.CFCheckptInterval
 
-			log.Debugf("Got cfheaders from height=%v to height=%v",
-				startHeight, lastHeight)
+			log.Debugf("Got cfheaders from height=%v to "+
+				"height=%v, prev_hash=%v", startHeight,
+				lastHeight, r.PrevFilterHeader)
 
 			// If this is out of order but not yet written, we can
 			// verify that the checkpoints match, and then store
@@ -939,6 +935,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				r.PrevFilterHeader = *curHeader
 				offset := curHeight + 1 - startHeight
 				r.FilterHashes = r.FilterHashes[offset:]
+
+				log.Debugf("Using offset %d for initial "+
+					"filter header range (new prev_hash=%v)",
+					offset, r.PrevFilterHeader)
 			}
 
 			curHeader, err = b.writeCFHeadersMsg(r, store)
@@ -1009,7 +1009,9 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, err
 	}
 	if *tip != msg.PrevFilterHeader {
-		return nil, fmt.Errorf("attempt to write cfheaders out of order")
+		return nil, fmt.Errorf("attempt to write cfheaders out of "+
+			"order! Tip=%v, prev_hash=%v.", *tip,
+			msg.PrevFilterHeader)
 	}
 
 	// Cycle through the headers and compute each header based on the prev
@@ -1045,14 +1047,16 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// particular checkpoint interval.
 	lastHeight := startHeight + uint32(numHeaders) - 1
 	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
+	lastHash := lastBlockHeader.BlockHash()
 
 	// We only need to set the height and hash of the very last filter
 	// header in the range to ensure that the index properly updates the
 	// tip of the chain.
-	headerBatch[numHeaders-1].HeaderHash = lastBlockHeader.BlockHash()
+	headerBatch[numHeaders-1].HeaderHash = lastHash
 	headerBatch[numHeaders-1].Height = lastHeight
 
-	log.Debugf("Writing filter headers up to height=%v", lastHeight)
+	log.Debugf("Writing filter headers up to height=%v, hash=%v",
+		lastHeight, lastHash)
 
 	// Write the header batch.
 	err = store.WriteHeaders(headerBatch...)
@@ -1082,7 +1086,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// for sub-system that only need to know the height has changed rather
 	// than know each new header that's been added to the tip.
 	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = lastBlockHeader.BlockHash()
+	b.filterHeaderTipHash = lastHash
 	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, nil

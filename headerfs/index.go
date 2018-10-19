@@ -99,7 +99,7 @@ type headerEntry struct {
 
 // headerBatch is a batch of header entries to be written to disk.
 //
-// NOTE: The entries within a batch SHOULD be properly sorted by height in
+// NOTE: The entries within a batch SHOULD be properly sorted by hash in
 // order to ensure the batch is written in a sequential write.
 type headerBatch []headerEntry
 
@@ -134,7 +134,7 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 	}
 
 	// In order to ensure optimal write performance, we'll ensure that the
-	// items are sorted before insertion into the database.
+	// items are sorted by their hash before insertion into the database.
 	sort.Sort(batch)
 
 	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
