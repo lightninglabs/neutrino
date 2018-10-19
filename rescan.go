@@ -476,6 +476,20 @@ rescanLoop:
 					continue rescanLoop
 				}
 
+				// Do not process block until we have all
+				// filter headers. Don't worry, the block will
+				// get re-queued every time there is a new
+				// filter available. However, if it's a
+				// duplicate block notification, then we can
+				// re-process it without any issues.
+				if header.BlockHash() != curStamp.Hash &&
+					!s.hasFilterHeadersByHeight(uint32(curStamp.Height+1)) {
+					log.Warnf("Missing filter header for "+
+						"height=%v, skipping",
+						curStamp.Height+1)
+					continue rescanLoop
+				}
+
 				// As this could be a re-try, we'll ensure that
 				// we don't incorrectly increment our current
 				// time stamp.
@@ -485,8 +499,8 @@ rescanLoop:
 					curStamp.Height++
 				}
 
-				log.Tracef("Rescan got block %d (%s)",
-					curStamp.Height, curStamp.Hash)
+				log.Tracef("Rescan got block %d (%s)", curStamp.Height,
+					curStamp.Hash)
 
 				// We're only scanning if the header is beyond
 				// the horizon of our start time.
@@ -873,6 +887,13 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	// meantime, we return false if the basic filter didn't match our
 	// watch list.
 	return false, nil
+}
+
+// hasFilterHeadersByHeight checks whether both the basic and extended filter
+// headers for a particular height are known.
+func (s *ChainService) hasFilterHeadersByHeight(height uint32) bool {
+	_, regFetchErr := s.RegFilterHeaders.FetchHeaderByHeight(height)
+	return regFetchErr == nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified
