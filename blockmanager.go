@@ -493,19 +493,18 @@ waitForHeaders:
 		// checkpoints last time, we must query our peers again.
 		if minCheckpointHeight(allCFCheckpoints) < lastHeight {
 			// Start by getting the filter checkpoints up to the
-			// latest block checkpoint we have for this chain. We
-			// do this so we don't have to fetch all filter
-			// checkpoints each time our block header chain
-			// advances. If our block header chain has already
-			// advanced past the last block checkpoint, we must
-			// fetch filter checkpoints to our last header hash.
+			// height of our block header chain. If we have a chain
+			// checkpoint that is past this height, we use that
+			// instead. We do this so we don't have to fetch all
+			// filter checkpoints each time our block header chain
+			// advances.
 			// TODO(halseth): fetch filter checkpoints up to the
 			// best block of the connected peers.
-			bestHeight := uint32(lastCp.Height)
-			bestHash := *lastCp.Hash
-			if bestHeight < lastHeight {
-				bestHeight = lastHeight
-				bestHash = lastHash
+			bestHeight := lastHeight
+			bestHash := lastHash
+			if bestHeight < uint32(lastCp.Height) {
+				bestHeight = uint32(lastCp.Height)
+				bestHash = *lastCp.Hash
 			}
 
 			log.Debugf("Getting filter checkpoints up to "+
