@@ -1004,14 +1004,14 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 	// Check that the PrevFilterHeader is the same as the last stored so we
 	// can prevent misalignment.
-	tip, _, err := store.ChainTip()
+	tip, tipHeight, err := store.ChainTip()
 	if err != nil {
 		return nil, err
 	}
 	if *tip != msg.PrevFilterHeader {
 		return nil, fmt.Errorf("attempt to write cfheaders out of "+
-			"order! Tip=%v, prev_hash=%v.", *tip,
-			msg.PrevFilterHeader)
+			"order! Tip=%v (height=%v), prev_hash=%v.", *tip,
+			tipHeight, msg.PrevFilterHeader)
 	}
 
 	// Cycle through the headers and compute each header based on the prev
@@ -1055,8 +1055,8 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	headerBatch[numHeaders-1].HeaderHash = lastHash
 	headerBatch[numHeaders-1].Height = lastHeight
 
-	log.Debugf("Writing filter headers up to height=%v, hash=%v",
-		lastHeight, lastHash)
+	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
+		"new_tip=%v", lastHeight, lastHash, lastHeader)
 
 	// Write the header batch.
 	err = store.WriteHeaders(headerBatch...)
