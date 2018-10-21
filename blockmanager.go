@@ -893,7 +893,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// Find the first and last height for the blocks
 			// represented by this message.
 			startHeight := checkPointIndex*wire.CFCheckptInterval + 1
-			lastHeight := startHeight + wire.CFCheckptInterval
+			lastHeight := (checkPointIndex + 1) * wire.CFCheckptInterval
 
 			log.Debugf("Got cfheaders from height=%v to "+
 				"height=%v, prev_hash=%v", startHeight,
