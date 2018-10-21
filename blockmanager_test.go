@@ -22,7 +22,7 @@ import (
 func TestBlockManagerInitialInterval(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
+	type testCase struct {
 		// permute indicates whether responses should be permutated.
 		permute bool
 
@@ -30,23 +30,24 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// the first checkpoint interval to the filter header store
 		// before starting the test.
 		partialInterval bool
-	}{
-		{
-			permute:         false,
-			partialInterval: false,
-		},
-		{
-			permute:         false,
-			partialInterval: true,
-		},
-		{
-			permute:         true,
-			partialInterval: false,
-		},
-		{
-			permute:         true,
-			partialInterval: true,
-		},
+
+		// repeat indicates whether responses should be repeated.
+		repeat bool
+	}
+
+	// Generate all combinations of testcases.
+	var testCases []testCase
+	b := []bool{false, true}
+	for _, perm := range b {
+		for _, part := range b {
+			for _, rep := range b {
+				testCases = append(testCases, testCase{
+					permute:         perm,
+					partialInterval: part,
+					repeat:          rep,
+				})
+			}
+		}
 	}
 
 	for _, test := range testCases {
@@ -263,6 +264,18 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				if !f(nil, msgs[index], responses[index]) {
 					t.Fatalf("got response false")
 				}
+
+				// If we are not testing repeated responses, go
+				// on to the next response.
+				if !test.repeat {
+					continue
+				}
+
+				// Otherwise resend the response we just sent.
+				if !f(nil, msgs[index], responses[index]) {
+					t.Fatalf("got response false")
+				}
+
 			}
 		}
 
