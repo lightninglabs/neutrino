@@ -103,6 +103,9 @@ type blockManager struct {
 	// headers that we've verified in the past 10 seconds.
 	fltrHeaderProgessLogger *headerProgressLogger
 
+	// genesisHeader is the filter header of the genesis block.
+	genesisHeader chainhash.Hash
+
 	// headerTip will be set to the current block header tip at all times.
 	// Callers MUST hold the lock below each time they read/write from
 	// this field.
@@ -206,6 +209,14 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 	// duties.
 	bm.newHeadersSignal = sync.NewCond(&bm.newHeadersMtx)
 	bm.newFilterHeadersSignal = sync.NewCond(&bm.newFilterHeadersMtx)
+
+	// We fetch the genesis header to use for verifying the first received
+	// interval.
+	genesisHeader, err := s.RegFilterHeaders.FetchHeaderByHeight(0)
+	if err != nil {
+		return nil, err
+	}
+	bm.genesisHeader = *genesisHeader
 
 	// Initialize the next checkpoint based on the current height.
 	header, height, err := s.BlockHeaders.ChainTip()
@@ -874,8 +885,19 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				return false
 			}
 
+			// Use either the genesis header or the previous
+			// checkpoint index as the previous checkpoint when
+			// verifying that the filter headers in the response
+			// match up.
+			prevCheckpoint := &b.genesisHeader
+			if checkPointIndex > 0 {
+				prevCheckpoint = checkpoints[checkPointIndex-1]
+
+			}
+			nextCheckpoint := checkpoints[checkPointIndex]
+
 			// The response doesn't match the checkpoint.
-			if !verifyCheckpoint(checkpoints[checkPointIndex], r) {
+			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
 				log.Warnf("Checkpoints at index %v don't match " +
 					"response!!!")
 				return false
@@ -1111,9 +1133,14 @@ func minCheckpointHeight(checkpoints map[string][]*chainhash.Hash) uint32 {
 }
 
 // verifyHeaderCheckpoint verifies that a CFHeaders message matches the passed
-// checkpoint. It assumes everything else has been checked, including filter
+// checkpoints. It assumes everything else has been checked, including filter
 // type and stop hash matches, and returns true if matching and false if not.
-func verifyCheckpoint(checkpoint *chainhash.Hash, cfheaders *wire.MsgCFHeaders) bool {
+func verifyCheckpoint(prevCheckpoint, nextCheckpoint *chainhash.Hash,
+	cfheaders *wire.MsgCFHeaders) bool {
+
+	if *prevCheckpoint != cfheaders.PrevFilterHeader {
+		return false
+	}
 
 	lastHeader := cfheaders.PrevFilterHeader
 	for _, hash := range cfheaders.FilterHashes {
@@ -1122,7 +1149,7 @@ func verifyCheckpoint(checkpoint *chainhash.Hash, cfheaders *wire.MsgCFHeaders) 
 		)
 	}
 
-	return lastHeader == *checkpoint
+	return lastHeader == *nextCheckpoint
 }
 
 // resolveConflict finds the correct checkpoint information, rewinds the header
