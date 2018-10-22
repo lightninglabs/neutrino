@@ -2,10 +2,10 @@ package neutrino
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg"
@@ -15,6 +15,235 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
+
+// maxHeight is the height we will generate filter headers up to.
+const maxHeight = 20 * uint32(wire.CFCheckptInterval)
+
+// setupBlockManager initialises a blockManager to be used in tests.
+func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
+	*headerfs.FilterHeaderStore, func(), error) {
+
+	// Set up the block and filter header stores.
+	tempDir, err := ioutil.TempDir("", "neutrino")
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("Failed to create "+
+			"temporary directory: %s", err)
+	}
+
+	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, nil, nil, nil, fmt.Errorf("Error opening DB: %s",
+			err)
+	}
+
+	hdrStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, nil, fmt.Errorf("Error creating block "+
+			"header store: %s", err)
+	}
+
+	cleanUp := func() {
+		defer os.RemoveAll(tempDir)
+		defer db.Close()
+	}
+
+	cfStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams,
+	)
+	if err != nil {
+		cleanUp()
+		return nil, nil, nil, nil, fmt.Errorf("Error creating filter "+
+			"header store: %s", err)
+	}
+
+	// Set up a chain service for the block manager. Each test should set
+	// custom query methods on this chain service.
+	cs := &ChainService{
+		chainParams:      chaincfg.SimNetParams,
+		BlockHeaders:     hdrStore,
+		RegFilterHeaders: cfStore,
+	}
+
+	// Set up a blockManager with the chain service we defined.
+	bm, err := newBlockManager(cs)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("unable to create "+
+			"blockmanager: %v", err)
+	}
+
+	return bm, hdrStore, cfStore, cleanUp, nil
+}
+
+// headers wraps the different headers and filters used throughout the tests.
+type headers struct {
+	blockHeaders []headerfs.BlockHeader
+	cfHeaders    []headerfs.FilterHeader
+	checkpoints  []*chainhash.Hash
+	filterHashes []chainhash.Hash
+}
+
+// generateHeaders generates block headers, filter header and hashes, and
+// checkpoints from the given genesis. The onCheckpoint method will be called
+// with the current cf header on each checkpoint to modify the derivation of
+// the next interval
+func generateHeaders(genesisBlockHeader *wire.BlockHeader,
+	genesisFilterHeader *chainhash.Hash,
+	onCheckpoint func(*chainhash.Hash)) (*headers, error) {
+
+	var blockHeaders []headerfs.BlockHeader
+	blockHeaders = append(blockHeaders, headerfs.BlockHeader{
+		BlockHeader: genesisBlockHeader,
+		Height:      0,
+	})
+
+	var cfHeaders []headerfs.FilterHeader
+	cfHeaders = append(cfHeaders, headerfs.FilterHeader{
+		HeaderHash: genesisBlockHeader.BlockHash(),
+		FilterHash: *genesisFilterHeader,
+		Height:     0,
+	})
+
+	// The filter hashes (not the filter headers!) will be sent as
+	// part of the CFHeaders response, so we also keep track of
+	// them.
+	genesisFilter, err := builder.BuildBasicFilter(
+		chaincfg.SimNetParams.GenesisBlock, nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to build genesis filter: %v",
+			err)
+	}
+
+	genesisFilterHash, err := builder.GetFilterHash(genesisFilter)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get genesis filter hash: %v",
+			err)
+	}
+
+	var filterHashes []chainhash.Hash
+	filterHashes = append(filterHashes, genesisFilterHash)
+
+	// Also keep track of the current filter header. We use this to
+	// calculate the next filter header, as it commits to the
+	// previous.
+	currentCFHeader := *genesisFilterHeader
+
+	// checkpoints will be the checkpoints passed to
+	// getCheckpointedCFHeaders.
+	var checkpoints []*chainhash.Hash
+
+	for height := uint32(1); height <= maxHeight; height++ {
+		header := heightToHeader(height)
+		blockHeader := headerfs.BlockHeader{
+			BlockHeader: header,
+			Height:      height,
+		}
+
+		blockHeaders = append(blockHeaders, blockHeader)
+
+		// It doesn't really matter what filter the filter
+		// header commit to, so just use the height as a nonce
+		// for the filters.
+		filterHash := chainhash.Hash{}
+		binary.BigEndian.PutUint32(filterHash[:], height)
+		filterHashes = append(filterHashes, filterHash)
+
+		// Calculate the current filter header, and add to our
+		// slice.
+		currentCFHeader = chainhash.DoubleHashH(
+			append(filterHash[:], currentCFHeader[:]...),
+		)
+		cfHeaders = append(cfHeaders, headerfs.FilterHeader{
+			HeaderHash: header.BlockHash(),
+			FilterHash: currentCFHeader,
+			Height:     height,
+		})
+
+		// Each interval we must record a checkpoint.
+		if height%wire.CFCheckptInterval == 0 {
+			// We must make a copy of the current header to
+			// avoid mutation.
+			cfh := currentCFHeader
+			checkpoints = append(checkpoints, &cfh)
+
+			if onCheckpoint != nil {
+				onCheckpoint(&currentCFHeader)
+			}
+		}
+	}
+
+	return &headers{
+		blockHeaders: blockHeaders,
+		cfHeaders:    cfHeaders,
+		checkpoints:  checkpoints,
+		filterHashes: filterHashes,
+	}, nil
+}
+
+// generateResponses generates the MsgCFHeaders messages from the given queries
+// and headers.
+func generateResponses(msgs []wire.Message,
+	headers *headers) ([]*wire.MsgCFHeaders, error) {
+
+	// Craft a response for each message.
+	var responses []*wire.MsgCFHeaders
+	for _, msg := range msgs {
+		// Only GetCFHeaders expected.
+		q, ok := msg.(*wire.MsgGetCFHeaders)
+		if !ok {
+			return nil, fmt.Errorf("got unexpected message %T",
+				msg)
+		}
+
+		// The start height must be set to a checkpoint height+1.
+		if q.StartHeight%wire.CFCheckptInterval != 1 {
+			return nil, fmt.Errorf("unexpexted start height %v",
+				q.StartHeight)
+		}
+
+		var prevFilterHeader chainhash.Hash
+		switch q.StartHeight {
+
+		// If the start height is 1 the prevFilterHeader is set to the
+		// genesis header.
+		case 1:
+			genesisFilterHeader := headers.cfHeaders[0].FilterHash
+			prevFilterHeader = genesisFilterHeader
+
+		// Otherwise we use one of the created checkpoints.
+		default:
+			j := q.StartHeight/wire.CFCheckptInterval - 1
+			prevFilterHeader = *headers.checkpoints[j]
+		}
+
+		resp := &wire.MsgCFHeaders{
+			FilterType:       q.FilterType,
+			StopHash:         q.StopHash,
+			PrevFilterHeader: prevFilterHeader,
+		}
+
+		// Keep adding filter hashes until we reach the stop hash.
+		for h := q.StartHeight; ; h++ {
+			resp.FilterHashes = append(
+				resp.FilterHashes, &headers.filterHashes[h],
+			)
+
+			blockHash := headers.blockHeaders[h].BlockHash()
+			if blockHash == q.StopHash {
+				break
+			}
+		}
+
+		responses = append(responses, resp)
+	}
+
+	return responses, nil
+}
 
 // TestBlockManagerInitialInterval tests that the block manager is able to
 // handle checkpointed filter header query responses in out of order, and when
@@ -52,34 +281,11 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 	for _, test := range testCases {
 
-		// Set up the block and filter header stores.
-		tempDir, err := ioutil.TempDir("", "neutrino")
+		bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
 		if err != nil {
-			t.Fatalf("Failed to create temporary directory: %s",
-				err)
+			t.Fatalf("unable to set up ChainService: %v", err)
 		}
-		defer os.RemoveAll(tempDir)
-
-		db, err := walletdb.Create("bdb", tempDir+"/weks.db")
-		if err != nil {
-			t.Fatalf("Error opening DB: %s", err)
-		}
-		defer db.Close()
-
-		hdrStore, err := headerfs.NewBlockHeaderStore(
-			tempDir, db, &chaincfg.SimNetParams,
-		)
-		if err != nil {
-			t.Fatalf("Error creating block header store: %s", err)
-		}
-
-		cfStore, err := headerfs.NewFilterHeaderStore(
-			tempDir, db, headerfs.RegularFilter,
-			&chaincfg.SimNetParams,
-		)
-		if err != nil {
-			t.Fatalf("Error creating filter header store: %s", err)
-		}
+		defer cleanUp()
 
 		// Keep track of the filter headers and block headers. Since
 		// the genesis headers are written automatically when the store
@@ -89,92 +295,20 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		var blockHeaders []headerfs.BlockHeader
-		blockHeaders = append(blockHeaders, headerfs.BlockHeader{
-			BlockHeader: genesisBlockHeader,
-			Height:      0,
-		})
-
 		genesisFilterHeader, _, err := cfStore.ChainTip()
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		var cfHeaders []headerfs.FilterHeader
-		cfHeaders = append(cfHeaders, headerfs.FilterHeader{
-			HeaderHash: genesisBlockHeader.BlockHash(),
-			FilterHash: *genesisFilterHeader,
-			Height:     0,
-		})
-
-		// The filter hashes (not the filter headers!) will be sent as
-		// part of the CFHeaders response, so we also keep track of
-		// them
-		genesisFilter, err := builder.BuildBasicFilter(
-			chaincfg.SimNetParams.GenesisBlock, nil,
-		)
+		headers, err := generateHeaders(genesisBlockHeader,
+			genesisFilterHeader, nil)
 		if err != nil {
-			t.Fatalf("unable to build genesis filter: %v", err)
-		}
-
-		genesisFilterHash, err := builder.GetFilterHash(genesisFilter)
-		if err != nil {
-			t.Fatal("fail")
-		}
-
-		var filterHashes []chainhash.Hash
-		filterHashes = append(filterHashes, genesisFilterHash)
-
-		// Also keep track of the current filter header. We use this to
-		// calculate the next filter header, as it commits to the
-		// previous.
-		currentCFHeader := *genesisFilterHeader
-
-		// checkpoints will be the checkpoints passed to
-		// getCheckpointedCFHeaders.
-		var checkpoints []*chainhash.Hash
-
-		maxHeight := 20 * uint32(wire.CFCheckptInterval)
-		for height := uint32(1); height <= maxHeight; height++ {
-			header := heightToHeader(height)
-			blockHeader := headerfs.BlockHeader{
-				BlockHeader: header,
-				Height:      height,
-			}
-
-			blockHeaders = append(blockHeaders, blockHeader)
-
-			// It doesn't really matter what filter the filter
-			// header commit to, so just use the height as a nonce
-			// for the filters.
-			filterHash := chainhash.Hash{}
-			binary.BigEndian.PutUint32(filterHash[:], height)
-			filterHashes = append(filterHashes, filterHash)
-
-			// Calculate the current filter header, and add to our
-			// slice.
-			currentCFHeader = chainhash.DoubleHashH(
-				append(filterHash[:], currentCFHeader[:]...),
-			)
-			cfHeaders = append(cfHeaders, headerfs.FilterHeader{
-				HeaderHash: header.BlockHash(),
-				FilterHash: currentCFHeader,
-				Height:     height,
-			})
-
-			// Each interval we must record a checkpoint.
-			if height > 0 && height%wire.CFCheckptInterval == 0 {
-				// We must make a copy of the current header to
-				// avoid mutation.
-				cfh := currentCFHeader
-				checkpoints = append(checkpoints, &cfh)
-			}
-
+			t.Fatalf("unable to generate headers: %v", err)
 		}
 
 		// Write all block headers but the genesis, since it is already
 		// in the store.
-		if err = hdrStore.WriteHeaders(blockHeaders[1:]...); err != nil {
+		if err = hdrStore.WriteHeaders(headers.blockHeaders[1:]...); err != nil {
 			t.Fatalf("Error writing batch of headers: %s", err)
 		}
 
@@ -182,7 +316,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// written to the store by writing 1/3 of the first interval.
 		if test.partialInterval {
 			err = cfStore.WriteHeaders(
-				cfHeaders[1 : wire.CFCheckptInterval/3]...,
+				headers.cfHeaders[1 : wire.CFCheckptInterval/3]...,
 			)
 			if err != nil {
 				t.Fatalf("Error writing batch of headers: %s",
@@ -190,67 +324,17 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			}
 		}
 
-		// Set up a chain service with a custom query batch method.
-		cs := &ChainService{
-			BlockHeaders: hdrStore,
-		}
-		cs.queryBatch = func(msgs []wire.Message, f func(*ServerPeer,
-			wire.Message, wire.Message) bool, q <-chan struct{},
-			qo ...QueryOption) {
+		// We set up a custom query batch method for this test, as we
+		// will use this to feed the blockmanager with our crafted
+		// responses.
+		bm.server.queryBatch = func(msgs []wire.Message,
+			f func(*ServerPeer, wire.Message, wire.Message) bool,
+			q <-chan struct{}, qo ...QueryOption) {
 
-			// Craft response for each message.
-			var responses []*wire.MsgCFHeaders
-			for _, msg := range msgs {
-				// Only GetCFHeaders expected.
-				q, ok := msg.(*wire.MsgGetCFHeaders)
-				if !ok {
-					t.Fatalf("got unexpected message %T",
-						msg)
-				}
-
-				// The start height must be set to a checkpoint
-				// height+1.
-				if q.StartHeight%wire.CFCheckptInterval != 1 {
-					t.Fatalf("unexpexted start height %v",
-						q.StartHeight)
-				}
-
-				var prevFilterHeader chainhash.Hash
-				switch q.StartHeight {
-
-				// If the start height is 1 the
-				// prevFilterHeader is set to the genesis
-				// header.
-				case 1:
-					prevFilterHeader = *genesisFilterHeader
-
-				// Otherwise we use one of the created
-				// checkpoints.
-				default:
-					j := q.StartHeight/wire.CFCheckptInterval - 1
-					prevFilterHeader = *checkpoints[j]
-				}
-
-				resp := &wire.MsgCFHeaders{
-					FilterType:       q.FilterType,
-					StopHash:         q.StopHash,
-					PrevFilterHeader: prevFilterHeader,
-				}
-
-				// Keep adding filter hashes until we reach the
-				// stop hash.
-				for h := q.StartHeight; ; h++ {
-					resp.FilterHashes = append(
-						resp.FilterHashes, &filterHashes[h],
-					)
-
-					blockHash := blockHeaders[h].BlockHash()
-					if blockHash == q.StopHash {
-						break
-					}
-				}
-
-				responses = append(responses, resp)
+			responses, err := generateResponses(msgs, headers)
+			if err != nil {
+				t.Fatalf("unable to generate responses: %v",
+					err)
 			}
 
 			// We permute the response order if the test signals
@@ -279,23 +363,10 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			}
 		}
 
-		// Set up a blockManager with the chain service we defined...
-		bm := blockManager{
-			server: cs,
-			blkHeaderProgressLogger: newBlockProgressLogger(
-				"Processed", "block", log,
-			),
-			fltrHeaderProgessLogger: newBlockProgressLogger(
-				"Verified", "filter header", log,
-			),
-		}
-		bm.newHeadersSignal = sync.NewCond(&bm.newHeadersMtx)
-		bm.newFilterHeadersSignal = sync.NewCond(&bm.newFilterHeadersMtx)
-
-		// ...and call the get checkpointed cf headers method with the
-		// checkpoints we created.
+		// Call the get checkpointed cf headers method with the
+		// checkpoints we created to start the test.
 		bm.getCheckpointedCFHeaders(
-			checkpoints, cfStore, wire.GCSFilterRegular,
+			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 
 		// Finally make sure the filter header tip is what we expect.
@@ -309,7 +380,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				maxHeight, tipHeight)
 		}
 
-		lastCheckpoint := checkpoints[len(checkpoints)-1]
+		lastCheckpoint := headers.checkpoints[len(headers.checkpoints)-1]
 		if *tip != *lastCheckpoint {
 			t.Fatalf("expected tip to be %v, was %v",
 				lastCheckpoint, tip)
