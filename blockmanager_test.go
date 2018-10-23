@@ -400,3 +400,129 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		}
 	}
 }
+
+// TestBlockManagerInvalidInterval tests that the block manager is able to
+// determine it is receiving corrupt checkpoints and filter headers.
+func TestBlockManagerInvalidInterval(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		// wrongGenesis indicates whether we should start deriving the
+		// filters from a wrong genesis.
+		wrongGenesis bool
+
+		// partialInterval indicates whether we should write parts of
+		// the first checkpoint interval to the filter header store
+		// before starting the test.
+		partialInterval bool
+
+		// firstInvalid is the first interval we expect the
+		// blockmanager to determine is invalid.
+		firstInvalid int
+	}
+
+	testCases := []testCase{
+		// With a set of checkpoints and filter headers calculated from
+		// the wrong genesis, the block manager should be able to
+		// determine that the first interval doesn't line up.
+		{
+			wrongGenesis: true,
+			firstInvalid: 0,
+		},
+
+		// With checkpoints calculated from the wrong genesis, and a
+		// partial set of filter headers already written, the first
+		// interval should be considered invalid.
+		{
+			wrongGenesis:    true,
+			partialInterval: true,
+			firstInvalid:    0,
+		},
+	}
+
+	for _, test := range testCases {
+		bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
+		if err != nil {
+			t.Fatalf("unable to set up ChainService: %v", err)
+		}
+		defer cleanUp()
+
+		// Keep track of the filter headers and block headers. Since
+		// the genesis headers are written automatically when the store
+		// is created, we query it to add to the slices.
+		genesisBlockHeader, _, err := hdrStore.ChainTip()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		genesisFilterHeader, _, err := cfStore.ChainTip()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// To emulate a full node serving us filter headers derived
+		// from different genesis than what we have, we flip a bit in
+		// the genesis filter header.
+		if test.wrongGenesis {
+			genesisFilterHeader[0] ^= 1
+		}
+
+		headers, err := generateHeaders(genesisBlockHeader,
+			genesisFilterHeader, nil)
+		if err != nil {
+			t.Fatalf("unable to generate headers: %v", err)
+		}
+
+		// Write all block headers but the genesis, since it is already
+		// in the store.
+		if err = hdrStore.WriteHeaders(headers.blockHeaders[1:]...); err != nil {
+			t.Fatalf("Error writing batch of headers: %s", err)
+		}
+
+		// We emulate the case where a few filter headers are already
+		// written to the store by writing 1/3 of the first interval.
+		if test.partialInterval {
+			err = cfStore.WriteHeaders(
+				headers.cfHeaders[1 : wire.CFCheckptInterval/3]...,
+			)
+			if err != nil {
+				t.Fatalf("Error writing batch of headers: %s",
+					err)
+			}
+		}
+
+		bm.server.queryBatch = func(msgs []wire.Message,
+			f func(*ServerPeer, wire.Message, wire.Message) bool,
+			q <-chan struct{}, qo ...QueryOption) {
+
+			responses, err := generateResponses(msgs, headers)
+			if err != nil {
+				t.Fatalf("unable to generate responses: %v",
+					err)
+			}
+
+			// Check that the success of the callback match what we
+			// expect.
+			for i := range responses {
+				success := f(nil, msgs[i], responses[i])
+				if i == test.firstInvalid {
+					if success {
+						t.Fatalf("expected interval "+
+							"%d to be invalid", i)
+					}
+					break
+				}
+
+				if !success {
+					t.Fatalf("expected interval %d to be "+
+						"valid", i)
+				}
+			}
+		}
+
+		// Start the test by calling the get checkpointed cf headers
+		// method with the checkpoints we created.
+		bm.getCheckpointedCFHeaders(
+			headers.checkpoints, cfStore, wire.GCSFilterRegular,
+		)
+	}
+}
