@@ -415,6 +415,10 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		// should not line up with the previous checkpoint.
 		intervalMisaligned bool
 
+		// invalidPrevHash indicates whether the interval responses
+		// should have a prev hash that doesn't mathc that interval.
+		invalidPrevHash bool
+
 		// partialInterval indicates whether we should write parts of
 		// the first checkpoint interval to the filter header store
 		// before starting the test.
@@ -456,6 +460,13 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			intervalMisaligned: true,
 			partialInterval:    true,
 			firstInvalid:       1,
+		},
+
+		// With responses having invalid prev hashes, the second
+		// interval should be deemed invalid.
+		{
+			invalidPrevHash: true,
+			firstInvalid:    1,
 		},
 	}
 
@@ -539,6 +550,18 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 						continue
 					}
 					responses[i].PrevFilterHeader[0] ^= 1
+				}
+			}
+
+			// If we are testing for intervals with invalid prev
+			// hashes, we flip a bit to corrup them, regardless of
+			// whether we are testing misaligned intervals.
+			if test.invalidPrevHash {
+				for i := range responses {
+					if i == 0 {
+						continue
+					}
+					responses[i].PrevFilterHeader[1] ^= 1
 				}
 			}
 
