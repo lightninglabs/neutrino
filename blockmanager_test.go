@@ -411,6 +411,10 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		// filters from a wrong genesis.
 		wrongGenesis bool
 
+		// intervalMisaligned indicates whether each interval prev hash
+		// should not line up with the previous checkpoint.
+		intervalMisaligned bool
+
 		// partialInterval indicates whether we should write parts of
 		// the first checkpoint interval to the filter header store
 		// before starting the test.
@@ -437,6 +441,21 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			wrongGenesis:    true,
 			partialInterval: true,
 			firstInvalid:    0,
+		},
+
+		// With intervals not lining up, the second interval should
+		// be determined invalid.
+		{
+			intervalMisaligned: true,
+			firstInvalid:       1,
+		},
+
+		// With misaligned intervals and a partial interval written, the
+		// second interval should be considered invalid.
+		{
+			intervalMisaligned: true,
+			partialInterval:    true,
+			firstInvalid:       1,
 		},
 	}
 
@@ -467,7 +486,16 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		}
 
 		headers, err := generateHeaders(genesisBlockHeader,
-			genesisFilterHeader, nil)
+			genesisFilterHeader,
+			func(currentCFHeader *chainhash.Hash) {
+				// If we are testing that each interval doesn't
+				// line up properly with the previous, we flip
+				// a bit in the current header before
+				// calculating the next interval checkpoint.
+				if test.intervalMisaligned {
+					currentCFHeader[0] ^= 1
+				}
+			})
 		if err != nil {
 			t.Fatalf("unable to generate headers: %v", err)
 		}
@@ -498,6 +526,20 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unable to generate responses: %v",
 					err)
+			}
+
+			// Since we used the generated checkpoints when
+			// creating the responses, we must flip the
+			// PrevFilterHeader bit back before sending them if we
+			// are checking for misaligned intervals. This to
+			// ensure we don't hit the invalid prev hash case.
+			if test.intervalMisaligned {
+				for i := range responses {
+					if i == 0 {
+						continue
+					}
+					responses[i].PrevFilterHeader[0] ^= 1
+				}
 			}
 
 			// Check that the success of the callback match what we
