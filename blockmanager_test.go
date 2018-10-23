@@ -280,6 +280,8 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 	}
 
 	for _, test := range testCases {
+		testDesc := fmt.Sprintf("permute=%v, partial=%v, repeat=%v",
+			test.permute, test.partialInterval, test.repeat)
 
 		bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
 		if err != nil {
@@ -345,8 +347,17 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				if test.permute {
 					index = v
 				}
+
+				// Before sending we take a copy of the
+				// message, as we cannot guarantee that it
+				// won't be modified.
+				r := *responses[index]
+
+				// Let the blockmanager handle the message.
 				if !f(nil, msgs[index], responses[index]) {
-					t.Fatalf("got response false")
+					t.Fatalf("got response false on "+
+						"send of index %d: %v",
+						index, testDesc)
 				}
 
 				// If we are not testing repeated responses, go
@@ -356,8 +367,10 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				}
 
 				// Otherwise resend the response we just sent.
-				if !f(nil, msgs[index], responses[index]) {
-					t.Fatalf("got response false")
+				if !f(nil, msgs[index], &r) {
+					t.Fatalf("got response false on "+
+						"resend of index %d: %v",
+						index, testDesc)
 				}
 
 			}
