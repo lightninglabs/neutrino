@@ -1,10 +1,10 @@
-hash: d643fb2b4e206b1cf65711308cb3719f2a6a6e259065d18de92722ef3d2bbba2
-updated: 2018-09-03T18:17:04.668851582-07:00
+hash: 5f799ea7ce4fbb4787e01018f569d3b63e042e6cee1e442a8c7c9f10b3a4c864
+updated: 2018-11-09T21:24:14.090074737Z
 imports:
 - name: github.com/aead/siphash
   version: 83563a290f60225eb120d724600b9690c3fb536f
 - name: github.com/btcsuite/btcd
-  version: 79e00513b1011888b1e675157ab89f527f901cae
+  version: 67e573d211ace594f1366b4ce9d39726c4b19bd0
   subpackages:
   - addrmgr
   - blockchain
@@ -78,11 +78,11 @@ imports:
   subpackages:
   - ripemd160
 - name: golang.org/x/net
-  version: 8a410e7b638dca158bf9e766925842f6651ff828
+  version: 922f4815f713f213882e8ef45e0d315b164d705c
   subpackages:
   - context
 - name: golang.org/x/sys
-  version: 2b024373dcd9800f0cae693839fac6ede8d64a8c
+  version: 3b58ed4ad3395d483fc92d5d14123ce2c3581fec
   subpackages:
   - unix
 - name: google.golang.org/grpc
