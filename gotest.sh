@@ -119,19 +119,6 @@ while getopts "lrcio" flag; do
 # remove the options from the positional parameters
 shift $(( OPTIND - 1 ))
 
-# Make sure glide is installed and $GOPATH/bin is in your path.
-if [ ! -x "$(type -p glide)" ]; then
-    print "* Install glide"
-    go get -u github.com/Masterminds/glide
-fi
-
-# Install the dependency if vendor directory not exist or if flag have been
-# specified.
-if [ "$NEED_INSTALL" == "true" ] || [ ! -d "./vendor" ]; then
-    print "* Install dependencies"
-    glide install
-fi
-
 # Lint check is first because we shouldn't run tests on garbage code.
 if [ "$NEED_LINT" == "true" ] || [ "$RACE" == "false" ]; then
     lint_check
