@@ -81,7 +81,7 @@ lint_check() {
     gometalinter.v1 --install 1>/dev/null
 
     # Automatic checks
-    linter_targets=$(glide novendor | grep -v lnrpc)
+    linter_targets= $(go list -f '{{.Dir}}' ./... | grep -v 'lnrpc')
     test -z "$(gometalinter.v1 --disable-all \
     --enable=gofmt \
     --enable=vet \
