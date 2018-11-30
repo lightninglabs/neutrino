@@ -1,7 +1,13 @@
 language: go
+cache:
+  directories:
+    - $GOCACHE
+    - $GOPATH/pkg/mod
+    - $GOPATH/src/github.com/btcsuite
+    - $GOPATH/src/github.com/golang
+    - $GOPATH/src/gopkg.in/alecthomas
 go:
-  - "1.9.4"
-  - "1.10"
+  - "1.11.x"
 sudo: false
 install:
   - GLIDE_TAG=v0.12.3
@@ -14,7 +20,7 @@ install:
   - pushd btcd
   - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
   - glide install
-  - go install . ./cmd/...
+  - GO111MODULE=off go install . ./cmd/...
   - popd
   - popd
 env:
@@ -22,5 +28,6 @@ env:
     - RACE=false
     - RACE=true
 script:
+  - export GO111MODULE=on
   - export PATH=$PATH:$HOME/gopath/bin
   - ./gotest.sh
