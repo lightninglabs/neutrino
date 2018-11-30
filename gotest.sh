@@ -74,14 +74,14 @@ lint_check() {
     if [ ! -x "$(type -p gometalinter.v2)" ]; then
         print "** Install gometalinter"
         GO111MODULE=off go get -u gopkg.in/alecthomas/gometalinter.v2
-        gometalinter.v2 --install
+        GO111MODULE=off gometalinter.v2 --install
     fi
 
     # Update metalinter if needed.
-    gometalinter.v2 --install 1>/dev/null
+    GO111MODULE=off gometalinter.v2 --install 1>/dev/null
 
     # Automatic checks
-    linter_targets= $(go list -f '{{.Dir}}' ./... | grep -v 'lnrpc')
+    linter_targets=$(go list ./... | grep -v 'lnrpc')
     test -z "$(gometalinter.v2 --disable-all \
     --enable=gofmt \
     --enable=vet \
