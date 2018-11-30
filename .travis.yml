@@ -1,4 +1,11 @@
 language: go
+cache:
+  directories:
+    - $GOCACHE
+    - $GOPATH/pkg/mod
+    - $GOPATH/src/github.com/btcsuite
+    - $GOPATH/src/github.com/golang
+    - $GOPATH/src/gopkg.in/alecthomas
 go:
   - "1.11.x"
 sudo: false
@@ -13,7 +20,7 @@ install:
   - pushd btcd
   - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
   - glide install
-  - go install . ./cmd/...
+  - GO111MODULE=off go install . ./cmd/...
   - popd
   - popd
 env:
