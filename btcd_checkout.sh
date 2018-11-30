@@ -1,3 +1,3 @@
 #!/bin/bash
 
-git checkout $(cat $GOPATH/src/github.com/lightninglabs/neutrino/glide.yaml | grep -A1 btcd | tail -n1 | awk '{ print $2}')
+git checkout $(cat go.sum | grep -A1 github.com/btcsuite/btcd | tail -n1 | awk -F " " '{ print $2 }' | awk -F "-" '{ print $3 }' | awk -F "/" '{ print $1 }')
