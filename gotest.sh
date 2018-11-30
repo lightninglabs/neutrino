@@ -71,18 +71,18 @@ lint_check() {
     print "* Run static checks"
 
     # Make sure gometalinter is installed and $GOPATH/bin is in your path.
-    if [ ! -x "$(type -p gometalinter.v1)" ]; then
+    if [ ! -x "$(type -p gometalinter.v2)" ]; then
         print "** Install gometalinter"
-        go get -u gopkg.in/alecthomas/gometalinter.v1
-        gometalinter.v1 --install
+        go get -u gopkg.in/alecthomas/gometalinter.v2
+        gometalinter.v2 --install
     fi
 
     # Update metalinter if needed.
-    gometalinter.v1 --install 1>/dev/null
+    gometalinter.v2 --install 1>/dev/null
 
     # Automatic checks
     linter_targets= $(go list -f '{{.Dir}}' ./... | grep -v 'lnrpc')
-    test -z "$(gometalinter.v1 --disable-all \
+    test -z "$(gometalinter.v2 --disable-all \
     --enable=gofmt \
     --enable=vet \
     --enable=golint \
