@@ -73,7 +73,7 @@ lint_check() {
     # Make sure gometalinter is installed and $GOPATH/bin is in your path.
     if [ ! -x "$(type -p gometalinter.v2)" ]; then
         print "** Install gometalinter"
-        go get -u gopkg.in/alecthomas/gometalinter.v2
+        GO111MODULE=off go get -u gopkg.in/alecthomas/gometalinter.v2
         gometalinter.v2 --install
     fi
 
