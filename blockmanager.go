@@ -898,8 +898,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 			// The response doesn't match the checkpoint.
 			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
-				log.Warnf("Checkpoints at index %v don't match " +
-					"response!!!")
+				log.Warnf("Checkpoints at index %v don't match "+
+					"response!!!", checkPointIndex)
 				return false
 			}
 
