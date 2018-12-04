@@ -23,6 +23,10 @@ import (
 )
 
 var (
+	// zeroOutPoint indicates that we should match on an output's script
+	// when dispatching a spend notification.
+	zeroOutPoint wire.OutPoint
+
 	// ErrRescanExit is an error returned to the caller in case the ongoing
 	// rescan exits.
 	ErrRescanExit = errors.New("rescan exited")
@@ -971,7 +975,23 @@ func (ro *rescanOptions) updateFilter(update *updateOptions,
 func (ro *rescanOptions) spendsWatchedInput(tx *btcutil.Tx) bool {
 	for _, in := range tx.MsgTx().TxIn {
 		for _, input := range ro.watchInputs {
-			if in.PreviousOutPoint == input.OutPoint {
+			switch {
+			// If we're watching for a zero outpoint, then we should
+			// match on the output script being spent instead.
+			case input.OutPoint == zeroOutPoint:
+				pkScript, err := txscript.ComputePkScript(
+					in.SignatureScript, in.Witness,
+				)
+				if err != nil {
+					continue
+				}
+
+				if bytes.Equal(pkScript.Script(), input.PkScript) {
+					return true
+				}
+
+			// Otherwise, we'll match on the outpoint being spent.
+			case in.PreviousOutPoint == input.OutPoint:
 				return true
 			}
 		}
