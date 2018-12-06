@@ -71,18 +71,18 @@ lint_check() {
     print "* Run static checks"
 
     # Make sure gometalinter is installed and $GOPATH/bin is in your path.
-    if [ ! -x "$(type -p gometalinter.v1)" ]; then
+    if [ ! -x "$(type -p gometalinter.v2)" ]; then
         print "** Install gometalinter"
-        go get -u gopkg.in/alecthomas/gometalinter.v1
-        gometalinter.v1 --install
+        GO111MODULE=off go get -u gopkg.in/alecthomas/gometalinter.v2
+        GO111MODULE=off gometalinter.v2 --install
     fi
 
     # Update metalinter if needed.
-    gometalinter.v1 --install 1>/dev/null
+    GO111MODULE=off gometalinter.v2 --install 1>/dev/null
 
     # Automatic checks
-    linter_targets=$(glide novendor | grep -v lnrpc)
-    test -z "$(gometalinter.v1 --disable-all \
+    linter_targets=$(go list ./... | grep -v 'lnrpc')
+    test -z "$(gometalinter.v2 --disable-all \
     --enable=gofmt \
     --enable=vet \
     --enable=golint \
@@ -118,19 +118,6 @@ while getopts "lrcio" flag; do
 
 # remove the options from the positional parameters
 shift $(( OPTIND - 1 ))
-
-# Make sure glide is installed and $GOPATH/bin is in your path.
-if [ ! -x "$(type -p glide)" ]; then
-    print "* Install glide"
-    go get -u github.com/Masterminds/glide
-fi
-
-# Install the dependency if vendor directory not exist or if flag have been
-# specified.
-if [ "$NEED_INSTALL" == "true" ] || [ ! -d "./vendor" ]; then
-    print "* Install dependencies"
-    glide install
-fi
 
 # Lint check is first because we shouldn't run tests on garbage code.
 if [ "$NEED_LINT" == "true" ] || [ "$RACE" == "false" ]; then
