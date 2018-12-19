@@ -862,9 +862,7 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
 	// TODO(roasbeef): need to ENSURE always get filter
-
-	key := builder.DeriveKey(blockHash)
-	bFilter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
+	filter, err := s.GetCFilter(*blockHash, wire.GCSFilterRegular)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
@@ -873,23 +871,12 @@ func (s *ChainService) blockFilterMatches(ro *rescanOptions,
 		return false, err
 	}
 
-	// If we found the basic filter, and the filter isn't
-	// "nil", then we'll check the items in the watch list
+	// If we found the filter, then we'll check the items in the watch list
 	// against it.
-	if bFilter != nil && bFilter.N() != 0 {
-		// We see if any relevant transactions match.
-		matched, err := bFilter.MatchAny(key, ro.watchList)
-		if matched || err != nil {
-			return matched, err
-		}
+	if filter != nil && filter.N() != 0 {
+		return s.matchBlockFilter(ro, filter, blockHash)
 	}
 
-	// We don't need the extended filter, since all of the things a rescan
-	// can watch for are currently added to the same watch list and
-	// available in the basic filter. In the future, we can watch for
-	// data pushes in input scripts (incl. P2SH and witness). In the
-	// meantime, we return false if the basic filter didn't match our
-	// watch list.
 	return false, nil
 }
 
