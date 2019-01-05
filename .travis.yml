@@ -3,7 +3,7 @@ cache:
   directories:
     - $GOCACHE
     - $GOPATH/pkg/mod
-    - $GOPATH/src/github.com/btcsuite
+    - $GOPATH/src/github.com/ltcsuite
     - $GOPATH/src/github.com/golang
     - $GOPATH/src/gopkg.in/alecthomas
 go:
@@ -11,10 +11,10 @@ go:
 sudo: false
 install:
   - export PATH=$PATH:$PWD/linux-amd64/
-  - mkdir -p $GOPATH/src/github.com/btcsuite/
-  - go get -d github.com/btcsuite/btcd
-  - pushd $GOPATH/src/github.com/btcsuite/btcd
-  - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
+  - mkdir -p $GOPATH/src/github.com/ltcsuite/
+  - go get -d github.com/ltcsuite/ltcd
+  - pushd $GOPATH/src/github.com/ltcsuite/ltcd
+  - $GOPATH/src/github.com/lightninglabs/neutrino/ltcd_checkout.sh
   - go install . ./cmd/...
   - popd
 env:
