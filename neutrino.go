@@ -12,19 +12,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/addrmgr"
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/connmgr"
-	"github.com/btcsuite/btcd/peer"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/lightninglabs/neutrino/cache/lru"
-	"github.com/lightninglabs/neutrino/filterdb"
-	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/ltcsuite/ltcd/addrmgr"
+	"github.com/ltcsuite/ltcd/blockchain"
+	"github.com/ltcsuite/ltcd/chaincfg"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcd/connmgr"
+	"github.com/ltcsuite/ltcd/peer"
+	"github.com/ltcsuite/ltcd/wire"
+	"github.com/ltcsuite/ltcutil"
+	"github.com/ltcsuite/ltcwallet/waddrmgr"
+	"github.com/ltcsuite/ltcwallet/walletdb"
+	"github.com/ltcsuite/neutrino/cache/lru"
+	"github.com/ltcsuite/neutrino/filterdb"
+	"github.com/ltcsuite/neutrino/headerfs"
 )
 
 // These are exported variables so they can be changed by users.
@@ -339,9 +339,9 @@ func (sp *ServerPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 // disconnected if an invalid fee filter value is provided.
 func (sp *ServerPeer) OnFeeFilter(_ *peer.Peer, msg *wire.MsgFeeFilter) {
 	// Check that the passed minimum fee is a valid amount.
-	if msg.MinFee < 0 || msg.MinFee > btcutil.MaxSatoshi {
+	if msg.MinFee < 0 || msg.MinFee > ltcutil.MaxSatoshi {
 		log.Debugf("Peer %v sent an invalid feefilter '%v' -- "+
-			"disconnecting", sp, btcutil.Amount(msg.MinFee))
+			"disconnecting", sp, ltcutil.Amount(msg.MinFee))
 		sp.Disconnect()
 		return
 	}

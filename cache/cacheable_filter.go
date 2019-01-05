@@ -1,6 +1,6 @@
 package cache
 
-import "github.com/btcsuite/btcutil/gcs"
+import "github.com/ltcsuite/ltcutil/gcs"
 
 // CacheableFilter is a wrapper around Filter type which provides a Size method
 // used by the cache to target certain memory usage.

@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/ltcsuite/ltcd/blockchain"
+	"github.com/ltcsuite/ltcd/chaincfg"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcd/wire"
+	"github.com/ltcsuite/ltcutil/gcs/builder"
+	"github.com/ltcsuite/ltcwallet/waddrmgr"
+	"github.com/ltcsuite/ltcwallet/walletdb"
 )
 
 // BlockHeaderStore is an interface that provides an abstraction for a generic

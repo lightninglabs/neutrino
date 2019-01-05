@@ -1,6 +1,6 @@
 package headerlist
 
-import "github.com/btcsuite/btcd/wire"
+import "github.com/ltcsuite/ltcd/wire"
 
 // Chain is an interface that stores a list of Nodes. Each node represents a
 // header in the main chain and also includes a height along with it. This is

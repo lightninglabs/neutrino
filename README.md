@@ -1,13 +1,13 @@
 # Neutrino: Privacy-Preserving Bitcoin Light Client
 
-[![Build Status](https://travis-ci.org/lightninglabs/neutrino.svg?branch=master)](https://travis-ci.org/lightninglabs/neutrino)
-[![Godoc](https://godoc.org/github.com/lightninglabs/neutrino?status.svg)](https://godoc.org/github.com/lightninglabs/neutrino)
-[![Coverage Status](https://coveralls.io/repos/github/lightninglabs/neutrino/badge.svg?branch=master)](https://coveralls.io/github/lightninglabs/neutrino?branch=master)
+[![Build Status](https://travis-ci.org/ltcsuite/neutrino.svg?branch=master)](https://travis-ci.org/ltcsuite/neutrino)
+[![Godoc](https://godoc.org/github.com/ltcsuite/neutrino?status.svg)](https://godoc.org/github.com/ltcsuite/neutrino)
+[![Coverage Status](https://coveralls.io/repos/github/ltcsuite/neutrino/badge.svg?branch=master)](https://coveralls.io/github/ltcsuite/neutrino?branch=master)
 
 Neutrino is an **experimental** Bitcoin light client written in Go and designed with mobile Lightning Network clients in mind. It uses a [new proposal](https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2017-June/014474.html) for compact block filters to minimize bandwidth and storage use on the client side, while attempting to preserve privacy and minimize processor load on full nodes serving light clients.
 
 ## Mechanism of operation
-The light client synchronizes only block headers and a chain of compact block filter headers specifying the correct filters for each block. Filters are loaded lazily and stored in the database upon request; blocks are loaded lazily and not saved. There are multiple [known major issues](https://github.com/lightninglabs/neutrino/issues) with the client, so it is **not recommended** to use it with real money at this point.
+The light client synchronizes only block headers and a chain of compact block filter headers specifying the correct filters for each block. Filters are loaded lazily and stored in the database upon request; blocks are loaded lazily and not saved. There are multiple [known major issues](https://github.com/ltcsuite/neutrino/issues) with the client, so it is **not recommended** to use it with real money at this point.
 
 ## Usage
 The client is instantiated as an object using `NewChainService` and then started. Upon start, the client sets up its database and other relevant files and connects to the p2p network. At this point, it becomes possible to query the client.

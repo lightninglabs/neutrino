@@ -1,8 +1,8 @@
 package neutrino
 
 import (
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcd/wire"
 )
 
 // batchSpendReporter orchestrates the delivery of spend reports to

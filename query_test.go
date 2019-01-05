@@ -12,17 +12,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/lightninglabs/neutrino/cache"
-	"github.com/lightninglabs/neutrino/cache/lru"
-	"github.com/lightninglabs/neutrino/filterdb"
-	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/ltcsuite/ltcd/blockchain"
+	"github.com/ltcsuite/ltcd/chaincfg"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcd/wire"
+	"github.com/ltcsuite/ltcutil"
+	"github.com/ltcsuite/ltcutil/gcs"
+	"github.com/ltcsuite/ltcutil/gcs/builder"
+	"github.com/ltcsuite/neutrino/cache"
+	"github.com/ltcsuite/neutrino/cache/lru"
+	"github.com/ltcsuite/neutrino/filterdb"
+	"github.com/ltcsuite/neutrino/headerfs"
 )
 
 var (
@@ -44,7 +44,7 @@ var (
 //
 // NOTE: copied from btcsuite/btcd/database/ffldb/interface_test.go
 func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
-	[]*btcutil.Block, error) {
+	[]*ltcutil.Block, error) {
 	// Open the file that contains the blocks for reading.
 	fi, err := os.Open(dataFile)
 	if err != nil {
@@ -60,8 +60,8 @@ func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
 	dr := bzip2.NewReader(fi)
 
 	// Set the first block as the genesis block.
-	blocks := make([]*btcutil.Block, 0, 256)
-	genesis := btcutil.NewBlock(chaincfg.MainNetParams.GenesisBlock)
+	blocks := make([]*ltcutil.Block, 0, 256)
+	genesis := ltcutil.NewBlock(chaincfg.MainNetParams.GenesisBlock)
 	blocks = append(blocks, genesis)
 
 	// Load the remaining blocks.
@@ -100,7 +100,7 @@ func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
 		}
 
 		// Deserialize and store the block.
-		block, err := btcutil.NewBlockFromBytes(blockBytes)
+		block, err := ltcutil.NewBlockFromBytes(blockBytes)
 		if err != nil {
 			t.Errorf("Failed to parse block %v: %v", height, err)
 			return nil, err

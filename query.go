@@ -8,15 +8,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/ltcsuite/ltcd/blockchain"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcd/wire"
+	"github.com/ltcsuite/ltcutil"
+	"github.com/ltcsuite/ltcutil/gcs"
+	"github.com/ltcsuite/ltcutil/gcs/builder"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/lightninglabs/neutrino/cache"
-	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/ltcsuite/neutrino/cache"
+	"github.com/ltcsuite/neutrino/filterdb"
 )
 
 var (
@@ -885,7 +885,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 // time, until one answers. If the block is found in the cache, it will be
 // returned immediately.
 func (s *ChainService) GetBlock(blockHash chainhash.Hash,
-	options ...QueryOption) (*btcutil.Block, error) {
+	options ...QueryOption) (*ltcutil.Block, error) {
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block so we
@@ -926,7 +926,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// which is always called single-threadedly. We don't check the block
 	// until after the query is finished, so we can just write to it
 	// naively.
-	var foundBlock *btcutil.Block
+	var foundBlock *ltcutil.Block
 	s.queryPeers(
 		// Send a wire.GetDataMsg
 		getData,
@@ -949,11 +949,11 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				if response.BlockHash() != blockHash {
 					return
 				}
-				block := btcutil.NewBlock(response)
+				block := ltcutil.NewBlock(response)
 
-				// Only set height if btcutil hasn't
+				// Only set height if ltcutil hasn't
 				// automagically put one in.
-				if block.Height() == btcutil.BlockHeightUnknown {
+				if block.Height() == ltcutil.BlockHeightUnknown {
 					block.SetHeight(int32(height))
 				}
 

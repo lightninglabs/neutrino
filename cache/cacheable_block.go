@@ -1,11 +1,11 @@
 package cache
 
-import "github.com/btcsuite/btcutil"
+import "github.com/ltcsuite/ltcutil"
 
-// CacheableBlock is a wrapper around the btcutil.Block type which provides a
+// CacheableBlock is a wrapper around the ltcutil.Block type which provides a
 // Size method used by the cache to target certain memory usage.
 type CacheableBlock struct {
-	*btcutil.Block
+	*ltcutil.Block
 }
 
 // Size returns size of this block in bytes.

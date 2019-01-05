@@ -7,12 +7,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/ltcsuite/ltcd/chaincfg"
+	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
+	"github.com/ltcsuite/ltcutil/gcs"
+	"github.com/ltcsuite/ltcutil/gcs/builder"
+	"github.com/ltcsuite/ltcwallet/walletdb"
+	_ "github.com/ltcsuite/ltcwallet/walletdb/bdb"
 )
 
 func createTestDatabase() (func(), FilterDatabase, error) {
