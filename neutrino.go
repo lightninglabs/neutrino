@@ -530,6 +530,7 @@ type ChainService struct {
 	donePeers         chan *ServerPeer
 	banPeers          chan *ServerPeer
 	query             chan interface{}
+	firstPeerConnect  chan struct{}
 	peerHeightsUpdate chan updatePeerHeightsMsg
 	wg                sync.WaitGroup
 	quit              chan struct{}
@@ -600,6 +601,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		banPeers:            make(chan *ServerPeer, MaxPeers),
 		query:               make(chan interface{}),
 		quit:                make(chan struct{}),
+		firstPeerConnect:    make(chan struct{}),
 		peerHeightsUpdate:   make(chan updatePeerHeightsMsg),
 		timeSource:          blockchain.NewMedianTime(),
 		services:            Services,
@@ -916,7 +918,7 @@ func (s *ChainService) peerHandler() {
 	// synchronize things, it's easier and slightly faster to simply start
 	// and stop them in this handler.
 	s.addrManager.Start()
-	s.blockManager.Start()
+	s.blockManager.Start(s.firstPeerConnect)
 	s.utxoScanner.Start()
 
 	state := &peerState{
@@ -1113,6 +1115,12 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		state.persistentPeers[sp.ID()] = sp
 	} else {
 		state.outboundPeers[sp.ID()] = sp
+	}
+
+	// Close firstPeerConnect channel so blockManager will be notified.
+	if s.firstPeerConnect != nil {
+		close(s.firstPeerConnect)
+		s.firstPeerConnect = nil
 	}
 
 	return true

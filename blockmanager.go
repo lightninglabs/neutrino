@@ -250,7 +250,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 }
 
 // Start begins the core block handler which processes block and inv messages.
-func (b *blockManager) Start() {
+func (b *blockManager) Start(firstPeerConnect <-chan struct{}) {
 	// Already started?
 	if atomic.AddInt32(&b.started, 1) != 1 {
 		return
@@ -259,7 +259,22 @@ func (b *blockManager) Start() {
 	log.Trace("Starting block manager")
 	b.wg.Add(2)
 	go b.blockHandler()
-	go b.cfHandler()
+	go func() {
+		defer b.wg.Done()
+
+		log.Debug("Waiting for peer connection...")
+
+		// Before starting the cfHandler we want to make sure we are connected
+		// with at least one peer.
+		select {
+		case <-firstPeerConnect:
+		case <-b.quit:
+			return
+		}
+
+		log.Debug("Peer connected, starting cfHandler.")
+		b.cfHandler()
+	}()
 }
 
 // Stop gracefully shuts down the block manager by stopping all asynchronous
@@ -407,12 +422,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 // run as a goroutine. It requests and processes cfheaders messages in a
 // separate goroutine from the peer handlers.
 func (b *blockManager) cfHandler() {
-	// If a loop ends with a quit, we want to signal that the goroutine is
-	// done.
-	defer func() {
-		log.Trace("Committed filter header handler done")
-		b.wg.Done()
-	}()
+	defer log.Trace("Committed filter header handler done")
 
 	var (
 		// allCFCheckpoints is a map from our peers to the list of
