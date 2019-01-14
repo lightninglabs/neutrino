@@ -845,7 +845,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		currentInterval++
 	}
 
-	log.Infof("Attempting to query for %v cfheader batches", len(queryMsgs))
+	batchesCount := len(queryMsgs)
+	if batchesCount == 0 {
+		return
+	}
+
+	log.Infof("Attempting to query for %v cfheader batches", batchesCount)
 
 	// With the set of messages constructed, we'll now request the batch
 	// all at once. This message will distributed the header requests
