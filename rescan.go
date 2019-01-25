@@ -399,10 +399,153 @@ filterHeaderWaitLoop:
 		})
 	}
 
+	// We'll need to keep track of whether we are current with the chain in
+	// order to properly recover from a re-org. We'll start by assuming that
+	// we are not current in order to catch up from the starting point to
+	// the tip of the chain.
+	current := false
+
+	// handleBlockConnected is a closure that handles a new block connected
+	// notification.
+	//
+	// TODO(wilmer): refactor this and handleBlockDisconnected into their
+	// own methods.
+	handleBlockConnected := func(header wire.BlockHeader) error {
+		// If we've somehow missed a header in the range, then we'll
+		// mark ourselves as not current so we can walk down the chain
+		// and notify the callers of blocks we may have missed.
+		//
+		// It's possible due to the nature of the current subscription
+		// system that we get a duplicate block. We'll catch this and
+		// continue forwards to avoid an unnecessary state transition
+		// back to the !current state.
+		if header.PrevBlock != curStamp.Hash &&
+			header.BlockHash() != curStamp.Hash {
+
+			current = false
+			return fmt.Errorf("out of order block %v: "+
+				"expected PrevBlock %v, got %v",
+				header.BlockHash(), curStamp.Hash,
+				header.PrevBlock)
+		}
+
+		// Do not process block until we have all filter headers. Don't
+		// worry, the block will get re-queued every time there is a new
+		// filter available. However, if it's a duplicate block
+		// notification, then we can re-process it without any issues.
+		if header.BlockHash() != curStamp.Hash &&
+			!s.hasFilterHeadersByHeight(uint32(curStamp.Height+1)) {
+
+			log.Warnf("Missing filter header for height=%v, "+
+				"skipping", curStamp.Height+1)
+
+			return nil
+		}
+
+		// As this could be a re-try, we'll ensure that we don't
+		// incorrectly increment our current time stamp.
+		if curStamp.Hash != header.BlockHash() {
+			curHeader = header
+			curStamp.Hash = header.BlockHash()
+			curStamp.Height++
+		}
+
+		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
+			curStamp.Hash)
+
+		// We're only scanning if the header is beyond the horizon of
+		// our start time.
+		if !scanning {
+			scanning = ro.startTime.Before(
+				curHeader.Timestamp,
+			)
+		}
+
+		// If we're actually scanning and we have a non-empty watch
+		// list, then we'll attempt to fetch the filter from the
+		// network.
+		var blockFilter *gcs.Filter
+		queryOptions := NumRetries(0)
+		blockFilter, err = s.GetCFilter(
+			curStamp.Hash, wire.GCSFilterRegular, queryOptions,
+		)
+
+		switch {
+		// If the block index doesn't know about this block, then it's
+		// likely we're mid re-org so we'll accept this as we account
+		// for it below.
+		case err == headerfs.ErrHashNotFound:
+
+		case err != nil:
+			return fmt.Errorf("unable to get filter for hash=%v: %v",
+				curStamp.Hash, err)
+		}
+
+		// If the filter is nil, then this either means that we don't
+		// have any peers to fetch this filter from, or the peer(s) that
+		// we're trying to fetch from are in the progress of a re-org.
+		if blockFilter == nil {
+			// TODO(halseth): this is racy, as blocks can come in
+			// before we refetch.
+			resetBlockReFetchTimer(header, curStamp.Height)
+			return nil
+		}
+
+		err := s.notifyBlockWithFilter(
+			ro, &curHeader, &curStamp, blockFilter,
+		)
+		if err != nil {
+			return err
+		}
+
+		// We'll successfully fetched this current block, so we'll reset
+		// the retry timer back to nil.
+		blockReFetchTimer = nil
+		return nil
+	}
+
+	// handleBlockDisconnected is a helper closure that handles a new block
+	// disconnected notification.
+	handleBlockDisconnected := func(header wire.BlockHeader) {
+		log.Debugf("Rescan disconnect block %d (%s)\n", curStamp.Height,
+			curStamp.Hash)
+
+		// Only deal with it if it's the current block we know about.
+		// Otherwise, it's in the future.
+		if header.BlockHash() == curStamp.Hash {
+			// Run through notifications. This is all
+			// single-threaded. We include deprecated calls as
+			// they're still used, for now.
+			if ro.ntfn.OnFilteredBlockDisconnected != nil {
+				ro.ntfn.OnFilteredBlockDisconnected(
+					curStamp.Height,
+					&curHeader)
+			}
+			if ro.ntfn.OnBlockDisconnected != nil {
+				ro.ntfn.OnBlockDisconnected(
+					&curStamp.Hash,
+					curStamp.Height,
+					curHeader.Timestamp)
+			}
+
+			header := s.getReorgTip(header.PrevBlock)
+			curHeader = *header
+			curStamp.Hash = header.BlockHash()
+			curStamp.Height--
+
+			// Now that we got a re-org, if we had a re-fetch timer
+			// going, we'll re-set is at the new header tip.
+			if blockReFetchTimer != nil {
+				resetBlockReFetchTimer(
+					*header, curStamp.Height,
+				)
+			}
+		}
+	}
+
 	// Loop through blocks, one at a time. This relies on the underlying
 	// ChainService API to send blockConnected and blockDisconnected
 	// notifications in the correct order.
-	current := false
 rescanLoop:
 	for {
 		// If we've reached the ending height or hash for this rescan,
@@ -455,153 +598,15 @@ rescanLoop:
 				}
 
 			case header := <-blockConnected:
-				// If we've somehow missed a header in the
-				// range, then we'll mark ourselves as not
-				// current so we can walk down the chain and
-				// notify the callers of blocks we may have
-				// missed.
-				//
-				// It's possible due to the nature of the
-				// current subscription system that we get a
-				// duplicate block. We'll catch this and
-				// continue forwards to avoid an unnecessary
-				// state transition back to the !current state.
-				if header.PrevBlock != curStamp.Hash &&
-					header.BlockHash() != curStamp.Hash {
-
-					log.Debugf("Rescan got out of order "+
-						"block %s with prevblock %s, "+
-						"curHeader: %s",
-						header.BlockHash(),
-						header.PrevBlock,
-						curStamp.Hash)
-
-					current = false
-					continue rescanLoop
-				}
-
-				// Do not process block until we have all
-				// filter headers. Don't worry, the block will
-				// get re-queued every time there is a new
-				// filter available. However, if it's a
-				// duplicate block notification, then we can
-				// re-process it without any issues.
-				if header.BlockHash() != curStamp.Hash &&
-					!s.hasFilterHeadersByHeight(uint32(curStamp.Height+1)) {
-					log.Warnf("Missing filter header for "+
-						"height=%v, skipping",
-						curStamp.Height+1)
-					continue rescanLoop
-				}
-
-				// As this could be a re-try, we'll ensure that
-				// we don't incorrectly increment our current
-				// time stamp.
-				if curStamp.Hash != header.BlockHash() {
-					curHeader = header
-					curStamp.Hash = header.BlockHash()
-					curStamp.Height++
-				}
-
-				log.Tracef("Rescan got block %d (%s)", curStamp.Height,
-					curStamp.Hash)
-
-				// We're only scanning if the header is beyond
-				// the horizon of our start time.
-				if !scanning {
-					scanning = ro.startTime.Before(
-						curHeader.Timestamp,
-					)
-				}
-
-				// If we're actually scanning and we have a
-				// non-empty watch list, then we'll attempt to
-				// fetch the filter from the network.
-				var blockFilter *gcs.Filter
-				queryOptions := NumRetries(0)
-				blockFilter, err = s.GetCFilter(
-					curStamp.Hash, wire.GCSFilterRegular,
-					queryOptions,
-				)
-
-				switch {
-				// If the block index doesn't know about
-				// this block, then it's likely we're mid
-				// re-org so we'll accept this as we
-				// account for it below.
-				case err == headerfs.ErrHashNotFound:
-
-				case err != nil:
-					return fmt.Errorf("unable to get "+
-						"filter for hash=%v: %v",
-						curStamp.Hash, err)
-				}
-
-				// If the filter is nil, then this either means
-				// that we don't have any peers to fetch this
-				// filter from, or the peer(s) that we're
-				// trying to fetch from are in the progress of
-				// a re-org.
-				if blockFilter == nil {
-					// TODO(halseth): this is racy, as
-					// blocks can come in before we
-					// refetch.
-					resetBlockReFetchTimer(
-						header, curStamp.Height,
-					)
-					continue
-				}
-
-				err := s.notifyBlockWithFilter(
-					ro, &curHeader, &curStamp, blockFilter,
-				)
+				err := handleBlockConnected(header)
 				if err != nil {
-					return err
+					log.Errorf("Unable to process new "+
+						"block %v", header.BlockHash(),
+						err)
 				}
-
-				// We'll successfully fetched this current
-				// block, so we'll reset the retry timer back
-				// to nil.
-				blockReFetchTimer = nil
 
 			case header := <-blockDisconnected:
-				log.Debugf("Rescan disconnect block %d (%s)\n",
-					curStamp.Height, curStamp.Hash)
-
-				// Only deal with it if it's the current block
-				// we know about. Otherwise, it's in the
-				// future.
-				if header.BlockHash() == curStamp.Hash {
-					// Run through notifications. This is
-					// all single-threaded. We include
-					// deprecated calls as they're still
-					// used, for now.
-					if ro.ntfn.OnFilteredBlockDisconnected != nil {
-						ro.ntfn.OnFilteredBlockDisconnected(
-							curStamp.Height,
-							&curHeader)
-					}
-					if ro.ntfn.OnBlockDisconnected != nil {
-						ro.ntfn.OnBlockDisconnected(
-							&curStamp.Hash,
-							curStamp.Height,
-							curHeader.Timestamp)
-					}
-
-					header := s.getReorgTip(header.PrevBlock)
-					curHeader = *header
-					curStamp.Hash = header.BlockHash()
-					curStamp.Height--
-
-					// Now that we got a re-org, if we had
-					// a re-fetch timer going, we'll re-set
-					// is at the new header tip.
-					if blockReFetchTimer != nil {
-						resetBlockReFetchTimer(
-							*header, curStamp.Height,
-						)
-					}
-				}
+				handleBlockDisconnected(header)
 			}
 
 		// If we're not yet current, then we'll walk down the chain
