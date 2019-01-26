@@ -286,62 +286,74 @@ func (s *ChainService) rescan(options ...RescanOption) error {
 		}
 	}
 
-	s.blockManager.newFilterHeadersMtx.RLock()
-	filterHeaderHeight := s.blockManager.filterHeaderTip
-	s.blockManager.newFilterHeadersMtx.RUnlock()
-
-	log.Debugf("Waiting for filter headers (height=%v) to catch up the "+
-		"rescan start (height=%v)", filterHeaderHeight, curStamp.Height)
-
-	// We'll wait here at this point until we have enough filter headers to
-	// actually start walking forwards in the chain. To be able to wake up
-	// in cause we are being asked to exit, we'll launch a new goroutine to
-	// wait.
-	done := make(chan struct{})
-	go func() {
-		s.blockManager.newFilterHeadersMtx.Lock()
-		for s.blockManager.filterHeaderTip < uint32(curStamp.Height) {
-			s.blockManager.newFilterHeadersSignal.Wait()
-
-			// While we're awake, check to see if we need to exit.
-			select {
-			case <-ro.quit:
-				s.blockManager.newFilterHeadersMtx.Unlock()
-				return
-			default:
-			}
-		}
-		s.blockManager.newFilterHeadersMtx.Unlock()
-		close(done)
-	}()
-
-	// Now wait for either filter headers to be fully synced, or we are
-	// quitting. We also queue any incoming rescan updates, such that we
-	// can apply them when the filters are synced.
+	// Now that we've determined the starting point of our rescan, we can
+	// begin processing updates from the client.
 	var updates []*updateOptions
-filterHeaderWaitLoop:
-	for {
-		select {
-		case update := <-ro.update:
-			updates = append(updates, update)
 
-		case <-done:
-			break filterHeaderWaitLoop
-
-		case <-ro.quit:
-			// Broadcast the header signal such that the goroutine
-			// can wake up and exit.
-			s.blockManager.newFilterHeadersSignal.Broadcast()
-			return ErrRescanExit
-		}
+	// We'll need to ensure that the backing chain has actually caught up to
+	// the rescan's starting height.
+	bestBlock, err := s.BestBlock()
+	if err != nil {
+		return err
 	}
 
-	// If any updates were queued while waiting for the filter headers to
-	// sync, apply them now.
-	for _, upd := range updates {
-		_, err := ro.updateFilter(upd, &curStamp, &curHeader)
+	// If it hasn't, we'll subscribe for block notifications at tip and wait
+	// until we receive a notification for a block with the rescan's
+	// starting height.
+	if bestBlock.Height < curStamp.Height {
+		log.Debugf("Waiting to catch up to the rescan start height=%d "+
+			"from height=%d", curStamp.Height, bestBlock.Height)
+
+		blockSubscription, err := s.blockSubscriptionMgr.NewSubscription(
+			uint32(bestBlock.Height),
+		)
 		if err != nil {
 			return err
+		}
+
+	waitUntilSynced:
+		for {
+			select {
+			// We'll make sure to process any updates while we're
+			// syncing to prevent blocking the client.
+			case update := <-ro.update:
+				updates = append(updates, update)
+
+			// A new block notification for the tip of the chain has
+			// arrived. We'll determine we've caught up to the
+			// rescan's starting height by receiving a block
+			// connected notification for the same height.
+			case ntfn, ok := <-blockSubscription.Notifications:
+				if !ok {
+					return errors.New("rescan block " +
+						"subscription was canceled " +
+						"while waiting to catch up")
+				}
+
+				if _, ok := ntfn.(*blockntfns.Connected); !ok {
+					continue
+				}
+				if ntfn.Height() < uint32(curStamp.Height) {
+					continue
+				}
+
+				break waitUntilSynced
+
+			case <-ro.quit:
+				blockSubscription.Cancel()
+				return ErrRescanExit
+			}
+		}
+
+		blockSubscription.Cancel()
+
+		// If any updates were queued while waiting to catch up to the
+		// start height of the rescan, apply them now.
+		for _, upd := range updates {
+			_, err := ro.updateFilter(upd, &curStamp, &curHeader)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
