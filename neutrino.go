@@ -739,10 +739,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
-		BestSnapshot:       s.BestBlock,
-		GetBlockHash:       s.GetBlockHash,
-		BlockFilterMatches: s.blockFilterMatches,
-		GetBlock:           s.GetBlock,
+		BestSnapshot: s.BestBlock,
+		GetBlockHash: s.GetBlockHash,
+		GetBlock:     s.GetBlock,
+		BlockFilterMatches: func(ro *rescanOptions,
+			blockHash *chainhash.Hash) (bool, error) {
+
+			return blockFilterMatches(
+				&RescanChainSource{&s}, ro, blockHash,
+			)
+		},
 	})
 
 	return &s, nil
@@ -1336,4 +1342,42 @@ func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
 		}
 	}
 	return nil
+}
+
+// RescanChainSource is a wrapper type around the ChainService struct that will
+// be used to satisfy the rescan.ChainSource interface.
+type RescanChainSource struct {
+	*ChainService
+}
+
+// A compile-time check to ensure that RescanChainSource implements the
+// rescan.ChainSource interface.
+var _ ChainSource = (*RescanChainSource)(nil)
+
+// GetBlockHeaderByHeight returns the header of the block with the given height.
+func (s *RescanChainSource) GetBlockHeaderByHeight(
+	height uint32) (*wire.BlockHeader, error) {
+	return s.BlockHeaders.FetchHeaderByHeight(height)
+}
+
+// GetBlockHeader returns the header of the block with the given hash.
+func (s *RescanChainSource) GetBlockHeader(
+	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+	return s.BlockHeaders.FetchHeader(hash)
+}
+
+// GetFilterHeaderByHeight returns the filter header of the block with the given
+// height.
+func (s *RescanChainSource) GetFilterHeaderByHeight(
+	height uint32) (*chainhash.Hash, error) {
+	return s.RegFilterHeaders.FetchHeaderByHeight(height)
+}
+
+// Subscribe returns a block subscription that delivers block notifications in
+// order. The bestHeight parameter can be used to signal that a backlog of
+// notifications should be delivered from this height. When providing a height
+// of 0, a backlog will not be delivered.
+func (s *RescanChainSource) Subscribe(
+	bestHeight uint32) (*blockntfns.Subscription, error) {
+	return s.blockSubscriptionMgr.NewSubscription(bestHeight)
 }
