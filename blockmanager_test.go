@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -376,6 +377,22 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			}
 		}
 
+		// We should expect to see notifications for each new filter
+		// header being connected.
+		startHeight := uint32(1)
+		if test.partialInterval {
+			startHeight = wire.CFCheckptInterval / 3
+		}
+		go func() {
+			for i := startHeight; i <= maxHeight; i++ {
+				ntfn := <-bm.blockNtfnChan
+				if _, ok := ntfn.(*blockntfns.Connected); !ok {
+					t.Fatal("expected block connected " +
+						"notification")
+				}
+			}
+		}()
+
 		// Call the get checkpointed cf headers method with the
 		// checkpoints we created to start the test.
 		bm.getCheckpointedCFHeaders(
@@ -583,6 +600,22 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				}
 			}
 		}
+
+		// We should expect to see notifications for each new filter
+		// header being connected.
+		startHeight := uint32(1)
+		if test.partialInterval {
+			startHeight = wire.CFCheckptInterval / 3
+		}
+		go func() {
+			for i := startHeight; i <= maxHeight; i++ {
+				ntfn := <-bm.blockNtfnChan
+				if _, ok := ntfn.(*blockntfns.Connected); !ok {
+					t.Fatal("expected block connected " +
+						"notification")
+				}
+			}
+		}()
 
 		// Start the test by calling the get checkpointed cf headers
 		// method with the checkpoints we created.

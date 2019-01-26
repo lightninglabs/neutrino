@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 )
@@ -167,6 +168,10 @@ type blockManager struct {
 	// try to perform any queries before we have our first peer.
 	firstPeerSignal <-chan struct{}
 
+	// blockNtfnChan is a channel in which the latest block notifications
+	// for the tip of the chain will be sent upon.
+	blockNtfnChan chan blockntfns.BlockNtfn
+
 	wg   sync.WaitGroup
 	quit chan struct{}
 
@@ -191,8 +196,9 @@ func newBlockManager(s *ChainService,
 	adjustmentFactor := s.chainParams.RetargetAdjustmentFactor
 
 	bm := blockManager{
-		server:   s,
-		peerChan: make(chan interface{}, MaxPeers*3),
+		server:        s,
+		peerChan:      make(chan interface{}, MaxPeers*3),
+		blockNtfnChan: make(chan blockntfns.BlockNtfn),
 		blkHeaderProgressLogger: newBlockProgressLogger(
 			"Processed", "block", log,
 		),
@@ -1110,7 +1116,6 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
-	msgType := connectBasic
 	for i, header := range matchingBlockHeaders {
 		header := header
 
@@ -1119,10 +1124,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 			header.Timestamp, int32(headerHeight),
 		)
 
-		b.server.sendSubscribedMsg(&blockMessage{
-			msgType: msgType,
-			header:  &header,
-		})
+		b.onBlockConnected(header, headerHeight)
 	}
 
 	// We'll also set the new header tip and notify any peers that the tip
@@ -2545,4 +2547,77 @@ func (b *blockManager) findPrevTestNetDifficulty(hList headerlist.Chain) (uint32
 		lastBits = iterNode.Bits
 	}
 	return lastBits, nil
+}
+
+// onBlockConnected queues a block notification that extends the current chain.
+func (b *blockManager) onBlockConnected(header wire.BlockHeader, height uint32) {
+	select {
+	case b.blockNtfnChan <- blockntfns.NewBlockConnected(header, height):
+	case <-b.quit:
+	}
+}
+
+// onBlockDisconnected queues a block notification that reorgs the current
+// chain.
+func (b *blockManager) onBlockDisconnected(headerDisconnected wire.BlockHeader,
+	heightDisconnected uint32, newChainTip wire.BlockHeader) {
+
+	select {
+	case b.blockNtfnChan <- blockntfns.NewBlockDisconnected(
+		headerDisconnected, heightDisconnected, newChainTip,
+	):
+	case <-b.quit:
+	}
+}
+
+// Notifications exposes a receive-only channel in which the latest block
+// notifications for the tip of the chain can be received.
+func (b *blockManager) Notifications() <-chan blockntfns.BlockNtfn {
+	return b.blockNtfnChan
+}
+
+// NotificationsSinceHeight returns a backlog of block notifications starting
+// from the given height to the tip of the chain. When providing a height of 0,
+// a backlog will not be delivered.
+func (b *blockManager) NotificationsSinceHeight(
+	height uint32) ([]blockntfns.BlockNtfn, uint32, error) {
+
+	b.newFilterHeadersMtx.RLock()
+	defer b.newFilterHeadersMtx.RUnlock()
+
+	bestHeight := b.filterHeaderTip
+
+	// If a height of 0 is provided by the caller, then a backlog of
+	// notifications is not needed.
+	if height == 0 {
+		return nil, bestHeight, nil
+	}
+
+	// If the best height matches the filter header tip, then we're done and
+	// don't need to proceed any further.
+	if bestHeight == height {
+		return nil, bestHeight, nil
+	}
+
+	// If the request has a height later than a height we've yet to come
+	// across in the chain, we'll return an error to indicate so to the
+	// caller.
+	if height > bestHeight {
+		return nil, 0, fmt.Errorf("request with height %d is greater "+
+			"than best height known %d", height, bestHeight)
+	}
+
+	// Otherwise, we need to read block headers from disk to deliver a
+	// backlog to the caller before we proceed.
+	blocks := make([]blockntfns.BlockNtfn, 0, bestHeight-height)
+	for i := height + 1; i <= bestHeight; i++ {
+		header, err := b.server.BlockHeaders.FetchHeaderByHeight(i)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		blocks = append(blocks, blockntfns.NewBlockConnected(*header, i))
+	}
+
+	return blocks, bestHeight, nil
 }

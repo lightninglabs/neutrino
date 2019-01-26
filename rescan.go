@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -355,14 +356,7 @@ filterHeaderWaitLoop:
 	// checking timestamps at each block.
 	scanning := ro.startTime.Before(curHeader.Timestamp)
 
-	// Listen for notifications.
-	blockConnected := make(chan wire.BlockHeader)
-	blockDisconnected := make(chan wire.BlockHeader)
-
-	var (
-		subscription *blockSubscription
-		err          error
-	)
+	var blockSubscription *blockntfns.Subscription
 
 	// blockRetryInterval is the interval in which we'll continually re-try
 	// to fetch the latest filter from our peers.
@@ -375,7 +369,7 @@ filterHeaderWaitLoop:
 	// the filter for a block the first time around.
 	var blockReFetchTimer *time.Timer
 
-	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height int32) {
+	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height uint32) {
 		// If so, then we'll avoid notifying the block, and will
 		// instead add this to our retry queue, as we should be getting
 		// block disconnected notifications in short order.
@@ -392,8 +386,9 @@ filterHeaderWaitLoop:
 			log.Infof("Resending rescan header for block hash=%v, "+
 				"height=%v", headerTip.BlockHash(), height)
 
+			ntfn := blockntfns.NewBlockConnected(headerTip, height)
 			select {
-			case blockConnected <- headerTip:
+			case blockSubscription.Notifications <- ntfn:
 			case <-ro.quit:
 			}
 		})
@@ -410,7 +405,7 @@ filterHeaderWaitLoop:
 	//
 	// TODO(wilmer): refactor this and handleBlockDisconnected into their
 	// own methods.
-	handleBlockConnected := func(header wire.BlockHeader) error {
+	handleBlockConnected := func(ntfn *blockntfns.Connected) error {
 		// If we've somehow missed a header in the range, then we'll
 		// mark ourselves as not current so we can walk down the chain
 		// and notify the callers of blocks we may have missed.
@@ -419,6 +414,7 @@ filterHeaderWaitLoop:
 		// system that we get a duplicate block. We'll catch this and
 		// continue forwards to avoid an unnecessary state transition
 		// back to the !current state.
+		header := ntfn.Header()
 		if header.PrevBlock != curStamp.Hash &&
 			header.BlockHash() != curStamp.Hash {
 
@@ -466,7 +462,7 @@ filterHeaderWaitLoop:
 		// network.
 		var blockFilter *gcs.Filter
 		queryOptions := NumRetries(0)
-		blockFilter, err = s.GetCFilter(
+		blockFilter, err := s.GetCFilter(
 			curStamp.Hash, wire.GCSFilterRegular, queryOptions,
 		)
 
@@ -487,11 +483,11 @@ filterHeaderWaitLoop:
 		if blockFilter == nil {
 			// TODO(halseth): this is racy, as blocks can come in
 			// before we refetch.
-			resetBlockReFetchTimer(header, curStamp.Height)
+			resetBlockReFetchTimer(header, uint32(curStamp.Height))
 			return nil
 		}
 
-		err := s.notifyBlockWithFilter(
+		err = s.notifyBlockWithFilter(
 			ro, &curHeader, &curStamp, blockFilter,
 		)
 		if err != nil {
@@ -506,46 +502,48 @@ filterHeaderWaitLoop:
 
 	// handleBlockDisconnected is a helper closure that handles a new block
 	// disconnected notification.
-	handleBlockDisconnected := func(header wire.BlockHeader) {
+	handleBlockDisconnected := func(ntfn *blockntfns.Disconnected) error {
 		log.Debugf("Rescan disconnect block %d (%s)\n", curStamp.Height,
 			curStamp.Hash)
 
 		// Only deal with it if it's the current block we know about.
 		// Otherwise, it's in the future.
-		if header.BlockHash() == curStamp.Hash {
-			// Run through notifications. This is all
-			// single-threaded. We include deprecated calls as
-			// they're still used, for now.
-			if ro.ntfn.OnFilteredBlockDisconnected != nil {
-				ro.ntfn.OnFilteredBlockDisconnected(
-					curStamp.Height,
-					&curHeader)
-			}
-			if ro.ntfn.OnBlockDisconnected != nil {
-				ro.ntfn.OnBlockDisconnected(
-					&curStamp.Hash,
-					curStamp.Height,
-					curHeader.Timestamp)
-			}
-
-			header := s.getReorgTip(header.PrevBlock)
-			curHeader = *header
-			curStamp.Hash = header.BlockHash()
-			curStamp.Height--
-
-			// Now that we got a re-org, if we had a re-fetch timer
-			// going, we'll re-set is at the new header tip.
-			if blockReFetchTimer != nil {
-				resetBlockReFetchTimer(
-					*header, curStamp.Height,
-				)
-			}
+		blockDisconnected := ntfn.Header()
+		if blockDisconnected.BlockHash() != curStamp.Hash {
+			return nil
 		}
+
+		// Run through notifications. This is all single-threaded. We
+		// include deprecated calls as they're still used, for now.
+		if ro.ntfn.OnFilteredBlockDisconnected != nil {
+			ro.ntfn.OnFilteredBlockDisconnected(
+				curStamp.Height, &curHeader,
+			)
+		}
+		if ro.ntfn.OnBlockDisconnected != nil {
+			ro.ntfn.OnBlockDisconnected(
+				&curStamp.Hash, curStamp.Height,
+				curHeader.Timestamp,
+			)
+		}
+
+		curHeader = ntfn.ChainTip()
+		curStamp.Hash = curHeader.BlockHash()
+		curStamp.Height--
+
+		// Now that we got a re-org, if we had a re-fetch timer going,
+		// we'll re-set is at the new header tip.
+		if blockReFetchTimer != nil {
+			resetBlockReFetchTimer(
+				curHeader, uint32(curStamp.Height),
+			)
+		}
+
+		return nil
 	}
 
 	// Loop through blocks, one at a time. This relies on the underlying
-	// ChainService API to send blockConnected and blockDisconnected
-	// notifications in the correct order.
+	// chain source to deliver notifications in the correct order.
 rescanLoop:
 	for {
 		// If we've reached the ending height or hash for this rescan,
@@ -593,20 +591,35 @@ rescanLoop:
 						curStamp.Height, curStamp.Hash)
 
 					current = false
-					s.unsubscribeBlockMsgs(subscription)
-					subscription = nil
+					blockSubscription.Cancel()
+					blockSubscription = nil
 				}
 
-			case header := <-blockConnected:
-				err := handleBlockConnected(header)
-				if err != nil {
-					log.Errorf("Unable to process new "+
-						"block %v", header.BlockHash(),
-						err)
+			case ntfn, ok := <-blockSubscription.Notifications:
+				if !ok {
+					return errors.New("rescan block " +
+						"subscription was canceled")
 				}
 
-			case header := <-blockDisconnected:
-				handleBlockDisconnected(header)
+				switch ntfn := ntfn.(type) {
+				case *blockntfns.Connected:
+					err := handleBlockConnected(ntfn)
+					if err != nil {
+						log.Errorf("Unable to process "+
+							"%v: %v", ntfn, err)
+					}
+
+				case *blockntfns.Disconnected:
+					err := handleBlockDisconnected(ntfn)
+					if err != nil {
+						log.Errorf("Unable to process "+
+							"%v: %v", ntfn, err)
+					}
+
+				default:
+					log.Warnf("Received unhandled block "+
+						"notification: %T", ntfn)
+				}
 			}
 
 		// If we're not yet current, then we'll walk down the chain
@@ -650,23 +663,22 @@ rescanLoop:
 
 				// Ensure we cancel the old subscroption if
 				// we're going back to scan for missed blocks.
-				if subscription != nil {
-					s.unsubscribeBlockMsgs(subscription)
+				if blockSubscription != nil {
+					blockSubscription.Cancel()
 				}
 
 				// Subscribe to block notifications.
-				subscription, err = s.subscribeBlockMsg(
-					uint32(curStamp.Height), blockConnected,
-					blockDisconnected, nil,
+				blockSubscription, err = s.blockSubscriptionMgr.NewSubscription(
+					uint32(curStamp.Height),
 				)
 				if err != nil {
 					return fmt.Errorf("unable to register "+
 						"block subscription: %v", err)
 				}
 				defer func() {
-					if subscription != nil {
-						s.unsubscribeBlockMsgs(subscription)
-						subscription = nil
+					if blockSubscription != nil {
+						blockSubscription.Cancel()
+						blockSubscription = nil
 					}
 				}()
 
@@ -1262,15 +1274,4 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	}
 
 	return report, nil
-}
-
-// getReorgTip gets a block header from the chain service's cache. This is only
-// required until the block subscription API is factored out into its own
-// package.
-//
-// TODO(aakselrod): Get rid of this as described above.
-func (s *ChainService) getReorgTip(hash chainhash.Hash) *wire.BlockHeader {
-	s.mtxReorgHeader.RLock()
-	defer s.mtxReorgHeader.RUnlock()
-	return s.reorgedBlockHeaders[hash]
 }
