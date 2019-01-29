@@ -680,6 +680,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					break
 				}
 
+				// The peer behind this address should support
+				// all of our required services.
+				if addr.Services()&RequiredServices != RequiredServices {
+					continue
+				}
+
 				// Address will not be invalid, local or unroutable
 				// because addrmanager rejects those on addition.
 				// Just check that we don't already have an address
