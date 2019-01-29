@@ -254,6 +254,16 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// the local clock to keep the network time in sync.
 	sp.server.timeSource.AddTimeSample(sp.Addr(), msg.Timestamp)
 
+	// Update the address manager with the advertised services for outbound
+	// connections in case they have changed. This is not done for inbound
+	// connections to help prevent malicious behavior and is skipped when
+	// running on the simulation test network since it is only intended to
+	// connect to specified peers and actively avoids advertising and
+	// connecting to discovered peers.
+	if sp.server.ChainParams().Net != chaincfg.SimNetParams.Net && !sp.Inbound() {
+		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
+	}
+
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
