@@ -70,7 +70,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 	}
 
 	// Set up a blockManager with the chain service we defined.
-	bm, err := newBlockManager(cs)
+	bm, err := newBlockManager(cs, nil)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
