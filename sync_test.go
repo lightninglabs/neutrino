@@ -250,6 +250,7 @@ type testLogger struct {
 
 type neutrinoHarness struct {
 	h1, h2, h3 *rpctest.Harness
+	cfg        neutrino.Config
 	svc        *neutrino.ChainService
 }
 
@@ -262,6 +263,10 @@ var testCases = []*syncTestCase{
 	{
 		name: "initial sync",
 		test: testInitialSync,
+	},
+	{
+		name: "test cfheaders sync",
+		test: testCFHeadersSync,
 	},
 	{
 		name: "one-shot rescan",
@@ -287,6 +292,36 @@ func testInitialSync(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
+}
+
+// Make sure that the client doesn't get stuck in a loop attempting to
+// synchronize cfheaders from the wrong peer. Because this is probabilistic
+// and requires an incorrect peer to be connected, we try it several times
+// with a much shorter ban duration. We also try to ban the correct peer
+// temporarily to increase the chances that the wrong peer gets queried for
+// the cfheaders.
+func testCFHeadersSync(harness *neutrinoHarness, t *testing.T) {
+	neutrino.BanDuration = 100 * time.Millisecond
+	for i := 0; i < 15; i++ {
+		svc, cleanup, err := createService(t, harness.cfg)
+		if err != nil {
+			t.Fatalf("Couldn't create ChainService: %s", err)
+		}
+
+		// Ban the correct peer for a little longer.
+		neutrino.BanDuration = 500 * time.Millisecond
+		banPeer(svc, harness.h1)
+		neutrino.BanDuration = 100 * time.Millisecond
+
+		// Wait for synchronization.
+		err = waitForSync(t, svc, harness.h1)
+		if err != nil {
+			cleanup()
+			t.Fatalf("Couldn't sync ChainService: %s", err)
+		}
+		cleanup()
+	}
+	neutrino.BanDuration = 5 * time.Second
 }
 
 // Variables used to track state between multiple rescan tests.
@@ -1096,7 +1131,7 @@ func TestNeutrinoSync(t *testing.T) {
 	defer cleanup()
 
 	// Create a test harness with the three nodes and the neutrino instance.
-	testHarness := &neutrinoHarness{h1, h2, h3, svc}
+	testHarness := &neutrinoHarness{h1, h2, h3, config, svc}
 
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
