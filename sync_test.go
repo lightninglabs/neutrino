@@ -1079,21 +1079,8 @@ func TestNeutrinoSync(t *testing.T) {
 			})
 	}
 
-	// Create a temporary directory, initialize an empty walletdb with an
-	// SPV chain namespace, and create a configuration for the ChainService.
-	tempDir, err := ioutil.TempDir("", "neutrino")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %s", err)
-	}
-	defer os.RemoveAll(tempDir)
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
-	defer db.Close()
-	if err != nil {
-		t.Fatalf("Error opening DB: %s\n", err)
-	}
+	// Create a configuration for the ChainService.
 	config := neutrino.Config{
-		DataDir:     tempDir,
-		Database:    db,
 		ChainParams: modParams,
 		AddPeers: []string{
 			h3.P2PAddress(),
@@ -1105,12 +1092,8 @@ func TestNeutrinoSync(t *testing.T) {
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
 	neutrino.QueryPeerConnectTimeout = 10 * time.Second
-	svc, err := neutrino.NewChainService(config)
-	if err != nil {
-		t.Fatalf("Error creating ChainService: %s", err)
-	}
-	svc.Start()
-	defer svc.Stop()
+	svc, cleanup, err := createService(t, config)
+	defer cleanup()
 
 	// Create a test harness with the three nodes and the neutrino instance.
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
@@ -1120,6 +1103,41 @@ func TestNeutrinoSync(t *testing.T) {
 			test.test(testHarness, t)
 		})
 	}
+}
+
+// createService creates a neutrino.ChainService, which allows the caller to
+// then use it. It's created in a temporary directory, which is cleaned up by
+// the returned cleanup function.
+func createService(t *testing.T, config neutrino.Config) (
+	*neutrino.ChainService, func(), error) {
+
+	// Create a temporary directory, initialize an empty walletdb with an
+	// SPV chain namespace, and add those to the ChainService config.
+	tempDir, err := ioutil.TempDir("", "neutrino")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %s", err)
+	}
+	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("Error opening DB: %s\n", err)
+	}
+	config.DataDir = tempDir
+	config.Database = db
+
+	// Create a new service and return it with its cleanup function.
+	svc, err := neutrino.NewChainService(config)
+	if err != nil {
+		db.Close()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Error creating ChainService: %s", err)
+	}
+	svc.Start()
+	return svc, func() {
+		svc.Stop()
+		db.Close()
+		os.RemoveAll(tempDir)
+	}, nil
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
