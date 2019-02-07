@@ -510,9 +510,26 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			)
 		}
 
-		// If we're actually scanning and we have a non-empty watch
-		// list, then we'll attempt to fetch the filter from the
-		// network.
+		// If we're not scanning or our watch list is empty, then we can
+		// just notify the block without fetching any filters/blocks.
+		if !scanning || len(ro.watchList) == 0 {
+			if ro.ntfn.OnFilteredBlockConnected != nil {
+				ro.ntfn.OnFilteredBlockConnected(
+					curStamp.Height, &curHeader, nil,
+				)
+			}
+			if ro.ntfn.OnBlockConnected != nil {
+				ro.ntfn.OnBlockConnected(
+					&curStamp.Hash, curStamp.Height,
+					curHeader.Timestamp,
+				)
+			}
+
+			return nil
+		}
+
+		// Otherwise, we'll attempt to fetch the filter to retrieve the
+		// relevant transactions and notify them.
 		queryOptions := NumRetries(0)
 		blockFilter, err := chain.GetCFilter(
 			curStamp.Hash, wire.GCSFilterRegular, queryOptions,
