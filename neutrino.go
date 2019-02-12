@@ -26,6 +26,7 @@ import (
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/pushtx"
 )
 
 // These are exported variables so they can be changed by users.
@@ -570,6 +571,7 @@ type ChainService struct {
 	timeSource           blockchain.MedianTimeSource
 	services             wire.ServiceFlag
 	utxoScanner          *UtxoScanner
+	broadcaster          *pushtx.Broadcaster
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -785,6 +787,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			return blockFilterMatches(
 				&RescanChainSource{&s}, ro, blockHash,
 			)
+		},
+	})
+
+	s.broadcaster = pushtx.NewBroadcaster(&pushtx.Config{
+		Broadcast: func(tx *wire.MsgTx) error {
+			return s.sendTransaction(tx)
+		},
+		SubscribeBlocks: func() (*blockntfns.Subscription, error) {
+			return s.blockSubscriptionMgr.NewSubscription(0)
 		},
 	})
 
@@ -1235,14 +1246,14 @@ func disconnectPeer(peerList map[int32]*ServerPeer,
 	return false
 }
 
-// PublishTransaction sends the transaction to the consensus RPC server so it
-// can be propigated to other nodes and eventually mined.
-func (s *ChainService) PublishTransaction(tx *wire.MsgTx) error {
+// BroadcastTransaction broadcasts the transaction to all currently active peers
+// so it can be propagated to other nodes and eventually mined. An error won't
+// be returned if the transaction already exists within the mempool. Any
+// transaction broadcast through this method will be rebroadcast upon every
+// change of the tip of the chain.
+func (s *ChainService) BroadcastTransaction(tx *wire.MsgTx) error {
 	// TODO(roasbeef): pipe through querying interface
-
-	/*_, err := s.rpcClient.SendRawTransaction(tx, false)
-	return err*/
-	return nil
+	return s.broadcaster.Broadcast(tx)
 }
 
 // newPeerConfig returns the configuration for the given ServerPeer.
@@ -1351,6 +1362,11 @@ func (s *ChainService) Start() error {
 
 	s.utxoScanner.Start()
 
+	if err := s.broadcaster.Start(); err != nil {
+		return fmt.Errorf("unable to start transaction broadcaster: %v",
+			err)
+	}
+
 	go s.connManager.Start()
 
 	// Start the peer handler which in turn starts the address and block
@@ -1370,6 +1386,7 @@ func (s *ChainService) Stop() error {
 	}
 
 	s.connManager.Stop()
+	s.broadcaster.Stop()
 	s.utxoScanner.Stop()
 	s.blockSubscriptionMgr.Stop()
 	s.blockManager.Stop()

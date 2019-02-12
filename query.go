@@ -1006,7 +1006,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
-// SendTransaction sends a transaction to all peers. It returns an error if any
+// sendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
 // TODO: Better privacy by sending to only one random peer and watching
@@ -1014,7 +1014,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 //
 // TODO(wilmer): Move to pushtx package after introducing a query package. This
 // cannot be done at the moment due to circular dependencies.
-func (s *ChainService) SendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
+func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 	// Starting with the set of default options, we'll apply any specified
 	// functional options to the query so that we can check what inv type
 	// to use. Broadcast the inv to all peers, responding to any getdata
