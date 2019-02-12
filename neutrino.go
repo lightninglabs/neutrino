@@ -947,16 +947,6 @@ func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
 func (s *ChainService) peerHandler() {
-	// Start the address manager and block manager, both of which are
-	// needed by peers.  This is done here since their lifecycle is closely
-	// tied to this handler and rather than adding more channels to
-	// synchronize things, it's easier and slightly faster to simply start
-	// and stop them in this handler.
-	s.addrManager.Start()
-	s.blockManager.Start()
-	s.blockSubscriptionMgr.Start()
-	s.utxoScanner.Start()
-
 	state := &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
@@ -993,7 +983,6 @@ func (s *ChainService) peerHandler() {
 				)
 			})
 	}
-	go s.connManager.Start()
 
 out:
 	for {
@@ -1026,12 +1015,6 @@ out:
 			break out
 		}
 	}
-
-	s.connManager.Stop()
-	s.utxoScanner.Stop()
-	s.blockSubscriptionMgr.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
 
 	// Drain channels before exiting so nothing is left waiting around
 	// to send.
@@ -1354,16 +1337,28 @@ func (s *ChainService) ChainParams() chaincfg.Params {
 }
 
 // Start begins connecting to peers and syncing the blockchain.
-func (s *ChainService) Start() {
+func (s *ChainService) Start() error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
-		return
+		return nil
 	}
+
+	// Start the address manager and block manager, both of which are
+	// needed by peers.
+	s.addrManager.Start()
+	s.blockManager.Start()
+	s.blockSubscriptionMgr.Start()
+
+	s.utxoScanner.Start()
+
+	go s.connManager.Start()
 
 	// Start the peer handler which in turn starts the address and block
 	// managers.
 	s.wg.Add(1)
 	go s.peerHandler()
+
+	return nil
 }
 
 // Stop gracefully shuts down the server by stopping and disconnecting all
@@ -1373,6 +1368,12 @@ func (s *ChainService) Stop() error {
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
 	}
+
+	s.connManager.Stop()
+	s.utxoScanner.Stop()
+	s.blockSubscriptionMgr.Stop()
+	s.blockManager.Stop()
+	s.addrManager.Stop()
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
