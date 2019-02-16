@@ -390,10 +390,16 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
+	var addrsSupportingServices []*wire.NetAddress
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {
 			return
+		}
+
+		// Skip any that don't advertise our required services.
+		if na.Services&RequiredServices != RequiredServices {
+			continue
 		}
 
 		// Set the timestamp to 5 days ago if it's more than 24 hours
@@ -404,16 +410,25 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 			na.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
 		}
 
-		// Add address to known addresses for this peer.
-		sp.addKnownAddresses([]*wire.NetAddress{na})
+		addrsSupportingServices = append(addrsSupportingServices, na)
+
 	}
+
+	// Ignore any addr messages if none of them contained our required
+	// services.
+	if len(addrsSupportingServices) == 0 {
+		return
+	}
+
+	// Add address to known addresses for this peer.
+	sp.addKnownAddresses(addrsSupportingServices)
 
 	// Add addresses to server address manager.  The address manager handles
 	// the details of things such as preventing duplicate addresses, max
 	// addresses, and last seen updates.
 	// XXX bitcoind gives a 2 hour time penalty here, do we want to do the
 	// same?
-	sp.server.addrManager.AddAddresses(msg.AddrList, sp.NA())
+	sp.server.addrManager.AddAddresses(addrsSupportingServices, sp.NA())
 }
 
 // OnRead is invoked when a peer receives a message and it is used to update
