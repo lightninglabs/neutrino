@@ -946,6 +946,17 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
 				log.Warnf("Checkpoints at index %v don't match "+
 					"response!!!", checkPointIndex)
+
+				// If the peer gives us a header that doesn't
+				// match what we know to be the best
+				// checkpoint, then we'll ban the peer so we
+				// can re-allocate the query elsewhere.
+				log.Warnf("Banning peer=%v for invalid "+
+					"checkpoints", sp)
+
+				b.server.BanPeer(sp)
+				sp.Disconnect()
+
 				return false
 			}
 
