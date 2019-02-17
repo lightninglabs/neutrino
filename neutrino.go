@@ -962,13 +962,29 @@ func (s *ChainService) peerHandler() {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddress) {
+				var validAddrs []*wire.NetAddress
+				for _, addr := range addrs {
+					if addr.Services&RequiredServices !=
+						RequiredServices {
+						continue
+					}
+
+					validAddrs = append(validAddrs, addr)
+				}
+
+				if len(validAddrs) == 0 {
+					return
+				}
+
 				// Bitcoind uses a lookup of the dns seeder
 				// here. This is rather strange since the
 				// values looked up by the DNS seed lookups
 				// will vary quite a lot.  to replicate this
 				// behaviour we put all addresses as having
 				// come from the first one.
-				s.addrManager.AddAddresses(addrs, addrs[0])
+				s.addrManager.AddAddresses(
+					validAddrs, validAddrs[0],
+				)
 			})
 	}
 	go s.connManager.Start()
