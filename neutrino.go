@@ -254,16 +254,6 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// the local clock to keep the network time in sync.
 	sp.server.timeSource.AddTimeSample(sp.Addr(), msg.Timestamp)
 
-	// Update the address manager with the advertised services for outbound
-	// connections in case they have changed. This is not done for inbound
-	// connections to help prevent malicious behavior and is skipped when
-	// running on the simulation test network since it is only intended to
-	// connect to specified peers and actively avoids advertising and
-	// connecting to discovered peers.
-	if sp.server.ChainParams().Net != chaincfg.SimNetParams.Net && !sp.Inbound() {
-		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
-	}
-
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
@@ -287,6 +277,7 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// discovered peers.
 	if sp.server.chainParams.Net != chaincfg.SimNetParams.Net {
 		addrManager := sp.server.addrManager
+
 		// Request known addresses if the server address manager needs
 		// more and the peer has a protocol version new enough to
 		// include a timestamp with addresses.
@@ -296,8 +287,23 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
 		}
 
-		// Mark the address as a known good address.
+		// Add the address to the addr manager anew, and also mark it
+		// as a good address.
+		sp.server.addrManager.AddAddresses(
+			[]*wire.NetAddress{sp.NA()}, sp.NA(),
+		)
 		addrManager.Good(sp.NA())
+
+		// Update the address manager with the advertised services for
+		// outbound connections in case they have changed. This is not
+		// done for inbound connections to help prevent malicious
+		// behavior and is skipped when running on the simulation test
+		// network since it is only intended to connect to specified
+		// peers and actively avoids advertising and connecting to
+		// discovered peers.
+		if !sp.Inbound() {
+			sp.server.addrManager.SetServices(sp.NA(), msg.Services)
+		}
 	}
 
 	// Add valid peer to the server.
