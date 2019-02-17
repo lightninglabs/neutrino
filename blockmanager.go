@@ -1394,8 +1394,7 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 					// scripts as well since we don't index
 					// these in order to avoid a circular
 					// dependency.
-					case txOut.PkScript[0] == txscript.OP_RETURN &&
-						txscript.IsPushOnlyScript(txOut.PkScript[1:]):
+					case txOut.PkScript[0] == txscript.OP_RETURN:
 						continue
 					}
 
