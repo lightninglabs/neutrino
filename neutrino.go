@@ -818,12 +818,20 @@ func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 
 // BanPeer bans a peer that has already been connected to the server by ip.
 func (s *ChainService) BanPeer(sp *ServerPeer) {
-	s.banPeers <- sp
+	select {
+	case s.banPeers <- sp:
+	case <-s.quit:
+		return
+	}
 }
 
 // AddPeer adds a new peer that has already been connected to the server.
 func (s *ChainService) AddPeer(sp *ServerPeer) {
-	s.newPeers <- sp
+	select {
+	case s.newPeers <- sp:
+	case <-s.quit:
+		return
+	}
 }
 
 // AddBytesSent adds the passed number of bytes to the total bytes sent counter
@@ -1180,7 +1188,9 @@ func (s *ChainService) handleBanPeerMsg(state *peerState, sp *ServerPeer) {
 // to be located. If the peer is found, and the passed callback: `whenFound'
 // isn't nil, we call it with the peer as the argument before it is removed
 // from the peerList, and is disconnected from the server.
-func disconnectPeer(peerList map[int32]*ServerPeer, compareFunc func(*ServerPeer) bool, whenFound func(*ServerPeer)) bool {
+func disconnectPeer(peerList map[int32]*ServerPeer,
+	compareFunc func(*ServerPeer) bool, whenFound func(*ServerPeer)) bool {
+
 	for addr, peer := range peerList {
 		if compareFunc(peer) {
 			if whenFound != nil {
@@ -1261,7 +1271,12 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 // done along with other performing other desirable cleanup.
 func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 	sp.WaitForDisconnect()
-	s.donePeers <- sp
+
+	select {
+	case s.donePeers <- sp:
+	case <-s.quit:
+		return
+	}
 
 	// Only tell block manager we are gone if we ever told it we existed.
 	if sp.VersionKnown() {
@@ -1274,11 +1289,17 @@ func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 // the latest connected main chain block, or a recognized orphan. These height
 // updates allow us to dynamically refresh peer heights, ensuring sync peer
 // selection has access to the latest block heights for each peer.
-func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash, latestHeight int32, updateSource *ServerPeer) {
-	s.peerHeightsUpdate <- updatePeerHeightsMsg{
+func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash,
+	latestHeight int32, updateSource *ServerPeer) {
+
+	select {
+	case s.peerHeightsUpdate <- updatePeerHeightsMsg{
 		newHash:    latestBlkHash,
 		newHeight:  latestHeight,
 		originPeer: updateSource,
+	}:
+	case <-s.quit:
+		return
 	}
 }
 
