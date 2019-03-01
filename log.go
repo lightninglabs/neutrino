@@ -6,6 +6,7 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btclog"
+	"github.com/lightninglabs/neutrino/blockntfns"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -33,6 +34,7 @@ func UseLogger(logger btclog.Logger) {
 	txscript.UseLogger(logger)
 	peer.UseLogger(logger)
 	addrmgr.UseLogger(logger)
+	blockntfns.UseLogger(logger)
 }
 
 // logClosure is used to provide a closure over expensive logging operations so

@@ -1328,7 +1328,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
 	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
-	rescan := svc.NewRescan(
+	rescan := neutrino.NewRescan(
+		&neutrino.RescanChainSource{svc},
 		neutrino.QuitChan(quit),
 		neutrino.WatchAddrs(addr),
 		neutrino.StartBlock(startBlock),
