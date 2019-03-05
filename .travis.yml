@@ -23,5 +23,5 @@ env:
     - RACE=true
 script:
   - export GO111MODULE=on
-  - export PATH=$PATH:$HOME/gopath/bin
+  - export PATH=$PATH:$GOPATH/bin
   - ./gotest.sh
