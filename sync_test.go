@@ -523,7 +523,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(harness.svc, harness.h2)
-	err = harness.svc.BroadcastTransaction(authTx1.Tx)
+	err = harness.svc.SendTransaction(authTx1.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
@@ -565,7 +565,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(harness.svc, harness.h2)
-	err = harness.svc.BroadcastTransaction(authTx2.Tx)
+	err = harness.svc.SendTransaction(authTx2.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}

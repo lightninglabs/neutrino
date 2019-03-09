@@ -1246,12 +1246,12 @@ func disconnectPeer(peerList map[int32]*ServerPeer,
 	return false
 }
 
-// BroadcastTransaction broadcasts the transaction to all currently active peers
-// so it can be propagated to other nodes and eventually mined. An error won't
-// be returned if the transaction already exists within the mempool. Any
+// SendTransaction broadcasts the transaction to all currently active peers so
+// it can be propagated to other nodes and eventually mined. An error won't be
+// returned if the transaction already exists within the mempool. Any
 // transaction broadcast through this method will be rebroadcast upon every
 // change of the tip of the chain.
-func (s *ChainService) BroadcastTransaction(tx *wire.MsgTx) error {
+func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 	// TODO(roasbeef): pipe through querying interface
 	return s.broadcaster.Broadcast(tx)
 }
