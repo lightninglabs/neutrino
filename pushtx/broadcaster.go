@@ -106,6 +106,8 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 	defer b.wg.Done()
 	defer sub.Cancel()
 
+	log.Infof("Broadcaster now active")
+
 	for {
 		select {
 		// A new broadcast request was submitted by an external caller.
@@ -114,12 +116,17 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 
 		// A new block notification has arrived, so we'll rebroadcast
 		// all of our pending transactions.
-		case _, ok := <-sub.Notifications:
+		case block, ok := <-sub.Notifications:
 			if !ok {
 				log.Warn("Unable to rebroadcast transactions: " +
 					"block subscription was canceled")
 				continue
 			}
+
+			blockHeader := block.Header()
+			log.Debugf("Re-broadcasting transaction at height=%v, "+
+				"hash=%v", block.Height(),
+				blockHeader.BlockHash())
 
 			b.rebroadcast()
 
@@ -134,6 +141,7 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 func (b *Broadcaster) handleBroadcastReq(req *broadcastReq) error {
 	err := b.cfg.Broadcast(req.tx)
 	if err != nil && !IsBroadcastError(err, Mempool) {
+		log.Errorf("Broadcast attempt failed: %v", err)
 		return err
 	}
 
@@ -161,6 +169,9 @@ func (b *Broadcaster) rebroadcast() {
 		// TODO(wilmer); This should ideally be implemented by checking
 		// the chain ourselves rather than trusting our peers.
 		case IsBroadcastError(err, Confirmed):
+			log.Debugf("Re-broadcast of txid=%v, now confirmed!",
+				tx.TxHash())
+
 			delete(b.transactions, tx.TxHash())
 			continue
 
@@ -172,6 +183,9 @@ func (b *Broadcaster) rebroadcast() {
 		// transaction into their mempool to prevent resending to them
 		// every time.
 		case IsBroadcastError(err, Mempool):
+			log.Debugf("Re-broadcast of txid=%v, still "+
+				"pending...", tx.TxHash())
+
 			continue
 
 		case err != nil:

@@ -1108,6 +1108,9 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// and certain other cases. Due to this, we should probably decide on a
 	// threshold of rejections instead.
 	if numReplied == len(rejections) {
+		log.Warnf("All peers rejected transaction %v checking errors",
+			tx.TxHash())
+
 		mostRejectedCount := 0
 		var mostRejectedErr pushtx.BroadcastError
 
