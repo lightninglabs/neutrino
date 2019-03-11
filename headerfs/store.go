@@ -210,7 +210,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
 	for fileHeight > tipHeight {
-		if bhs.singleTruncate(); err != nil {
+		if err := bhs.singleTruncate(); err != nil {
 			return nil, err
 		}
 
@@ -681,7 +681,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
 	for fileHeight > tipHeight {
-		if fhs.singleTruncate(); err != nil {
+		if err := fhs.singleTruncate(); err != nil {
 			return nil, err
 		}
 
