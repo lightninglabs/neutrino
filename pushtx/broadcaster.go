@@ -124,9 +124,12 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 			}
 
 			blockHeader := block.Header()
-			log.Debugf("Re-broadcasting transaction at height=%v, "+
-				"hash=%v", block.Height(),
-				blockHeader.BlockHash())
+
+			if len(b.transactions) != 0 {
+				log.Debugf("Re-broadcasting transaction at height=%v, "+
+					"hash=%v", block.Height(),
+					blockHeader.BlockHash())
+			}
 
 			b.rebroadcast()
 
