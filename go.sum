@@ -13,6 +13,8 @@ github.com/btcsuite/btcutil v0.0.0-20190207003914-4c204d697803/go.mod h1:+5NJ2+q
 github.com/btcsuite/btcwallet v0.0.0-20180904010540-284e2e0e696e33d5be388f7f3d9a26db703e0c06/go.mod h1:/d7QHZsfUAruXuBhyPITqoYOmJ+nq35qPsJjz/aSpCg=
 github.com/btcsuite/btcwallet v0.0.0-20190313032608-acf3b04b0273 h1:DqszP8GBNlrSdNGTZ000d6YF6N4xpmrjxGL8KeOSwJQ=
 github.com/btcsuite/btcwallet v0.0.0-20190313032608-acf3b04b0273/go.mod h1:mkOYY8/psBiL5E+Wb0V7M0o+N7NXi2SZJz6+RKkncIc=
+github.com/btcsuite/btcwallet v0.0.0-20190313041134-68fc7c82e131 h1:BhBlN90EcFIWGSduKOGckSwBQC1kBeavQ16DqzFj+gw=
+github.com/btcsuite/btcwallet v0.0.0-20190313041134-68fc7c82e131/go.mod h1:qMi4jGpAO6YRsd81RYDG7o5pBIGqN9faCioJdagLu64=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd h1:R/opQEbFEy9JGkIguV40SvRY1uliPX8ifOvi6ICsFCw=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd/go.mod h1:HHNXQzUsZCxOoE+CPiyCTO6x34Zs86zZUiwtpXoGdtg=
 github.com/btcsuite/golangcrypto v0.0.0-20150304025918-53f62d9b43e8 h1:nOsAWScwueMVk/VLm/dvQQD7DuanyvAUb6B3P3eT274=
@@ -61,8 +63,7 @@ github.com/lightninglabs/gozmq v0.0.0-20180324010646-462a8a753885 h1:fTLuPUkaKII
 github.com/lightninglabs/gozmq v0.0.0-20180324010646-462a8a753885/go.mod h1:KUh15naRlx/TmUMFS/p4JJrCrE6F7RGF7rsnvuu45E4=
 github.com/lightninglabs/neutrino v0.0.0-20181017011010-4d6069299130/go.mod h1:KJq43Fu9ceitbJsSXMILcT4mGDNI/crKmPIkDOZXFyM=
 github.com/lightninglabs/neutrino v0.0.0-20190213031021-ae4583a89cfb/go.mod h1:g6cMQd+hfAU8pQTJAdjm6/EQREhupyd22f+CL0qYFOE=
-github.com/lightningnetwork/lnd/queue v1.0.0 h1:dlYHA+4Z+GZhb6cJZhE8rVC1QJWWOxQHk8HpOh4q9RA=
-github.com/lightningnetwork/lnd/queue v1.0.0/go.mod h1:JFLKmMmBT/YST+w7RwJnW0LXrpCOWDEseWTBg2DqSFA=
+github.com/lightninglabs/neutrino v0.0.0-20190313035638-e1ad4c33fb18/go.mod h1:v6tz6jbuAubTrRpX8ke2KH9sJxml8KlPQTKgo9mAp1Q=
 github.com/lightningnetwork/lnd/queue v1.0.1 h1:jzJKcTy3Nj5lQrooJ3aaw9Lau3I0IwvQR5sqtjdv2R0=
 github.com/lightningnetwork/lnd/queue v1.0.1/go.mod h1:vaQwexir73flPW43Mrm7JOgJHmcEFBWWSl9HlyASoms=
 github.com/lightningnetwork/lnd/ticker v1.0.0 h1:S1b60TEGoTtCe2A0yeB+ecoj/kkS4qpwh6l+AkQEZwU=
