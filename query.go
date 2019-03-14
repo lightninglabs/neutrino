@@ -74,12 +74,6 @@ type queryOptions struct {
 	persistToDisk bool
 }
 
-// filterCacheKey represents the key used for FilterCache of the ChainService.
-type filterCacheKey struct {
-	blockHash  *chainhash.Hash
-	filterType filterdb.FilterType
-}
-
 // QueryOption is a functional option argument to any of the network query
 // methods, such as GetBlock and GetCFilter (when that resorts to a network
 // query). These are always processed in order, with later options overriding
@@ -706,7 +700,7 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 
 	filterValue, err := s.FilterCache.Get(cacheKey)
 	if err != nil {
@@ -720,7 +714,7 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType, filter *gcs.Filter) error {
 
-	cacheKey := filterCacheKey{blockHash: blockHash, filterType: filterType}
+	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
