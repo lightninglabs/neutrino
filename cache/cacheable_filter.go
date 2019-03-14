@@ -1,6 +1,16 @@
 package cache
 
-import "github.com/btcsuite/btcutil/gcs"
+import (
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcutil/gcs"
+	"github.com/lightninglabs/neutrino/filterdb"
+)
+
+// filterCacheKey represents the key used to access filters in the FilterCache.
+type FilterCacheKey struct {
+	BlockHash  *chainhash.Hash
+	FilterType filterdb.FilterType
+}
 
 // CacheableFilter is a wrapper around Filter type which provides a Size method
 // used by the cache to target certain memory usage.
