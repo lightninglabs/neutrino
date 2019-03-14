@@ -8,7 +8,7 @@ import (
 
 // filterCacheKey represents the key used to access filters in the FilterCache.
 type FilterCacheKey struct {
-	BlockHash  *chainhash.Hash
+	BlockHash  chainhash.Hash
 	FilterType filterdb.FilterType
 }
 
