@@ -19,6 +19,8 @@ var (
 // newSubscription is an internal message used within the SubscriptionManager to
 // denote a new client's intent to receive block notifications.
 type newSubscription struct {
+	canceled sync.Once
+
 	id uint64
 
 	ntfnChan  chan BlockNtfn
@@ -32,10 +34,12 @@ type newSubscription struct {
 }
 
 func (s *newSubscription) cancel() {
-	s.ntfnQueue.Stop()
-	close(s.quit)
-	s.wg.Wait()
-	close(s.ntfnChan)
+	s.canceled.Do(func() {
+		s.ntfnQueue.Stop()
+		close(s.quit)
+		s.wg.Wait()
+		close(s.ntfnChan)
+	})
 }
 
 // cancelSubscription is an internal message used within the SubscriptionManager
