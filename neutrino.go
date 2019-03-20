@@ -797,6 +797,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		SubscribeBlocks: func() (*blockntfns.Subscription, error) {
 			return s.blockSubscriptionMgr.NewSubscription(0)
 		},
+		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
 	return &s, nil

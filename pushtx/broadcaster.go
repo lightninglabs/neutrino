@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -16,6 +17,12 @@ var (
 	// request to broadcast a transaction but the Broadcaster has already
 	// been stopped.
 	ErrBroadcasterStopped = errors.New("broadcaster has been stopped")
+)
+
+const (
+	// DefaultRebroadcastInterval is the default period that we'll wait
+	// between blocks to attempt another rebroadcast.
+	DefaultRebroadcastInterval = time.Minute
 )
 
 // broadcastReq is an internal message the Broadcaster will use to process
@@ -37,6 +44,10 @@ type Config struct {
 	// notifications in order. This will be used to rebroadcast all
 	// transactions once a new block arrives.
 	SubscribeBlocks func() (*blockntfns.Subscription, error)
+
+	// RebroadcastInterval is the interval that we'll continually try to
+	// re-broadcast transactions in-between new block arrival.
+	RebroadcastInterval time.Duration
 }
 
 // Broadcaster is a subsystem responsible for reliably broadcasting transactions
@@ -108,6 +119,9 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 
 	log.Infof("Broadcaster now active")
 
+	reBroadcastTicker := time.NewTicker(b.cfg.RebroadcastInterval)
+	defer reBroadcastTicker.Stop()
+
 	for {
 		select {
 		// A new broadcast request was submitted by an external caller.
@@ -126,9 +140,18 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 			blockHeader := block.Header()
 
 			if len(b.transactions) != 0 {
-				log.Debugf("Re-broadcasting transaction at height=%v, "+
-					"hash=%v", block.Height(),
+				log.Debugf("Re-broadcasting transaction at "+
+					"height=%v, hash=%v", block.Height(),
 					blockHeader.BlockHash())
+			}
+
+			b.rebroadcast()
+
+		// Between blocks, we'll also try to attempt additional
+		// re-broadcasts to ensure a timely confirmation.
+		case <-reBroadcastTicker.C:
+			if len(b.transactions) == 0 {
+				continue
 			}
 
 			b.rebroadcast()

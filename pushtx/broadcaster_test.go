@@ -51,6 +51,7 @@ func TestBroadcaster(t *testing.T) {
 				Cancel:        func() {},
 			}, nil
 		},
+		RebroadcastInterval: DefaultRebroadcastInterval,
 	}
 
 	broadcaster := NewBroadcaster(cfg)
@@ -94,6 +95,7 @@ func TestRebroadcast(t *testing.T) {
 				Cancel:        func() {},
 			}, nil
 		},
+		RebroadcastInterval: DefaultRebroadcastInterval,
 	}
 
 	broadcaster := NewBroadcaster(cfg)
