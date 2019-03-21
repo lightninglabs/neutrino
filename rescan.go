@@ -420,7 +420,10 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// blockReFetchTimer is a stoppable timer that we'll use to reminder
 	// ourselves to refetch a block in the case that we're unable to fetch
 	// the filter for a block the first time around.
-	var blockReFetchTimer *time.Timer
+	var (
+		blockReFetchTimer *time.Timer
+		reFetchMtx        sync.Mutex
+	)
 
 	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height uint32) {
 		// If so, then we'll avoid notifying the block, and will
@@ -437,10 +440,14 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			// If we're unable to process notifications at the
 			// moment (due to not being current), we'll reset our
 			// timer.
+			reFetchMtx.Lock()
 			if blockReFetchTimer != nil && blockSubscription == nil {
 				blockReFetchTimer.Reset(blockRetryInterval)
+
+				reFetchMtx.Unlock()
 				return
 			}
+			reFetchMtx.Unlock()
 
 			log.Infof("Resending rescan header for block hash=%v, "+
 				"height=%v", headerTip.BlockHash(), height)
@@ -454,9 +461,11 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 
 		// We'll start a timer to re-send this header so we re-process
 		// if in the case that we don't get a re-org soon afterwards.
+		reFetchMtx.Lock()
 		blockReFetchTimer = time.AfterFunc(
 			blockRetryInterval, blockReFetch,
 		)
+		reFetchMtx.Unlock()
 	}
 
 	// We'll need to keep track of whether we are current with the chain in
