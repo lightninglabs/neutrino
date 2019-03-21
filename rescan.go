@@ -442,6 +442,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			// timer.
 			reFetchMtx.Lock()
 			if blockReFetchTimer != nil && blockSubscription == nil {
+				if !blockReFetchTimer.Stop() {
+					<-blockReFetchTimer.C
+				}
 				blockReFetchTimer.Reset(blockRetryInterval)
 
 				reFetchMtx.Unlock()
