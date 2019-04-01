@@ -675,7 +675,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	store *headerfs.FilterHeaderStore, fType wire.FilterType) error {
 
 	// Get the filter header store's chain tip.
-	_, filtHeight, err := store.ChainTip()
+	filterTip, filtHeight, err := store.ChainTip()
 	if err != nil {
 		return fmt.Errorf("error getting filter chain tip: %v", err)
 	}
@@ -706,6 +706,23 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// Query all peers for the responses.
 	startHeight := filtHeight + 1
 	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
+
+	// Ban any peer that responds with the wrong prev filter header.
+	for peer, msg := range headers {
+		if msg.PrevFilterHeader != *filterTip {
+			log.Infof("Banning peer=%v for invalid prev filter "+
+				"header", peer)
+
+			sp := b.server.PeerByAddr(peer)
+			if sp != nil {
+				b.server.BanPeer(sp)
+				sp.Disconnect()
+			}
+
+			delete(headers, peer)
+		}
+	}
+
 	if len(headers) == 0 {
 		return fmt.Errorf("couldn't get cfheaders from peers")
 	}
