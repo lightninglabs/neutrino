@@ -1466,6 +1466,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	// Calculate the hash and use it to create the query message.
 	stopHash := stopHeader.BlockHash()
 	msg := wire.NewMsgGetCFHeaders(fType, height, &stopHash)
+	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
 	b.server.queryAllPeers(
@@ -1475,7 +1476,9 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 			switch m := resp.(type) {
 			case *wire.MsgCFHeaders:
 				if m.StopHash == stopHash &&
-					m.FilterType == fType {
+					m.FilterType == fType &&
+					len(m.FilterHashes) == numHeaders {
+
 					headers[sp.Addr()] = m
 
 					// We got an answer from this peer so
