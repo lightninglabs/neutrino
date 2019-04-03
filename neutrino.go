@@ -262,10 +262,11 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
 		peerServices&wire.SFNodeCF != wire.SFNodeCF {
 
-		log.Infof("Disconnecting peer %v, cannot serve compact "+
-			"filters", sp)
-		sp.Disconnect()
-		return nil
+		log.Infof("Disconnecting peer %v, cannot serve compact filters", sp)
+		reason := fmt.Sprintf("Support for compact filters is required")
+		rejectMsg := wire.NewMsgReject(msg.Command(), wire.RejectObsolete,
+			reason)
+		return rejectMsg
 	}
 
 	// Signal the block manager this peer is a new sync candidate.
