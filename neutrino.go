@@ -1111,6 +1111,38 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 	})
 }
 
+// isBanned returns true if the passed peer address is still considered to be
+// banned.
+func (s *ChainService) isBanned(addr string, state *peerState) bool {
+	// First, we'll extract the host so we can consider it without taking
+	// into account the target port.
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Debugf("can't split host/port: %s", err)
+		return false
+	}
+
+	// With the host obtained, we'll check on the ban status of this peer.
+	if banEnd, ok := state.banned[host]; ok {
+		// If the ban duration of this peer is still active, then we'll
+		// ignore it for now as it's still banned.
+		if time.Now().Before(banEnd) {
+			log.Debugf("Peer %s is banned for another %v - ignoring",
+				host, banEnd.Sub(time.Now()))
+			return true
+		}
+
+		// Otherwise, the peer was banned in the past, but is no longer
+		// banned, so we'll remove this ban entry and return back to
+		// the caller.
+		log.Infof("Peer %s is no longer banned", host)
+		delete(state.banned, host)
+		return false
+	}
+
+	return false
+}
+
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
 func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
@@ -1126,22 +1158,9 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	}
 
 	// Disconnect banned peers.
-	host, _, err := net.SplitHostPort(sp.Addr())
-	if err != nil {
-		log.Debugf("can't split host/port: %s", err)
+	if s.isBanned(sp.Addr(), state) {
 		sp.Disconnect()
 		return false
-	}
-	if banEnd, ok := state.banned[host]; ok {
-		if time.Now().Before(banEnd) {
-			log.Debugf("Peer %s is banned for another %v - disconnecting",
-				host, banEnd.Sub(time.Now()))
-			sp.Disconnect()
-			return false
-		}
-
-		log.Infof("Peer %s is no longer banned", host)
-		delete(state.banned, host)
 	}
 
 	// TODO: Check for max peers from a single IP.

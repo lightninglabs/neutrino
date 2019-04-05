@@ -50,6 +50,11 @@ type forAllPeersMsg struct {
 	closure func(*ServerPeer)
 }
 
+type banQueryMsg struct {
+	addr  string
+	reply chan bool
+}
+
 // TODO: General - abstract out more of blockmanager into queries. It'll make
 // this way more maintainable and usable.
 
@@ -168,6 +173,10 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// Even though this is a query, there's no reply channel as the
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
+
+	// A query to see if a peer is banned or not.
+	case banQueryMsg:
+		msg.reply <- s.isBanned(msg.addr, state)
 	}
 }
 
@@ -314,5 +323,20 @@ func (s *ChainService) ForAllPeers(closure func(sp *ServerPeer)) {
 	select {
 	case s.query <- forAllPeersMsg{closure: closure}:
 	case <-s.quit:
+	}
+}
+
+// IsBanned retursn true if the peer is banned, and false otherwise.
+func (s *ChainService) IsBanned(addr string) bool {
+	replyChan := make(chan bool, 1)
+
+	select {
+	case s.query <- banQueryMsg{
+		addr:  addr,
+		reply: replyChan,
+	}:
+		return <-replyChan
+	case <-s.quit:
+		return false
 	}
 }
