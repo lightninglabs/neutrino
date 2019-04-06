@@ -1655,7 +1655,7 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 
 			if *header != checkpoint {
 				log.Warnf("mismatch at height %v, expected %v got "+
-					"%v", ckptHeight, checkpoint, header)
+					"%v", ckptHeight, header, checkpoint)
 				return i, nil
 			}
 		}
