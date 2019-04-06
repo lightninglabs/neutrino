@@ -954,8 +954,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				log.Warnf("Banning peer=%v for invalid "+
 					"checkpoints", sp)
 
-				b.server.BanPeer(sp)
-				sp.Disconnect()
+				go func() {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}()
 
 				return false
 			}
