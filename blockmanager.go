@@ -1490,6 +1490,10 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 		if err != nil {
 			return nil, 0
 		}
+
+		// We'll make sure we also update our stopHeight so we know how
+		// many headers to expect below.
+		stopHeight = height + wire.MaxCFHeadersPerMsg - 1
 	}
 
 	// Calculate the hash and use it to create the query message.
