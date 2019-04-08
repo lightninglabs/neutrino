@@ -2359,8 +2359,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// is atomic.
 		err := b.server.BlockHeaders.WriteHeaders(headerWriteBatch...)
 		if err != nil {
-			panic(fmt.Sprintf("unable to write block header: %v",
-				err))
+			log.Errorf("Unable to write block headers: %v", err)
+			return
 		}
 	}
 
