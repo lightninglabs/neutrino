@@ -1439,6 +1439,9 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 //	2. If a peers' filter matches on a script that _should not_ match, it
 //	is potentially invalid. In this case we ban peers that matches more
 //	such scripts than other peers.
+//	3. If we cannot detect which filters are invalid from the block
+//	contents, we ban peers serving filters different from the majority of
+//	peers.
 func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter,
 	threshold int) ([]string, error) {
@@ -1600,6 +1603,47 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 			numRemaining)
 
 		return potentialBans, nil
+	}
+
+	// If all peers where serving filters consistent with the block, we
+	// cannot know for sure which one is dishonest (since we don't have the
+	// prevouts to deterministically reconstruct the filter). In this
+	// situation we go with the majority.
+	count := make(map[chainhash.Hash]int)
+	best := 0
+	for _, filter := range filtersFromPeers {
+		hash, err := builder.GetFilterHash(filter)
+		if err != nil {
+			return nil, err
+		}
+
+		count[hash]++
+		if count[hash] > best {
+			best = count[hash]
+		}
+	}
+
+	// If the number of peers serving the most common filter didn't match
+	// our threshold, there's not more we can do.
+	if best < threshold {
+		return nil, fmt.Errorf("only %d peers serving consistent "+
+			"filters, need %d", best, threshold)
+	}
+
+	// Mark all peers serving a filter other than the most common one as
+	// bad.
+	for peerAddr, filter := range filtersFromPeers {
+		hash, err := builder.GetFilterHash(filter)
+		if err != nil {
+			return nil, err
+		}
+
+		if count[hash] < best {
+			log.Warnf("Peer %v is serving filter with hash(%v) "+
+				"other than majority, marking as bad",
+				peerAddr, hash)
+			badPeers[peerAddr] = struct{}{}
+		}
 	}
 
 	invalidPeers := make([]string, 0, len(badPeers))
