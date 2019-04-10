@@ -1392,6 +1392,14 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 // returned what we believe to be an invalid filter. The threshold argument is
 // the minimum number of peers we need to agree on a filter before banning the
 // other peers.
+//
+// We'll use a few strategies to figure out which peers we believe serve
+// invalid filters:
+//	1. If a peers' filter doesn't match on a script that must match, we know
+//	the filter is invalid.
+//	2. If a peers' filter matches on a script that _should not_ match, it
+//	is potentially invalid. In this case we ban peers that matches more
+//	such scripts than other peers.
 func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter,
 	threshold int) ([]string, error) {
@@ -1412,9 +1420,18 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 
 	// With the current set of items that we can fetch from the p2p
 	// network, we're forced to only verify what we can at this point. So
-	// we'll just ensure that each of the filters returned
+	// we'll just ensure that each of the filters returned contains the
+	// expected outputs in the block. We don't have the prev outs so we
+	// cannot fully verify the filter.
 	//
 	// TODO(roasbeef): update after BLOCK_WITH_PREV_OUTS is a thing
+
+	// Since we don't expect OP_RETURN scripts to be included in the block,
+	// we keep a counter for how many matches for each peer. Since there
+	// might be false positives, an honest peer might still match on
+	// OP_RETURNS, but we can attempt to ban peers that have more matches
+	// than other peers.
+	opReturnMatches := make(map[string]int)
 
 	// We'll now run through each peer and ensure that each output
 	// script is included in the filter that they responded with to
@@ -1439,6 +1456,40 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 				// well since we don't index these in order to
 				// avoid a circular dependency.
 				case txOut.PkScript[0] == txscript.OP_RETURN:
+					// Previous versions of the filters did
+					// include OP_RETURNs. To be able
+					// disconnect bad peers still serving
+					// these old filters we attempt to
+					// check if there's an unexpected
+					// match. Since there might be false
+					// positives, an OP_RETURN can still
+					// match filters not including them.
+					// Therefore, we count the number of
+					// such unexpected matches for each
+					// peer, such that we can ban peers
+					// matching more than the rest.
+					match, err := filter.Match(
+						filterKey, txOut.PkScript,
+					)
+					if err != nil {
+						// Mark peer bad if we cannot
+						// match on its filter.
+						log.Warnf("Unable to check "+
+							"filter match for "+
+							"peer %v, marking as "+
+							"bad: %v", peerAddr,
+							err)
+
+						badPeers[peerAddr] = struct{}{}
+						continue peerVerification
+					}
+
+					// If it matches on the OP_RETURN
+					// output, we increase the op return
+					// counter.
+					if match {
+						opReturnMatches[peerAddr]++
+					}
 					continue
 				}
 
@@ -1475,8 +1526,43 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	// check whether the store or the checkpoints we got from the network
 	// are correct.
 
-	// With the set of bad peers known, we'll collect a slice of all the
-	// faulty peers.
+	// Return the bad peers if we have already found some.
+	if len(badPeers) > 0 {
+		invalidPeers := make([]string, 0, len(badPeers))
+		for peer := range badPeers {
+			invalidPeers = append(invalidPeers, peer)
+		}
+
+		return invalidPeers, nil
+	}
+
+	// If we couldn't immediately detect bad peers, we check if some peers
+	// were matching more OP_RETURNS than the rest.
+	mostMatches := 0
+	for _, cnt := range opReturnMatches {
+		if cnt > mostMatches {
+			mostMatches = cnt
+		}
+	}
+
+	// Gather up the peers with the most OP_RETURN matches.
+	var potentialBans []string
+	for peer, cnt := range opReturnMatches {
+		if cnt == mostMatches {
+			potentialBans = append(potentialBans, peer)
+		}
+	}
+
+	// If only a few peers had matching OP_RETURNS, we assume they are bad.
+	numRemaining := len(filtersFromPeers) - len(potentialBans)
+	if len(potentialBans) > 0 && numRemaining >= threshold {
+		log.Warnf("Found %d peers serving filters with unexpected "+
+			"OP_RETURNS. %d peers remaining", len(potentialBans),
+			numRemaining)
+
+		return potentialBans, nil
+	}
+
 	invalidPeers := make([]string, 0, len(badPeers))
 	for peer := range badPeers {
 		invalidPeers = append(invalidPeers, peer)
