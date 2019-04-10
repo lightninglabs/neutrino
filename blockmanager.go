@@ -1414,68 +1414,64 @@ func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
 		block.Header.BlockHash())
 
 	// Based on the type of filter, our verification algorithm will differ.
-	switch fType {
+	// Only regular filters are currently defined.
+	if fType != wire.GCSFilterRegular {
+		return nil, fmt.Errorf("unknown filter: %v", fType)
+	}
 
 	// With the current set of items that we can fetch from the p2p
 	// network, we're forced to only verify what we can at this point. So
 	// we'll just ensure that each of the filters returned
 	//
 	// TODO(roasbeef): update after BLOCK_WITH_PREV_OUTS is a thing
-	case wire.GCSFilterRegular:
 
-		// We'll now run through each peer and ensure that each output
-		// script is included in the filter that they responded with to
-		// our query.
-		for peerAddr, filter := range filtersFromPeers {
-		peerVerification:
+	// We'll now run through each peer and ensure that each output
+	// script is included in the filter that they responded with to
+	// our query.
+	for peerAddr, filter := range filtersFromPeers {
+		// We'll ensure that all the filters include every output
+		// script within the block.
+		//
+		// TODO(roasbeef): eventually just do a comparison against
+		// decompressed filters
+	peerVerification:
+		for _, tx := range block.Transactions {
+			for _, txOut := range tx.TxOut {
+				switch {
+				// If the script itself is blank, then we'll
+				// skip this as it doesn't contain any useful
+				// information.
+				case len(txOut.PkScript) == 0:
+					continue
 
-			// We'll ensure that all the filters include every
-			// output script within the block.
-			//
-			// TODO(roasbeef): eventually just do a comparison
-			// against decompressed filters
-			for _, tx := range block.Transactions {
-				for _, txOut := range tx.TxOut {
-					switch {
-					// If the script itself is blank, then
-					// we'll skip this as it doesn't
-					// contain any useful information.
-					case len(txOut.PkScript) == 0:
-						continue
+				// We'll also skip any OP_RETURN scripts as
+				// well since we don't index these in order to
+				// avoid a circular dependency.
+				case txOut.PkScript[0] == txscript.OP_RETURN:
+					continue
+				}
 
-					// We'll also skip any OP_RETURN
-					// scripts as well since we don't index
-					// these in order to avoid a circular
-					// dependency.
-					case txOut.PkScript[0] == txscript.OP_RETURN:
-						continue
-					}
-
-					match, err := filter.Match(
-						filterKey, txOut.PkScript,
-					)
-					if err != nil {
-						// If we're unable to query
-						// this filter, then we'll skip
-						// this peer all together.
-						continue peerVerification
-					}
-
-					if match {
-						continue
-					}
-
-					// If this filter doesn't match, then
-					// we'll mark this peer as bad and move
-					// on to the next peer.
-					badPeers[peerAddr] = struct{}{}
+				match, err := filter.Match(
+					filterKey, txOut.PkScript,
+				)
+				if err != nil {
+					// If we're unable to query this
+					// filter, then we'll skip this peer
+					// all together.
 					continue peerVerification
 				}
+
+				if match {
+					continue
+				}
+
+				// If this filter doesn't match, then we'll
+				// mark this peer as bad and move on to the
+				// next peer.
+				badPeers[peerAddr] = struct{}{}
+				continue peerVerification
 			}
 		}
-
-	default:
-		return nil, fmt.Errorf("unknown filter: %v", fType)
 	}
 
 	// TODO: We can add an after-the-fact countermeasure here against
