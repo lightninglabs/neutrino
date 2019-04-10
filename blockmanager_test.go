@@ -10,7 +10,9 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -623,4 +625,47 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 	}
+}
+
+// buildNonPushScriptFilter creates a CFilter with all output scripts except all
+// OP_RETURNS with push-only scripts.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// The old version of BIP-158 skipped OP_RETURNs that
+			// had a push-only script.
+			if txOut.PkScript[0] == txscript.OP_RETURN &&
+				txscript.IsPushOnlyScript(txOut.PkScript[1:]) {
+				continue
+			}
+
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
+}
+
+// buildAllPkScriptsFilter creates a CFilter with all output scripts, including
+// OP_RETURNS.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// An old version of BIP-158 included all output
+			// scripts.
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
 }

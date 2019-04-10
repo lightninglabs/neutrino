@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
@@ -95,7 +96,15 @@ var (
 		0x3f, 0xc4, 0x45, 0x05, 0xf2, 0x16, 0x10, 0xe5,
 		0x5b, 0x4c, 0x6f, 0x4d,
 	}
-
+	script4 = []byte{
+		0x6a,           // OP_RETURN
+		txscript.OP_IF, // We add a OP_IF to the script, as everything > OP_16 is considered non-push.
+		0xaa, 0x21, 0xa9, 0xed, 0x26, 0xe6, 0xdd, 0xfa,
+		0x3c, 0xc5, 0x1e, 0x27, 0x61, 0xba, 0xf6, 0xea,
+		0xc4, 0x54, 0xea, 0x11, 0x6d, 0xa3, 0x8f, 0xfb,
+		0x3f, 0xc4, 0x45, 0x05, 0xf2, 0x16, 0x10, 0xe5,
+		0x5b, 0x4c, 0x6f, 0x4d,
+	}
 	// For the purpose of the cfheader mismatch test, we actually only need
 	// to have the scripts of each transaction present.
 	block = &wire.MsgBlock{
@@ -121,9 +130,18 @@ var (
 					},
 				},
 			},
+			{
+				TxOut: []*wire.TxOut{
+					{
+						PkScript: script4,
+					},
+				},
+			},
 		},
 	}
 	correctFilter, _ = builder.BuildBasicFilter(block, nil)
+	oldFilter, _     = buildNonPushScriptFilter(block)
+	oldOldFilter, _  = buildAllPkScriptsFilter(block)
 
 	// a filter missing the first output of the block.
 	missingElementFilter, _ = builder.BuildBasicFilter(
@@ -424,6 +442,34 @@ var (
 			banThreshold: 1,
 			badPeers:     []string{"c"},
 		},
+		{
+			// One peer is serving the "old-old" filter which
+			// contains all OP_RETURN output, we expect this peer
+			// to be banned first.
+			name:  "old old peer",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": oldFilter,
+				"c": oldOldFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
+		},
+		{
+			// One peer is serving the "old" filter, which contains
+			// non-push OP_RETURNS. We expect this peer to be
+			// banned.
+			name:  "old peer",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": oldFilter,
+				"c": correctFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"b"},
+		},
 	}
 )
 
@@ -568,6 +614,25 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 
 func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	t.Parallel()
+
+	// The correct filter should have the coinbase output and the regular
+	// script output.
+	if correctFilter.N() != 2 {
+		t.Fatalf("expected new filter to have only 2 element, had %d",
+			correctFilter.N())
+	}
+
+	// The oldfilter should in addition have the non-push OP_RETURN output.
+	if oldFilter.N() != 3 {
+		t.Fatalf("expected old filter to have only 3 elements, had %d",
+			oldFilter.N())
+	}
+
+	// The oldOldFilter both OP_RETURN outputs.
+	if oldOldFilter.N() != 4 {
+		t.Fatalf("expected old filter to have 4 elements, had %d",
+			oldOldFilter.N())
+	}
 
 	for _, testCase := range resolveFilterTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
