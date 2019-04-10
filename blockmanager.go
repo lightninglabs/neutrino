@@ -1364,11 +1364,37 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 
 	log.Warnf("Detected cfheader mismatch at height=%v!!!", targetHeight)
 
-	// Get the block header for this height, along with the block as well.
+	// Get the block header for this height.
 	header, err := b.server.BlockHeaders.FetchHeaderByHeight(targetHeight)
 	if err != nil {
 		return nil, err
 	}
+
+	// Fetch filters from the peers in question.
+	// TODO(halseth): query only peers from headers map.
+	filtersFromPeers := b.fetchFilterFromAllPeers(
+		targetHeight, header.BlockHash(), fType,
+	)
+
+	var badPeers []string
+	for peer, _ := range headers {
+		_, ok := filtersFromPeers[peer]
+
+		// If a peer did not respond, ban it immediately.
+		if !ok {
+			log.Warnf("Peer %v did not respond to filter "+
+				"request, considering bad", peer)
+			badPeers = append(badPeers, peer)
+			continue
+		}
+	}
+
+	if len(badPeers) != 0 {
+		return badPeers, nil
+	}
+
+	// If all peers responded, get the block and use it to detect who is
+	// serving bad filters.
 	block, err := b.server.GetBlock(header.BlockHash())
 	if err != nil {
 		return nil, err
@@ -1377,12 +1403,6 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	log.Warnf("Attempting to reconcile cfheader mismatch amongst %v peers",
 		len(headers))
 
-	// We'll also fetch each of the filters from the peers that reported
-	// check points, as we may need this in order to determine which peers
-	// are faulty.
-	filtersFromPeers := b.fetchFilterFromAllPeers(
-		targetHeight, header.BlockHash(), fType,
-	)
 	return resolveFilterMismatchFromBlock(
 		block.MsgBlock(), fType, filtersFromPeers,
 
