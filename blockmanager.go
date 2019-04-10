@@ -756,33 +756,8 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 		if checkForCFHeaderMismatch(headers, i) {
 			targetHeight := startHeight + uint32(i)
 
-			log.Warnf("Detected cfheader mismatch at "+
-				"height=%v!!!", targetHeight)
-
-			// Get the block header for this height, along with the
-			// block as well.
-			header, err := b.server.BlockHeaders.FetchHeaderByHeight(
-				targetHeight,
-			)
-			if err != nil {
-				return err
-			}
-			block, err := b.server.GetBlock(header.BlockHash())
-			if err != nil {
-				return err
-			}
-
-			log.Warnf("Attempting to reconcile cfheader mismatch "+
-				"amongst %v peers", len(headers))
-
-			// We'll also fetch each of the filters from the peers
-			// that reported check points, as we may need this in
-			// order to determine which peers are faulty.
-			filtersFromPeers := b.fetchFilterFromAllPeers(
-				targetHeight, header.BlockHash(), fType,
-			)
-			badPeers, err := resolveCFHeaderMismatch(
-				block.MsgBlock(), fType, filtersFromPeers,
+			badPeers, err := b.detectBadPeers(
+				headers, targetHeight, uint32(i), fType,
 			)
 			if err != nil {
 				return err
@@ -1289,31 +1264,8 @@ func (b *blockManager) resolveConflict(
 			// block as well.
 			targetHeight := startHeight + uint32(i)
 
-			log.Warnf("Detected cfheader mismatch at "+
-				"height=%v!!!", targetHeight)
-
-			header, err := b.server.BlockHeaders.FetchHeaderByHeight(
-				targetHeight,
-			)
-			if err != nil {
-				return nil, err
-			}
-			block, err := b.server.GetBlock(header.BlockHash())
-			if err != nil {
-				return nil, err
-			}
-
-			log.Infof("Attempting to reconcile cfheader mismatch "+
-				"amongst %v peers", len(headers))
-
-			// We'll also fetch each of the filters from the peers
-			// that reported check points, as we may need this in
-			// order to determine which peers are faulty.
-			filtersFromPeers := b.fetchFilterFromAllPeers(
-				targetHeight, header.BlockHash(), fType,
-			)
-			badPeers, err := resolveCFHeaderMismatch(
-				block.MsgBlock(), fType, filtersFromPeers,
+			badPeers, err := b.detectBadPeers(
+				headers, targetHeight, uint32(i), fType,
 			)
 			if err != nil {
 				return nil, err
@@ -1396,6 +1348,38 @@ func checkForCFHeaderMismatch(headers map[string]*wire.MsgCFHeaders,
 	}
 
 	return false
+}
+
+// detectBadPeers fetches filters and the block at the given height to attempt
+// to detect which peers are serving bad filters.
+func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
+	targetHeight, filterIndex uint32,
+	fType wire.FilterType) ([]string, error) {
+
+	log.Warnf("Detected cfheader mismatch at height=%v!!!", targetHeight)
+
+	// Get the block header for this height, along with the block as well.
+	header, err := b.server.BlockHeaders.FetchHeaderByHeight(targetHeight)
+	if err != nil {
+		return nil, err
+	}
+	block, err := b.server.GetBlock(header.BlockHash())
+	if err != nil {
+		return nil, err
+	}
+
+	log.Warnf("Attempting to reconcile cfheader mismatch amongst %v peers",
+		len(headers))
+
+	// We'll also fetch each of the filters from the peers that reported
+	// check points, as we may need this in order to determine which peers
+	// are faulty.
+	filtersFromPeers := b.fetchFilterFromAllPeers(
+		targetHeight, header.BlockHash(), fType,
+	)
+	return resolveCFHeaderMismatch(
+		block.MsgBlock(), fType, filtersFromPeers,
+	)
 }
 
 // resolveCFHeaderMismatch will attempt to cross-reference each filter received
