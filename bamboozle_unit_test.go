@@ -125,6 +125,13 @@ var (
 	}
 	correctFilter, _ = builder.BuildBasicFilter(block, nil)
 
+	// a filter missing the first output of the block.
+	missingElementFilter, _ = builder.BuildBasicFilter(
+		&wire.MsgBlock{
+			Transactions: block.Transactions[1:],
+		}, nil,
+	)
+
 	fakeFilter1, _ = gcs.FromBytes(2, builder.DefaultP, builder.DefaultM, []byte{
 		0x30, 0x43, 0x02, 0x1f, 0x4d, 0x23, 0x81, 0xdc,
 		0x97, 0xf1, 0x82, 0xab, 0xd8, 0x18, 0x5f, 0x51,
@@ -403,6 +410,19 @@ var (
 			},
 			banThreshold: 1,
 			badPeers:     []string{},
+		},
+		{
+			// One peer is serving a filter tha lacks an element,
+			// we should immediately notice this and ban it.
+			name:  "filter missing element",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": missingElementFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
 		},
 	}
 )
