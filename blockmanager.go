@@ -1377,17 +1377,18 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	filtersFromPeers := b.fetchFilterFromAllPeers(
 		targetHeight, header.BlockHash(), fType,
 	)
-	return resolveCFHeaderMismatch(
+	return resolveFilterMismatchFromBlock(
 		block.MsgBlock(), fType, filtersFromPeers,
 	)
 }
 
-// resolveCFHeaderMismatch will attempt to cross-reference each filter received
-// by each peer based on what we can reconstruct and verify from the filter in
-// question. We'll return all the peers that returned what we believe to in
-// invalid filter.
-func resolveCFHeaderMismatch(block *wire.MsgBlock, fType wire.FilterType,
-	filtersFromPeers map[string]*gcs.Filter) ([]string, error) {
+// resolveFilterMismatchFromBlock will attempt to cross-reference each filter
+// in filtersFromPeers with the given block, based on what we can reconstruct
+// and verify from the filter in question. We'll return all the peers that
+// returned what we believe to be an invalid filter.
+func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
+	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter) (
+	[]string, error) {
 
 	badPeers := make(map[string]struct{})
 
