@@ -763,6 +763,22 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 				)
 			},
 		},
+		{
+			// We let the "bad" peers serve filters that don't hash
+			// to the filter headers they have sent.
+			filterAnswers: func(p string,
+				answers map[string]wire.Message) {
+
+				filterData := filterBytes
+				if strings.Contains(p, "bad") {
+					filterData, _ = fakeFilter1.NBytes()
+				}
+
+				answers[p] = wire.NewMsgCFilter(
+					fType, &targetBlockHash, filterData,
+				)
+			},
+		},
 	}
 
 	for _, test := range testCases {
