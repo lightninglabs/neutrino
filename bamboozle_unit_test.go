@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
@@ -45,6 +46,7 @@ type resolveFilterTestCase struct {
 	banThreshold int
 	peerFilters  map[string]*gcs.Filter
 	badPeers     []string
+	expectedErr  error
 }
 
 var (
@@ -105,6 +107,14 @@ var (
 		0x3f, 0xc4, 0x45, 0x05, 0xf2, 0x16, 0x10, 0xe5,
 		0x5b, 0x4c, 0x6f, 0x4d,
 	}
+	script5 = []byte{
+		0x00, // Version 0 witness program
+		0x14, // OP_DATA_20
+		0x9d, 0xda, 0xc6, 0xf3, 0x9d, 0x51, 0xe0, 0x39,
+		0x8e, 0x53, 0x2a, 0x22, 0xc4, 0x1b, 0xa1, 0x89,
+		0x40, 0x6a, 0x85, 0x22, // 20-byte pub key hash
+	}
+
 	// For the purpose of the cfheader mismatch test, we actually only need
 	// to have the scripts of each transaction present.
 	block = &wire.MsgBlock{
@@ -147,6 +157,20 @@ var (
 	missingElementFilter, _ = builder.BuildBasicFilter(
 		&wire.MsgBlock{
 			Transactions: block.Transactions[1:],
+		}, nil,
+	)
+
+	// a filter with one extra output script.
+	extraElementFilter, _ = builder.BuildBasicFilter(
+		&wire.MsgBlock{
+			Transactions: append(block.Transactions,
+				&wire.MsgTx{
+					TxOut: []*wire.TxOut{
+						{
+							PkScript: script5,
+						},
+					},
+				}),
 		}, nil,
 	)
 
@@ -470,6 +494,47 @@ var (
 			banThreshold: 1,
 			badPeers:     []string{"b"},
 		},
+		{
+			// We should go with the majority filter in case we
+			// cannot determine who is serving an invalid one.
+			name:  "majority filter",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
+		},
+		{
+			// We should go with the majority filter in case we
+			// cannot determine who is serving an invalid one.
+			name:  "majority filter 2",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 2,
+			badPeers:     []string{"c"},
+		},
+		{
+			// If we need at least 3 peers to consider a filter
+			// consistent, we shuold fail.
+			name:  "majority filter 3",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 3,
+			badPeers:     []string{"c"},
+			expectedErr: fmt.Errorf("only 2 peers serving " +
+				"consistent filters, need 3"),
+		},
 	}
 )
 
@@ -641,8 +706,16 @@ func TestResolveFilterMismatchFromBlock(t *testing.T) {
 				testCase.banThreshold,
 			)
 			if err != nil {
-				t.Fatalf("Couldn't resolve cfheader "+
-					"mismatch: %v", err)
+				switch {
+				case testCase.expectedErr == nil:
+					t.Fatalf("Expected no error, got %v", err)
+
+				case err.Error() != testCase.expectedErr.Error():
+					t.Fatalf("Expected error %v, got %v",
+						testCase.expectedErr, err)
+				}
+
+				return
 			}
 
 			if len(badPeers) != len(testCase.badPeers) {
