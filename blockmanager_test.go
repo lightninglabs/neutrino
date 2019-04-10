@@ -6,10 +6,12 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
@@ -668,4 +670,152 @@ func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	}
 
 	return b.Build()
+}
+
+func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {
+	remBad := make(map[string]struct{})
+	for p := range expBad {
+		remBad[p] = struct{}{}
+	}
+	for _, peer := range badPeers {
+		_, ok := remBad[peer]
+		if !ok {
+			return fmt.Errorf("did not expect %v to be bad", peer)
+		}
+		delete(remBad, peer)
+	}
+
+	if len(remBad) != 0 {
+		return fmt.Errorf("did expect more bad peers")
+	}
+
+	return nil
+}
+
+type mockQueryAccess struct {
+	answers map[string]wire.Message
+}
+
+func (m *mockQueryAccess) queryAllPeers(
+	queryMsg wire.Message,
+	checkResponse func(sp *ServerPeer, resp wire.Message,
+		quit chan<- struct{}, peerQuit chan<- struct{}),
+	options ...QueryOption) {
+
+	for p, resp := range m.answers {
+		pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
+		if err != nil {
+			panic(err)
+		}
+
+		sp := &ServerPeer{
+			Peer: pp,
+		}
+		checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
+	}
+}
+
+var _ QueryAccess = (*mockQueryAccess)(nil)
+
+// TestBlockManagerDetectBadPeers checks that we detect bad peers, like peers
+// not responding to our filter query, serving inconsistent filters etc.
+func TestBlockManagerDetectBadPeers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		stopHash        = chainhash.Hash{}
+		prev            = chainhash.Hash{}
+		startHeight     = uint32(100)
+		badIndex        = uint32(5)
+		targetIndex     = startHeight + badIndex
+		fType           = wire.GCSFilterRegular
+		filterBytes, _  = correctFilter.NBytes()
+		filterHash, _   = builder.GetFilterHash(correctFilter)
+		blockHeader     = wire.BlockHeader{}
+		targetBlockHash = block.BlockHash()
+
+		peers  = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
+		expBad = map[string]struct{}{
+			"bad:1": struct{}{},
+		}
+	)
+
+	testCases := []struct {
+		// filterAnswers is used by each testcase to set the anwers we
+		// want each peer to respond with on filter queries.
+		filterAnswers func(string, map[string]wire.Message)
+	}{
+		{
+			// We let the "bad" peers not respond to the filter
+			// query. They should be marked bad because they are
+			// unresponsive. We do this to ensure peers cannot
+			// only respond to us with headers, and stall our sync
+			// by not responding to filter requests.
+			filterAnswers: func(p string,
+				answers map[string]wire.Message) {
+
+				if strings.Contains(p, "bad") {
+					return
+				}
+
+				answers[p] = wire.NewMsgCFilter(
+					fType, &targetBlockHash, filterBytes,
+				)
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		// Create a mock block header store. We only need to be able to
+		// serve a header for the target index.
+		blockHeaders := newMockBlockHeaderStore()
+		blockHeaders.heights[targetIndex] = blockHeader
+		cs := &ChainService{
+			BlockHeaders: blockHeaders,
+		}
+
+		// We set up the mock QueryAccess to only respond according to
+		// the active testcase.
+		mock := &mockQueryAccess{
+			answers: make(map[string]wire.Message),
+		}
+		for _, peer := range peers {
+			test.filterAnswers(peer, mock.answers)
+		}
+
+		// For the CFHeaders, we pretend all peers responded with the same
+		// filter headers.
+		msg := &wire.MsgCFHeaders{
+			FilterType:       fType,
+			StopHash:         stopHash,
+			PrevFilterHeader: prev,
+		}
+
+		for i := uint32(0); i < 2*badIndex; i++ {
+			msg.AddCFHash(&filterHash)
+		}
+
+		headers := make(map[string]*wire.MsgCFHeaders)
+		for _, peer := range peers {
+			headers[peer] = msg
+		}
+
+		bm := &blockManager{
+			server:  cs,
+			queries: mock,
+		}
+
+		// Now trying to detect which peers are bad, we should detect the
+		// bad ones.
+		badPeers, err := bm.detectBadPeers(
+			headers, targetIndex, badIndex, fType,
+		)
+		if err != nil {
+			t.Fatalf("failed to detect bad peers: %v", err)
+		}
+
+		if err := assertBadPeers(expBad, badPeers); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
