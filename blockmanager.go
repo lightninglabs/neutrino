@@ -1447,8 +1447,13 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 				)
 				if err != nil {
 					// If we're unable to query this
-					// filter, then we'll skip this peer
-					// all together.
+					// filter, then we'll immediately ban
+					// this peer.
+					log.Warnf("Unable to check filter "+
+						"match for peer %v, marking "+
+						"as bad: %v", peerAddr, err)
+
+					badPeers[peerAddr] = struct{}{}
 					continue peerVerification
 				}
 
