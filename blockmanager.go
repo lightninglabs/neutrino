@@ -1698,6 +1698,8 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 // because the block manager controls which blocks are needed and how
 // the fetching should proceed.
 func (b *blockManager) blockHandler() {
+	defer b.wg.Done()
+
 	candidatePeers := list.New()
 out:
 	for {
@@ -1727,7 +1729,6 @@ out:
 		}
 	}
 
-	b.wg.Done()
 	log.Trace("Block handler done")
 }
 
