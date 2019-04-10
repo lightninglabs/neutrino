@@ -38,12 +38,12 @@ type checkCFHTestCase struct {
 	mismatch bool
 }
 
-type resolveCFHTestCase struct {
-	name        string
-	block       *wire.MsgBlock
-	idx         int
-	peerFilters map[string]*gcs.Filter
-	badPeers    []string
+type resolveFilterTestCase struct {
+	name         string
+	block        *wire.MsgBlock
+	banThreshold int
+	peerFilters  map[string]*gcs.Filter
+	badPeers     []string
 }
 
 var (
@@ -332,7 +332,7 @@ var (
 		},
 	}
 
-	resolveCFHTestCases = []*resolveCFHTestCase{
+	resolveFilterTestCases = []*resolveFilterTestCase{
 		{
 			name:  "all bad 1",
 			block: block,
@@ -340,8 +340,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter1,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 2",
@@ -350,8 +350,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 3",
@@ -360,8 +360,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 4",
@@ -370,8 +370,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 5",
@@ -380,8 +380,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter1,
 			},
-			idx:      1,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "one good",
@@ -391,8 +391,8 @@ var (
 				"b": fakeFilter1,
 				"c": fakeFilter2,
 			},
-			idx:      1,
-			badPeers: []string{"b", "c"},
+			banThreshold: 1,
+			badPeers:     []string{"b", "c"},
 		},
 		{
 			name:  "all good",
@@ -401,8 +401,8 @@ var (
 				"a": correctFilter,
 				"b": correctFilter,
 			},
-			idx:      1,
-			badPeers: []string{},
+			banThreshold: 1,
+			badPeers:     []string{},
 		},
 	}
 )
@@ -549,10 +549,11 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	t.Parallel()
 
-	for _, testCase := range resolveCFHTestCases {
+	for _, testCase := range resolveFilterTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			badPeers, err := resolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,
+				testCase.banThreshold,
 			)
 			if err != nil {
 				t.Fatalf("Couldn't resolve cfheader "+

@@ -1379,16 +1379,22 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	)
 	return resolveFilterMismatchFromBlock(
 		block.MsgBlock(), fType, filtersFromPeers,
+
+		// We'll require a strict majority of our peers to agree on
+		// filters.
+		(len(filtersFromPeers)+2)/2,
 	)
 }
 
 // resolveFilterMismatchFromBlock will attempt to cross-reference each filter
 // in filtersFromPeers with the given block, based on what we can reconstruct
 // and verify from the filter in question. We'll return all the peers that
-// returned what we believe to be an invalid filter.
+// returned what we believe to be an invalid filter. The threshold argument is
+// the minimum number of peers we need to agree on a filter before banning the
+// other peers.
 func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
-	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter) (
-	[]string, error) {
+	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter,
+	threshold int) ([]string, error) {
 
 	badPeers := make(map[string]struct{})
 
