@@ -168,7 +168,12 @@ type blockManager struct {
 
 	// server is a pointer to the main p2p server for Neutrino, we'll use
 	// this pointer at times to do things like access the database, etc
+	// TODO(halseth): replace with ChainSource interface to ease unit
+	// testing.
 	server *ChainService
+
+	// queries is an interface allowing querying peers.
+	queries QueryAccess
 
 	// peerChan is a channel for messages that come from peers
 	peerChan chan interface{}
@@ -207,6 +212,7 @@ func newBlockManager(s *ChainService,
 
 	bm := blockManager{
 		server:        s,
+		queries:       s,
 		peerChan:      make(chan interface{}, MaxPeers*3),
 		blockNtfnChan: make(chan blockntfns.BlockNtfn),
 		blkHeaderProgressLogger: newBlockProgressLogger(
@@ -1641,7 +1647,7 @@ func (b *blockManager) fetchFilterFromAllPeers(
 	// We'll now request the target filter from each peer, using a stop
 	// hash at the target block hash to ensure we only get a single filter.
 	fitlerReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
-	b.server.queryAllPeers(
+	b.queries.queryAllPeers(
 		fitlerReqMsg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
@@ -1689,7 +1695,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 
 	checkpoints := make(map[string][]*chainhash.Hash)
 	getCheckptMsg := wire.NewMsgGetCFCheckpt(fType, lastHash)
-	b.server.queryAllPeers(
+	b.queries.queryAllPeers(
 		getCheckptMsg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
