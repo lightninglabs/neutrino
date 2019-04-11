@@ -770,51 +770,29 @@ func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
-// GetCFilter gets a cfilter from the database. Failing that, it requests the
-// cfilter from the network and writes it to the database. If extended is true,
-// an extended filter will be queried for. Otherwise, we'll fetch the regular
-// filter.
-func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
-	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
+// cfiltersQuery is a struct that holds all the information necessary to
+// perform batch GetCFilters request, and handle the responses.
+type cfiltersQuery struct {
+	filterType  wire.FilterType
+	startHeight uint32
+	stopHash    *chainhash.Hash
+	curHeader   *chainhash.Hash
+	prevHeader  *chainhash.Hash
+	filter      *gcs.Filter
+}
 
-	// The only supported filter atm is the regular filter, so we'll reject
-	// all other filters.
-	if filterType != wire.GCSFilterRegular {
-		return nil, fmt.Errorf("unknown filter type: %v", filterType)
-	}
+// queryMsg returns the wire message to perform this query.
+func (q *cfiltersQuery) queryMsg() wire.Message {
+	return wire.NewMsgGetCFilters(q.filterType, q.startHeight, q.stopHash)
+}
 
-	// Only get one CFilter at a time to avoid redundancy from mutliple
-	// rescans running at once.
-	s.mtxCFilter.Lock()
-	defer s.mtxCFilter.Unlock()
+// prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
+// CFilter fo the given block hash.
+func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
+	filterType wire.FilterType, options ...QueryOption) (
+	*cfiltersQuery, error) {
 
-	// Based on if extended is true or not, we'll set up our set of
-	// querying, and db-write functions.
 	getHeader := s.RegFilterHeaders.FetchHeader
-	dbFilterType := filterdb.RegularFilter
-
-	// First check the cache to see if we already have this filter. If
-	// so, then we can return it an exit early.
-	filter, err := s.getFilterFromCache(&blockHash, dbFilterType)
-	if err == nil && filter != nil {
-		return filter, nil
-	}
-	if err != nil && err != cache.ErrElementNotFound {
-		return nil, err
-	}
-
-	// If not in cache, check if it's in database, returning early if yes.
-	filter, err = s.FilterDB.FetchFilter(&blockHash, dbFilterType)
-	if err == nil && filter != nil {
-		return filter, nil
-	}
-	if err != nil && err != filterdb.ErrFilterNotFound {
-		return nil, err
-	}
-
-	// We didn't get the filter from the DB, so we'll set it to nil and try
-	// to get it from the network.
-	filter = nil
 
 	// In order to verify the authenticity of the filter, we'll fetch the
 	// target block header so we can retrieve the hash of the prior block,
@@ -844,65 +822,129 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			"from database", blockHash)
 	}
 
+	return &cfiltersQuery{
+		filterType:  filterType,
+		startHeight: height,
+		stopHash:    &blockHash,
+		curHeader:   curHeader,
+		prevHeader:  prevHeader,
+		filter:      nil,
+	}, nil
+}
+
+// handleCFiltersRespons is called every time we receive a response for the
+// GetCFilters request.
+func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
+	resp wire.Message, quit chan<- struct{}) {
+
+	// We're only interested in "cfilter" messages.
+	response, ok := resp.(*wire.MsgCFilter)
+	if !ok {
+		return
+	}
+
+	// Only keep this going if we haven't already found a filter, or we
+	// risk closing an already closed channel.
+	if q.filter != nil {
+		return
+	}
+
+	// If the response doesn't match our request, ignore this message.
+	if *q.stopHash != response.BlockHash ||
+		q.filterType != response.FilterType {
+		return
+	}
+
+	gotFilter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, response.Data,
+	)
+	if err != nil {
+		// Malformed filter data. We can ignore this message.
+		return
+	}
+
+	// Now that we have a proper filter, ensure that re-calculating the
+	// filter header hash for the header _after_ the filter in the chain
+	// checks out. If not, we can ignore this response.
+	gotHeader, err := builder.MakeHeaderForFilter(gotFilter, *q.prevHeader)
+	if err != nil {
+		return
+	}
+
+	if gotHeader != *q.curHeader {
+		return
+	}
+
+	// At this point, the filter matches what we know about it and we
+	// declare it sane. We can kill the query and pass the response back to
+	// the caller.
+	q.filter = gotFilter
+	close(quit)
+}
+
+// GetCFilter gets a cfilter from the database. Failing that, it requests the
+// cfilter from the network and writes it to the database. If extended is true,
+// an extended filter will be queried for. Otherwise, we'll fetch the regular
+// filter.
+func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
+	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
+
+	// The only supported filter atm is the regular filter, so we'll reject
+	// all other filters.
+	if filterType != wire.GCSFilterRegular {
+		return nil, fmt.Errorf("unknown filter type: %v", filterType)
+	}
+
+	// Only get one CFilter at a time to avoid redundancy from mutliple
+	// rescans running at once.
+	s.mtxCFilter.Lock()
+	defer s.mtxCFilter.Unlock()
+
+	// Based on if extended is true or not, we'll set up our set of
+	// querying, and db-write functions.
+	dbFilterType := filterdb.RegularFilter
+
+	// First check the cache to see if we already have this filter. If
+	// so, then we can return it an exit early.
+	filter, err := s.getFilterFromCache(&blockHash, dbFilterType)
+	if err == nil && filter != nil {
+		return filter, nil
+	}
+	if err != nil && err != cache.ErrElementNotFound {
+		return nil, err
+	}
+
+	// If not in cache, check if it's in database, returning early if yes.
+	filter, err = s.FilterDB.FetchFilter(&blockHash, dbFilterType)
+	if err == nil && filter != nil {
+		return filter, nil
+	}
+	if err != nil && err != filterdb.ErrFilterNotFound {
+		return nil, err
+	}
+
+	// We didn't get the filter from the DB, so we'll set it to nil and try
+	// to get it from the network.
+	filter = nil
+
+	query, err := s.prepareCFiltersQuery(blockHash, filterType, options...)
+	if err != nil {
+		return nil, err
+	}
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
 	s.queryPeers(
 		// Send a wire.MsgGetCFilters
-		wire.NewMsgGetCFilters(filterType, height, &blockHash),
+		query.queryMsg(),
 
 		// Check responses and if we get one that matches, end the
 		// query early.
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
-			switch response := resp.(type) {
-			// We're only interested in "cfilter" messages.
-			case *wire.MsgCFilter:
-				// Only keep this going if we haven't already
-				// found a filter, or we risk closing an
-				// already closed channel.
-				if filter != nil {
-					return
-				}
-
-				// If the response doesn't match our request.
-				// Ignore this message.
-				if blockHash != response.BlockHash ||
-					filterType != response.FilterType {
-					return
-				}
-
-				gotFilter, err := gcs.FromNBytes(
-					builder.DefaultP, builder.DefaultM,
-					response.Data,
-				)
-				if err != nil {
-					// Malformed filter data. We can ignore
-					// this message.
-					return
-				}
-
-				// Now that we have a proper filter, ensure
-				// that re-calculating the filter header hash
-				// for the header _after_ the filter in the
-				// chain checks out. If not, we can ignore this
-				// response.
-				if gotHeader, err := builder.
-					MakeHeaderForFilter(gotFilter,
-						*prevHeader); err != nil ||
-					gotHeader != *curHeader {
-					return
-				}
-
-				// At this point, the filter matches what we
-				// know about it and we declare it sane. We can
-				// kill the query and pass the response back to
-				// the caller.
-				filter = gotFilter
-				close(quit)
-			default:
-			}
+		func(_ *ServerPeer, resp wire.Message, quit chan<- struct{}) {
+			s.handleCFiltersResponse(query, resp, quit)
 		},
 		options...,
 	)
+	filter = query.filter
 
 	if filter != nil {
 		// If we found a filter, put it in the cache and persistToDisk if
