@@ -131,7 +131,7 @@ func TestCacheFailsInsertionSizeBiggerCapacity(t *testing.T) {
 	t.Parallel()
 	c := NewCache(2)
 
-	err := c.Put(1, &sizeable{value: 1, size: 3})
+	_, err := c.Put(1, &sizeable{value: 1, size: 3})
 	if err == nil {
 		t.Fatal("shouldn't be able to put elements larger than cache")
 	}
@@ -145,7 +145,7 @@ func TestManySmallElementCanInsertAfterBigEviction(t *testing.T) {
 	t.Parallel()
 	c := NewCache(3)
 
-	err := c.Put(1, &sizeable{value: 1, size: 3})
+	_, err := c.Put(1, &sizeable{value: 1, size: 3})
 	if err != nil {
 		t.Fatal("couldn't insert element")
 	}
@@ -218,7 +218,7 @@ func TestConcurrencySimple(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := c.Put(i, &sizeable{value: i, size: 1})
+			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -252,7 +252,7 @@ func TestConcurrencySmallCache(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := c.Put(i, &sizeable{value: i, size: 1})
+			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -286,7 +286,7 @@ func TestConcurrencyBigCache(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := c.Put(i, &sizeable{value: i, size: 1})
+			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
 				t.Fatal(err)
 			}

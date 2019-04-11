@@ -52,19 +52,20 @@ func NewCache(capacity uint64) *Cache {
 
 // evict will evict as many elements as necessary to make enough space for a new
 // element with size needed to be inserted.
-func (c *Cache) evict(needed uint64) error {
+func (c *Cache) evict(needed uint64) (bool, error) {
 	if needed > c.capacity {
-		return fmt.Errorf("can't evict %v elements in size, since"+
-			"capacity is %v", needed, c.capacity)
+		return false, fmt.Errorf("can't evict %v elements in size, "+
+			"since capacity is %v", needed, c.capacity)
 	}
 
+	evicted := false
 	for c.capacity-c.size < needed {
 		// We still need to evict some more elements.
 		if c.ll.Len() == 0 {
 			// We should never reach here.
-			return fmt.Errorf("all elements got evicted, yet "+
-				"still need to evict %v, likelihood of error "+
-				"during size calculation",
+			return false, fmt.Errorf("all elements got evicted, "+
+				"yet still need to evict %v, likelihood of "+
+				"error during size calculation",
 				needed-(c.capacity-c.size))
 		}
 
@@ -74,8 +75,8 @@ func (c *Cache) evict(needed uint64) error {
 			ce := elr.Value.(*entry)
 			es, err := ce.value.Size()
 			if err != nil {
-				return fmt.Errorf("couldn't determine size of "+
-					"existing cache value %v", err)
+				return false, fmt.Errorf("couldn't determine "+
+					"size of existing cache value %v", err)
 			}
 
 			// Account for that element's removal in evicted and
@@ -85,24 +86,27 @@ func (c *Cache) evict(needed uint64) error {
 			// Remove the element from the cache.
 			c.ll.Remove(elr)
 			delete(c.cache, ce.key)
+			evicted = true
 		}
 	}
 
-	return nil
+	return evicted, nil
 }
 
 // Put inserts a given (key,value) pair into the cache, if the key already
 // exists, it will replace value and update it to be most recent item in cache.
-func (c *Cache) Put(key interface{}, value cache.Value) error {
+// The return value indicates whether items had to be evicted to make room for
+// the new element.
+func (c *Cache) Put(key interface{}, value cache.Value) (bool, error) {
 	vs, err := value.Size()
 	if err != nil {
-		return fmt.Errorf("couldn't determine size of cache value: %v",
-			err)
+		return false, fmt.Errorf("couldn't determine size of cache "+
+			"value: %v", err)
 	}
 
 	if vs > c.capacity {
-		return fmt.Errorf("can't insert entry of size %v into cache "+
-			"with capacity %v", vs, c.capacity)
+		return false, fmt.Errorf("can't insert entry of size %v into "+
+			"cache with capacity %v", vs, c.capacity)
 	}
 
 	c.mtx.Lock()
@@ -113,8 +117,8 @@ func (c *Cache) Put(key interface{}, value cache.Value) error {
 	if ok {
 		es, err := el.Value.(*entry).value.Size()
 		if err != nil {
-			return fmt.Errorf("couldn't determine size of existing"+
-				"cache value %v", err)
+			return false, fmt.Errorf("couldn't determine size of "+
+				"existing cache value %v", err)
 		}
 		c.ll.Remove(el)
 		c.size -= es
@@ -122,8 +126,9 @@ func (c *Cache) Put(key interface{}, value cache.Value) error {
 
 	// Then we need to make sure we have enough space for the element, evict
 	// elements if we need more space.
-	if err := c.evict(vs); err != nil {
-		return err
+	evicted, err := c.evict(vs)
+	if err != nil {
+		return false, err
 	}
 
 	// We have made enough space in the cache, so just insert it.
@@ -131,7 +136,7 @@ func (c *Cache) Put(key interface{}, value cache.Value) error {
 	c.cache[key] = el
 	c.size += vs
 
-	return nil
+	return evicted, nil
 }
 
 // Get will return value for a given key, making the element the most recently
