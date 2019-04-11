@@ -25,6 +25,11 @@ var (
 	// query.
 	QueryTimeout = time.Second * 3
 
+	// QueryBatchTimout is the total time we'll wait for a batch fetch
+	// query to complete.
+	// TODO(halseth): instead use timeout since last received response?
+	QueryBatchTimeout = time.Second * 30
+
 	// QueryNumRetries specifies how many times to retry sending a query to
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
@@ -72,7 +77,30 @@ type queryOptions struct {
 	// almost never need to re-match a filter once it's been fetched unless
 	// they're doing something like a key import.
 	persistToDisk bool
+
+	// optimisticBatch indicates whether we expect more calls to follow,
+	// and that we should attempt to batch more items with the query such
+	// that they can be cached, avoiding the extra round trip.
+	optimisticBatch optimisticBatchType
 }
+
+// optimisticBatchType is a type indicating the kind of batching we want to
+// execute with a query.
+type optimisticBatchType uint8
+
+const (
+	// noBatch indicates no other than the specified item should be
+	// queried.
+	noBatch optimisticBatchType = iota
+
+	// forwardBatch is used to indicate we should also query for items
+	// following, as they most likely will be fetched next.
+	forwardBatch
+
+	// reverseBatch is used to indicate we should also query for items
+	// preceding, as they most likely will be fetched next.
+	reverseBatch
+)
 
 // QueryOption is a functional option argument to any of the network query
 // methods, such as GetBlock and GetCFilter (when that resorts to a network
@@ -87,6 +115,7 @@ func defaultQueryOptions() *queryOptions {
 		numRetries:         uint8(QueryNumRetries),
 		peerConnectTimeout: QueryPeerConnectTimeout,
 		encoding:           QueryEncoding,
+		optimisticBatch:    noBatch,
 	}
 }
 
@@ -143,6 +172,22 @@ func DoneChan(doneChan chan<- struct{}) QueryOption {
 func PersistToDisk() QueryOption {
 	return func(qo *queryOptions) {
 		qo.persistToDisk = true
+	}
+}
+
+// OptimisticBatch allows the caller to tell that items following the requested
+// one should be included in the query.
+func OptimisticBatch() QueryOption {
+	return func(qo *queryOptions) {
+		qo.optimisticBatch = forwardBatch
+	}
+}
+
+// OptimisticReverseBatch allows the caller to tell that items preceding the
+// requested one should be included in the query.
+func OptimisticReverseBatch() QueryOption {
+	return func(qo *queryOptions) {
+		qo.optimisticBatch = reverseBatch
 	}
 }
 
