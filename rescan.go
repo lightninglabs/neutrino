@@ -981,7 +981,14 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
 
 	// TODO(roasbeef): need to ENSURE always get filter
-	filter, err := chain.GetCFilter(*blockHash, wire.GCSFilterRegular)
+
+	// Since this method is called when we are not current, and from the
+	// utxoscanner, we expect more calls to follow for the subsequent
+	// filters. To speed up the fetching, we make an optimistic batch
+	// query.
+	filter, err := chain.GetCFilter(
+		*blockHash, wire.GCSFilterRegular, OptimisticBatch(),
+	)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
