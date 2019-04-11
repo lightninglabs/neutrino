@@ -123,6 +123,41 @@ func (f *FilterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
 	return chainhash.NewHash(rawHeader)
 }
 
+// readHeaderRange will attempt to fetch a series of filter headers within the
+// target height range. This method batches a set of reads into a single system
+// call thereby increasing performance when reading a set of contiguous
+// headers.
+//
+// NOTE: The end height is _inclusive_ so we'll fetch all headers from the
+// startHeight up to the end height, including the final header.
+func (f *FilterHeaderStore) readHeaderRange(startHeight uint32,
+	endHeight uint32) ([]chainhash.Hash, error) {
+
+	// Based on the defined header type, we'll determine the number of
+	// bytes that we need to read from the file.
+	headerReader, err := readHeadersFromFile(
+		f.file, RegularFilterHeaderSize, startHeight, endHeight,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// We'll now incrementally parse out the set of individual headers from
+	// our set of serialized contiguous raw headers.
+	numHeaders := endHeight - startHeight + 1
+	headers := make([]chainhash.Hash, 0, numHeaders)
+	for headerReader.Len() != 0 {
+		var nextHeader chainhash.Hash
+		if _, err := headerReader.Read(nextHeader[:]); err != nil {
+			return nil, err
+		}
+
+		headers = append(headers, nextHeader)
+	}
+
+	return headers, nil
+}
+
 // readHeadersFromFile reads a chunk of headers, each of size headerSize, from
 // the given file, from startHeight to endHeight.
 func readHeadersFromFile(f *os.File, headerSize, startHeight,
