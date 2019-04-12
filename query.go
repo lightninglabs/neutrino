@@ -662,21 +662,31 @@ checkResponses:
 			}
 
 			queryPeer = nil
-			for _, curPeer := range s.Peers() {
-				if curPeer != nil && curPeer.Connected() &&
-					peerTries[curPeer.Addr()] < qo.numRetries {
-
-					curPeer := curPeer
-					queryPeer = curPeer
-
-					// Found a peer we can query.
-					peerTries[queryPeer.Addr()]++
-					queryPeer.subscribeRecvMsg(subscription)
-					queryPeer.QueueMessageWithEncoding(
-						queryMsg, nil, qo.encoding,
-					)
-					break
+			for _, peer := range s.Peers() {
+				// If the peer is no longer connected, we'll
+				// skip them.
+				if !peer.Connected() {
+					continue
 				}
+
+				// If we've yet to try this peer, we'll make
+				// sure to do so. If we've exceeded the number
+				// of tries we should retry this peer, then
+				// we'll skip them.
+				numTries, ok := peerTries[peer.Addr()]
+				if ok && numTries >= qo.numRetries {
+					continue
+				}
+
+				queryPeer = peer
+
+				// Found a peer we can query.
+				peerTries[queryPeer.Addr()]++
+				queryPeer.subscribeRecvMsg(subscription)
+				queryPeer.QueueMessageWithEncoding(
+					queryMsg, nil, qo.encoding,
+				)
+				break
 			}
 
 			// If at this point, we don't yet have a query peer,
