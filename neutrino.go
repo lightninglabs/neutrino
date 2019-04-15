@@ -1221,7 +1221,14 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 
 	if sp.connReq != nil {
-		s.connManager.Disconnect(sp.connReq.ID())
+		// If the peer has been banned, we'll remove the connection
+		// request from the manager to ensure we don't reconnect again.
+		// Otherwise, we'll just simply disconnect.
+		if s.isBanned(sp.connReq.Addr.String(), state) {
+			s.connManager.Remove(sp.connReq.ID())
+		} else {
+			s.connManager.Disconnect(sp.connReq.ID())
+		}
 	}
 
 	// Update the address' last seen time if the peer has acknowledged
