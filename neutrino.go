@@ -697,6 +697,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	var newAddressFunc func() (net.Addr, error)
 	if s.chainParams.Net != chaincfg.SimNetParams.Net {
 		newAddressFunc = func() (net.Addr, error) {
+
+			// Gather our set of currently connected peers to avoid
+			// connecting to them again.
+			connectedPeers := make(map[string]struct{})
+			for _, peer := range s.Peers() {
+				peerAddr := addrmgr.NetAddressKey(peer.NA())
+				connectedPeers[peerAddr] = struct{}{}
+			}
+
 			for tries := 0; tries < 100; tries++ {
 				addr := s.addrManager.GetAddress()
 				if addr == nil {
@@ -707,6 +716,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				addrString := addrmgr.NetAddressKey(addr.NetAddress())
 				if s.IsBanned(addrString) {
 					log.Debugf("Ignoring banned peer: %v", addrString)
+					continue
+				}
+
+				// Skip any addresses that correspond to our set
+				// of currently connected peers.
+				if _, ok := connectedPeers[addrString]; ok {
 					continue
 				}
 
