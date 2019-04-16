@@ -946,6 +946,19 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
 				log.Warnf("Checkpoints at index %v don't match "+
 					"response!!!", checkPointIndex)
+
+				// If the peer gives us a header that doesn't
+				// match what we know to be the best
+				// checkpoint, then we'll ban the peer so we
+				// can re-allocate the query elsewhere.
+				log.Warnf("Banning peer=%v for invalid "+
+					"checkpoints", sp)
+
+				go func() {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}()
+
 				return false
 			}
 
@@ -1479,6 +1492,10 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 		if err != nil {
 			return nil, 0
 		}
+
+		// We'll make sure we also update our stopHeight so we know how
+		// many headers to expect below.
+		stopHeight = height + wire.MaxCFHeadersPerMsg - 1
 	}
 
 	// Calculate the hash and use it to create the query message.
@@ -1644,7 +1661,7 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 
 			if *header != checkpoint {
 				log.Warnf("mismatch at height %v, expected %v got "+
-					"%v", ckptHeight, checkpoint, header)
+					"%v", ckptHeight, header, checkpoint)
 				return i, nil
 			}
 		}
