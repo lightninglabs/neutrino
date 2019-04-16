@@ -1349,6 +1349,13 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 		return
 	}
 
+	// If we're already connected to this peer, then we'll close out the new
+	// connection and keep the old.
+	if s.PeerByAddr(peerAddr) != nil {
+		conn.Close()
+		return
+	}
+
 	sp := newServerPeer(s, c.Permanent)
 	p, err := peer.NewOutboundPeer(newPeerConfig(sp), peerAddr)
 	if err != nil {
