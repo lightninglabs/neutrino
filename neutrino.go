@@ -262,9 +262,14 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
 		peerServices&wire.SFNodeCF != wire.SFNodeCF {
 
-		log.Infof("Disconnecting peer %v, cannot serve compact "+
+		log.Infof("Removing peer %v, cannot serve compact "+
 			"filters", sp)
-		sp.Disconnect()
+
+		sp.server.BanPeer(sp)
+		if sp.connReq != nil {
+			sp.server.connManager.Remove(sp.connReq.ID())
+		}
+
 		return nil
 	}
 
