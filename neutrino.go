@@ -70,9 +70,13 @@ var (
 	// from DNS.
 	DisableDNSSeed = false
 
-	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino will
-	// keep in memory if no size is specified in the neutrino.Config.
-	DefaultFilterCacheSize uint64 = 4096 * 1000
+	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino
+	// will keep in memory if no size is specified in the neutrino.Config.
+	// Since we utilize the cache during batch filter fetching, it is
+	// beneficial if it is able to to keep a whole batch. The current batch
+	// size is 1000, so we default to 30 MB, which can fit about 1450 to
+	// 2300 mainnet filters.
+	DefaultFilterCacheSize uint64 = 3120 * 10 * 1000
 
 	// DefaultBlockCacheSize is the size (in bytes) of blocks neutrino will
 	// keep in memory if no size is specified in the neutrino.Config.

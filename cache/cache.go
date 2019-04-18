@@ -10,8 +10,9 @@ var (
 // Cache represents a generic cache.
 type Cache interface {
 	// Put stores the given (key,value) pair, replacing existing value if
-	// key already exists.
-	Put(key interface{}, value Value) error
+	// key already exists. The return value indicates whether items had to
+	// be evicted to make room for the new element.
+	Put(key interface{}, value Value) (bool, error)
 
 	// Get returns the value for a given key.
 	Get(key interface{}) (Value, error)

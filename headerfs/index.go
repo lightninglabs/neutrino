@@ -58,6 +58,15 @@ const (
 	RegularFilter
 )
 
+const (
+	// BlockHeaderSize is the size in bytes of the Block header type.
+	BlockHeaderSize = 80
+
+	// RegularFilterHeaderSize is the size in bytes of the RegularFilter
+	// header type.
+	RegularFilterHeaderSize = 32
+)
+
 // headerIndex is an index stored within the database that allows for random
 // access into the on-disk header file. This, in conjunction with a flat file
 // of headers consists of header database. The keys have been specifically
