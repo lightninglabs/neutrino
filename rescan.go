@@ -537,15 +537,15 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// If we're not scanning or our watch list is empty, then we can
 		// just notify the block without fetching any filters/blocks.
 		if !scanning || len(ro.watchList) == 0 {
-			if ro.ntfn.OnFilteredBlockConnected != nil {
-				ro.ntfn.OnFilteredBlockConnected(
-					curStamp.Height, &curHeader, nil,
-				)
-			}
 			if ro.ntfn.OnBlockConnected != nil {
 				ro.ntfn.OnBlockConnected(
 					&curStamp.Hash, curStamp.Height,
 					curHeader.Timestamp,
+				)
+			}
+			if ro.ntfn.OnFilteredBlockConnected != nil {
+				ro.ntfn.OnFilteredBlockConnected(
+					curStamp.Height, &curHeader, nil,
 				)
 			}
 
@@ -612,15 +612,15 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 
 		// Run through notifications. This is all single-threaded. We
 		// include deprecated calls as they're still used, for now.
-		if ro.ntfn.OnFilteredBlockDisconnected != nil {
-			ro.ntfn.OnFilteredBlockDisconnected(
-				curStamp.Height, &curHeader,
-			)
-		}
 		if ro.ntfn.OnBlockDisconnected != nil {
 			ro.ntfn.OnBlockDisconnected(
 				&curStamp.Hash, curStamp.Height,
 				curHeader.Timestamp,
+			)
+		}
+		if ro.ntfn.OnFilteredBlockDisconnected != nil {
+			ro.ntfn.OnFilteredBlockDisconnected(
+				curStamp.Height, &curHeader,
 			)
 		}
 
@@ -836,14 +836,15 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 		}
 	}
 
-	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, &curHeader,
-			relevantTxs)
-	}
-
 	if ro.ntfn.OnBlockConnected != nil {
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
-			curStamp.Height, curHeader.Timestamp)
+		ro.ntfn.OnBlockConnected(
+			&curStamp.Hash, curStamp.Height, curHeader.Timestamp,
+		)
+	}
+	if ro.ntfn.OnFilteredBlockConnected != nil {
+		ro.ntfn.OnFilteredBlockConnected(
+			curStamp.Height, &curHeader, relevantTxs,
+		)
 	}
 
 	return nil
@@ -941,14 +942,15 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 		}
 	}
 
-	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
-			relevantTxs)
-	}
-
 	if ro.ntfn.OnBlockConnected != nil {
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
-			curStamp.Height, curHeader.Timestamp)
+		ro.ntfn.OnBlockConnected(
+			&curStamp.Hash, curStamp.Height, curHeader.Timestamp,
+		)
+	}
+	if ro.ntfn.OnFilteredBlockConnected != nil {
+		ro.ntfn.OnFilteredBlockConnected(
+			curStamp.Height, curHeader, relevantTxs,
+		)
 	}
 
 	return nil
