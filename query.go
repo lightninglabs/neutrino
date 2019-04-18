@@ -296,6 +296,11 @@ func queryChainServiceBatch(
 			mtxPeerStates.Unlock()
 		}()
 
+		// failedQueries keeps track of the queries this peer has failed
+		// to respond to, to ensure this query is not assigned to the
+		// peer again.
+		failedQueries := make(map[uint32]struct{})
+
 		// Track the last query our peer failed to answer and skip over
 		// it for the next attempt. This helps prevent most instances
 		// of the same peer being asked for the same query every time.
@@ -324,6 +329,14 @@ func queryChainServiceBatch(
 
 					log.Tracef("Query #%v already answered, "+
 						"skipping", i)
+					continue
+				}
+
+				// If the peer previously failed/timed out
+				// responding to this query, we'll skip it.
+				if _, ok := failedQueries[uint32(i)]; ok {
+					log.Tracef("Skipping previously failed "+
+						"query #%v", i)
 					continue
 				}
 
@@ -391,6 +404,7 @@ func queryChainServiceBatch(
 			case <-timeout:
 				// We failed, so set the query state back to
 				// zero and update our lastFailed state.
+				failedQueries[uint32(handleQuery)] = struct{}{}
 				atomic.StoreUint32(
 					&queryStates[handleQuery], uint32(queryWaitSubmit),
 				)
