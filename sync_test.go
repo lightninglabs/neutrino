@@ -61,31 +61,33 @@ var (
 	// "fd":	OnFilteredBlockDisconnected
 	wantLog = func() (log []byte) {
 		for i := 1096; i <= 1100; i++ {
+			// BlockConnected
+			log = append(log, []byte("bc")...)
 			// FilteredBlockConnected
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
-			// BlockConnected
-			log = append(log, []byte("bc")...)
 		}
 		// Block with one relevant (receive) transaction
-		log = append(log, []byte("rvfc")...)
-		log = append(log, 0x01)
+		log = append(log, []byte("rv")...)
 		log = append(log, []byte("bc")...)
+		log = append(log, []byte("fc")...)
+		log = append(log, 0x01)
 		// 124 blocks with nothing
 		for i := 1102; i <= 1225; i++ {
+			log = append(log, []byte("bc")...)
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// Block with 1 redeeming transaction
-		log = append(log, []byte("rdfc")...)
-		log = append(log, 0x01)
+		log = append(log, []byte("rd")...)
 		log = append(log, []byte("bc")...)
+		log = append(log, []byte("fc")...)
+		log = append(log, 0x01)
 		// Block with nothing
+		log = append(log, []byte("bc")...)
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
-		log = append(log, []byte("bc")...)
 		// Update with rewind - rewind back to 1095, add another address,
 		// and see more interesting transactions.
 		for i := 1227; i >= 1096; i-- {
@@ -94,62 +96,66 @@ var (
 		}
 		// Forward to 1100
 		for i := 1096; i <= 1100; i++ {
+			// BlockConnected
+			log = append(log, []byte("bc")...)
 			// FilteredBlockConnected
 			log = append(log, []byte("fc")...)
 			// 0 relevant TXs
 			log = append(log, 0x00)
-			// BlockConnected
-			log = append(log, []byte("bc")...)
 		}
 		// Block with two relevant (receive) transactions
-		log = append(log, []byte("rvrvfc")...)
-		log = append(log, 0x02)
+		log = append(log, []byte("rvrv")...)
 		log = append(log, []byte("bc")...)
+		log = append(log, []byte("fc")...)
+		log = append(log, 0x02)
 		// 124 blocks with nothing
 		for i := 1102; i <= 1225; i++ {
+			log = append(log, []byte("bc")...)
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 1226; i <= 1227; i++ {
-			log = append(log, []byte("rdfc")...)
-			log = append(log, 0x01)
+			log = append(log, []byte("rd")...)
 			log = append(log, []byte("bc")...)
+			log = append(log, []byte("fc")...)
+			log = append(log, 0x01)
 		}
 		// Block with nothing
+		log = append(log, []byte("bc")...)
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
-		log = append(log, []byte("bc")...)
 		// 3 block rollback
 		for i := 1228; i >= 1226; i-- {
-			log = append(log, []byte("fdbd")...)
+			log = append(log, []byte("bdfd")...)
 		}
 		// 1 block reorg with 2 redeeming transactions
-		log = append(log, []byte("rdrdfc")...)
-		log = append(log, 0x02)
+		log = append(log, []byte("rdrd")...)
 		log = append(log, []byte("bc")...)
+		log = append(log, []byte("fc")...)
+		log = append(log, 0x02)
 		// 4 block empty reorg
 		for i := 1227; i <= 1230; i++ {
+			log = append(log, []byte("bc")...)
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		// 5 block rollback
 		for i := 1230; i >= 1226; i-- {
-			log = append(log, []byte("fdbd")...)
+			log = append(log, []byte("bdfd")...)
 		}
 		// 2 blocks with 1 redeeming transaction each
 		for i := 1226; i <= 1227; i++ {
-			log = append(log, []byte("rdfc")...)
-			log = append(log, 0x01)
+			log = append(log, []byte("rd")...)
 			log = append(log, []byte("bc")...)
+			log = append(log, []byte("fc")...)
+			log = append(log, 0x01)
 		}
 		// 8 block rest of reorg
 		for i := 1228; i <= 1235; i++ {
+			log = append(log, []byte("bc")...)
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
-			log = append(log, []byte("bc")...)
 		}
 		return log
 	}()
