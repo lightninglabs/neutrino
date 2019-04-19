@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -42,28 +43,35 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			err)
 	}
 
+	cleanUp := func() {
+		db.Close()
+		os.RemoveAll(tempDir)
+	}
+
 	hdrStore, err := headerfs.NewBlockHeaderStore(
 		tempDir, db, &chaincfg.SimNetParams,
 	)
 	if err != nil {
-		db.Close()
+		cleanUp()
 		return nil, nil, nil, nil, fmt.Errorf("Error creating block "+
 			"header store: %s", err)
 	}
 
-	cleanUp := func() {
-		defer os.RemoveAll(tempDir)
-		defer db.Close()
-	}
-
 	cfStore, err := headerfs.NewFilterHeaderStore(
-		tempDir, db, headerfs.RegularFilter,
-		&chaincfg.SimNetParams, nil,
+		tempDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		nil,
 	)
 	if err != nil {
 		cleanUp()
 		return nil, nil, nil, nil, fmt.Errorf("Error creating filter "+
 			"header store: %s", err)
+	}
+
+	banStore, err := banman.NewStore(db)
+	if err != nil {
+		cleanUp()
+		return nil, nil, nil, nil, fmt.Errorf("unable to initialize "+
+			"ban store: %v", err)
 	}
 
 	// Set up a chain service for the block manager. Each test should set
@@ -72,6 +80,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 		chainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
+		banStore:         banStore,
 	}
 
 	// Set up a blockManager with the chain service we defined.
@@ -498,6 +507,16 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		}
 		defer cleanUp()
 
+		// Create a mock peer to prevent panics when attempting to ban
+		// a peer that served an invalid filter header.
+		mockPeer := newServerPeer(bm.server, false)
+		mockPeer.Peer, err = peer.NewOutboundPeer(
+			newPeerConfig(mockPeer), "127.0.0.1:8333",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		// Keep track of the filter headers and block headers. Since
 		// the genesis headers are written automatically when the store
 		// is created, we query it to add to the slices.
@@ -589,7 +608,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			// Check that the success of the callback match what we
 			// expect.
 			for i := range responses {
-				success := f(nil, msgs[i], responses[i])
+				success := f(mockPeer, msgs[i], responses[i])
 				if i == test.firstInvalid {
 					if success {
 						t.Fatalf("expected interval "+

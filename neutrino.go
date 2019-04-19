@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
@@ -100,7 +101,6 @@ type updatePeerHeightsMsg struct {
 type peerState struct {
 	outboundPeers   map[int32]*ServerPeer
 	persistentPeers map[int32]*ServerPeer
-	banned          map[string]time.Time
 	outboundGroups  map[string]int
 }
 
@@ -209,26 +209,36 @@ func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
 // the score is above the ban threshold, the peer will be banned and
 // disconnected.
 func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
-	// No warning is logged and no score is calculated if banning is disabled.
+	// No warning is logged and no score is calculated if banning is
+	// disabled.
 	warnThreshold := BanThreshold >> 1
 	if transient == 0 && persistent == 0 {
-		// The score is not being increased, but a warning message is still
-		// logged if the score is above the warn threshold.
+		// The score is not being increased, but a warning message is
+		// still logged if the score is above the warn threshold.
 		score := sp.banScore.Int()
 		if score > warnThreshold {
-			log.Warnf("Misbehaving peer %s: %s -- ban score is %d, "+
-				"it was not increased this time", sp, reason, score)
+			log.Warnf("Misbehaving peer %s: %s -- ban score is "+
+				"%d, it was not increased this time", sp,
+				reason, score)
 		}
 		return
 	}
+
 	score := sp.banScore.Increase(persistent, transient)
 	if score > warnThreshold {
 		log.Warnf("Misbehaving peer %s: %s -- ban score increased to %d",
 			sp, reason, score)
+
 		if score > BanThreshold {
-			log.Warnf("Misbehaving peer %s -- banning and disconnecting",
-				sp)
-			sp.server.BanPeer(sp)
+			peerAddr := sp.Addr()
+			err := sp.server.BanPeer(
+				peerAddr, banman.ExceededBanThreshold,
+			)
+			if err != nil {
+				log.Errorf("Unable to ban peer %v: %v",
+					peerAddr, err)
+			}
+
 			sp.Disconnect()
 		}
 	}
@@ -266,10 +276,12 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
 		peerServices&wire.SFNodeCF != wire.SFNodeCF {
 
-		log.Infof("Removing peer %v, cannot serve compact "+
-			"filters", sp)
+		peerAddr := sp.Addr()
+		err := sp.server.BanPeer(peerAddr, banman.NoCompactFilters)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
+		}
 
-		sp.server.BanPeer(sp)
 		if sp.connReq != nil {
 			sp.server.connManager.Remove(sp.connReq.ID())
 		}
@@ -578,7 +590,6 @@ type ChainService struct {
 	blockSubscriptionMgr *blockntfns.SubscriptionManager
 	newPeers             chan *ServerPeer
 	donePeers            chan *ServerPeer
-	banPeers             chan *ServerPeer
 	query                chan interface{}
 	firstPeerConnect     chan struct{}
 	peerHeightsUpdate    chan updatePeerHeightsMsg
@@ -588,6 +599,7 @@ type ChainService struct {
 	services             wire.ServiceFlag
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
+	banStore             banman.Store
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -639,7 +651,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		addrManager:       amgr,
 		newPeers:          make(chan *ServerPeer, MaxPeers),
 		donePeers:         make(chan *ServerPeer, MaxPeers),
-		banPeers:          make(chan *ServerPeer, MaxPeers),
 		query:             make(chan interface{}),
 		quit:              make(chan struct{}),
 		firstPeerConnect:  make(chan struct{}),
@@ -838,6 +849,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
+	s.banStore, err = banman.NewStore(cfg.Database)
+	if err != nil {
+		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
+	}
+
 	return &s, nil
 }
 
@@ -900,13 +916,41 @@ func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	return int32(height), nil
 }
 
-// BanPeer bans a peer that has already been connected to the server by ip.
-func (s *ChainService) BanPeer(sp *ServerPeer) {
-	select {
-	case s.banPeers <- sp:
-	case <-s.quit:
-		return
+// BanPeer bans a peer due to a specific reason for a duration of BanDuration.
+func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
+	log.Warnf("Banning peer %v: duration=%v, reason=%v", addr, BanDuration,
+		reason)
+
+	ipNet, err := banman.ParseIPNet(addr, nil)
+	if err != nil {
+		return fmt.Errorf("unable to parse IP network for peer %v: %v",
+			addr, err)
 	}
+	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
+}
+
+// IsBanned returns true if the peer is banned, and false otherwise.
+func (s *ChainService) IsBanned(addr string) bool {
+	ipNet, err := banman.ParseIPNet(addr, nil)
+	if err != nil {
+		log.Errorf("Unable to parse IP network for peer %v: %v", addr,
+			err)
+		return false
+	}
+	banStatus, err := s.banStore.Status(ipNet)
+	if err != nil {
+		log.Errorf("Unable to determine ban status for peer %v: %v",
+			addr, err)
+		return false
+	}
+
+	// Log how much time left the peer will remain banned for, if any.
+	if time.Now().Before(banStatus.Expiration) {
+		log.Debugf("Peer %v is banned for another %v", addr,
+			banStatus.Expiration.Sub(time.Now()))
+	}
+
+	return banStatus.Banned
 }
 
 // AddPeer adds a new peer that has already been connected to the server.
@@ -1000,7 +1044,6 @@ func (s *ChainService) peerHandler() {
 	state := &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
-		banned:          make(map[string]time.Time),
 		outboundGroups:  make(map[string]int),
 	}
 
@@ -1049,10 +1092,6 @@ out:
 		case umsg := <-s.peerHeightsUpdate:
 			s.handleUpdatePeerHeights(state, umsg)
 
-		// Peer to ban.
-		case p := <-s.banPeers:
-			s.handleBanPeerMsg(state, p)
-
 		case qmsg := <-s.query:
 			s.handleQuery(state, qmsg)
 
@@ -1073,7 +1112,6 @@ cleanup:
 		select {
 		case <-s.newPeers:
 		case <-s.donePeers:
-		case <-s.banPeers:
 		case <-s.peerHeightsUpdate:
 		case <-s.query:
 		default:
@@ -1149,38 +1187,6 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 	})
 }
 
-// isBanned returns true if the passed peer address is still considered to be
-// banned.
-func (s *ChainService) isBanned(addr string, state *peerState) bool {
-	// First, we'll extract the host so we can consider it without taking
-	// into account the target port.
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		log.Debugf("can't split host/port: %s", err)
-		return false
-	}
-
-	// With the host obtained, we'll check on the ban status of this peer.
-	if banEnd, ok := state.banned[host]; ok {
-		// If the ban duration of this peer is still active, then we'll
-		// ignore it for now as it's still banned.
-		if time.Now().Before(banEnd) {
-			log.Debugf("Peer %s is banned for another %v - ignoring",
-				host, banEnd.Sub(time.Now()))
-			return true
-		}
-
-		// Otherwise, the peer was banned in the past, but is no longer
-		// banned, so we'll remove this ban entry and return back to
-		// the caller.
-		log.Infof("Peer %s is no longer banned", host)
-		delete(state.banned, host)
-		return false
-	}
-
-	return false
-}
-
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
 func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
@@ -1196,7 +1202,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	}
 
 	// Disconnect banned peers.
-	if s.isBanned(sp.Addr(), state) {
+	if s.IsBanned(sp.Addr()) {
 		sp.Disconnect()
 		return false
 	}
@@ -1256,7 +1262,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		// If the peer has been banned, we'll remove the connection
 		// request from the manager to ensure we don't reconnect again.
 		// Otherwise, we'll just simply disconnect.
-		if s.isBanned(sp.connReq.Addr.String(), state) {
+		if s.IsBanned(sp.connReq.Addr.String()) {
 			s.connManager.Remove(sp.connReq.ID())
 		} else {
 			s.connManager.Disconnect(sp.connReq.ID())
@@ -1271,18 +1277,6 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 
 	// If we get here it means that either we didn't know about the peer
 	// or we purposefully deleted it.
-}
-
-// handleBanPeerMsg deals with banning peers.  It is invoked from the
-// peerHandler goroutine.
-func (s *ChainService) handleBanPeerMsg(state *peerState, sp *ServerPeer) {
-	host, _, err := net.SplitHostPort(sp.Addr())
-	if err != nil {
-		log.Debugf("can't split ban peer %s: %s", sp.Addr(), err)
-		return
-	}
-	log.Infof("Banned peer %s for %v", host, BanDuration)
-	state.banned[host] = time.Now().Add(BanDuration)
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
