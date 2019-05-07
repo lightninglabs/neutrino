@@ -942,27 +942,25 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			}
 			nextCheckpoint := checkpoints[checkPointIndex]
 
-            if checkPointIndex > 0 {  // JMC
-				// The response doesn't match the checkpoint.
-				if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
-					log.Warnf("Checkpoints at index %v don't match "+
-						"response!!!", checkPointIndex)
+			// The response doesn't match the checkpoint.
+			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
+				log.Warnf("Checkpoints at index %v don't match "+
+					"response!!!", checkPointIndex)
 
-				    // If the peer gives us a header that doesn't
-				    // match what we know to be the best
-				    // checkpoint, then we'll ban the peer so we
-				    // can re-allocate the query elsewhere.
-				    log.Warnf("Banning peer=%v for invalid "+
-					    "checkpoints", sp)
+				// If the peer gives us a header that doesn't
+				// match what we know to be the best
+				// checkpoint, then we'll ban the peer so we
+				// can re-allocate the query elsewhere.
+				log.Warnf("Banning peer=%v for invalid "+
+					"checkpoints", sp)
 
-				    go func() {
-					    b.server.BanPeer(sp)
-					    sp.Disconnect()
-				    }()
+				go func() {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}()
 
-				    return false
-			    }
-            }
+				return false
+			}
 
 			// At this point, the response matches the query, and
 			// the relevant checkpoint we got earlier, so we should
@@ -1091,8 +1089,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, err
 	}
 	if *tip != msg.PrevFilterHeader {
-            // JMC litecoin hack: removed the fatal error, just log it instead
-			log.Debugf("attempt to write cfheaders out of "+
+		return nil, fmt.Errorf("attempt to write cfheaders out of "+
 			"order! Tip=%v (height=%v), prev_hash=%v.", *tip,
 			tipHeight, msg.PrevFilterHeader)
 	}
@@ -1665,7 +1662,7 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 			if *header != checkpoint {
 				log.Warnf("mismatch at height %v, expected %v got "+
 					"%v", ckptHeight, header, checkpoint)
-				// JMC return i, nil
+				return i, nil
 			}
 		}
 	}
@@ -2418,7 +2415,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
-	/* JMC disabled this because it was failing for Litecoin
+	// JMC below was failing for Litecoin, skip it for now
+    return nil
+
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
@@ -2431,7 +2430,7 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 		blockchain.CompactToBig(diff))
 	if err != nil {
 		return err
-	} */
+	}
 	// Ensure the block time is not too far in the future.
 	if blockHeader.Timestamp.After(maxTimestamp) {
 		return fmt.Errorf("block timestamp of %v is too far in the "+
