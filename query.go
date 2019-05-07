@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
+//	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -1212,7 +1212,8 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
-				if err := blockchain.CheckBlockSanity(
+//JMC disabled:
+/*				if err := blockchain.CheckBlockSanity(
 					block,
 					// We don't need to check PoW because
 					// by the time we get here, it's been
@@ -1228,7 +1229,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					sp.Disconnect()
 					return
 				}
-
+*/
 				// TODO(roasbeef): modify CheckBlockSanity to
 				// also check witness commitment
 
