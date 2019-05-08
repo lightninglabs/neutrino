@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -2415,19 +2417,26 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
-	// JMC below was failing for Litecoin, skip it for now
-    return nil
 
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
 		return err
 	}
-	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
-		Header: *blockHeader,
-	})
-	err = blockchain.CheckProofOfWork(stubBlock,
-		blockchain.CompactToBig(diff))
+	stubBlock := btcutil.NewBlock(&wire.MsgBlock{Header: *blockHeader,})
+
+	if b.server.chainParams.Net == 4056470269 { // litecoin testnet
+		stubBytes, err := stubBlock.Bytes()
+		if err != nil { return err }
+		ltcBlock, err := ltcutil.NewBlockFromBytes(stubBytes)
+		if err != nil { return err }
+		bigDiff := blockchain.CompactToBig(b.server.chainParams.PowLimitBits)
+		err = ltcblockchain.CheckProofOfWork(ltcBlock, bigDiff)
+	} else {
+		err = blockchain.CheckProofOfWork(stubBlock,
+			blockchain.CompactToBig(diff))
+	}
+
 	if err != nil {
 		return err
 	}

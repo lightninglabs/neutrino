@@ -8,10 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-//	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/blockchain"
+	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/davecgh/go-spew/spew"
@@ -1212,16 +1214,42 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
-//JMC disabled:
-/*				if err := blockchain.CheckBlockSanity(
-					block,
-					// We don't need to check PoW because
-					// by the time we get here, it's been
-					// checked during header
-					// synchronization
-					s.chainParams.PowLimit,
-					s.timeSource,
-				); err != nil {
+				log.Warnf("JMC calling CheckBlockSanity for %v", blockHash)
+
+				// if litecoin network, do litecoin specific checks
+				var err error
+				if s.chainParams.Net == 4056470269 { // litecoin testnet
+					stubBytes, err := block.Bytes()
+					if err != nil {
+						log.Warnf("couldn't : %v", err)
+					}
+					ltcBlock, err := ltcutil.NewBlockFromBytes(stubBytes)
+					if err != nil {
+						log.Warnf("couldn't : %v", err)
+					}
+
+					err = ltcblockchain.CheckBlockSanity(
+						ltcBlock,
+						// We don't need to check PoW because
+						// by the time we get here, it's been
+						// checked during header
+						// synchronization
+						s.chainParams.PowLimit,
+						s.timeSource,
+					)
+				} else {
+					err = blockchain.CheckBlockSanity(
+						block,
+						// We don't need to check PoW because
+						// by the time we get here, it's been
+						// checked during header
+						// synchronization
+						s.chainParams.PowLimit,
+						s.timeSource,
+					)
+				}
+
+				if err != nil {
 					log.Warnf("Invalid block for %s "+
 						"received from %s -- "+
 						"disconnecting peer", blockHash,
@@ -1229,7 +1257,6 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					sp.Disconnect()
 					return
 				}
-*/
 				// TODO(roasbeef): modify CheckBlockSanity to
 				// also check witness commitment
 
