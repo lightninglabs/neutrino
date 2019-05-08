@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
@@ -2417,13 +2417,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
-
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
 		return err
 	}
-	stubBlock := btcutil.NewBlock(&wire.MsgBlock{Header: *blockHeader,})
+	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
+		Header: *blockHeader,
+	})
 
 	if b.server.chainParams.Net == 4056470269 { // litecoin testnet
 		stubBytes, err := stubBlock.Bytes()
