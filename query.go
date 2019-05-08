@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
+	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
+	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
@@ -1214,7 +1214,6 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 				// If this claims our block but doesn't pass
 				// the sanity check, the peer is trying to
 				// bamboozle us. Disconnect it.
-				log.Warnf("JMC calling CheckBlockSanity for %v", blockHash)
 
 				// if litecoin network, do litecoin specific checks
 				var err error
@@ -1257,6 +1256,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 					sp.Disconnect()
 					return
 				}
+
 				// TODO(roasbeef): modify CheckBlockSanity to
 				// also check witness commitment
 
