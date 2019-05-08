@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs/builder"
 	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
 	ltcutil "github.com/ltcsuite/ltcutil"
+	ltcwire "github.com/ltcsuite/ltcd/wire"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
@@ -1217,7 +1218,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 				// if litecoin network, do litecoin specific checks
 				var err error
-				if s.chainParams.Net == 4056470269 { // litecoin testnet
+				isLitecoin := func(magic wire.BitcoinNet) bool {
+					return ltcwire.BitcoinNet(magic) == ltcwire.MainNet || 
+					   ltcwire.BitcoinNet(magic) == ltcwire.TestNet4 ||
+					   ltcwire.BitcoinNet(magic) == ltcwire.SimNet
+				}
+				if isLitecoin(s.chainParams.Net) {
 					stubBytes, err := block.Bytes()
 					if err != nil {
 						log.Warnf("couldn't : %v", err)

@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	ltcblockchain "github.com/ltcsuite/ltcd/blockchain"
+	ltcwire "github.com/ltcsuite/ltcd/wire"
 	ltcutil "github.com/ltcsuite/ltcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
@@ -2426,7 +2427,12 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 		Header: *blockHeader,
 	})
 
-	if b.server.chainParams.Net == 4056470269 { // litecoin testnet
+	isLitecoin := func(magic wire.BitcoinNet) bool {
+		return ltcwire.BitcoinNet(magic) == ltcwire.MainNet || 
+		   ltcwire.BitcoinNet(magic) == ltcwire.TestNet4 ||
+		   ltcwire.BitcoinNet(magic) == ltcwire.SimNet
+	}
+	if isLitecoin(b.server.chainParams.Net) {
 		stubBytes, err := stubBlock.Bytes()
 		if err != nil { return err }
 		ltcBlock, err := ltcutil.NewBlockFromBytes(stubBytes)
