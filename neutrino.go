@@ -536,6 +536,13 @@ type Config struct {
 	// BlockCacheSize indicates the size (in bytes) of blocks the block
 	// cache will hold in memory at most.
 	BlockCacheSize uint64
+
+	// AssertFilterHeader is an optional field that allows the creator of
+	// the ChainService to ensure that if any chain data exists, it's
+	// compliant with the expected filter header state. If neutrino starts
+	// up and this filter header state has diverged, then it'll remove the
+	// current on disk filter headers to sync them anew.
+	AssertFilterHeader *headerfs.FilterHeader
 }
 
 // ChainService is instantiated with functional options
@@ -685,7 +692,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter, &cfg.ChainParams,
+		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+		&cfg.ChainParams, cfg.AssertFilterHeader,
 	)
 	if err != nil {
 		return nil, err

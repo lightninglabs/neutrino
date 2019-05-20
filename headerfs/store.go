@@ -81,7 +81,7 @@ var headerBufPool = sync.Pool{
 type headerStore struct {
 	mtx sync.RWMutex
 
-	filePath string
+	fileName string
 
 	file *os.File
 
@@ -122,7 +122,7 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}
 
 	return &headerStore{
-		filePath:    filePath,
+		fileName:    flatFileName,
 		file:        headerFile,
 		headerIndex: index,
 	}, nil
@@ -596,7 +596,8 @@ type FilterHeaderStore struct {
 // FilterHeaderStore, then the initial genesis filter header will need to be
 // inserted.
 func NewFilterHeaderStore(filePath string, db walletdb.DB,
-	filterType HeaderType, netParams *chaincfg.Params) (*FilterHeaderStore, error) {
+	filterType HeaderType, netParams *chaincfg.Params,
+	headerStateAssertion *FilterHeader) (*FilterHeaderStore, error) {
 
 	fStore, err := newHeaderStore(db, filePath, filterType)
 	if err != nil {
@@ -655,6 +656,15 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		return fhs, nil
 	}
 
+	// If we have a state assertion then we'll check it now to see if we
+	// need to modify our filter header files before we proceed.
+	if headerStateAssertion != nil {
+		err := fhs.maybeResetHeaderState(headerStateAssertion)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// As a final initialization step, we'll ensure that the header tip
 	// within the flat files, is in sync with out database index.
 	tipHash, tipHeight, err := fhs.chainTip()
@@ -691,6 +701,34 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// TODO(roasbeef): make above into func
 
 	return fhs, nil
+}
+
+// maybeResetHeaderState will reset the header state if the header assertion
+// fails, but only if the target height is found.
+func (f *FilterHeaderStore) maybeResetHeaderState(
+	headerStateAssertion *FilterHeader) error {
+
+	// First, we'll attempt to locate the header at this height. If no such
+	// header is found, then we'll exit early.
+	assertedHeader, err := f.FetchHeaderByHeight(
+		headerStateAssertion.Height,
+	)
+	if _, ok := err.(*ErrHeaderNotFound); ok {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	// If our on disk state and the provided header assertion don't
+	// match, then we'll purge this state so we can sync it anew
+	// once we fully start up.
+	if *assertedHeader != headerStateAssertion.FilterHash {
+		if err := os.Remove(f.fileName); err != nil {
+			return err
+		}
+	}
+
+	return err
 }
 
 // FetchHeader returns the filter header that corresponds to the passed block

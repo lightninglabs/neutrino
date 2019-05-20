@@ -433,7 +433,8 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 	}
 
 	cfStore, err := headerfs.NewFilterHeaderStore(
-		tempDir, db, headerfs.RegularFilter, &chaincfg.SimNetParams,
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
 	)
 	if err != nil {
 		t.Fatalf("Error creating filter header store: %s", err)
