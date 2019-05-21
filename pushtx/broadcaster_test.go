@@ -131,7 +131,7 @@ func TestRebroadcast(t *testing.T) {
 
 		for i := 0; i < len(expectedOrder); i++ {
 			tx := <-broadcastChan
-			if tx != expectedOrder[i] {
+			if tx.TxHash() != expectedOrder[i].TxHash() {
 				t.Fatalf("expected transaction %v, got %v",
 					expectedOrder[i].TxHash(), tx.TxHash())
 			}
@@ -154,10 +154,10 @@ func TestRebroadcast(t *testing.T) {
 	// as confirmed, and the second as it being accepted into the mempool.
 	broadcaster.cfg.Broadcast = func(tx *wire.MsgTx) error {
 		broadcastChan <- tx
-		if tx == txs[0] {
+		if tx.TxHash() == txs[0].TxHash() {
 			return &BroadcastError{Code: Confirmed}
 		}
-		if tx == txs[1] {
+		if tx.TxHash() == txs[1].TxHash() {
 			return &BroadcastError{Code: Mempool}
 		}
 		return nil

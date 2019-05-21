@@ -63,9 +63,6 @@ type Broadcaster struct {
 	// requests from external callers will be streamed through.
 	broadcastReqs chan *broadcastReq
 
-	// transactions is the set of transactions we have broadcast so far.
-	transactions map[chainhash.Hash]*wire.MsgTx
-
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -75,7 +72,6 @@ func NewBroadcaster(cfg *Config) *Broadcaster {
 	b := &Broadcaster{
 		cfg:           *cfg,
 		broadcastReqs: make(chan *broadcastReq),
-		transactions:  make(map[chainhash.Hash]*wire.MsgTx),
 		quit:          make(chan struct{}),
 	}
 
@@ -119,6 +115,50 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 
 	log.Infof("Broadcaster now active")
 
+	// transactions is the set of transactions we have broadcast so far,
+	// and are still not confirmed.
+	transactions := make(map[chainhash.Hash]*wire.MsgTx)
+
+	// confChan is a channel used to notify the broadcast handler about
+	// confirmed transactions.
+	confChan := make(chan chainhash.Hash)
+
+	// The rebroadcast semaphore is used to ensure we have only one
+	// rebroadcast running at a time.
+	rebroadcastSem := make(chan struct{}, 1)
+	rebroadcastSem <- struct{}{}
+
+	// triggerRebroadcast is a helper method that checks whether the
+	// rebroadcast semaphore is available, and if it is spawns a goroutine
+	// to rebroadcast all pending transactions.
+	triggerRebroadcast := func() {
+		select {
+		// If the rebroadcast semaphore is available, start a
+		// new goroutine to exectue a rebroadcast.
+		case <-rebroadcastSem:
+		default:
+			log.Debugf("Existing rebroadcast still in " +
+				"progress")
+			return
+		}
+
+		// Make a copy of the current set of transactions to hand to
+		// the goroutine.
+		txs := make(map[chainhash.Hash]*wire.MsgTx)
+		for k, v := range transactions {
+			txs[k] = v.Copy()
+		}
+
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+
+			b.rebroadcast(txs, confChan)
+			rebroadcastSem <- struct{}{}
+		}()
+
+	}
+
 	reBroadcastTicker := time.NewTicker(b.cfg.RebroadcastInterval)
 	defer reBroadcastTicker.Stop()
 
@@ -126,35 +166,35 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 		select {
 		// A new broadcast request was submitted by an external caller.
 		case req := <-b.broadcastReqs:
-			req.errChan <- b.handleBroadcastReq(req)
+			err := b.cfg.Broadcast(req.tx)
+			if err != nil && !IsBroadcastError(err, Mempool) {
+				log.Errorf("Broadcast attempt failed: %v", err)
+				req.errChan <- err
+				continue
+			}
+
+			transactions[req.tx.TxHash()] = req.tx
+			req.errChan <- nil
+
+		// A tx was confirmed, and we can remove it from our set of
+		// transactions.
+		case txHash := <-confChan:
+			delete(transactions, txHash)
 
 		// A new block notification has arrived, so we'll rebroadcast
 		// all of our pending transactions.
-		case block, ok := <-sub.Notifications:
+		case _, ok := <-sub.Notifications:
 			if !ok {
 				log.Warn("Unable to rebroadcast transactions: " +
 					"block subscription was canceled")
 				continue
 			}
-
-			blockHeader := block.Header()
-
-			if len(b.transactions) != 0 {
-				log.Debugf("Re-broadcasting transaction at "+
-					"height=%v, hash=%v", block.Height(),
-					blockHeader.BlockHash())
-			}
-
-			b.rebroadcast()
+			triggerRebroadcast()
 
 		// Between blocks, we'll also try to attempt additional
 		// re-broadcasts to ensure a timely confirmation.
 		case <-reBroadcastTicker.C:
-			if len(b.transactions) == 0 {
-				continue
-			}
-
-			b.rebroadcast()
+			triggerRebroadcast()
 
 		case <-b.quit:
 			return
@@ -162,31 +202,30 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 	}
 }
 
-// handleBroadcastReq handles a new external request to reliably broadcast a
-// transaction to the network.
-func (b *Broadcaster) handleBroadcastReq(req *broadcastReq) error {
-	err := b.cfg.Broadcast(req.tx)
-	if err != nil && !IsBroadcastError(err, Mempool) {
-		log.Errorf("Broadcast attempt failed: %v", err)
-		return err
-	}
-
-	b.transactions[req.tx.TxHash()] = req.tx
-
-	return nil
-}
-
 // rebroadcast rebroadcasts all of the currently pending transactions. Care has
 // been taken to ensure that the transactions are sorted in their dependency
 // order to prevent peers from deeming our transactions as invalid due to
 // broadcasting them before their pending dependencies.
-func (b *Broadcaster) rebroadcast() {
-	if len(b.transactions) == 0 {
+func (b *Broadcaster) rebroadcast(txs map[chainhash.Hash]*wire.MsgTx,
+	confChan chan<- chainhash.Hash) {
+
+	// Return immediately if there are no transactions to re-broadcast.
+	if len(txs) == 0 {
 		return
 	}
 
-	sortedTxs := wtxmgr.DependencySort(b.transactions)
+	log.Debugf("Re-broadcasting %d transactions", len(txs))
+
+	sortedTxs := wtxmgr.DependencySort(txs)
 	for _, tx := range sortedTxs {
+		// Before attempting to broadcast this transaction, we check
+		// whether we are shutting down.
+		select {
+		case <-b.quit:
+			return
+		default:
+		}
+
 		err := b.cfg.Broadcast(tx)
 		switch {
 		// If the transaction has already confirmed on-chain, we can
@@ -198,7 +237,11 @@ func (b *Broadcaster) rebroadcast() {
 			log.Debugf("Re-broadcast of txid=%v, now confirmed!",
 				tx.TxHash())
 
-			delete(b.transactions, tx.TxHash())
+			select {
+			case confChan <- tx.TxHash():
+			case <-b.quit:
+				return
+			}
 			continue
 
 		// If the transaction already exists within our peers' mempool,
