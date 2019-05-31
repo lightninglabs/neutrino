@@ -54,7 +54,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 
 	cfStore, err := headerfs.NewFilterHeaderStore(
 		tempDir, db, headerfs.RegularFilter,
-		&chaincfg.SimNetParams,
+		&chaincfg.SimNetParams, nil,
 	)
 	if err != nil {
 		cleanUp()
