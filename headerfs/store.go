@@ -659,9 +659,19 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// If we have a state assertion then we'll check it now to see if we
 	// need to modify our filter header files before we proceed.
 	if headerStateAssertion != nil {
-		err := fhs.maybeResetHeaderState(headerStateAssertion)
+		reset, err := fhs.maybeResetHeaderState(
+			headerStateAssertion,
+		)
 		if err != nil {
 			return nil, err
+		}
+
+		// If the filter header store was reset, we'll re-initialize it
+		// to recreate our on-disk state.
+		if reset {
+			return NewFilterHeaderStore(
+				filePath, db, filterType, netParams, nil,
+			)
 		}
 	}
 
@@ -704,9 +714,10 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 }
 
 // maybeResetHeaderState will reset the header state if the header assertion
-// fails, but only if the target height is found.
+// fails, but only if the target height is found. The boolean returned indicates
+// that header state was reset.
 func (f *FilterHeaderStore) maybeResetHeaderState(
-	headerStateAssertion *FilterHeader) error {
+	headerStateAssertion *FilterHeader) (bool, error) {
 
 	// First, we'll attempt to locate the header at this height. If no such
 	// header is found, then we'll exit early.
@@ -714,21 +725,28 @@ func (f *FilterHeaderStore) maybeResetHeaderState(
 		headerStateAssertion.Height,
 	)
 	if _, ok := err.(*ErrHeaderNotFound); ok {
-		return nil
-	} else if err != nil {
-		return err
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 
-	// If our on disk state and the provided header assertion don't
-	// match, then we'll purge this state so we can sync it anew
-	// once we fully start up.
+	// If our on disk state and the provided header assertion don't match,
+	// then we'll purge this state so we can sync it anew once we fully
+	// start up.
 	if *assertedHeader != headerStateAssertion.FilterHash {
-		if err := os.Remove(f.fileName); err != nil {
-			return err
+		// Close the file before removing it. This is required by some
+		// OS, e.g., Windows.
+		if err := f.file.Close(); err != nil {
+			return true, err
 		}
+		if err := os.Remove(f.fileName); err != nil {
+			return true, err
+		}
+		return true, nil
 	}
 
-	return err
+	return false, nil
 }
 
 // FetchHeader returns the filter header that corresponds to the passed block

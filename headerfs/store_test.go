@@ -519,50 +519,59 @@ func TestBlockHeadersFetchHeaderAncestors(t *testing.T) {
 func TestFilterHeaderStateAssertion(t *testing.T) {
 	t.Parallel()
 
-	cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new filter header store: %v", err)
-	}
+	const chainTip = 10
+	filterHeaderChain := createTestFilterHeaderChain(chainTip)
 
-	// With our test header store created, we'll make a new fake chain for
-	// use below.
-	filterHeaderChain := createTestFilterHeaderChain(10)
-
-	// We simulate the expected behavior of the block headers being written
-	// to disk before the filter headers are.
-	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
-
-		for _, header := range filterHeaderChain {
-			var heightBytes [4]byte
-			binary.BigEndian.PutUint32(heightBytes[:], header.Height)
-			err := rootBucket.Put(header.HeaderHash[:], heightBytes[:])
-			if err != nil {
-				return err
-			}
+	setup := func(t *testing.T) (func(), string, walletdb.DB) {
+		cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
+		if err != nil {
+			t.Fatalf("unable to create new filter header store: %v",
+				err)
 		}
 
-		return nil
-	}); err != nil {
-		t.Fatalf("unable to pre-load block index: %v", err)
-	}
+		// We simulate the expected behavior of the block headers being
+		// written to disk before the filter headers are.
+		if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+			rootBucket := tx.ReadWriteBucket(indexBucket)
 
-	// Next we'll also write the chain to the flat file we'll make our
-	// assertions against
-	if err := fhs.WriteHeaders(filterHeaderChain...); err != nil {
-		t.Fatalf("unable to write filter headers: %v", err)
+			for _, header := range filterHeaderChain {
+				var heightBytes [4]byte
+				binary.BigEndian.PutUint32(
+					heightBytes[:], header.Height,
+				)
+				err := rootBucket.Put(
+					header.HeaderHash[:], heightBytes[:],
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}); err != nil {
+			cleanUp()
+			t.Fatalf("unable to pre-load block index: %v", err)
+		}
+
+		// Next we'll also write the chain to the flat file we'll make
+		// our assertions against it.
+		if err := fhs.WriteHeaders(filterHeaderChain...); err != nil {
+			cleanUp()
+			t.Fatalf("unable to write filter headers: %v", err)
+		}
+
+		return cleanUp, tempDir, db
 	}
 
 	testCases := []struct {
+		name            string
 		headerAssertion *FilterHeader
 		shouldRemove    bool
 	}{
 		// A header that we know already to be in our local chain. It
 		// shouldn't remove the state.
 		{
+			name:            "correct assertion",
 			headerAssertion: &filterHeaderChain[3],
 			shouldRemove:    false,
 		},
@@ -570,6 +579,7 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 		// A made up header that isn't in the chain. It should remove
 		// all state.
 		{
+			name: "incorrect assertion",
 			headerAssertion: &FilterHeader{
 				Height: 5,
 			},
@@ -579,26 +589,46 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 		// A header that's well beyond the chain height, it should be a
 		// noop.
 		{
+			name: "assertion not found",
 			headerAssertion: &FilterHeader{
 				Height: 500,
 			},
 			shouldRemove: false,
 		},
 	}
-	for i, testCase := range testCases {
-		fhs, err := NewFilterHeaderStore(
-			tempDir, db, RegularFilter, &chaincfg.SimNetParams,
-			testCase.headerAssertion,
-		)
-		if err != nil {
-			t.Fatalf("unable to make new fhs: %v", err)
-		}
 
-		if testCase.shouldRemove {
-			_, err = os.Stat(fhs.fileName)
-			if err == nil {
-				t.Fatalf("%#v: file should have been removed", i)
+	for _, testCase := range testCases {
+		success := t.Run(testCase.name, func(t *testing.T) {
+			// We'll start the test by setting up our required
+			// dependencies.
+			cleanUp, tempDir, db := setup(t)
+			defer cleanUp()
+
+			// We'll then re-initialize the filter header store with
+			// its expected assertion.
+			fhs, err := NewFilterHeaderStore(
+				tempDir, db, RegularFilter, &chaincfg.SimNetParams,
+				testCase.headerAssertion,
+			)
+			if err != nil {
+				t.Fatalf("unable to make new fhs: %v", err)
 			}
+
+			// If the assertion failed, we should expect the tip of
+			// the chain to no longer exist as the state should've
+			// been removed.
+			_, err = fhs.FetchHeaderByHeight(chainTip)
+			if testCase.shouldRemove {
+				if _, ok := err.(*ErrHeaderNotFound); !ok {
+					t.Fatal("expected file to be removed")
+				}
+			}
+			if !testCase.shouldRemove && err != nil {
+				t.Fatal("expected file to not be removed")
+			}
+		})
+		if !success {
+			break
 		}
 	}
 }
