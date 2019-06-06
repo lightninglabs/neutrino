@@ -137,7 +137,7 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 		// new goroutine to exectue a rebroadcast.
 		case <-rebroadcastSem:
 		default:
-			log.Debugf("Existing rebroadcast still in " +
+			log.Tracef("Existing rebroadcast still in " +
 				"progress")
 			return
 		}
