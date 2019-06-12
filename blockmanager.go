@@ -1942,19 +1942,6 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	return b.syncPeer.LastBlock() >= b.syncPeer.StartingHeight()
 }
 
-// SynchronizeFilterHeaders allows the caller to execute a function closure
-// that depends on synchronization with the current set of filter headers. This
-// allows the caller to execute an action that depends on the current filter
-// header state, thereby ensuring that the state would shift from underneath
-// them. Each execution of the closure will have the current filter header tip
-// passed in to ensue that the caller gets a consistent view.
-func (b *blockManager) SynchronizeFilterHeaders(f func(uint32) error) error {
-	b.newFilterHeadersMtx.RLock()
-	defer b.newFilterHeadersMtx.RUnlock()
-
-	return f(b.filterHeaderTip)
-}
-
 // QueueInv adds the passed inv message and peer to the block handling queue.
 func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 	// No channel handling here because peers do not need to block on inv
