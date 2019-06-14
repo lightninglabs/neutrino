@@ -210,8 +210,8 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 		tx, ok := initialTxns[req.Input.OutPoint]
 		switch {
 		case !ok:
-			log.Errorf("Failed to find outpoint %s -- "+
-				"txid not found in block", req.Input.OutPoint)
+			log.Debugf("Outpoint %v not found in block %d ",
+				req.Input.OutPoint, height)
 			initialTxns[req.Input.OutPoint] = nil
 		case tx != nil:
 			log.Tracef("Block %d creates output %s",
