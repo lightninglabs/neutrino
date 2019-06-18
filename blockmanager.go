@@ -1478,13 +1478,13 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	// We'll now run through each peer and ensure that each output
 	// script is included in the filter that they responded with to
 	// our query.
+peerVerification:
 	for peerAddr, filter := range filtersFromPeers {
 		// We'll ensure that all the filters include every output
 		// script within the block.
 		//
 		// TODO(roasbeef): eventually just do a comparison against
 		// decompressed filters
-	peerVerification:
 		for _, tx := range block.Transactions {
 			for _, txOut := range tx.TxOut {
 				switch {
