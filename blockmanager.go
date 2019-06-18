@@ -37,6 +37,10 @@ const (
 	// we're able to properly handle re-orgs in size strictly less than
 	// this value.
 	numMaxMemHeaders = 10000
+
+	// retryTimeout is the time we'll wait between failed queries to fetch
+	// filter checkpoints and headers.
+	retryTimeout = 3 * time.Second
 )
 
 // filterStoreLookup
@@ -550,7 +554,7 @@ waitForHeaders:
 					"candidate checkpoints, trying again...")
 
 				select {
-				case <-time.After(QueryTimeout):
+				case <-time.After(retryTimeout):
 				case <-b.quit:
 					return
 				}
@@ -583,7 +587,7 @@ waitForHeaders:
 		}
 		if len(goodCheckpoints) == 0 {
 			select {
-			case <-time.After(QueryTimeout):
+			case <-time.After(retryTimeout):
 			case <-b.quit:
 				return
 			}
@@ -653,7 +657,7 @@ waitForHeaders:
 				"%v: %v", fType, err)
 
 			select {
-			case <-time.After(QueryTimeout):
+			case <-time.After(retryTimeout):
 			case <-b.quit:
 				return
 			}
