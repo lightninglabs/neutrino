@@ -23,7 +23,7 @@ import (
 var (
 	// QueryTimeout specifies how long to wait for a peer to answer a
 	// query.
-	QueryTimeout = time.Second * 3
+	QueryTimeout = time.Second * 10
 
 	// QueryBatchTimout is the total time we'll wait for a batch fetch
 	// query to complete.
