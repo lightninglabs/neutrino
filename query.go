@@ -1342,7 +1342,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// error as the reliable broadcaster will take care of broadcasting this
 	// transaction upon every block connected/disconnected.
 	if numReplied == 0 {
-		log.Warnf("No peers replied to inv message for transaction %v",
+		log.Debugf("No peers replied to inv message for transaction %v",
 			tx.TxHash())
 		return nil
 	}
