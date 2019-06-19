@@ -30,6 +30,10 @@ var (
 	// TODO(halseth): instead use timeout since last received response?
 	QueryBatchTimeout = time.Second * 30
 
+	// QueryPeerCooldown is the time we'll wait before re-assigning a query
+	// to a peer that previously failed because of a timeout.
+	QueryPeerCooldown = time.Second * 5
+
 	// QueryNumRetries specifies how many times to retry sending a query to
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
@@ -400,6 +404,21 @@ func queryChainServiceBatch(
 					newLogClosure(func() string {
 						return spew.Sdump(queryMsgs[handleQuery])
 					}))
+
+				// To allow other peers to pick up this query,
+				// let the peer that just timed out wait a
+				// cooldown period before handing the next
+				// query.
+				select {
+				case <-time.After(QueryPeerCooldown):
+				case <-queryQuit:
+					return
+				case <-s.quit:
+					return
+				case <-quit:
+					return
+				}
+
 			case <-matchSignal:
 				// We got a match signal so we can mark this
 				// query a success.
