@@ -14,6 +14,7 @@ import (
 // a simple map.
 type mockBlockHeaderStore struct {
 	headers map[chainhash.Hash]wire.BlockHeader
+	heights map[uint32]wire.BlockHeader
 }
 
 // A compile-time check to ensure the mockBlockHeaderStore adheres to the
@@ -24,9 +25,10 @@ var _ headerfs.BlockHeaderStore = (*mockBlockHeaderStore)(nil)
 // backed by an in-memory map. This instance is meant to be used by callers
 // outside the package to unit test components that require a BlockHeaderStore
 // interface.
-func newMockBlockHeaderStore() headerfs.BlockHeaderStore {
+func newMockBlockHeaderStore() *mockBlockHeaderStore {
 	return &mockBlockHeaderStore{
 		headers: make(map[chainhash.Hash]wire.BlockHeader),
+		heights: make(map[uint32]wire.BlockHeader),
 	}
 }
 
@@ -39,11 +41,17 @@ func (m *mockBlockHeaderStore) LatestBlockLocator() (
 	blockchain.BlockLocator, error) {
 	return nil, nil
 }
+
 func (m *mockBlockHeaderStore) FetchHeaderByHeight(height uint32) (
 	*wire.BlockHeader, error) {
 
-	return nil, nil
+	if header, ok := m.heights[height]; ok {
+		return &header, nil
+	}
+
+	return nil, headerfs.ErrHeightNotFound
 }
+
 func (m *mockBlockHeaderStore) FetchHeaderAncestors(uint32,
 	*chainhash.Hash) ([]wire.BlockHeader, uint32, error) {
 

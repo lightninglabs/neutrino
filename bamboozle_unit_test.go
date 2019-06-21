@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"sort"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
@@ -38,12 +40,13 @@ type checkCFHTestCase struct {
 	mismatch bool
 }
 
-type resolveCFHTestCase struct {
-	name        string
-	block       *wire.MsgBlock
-	idx         int
-	peerFilters map[string]*gcs.Filter
-	badPeers    []string
+type resolveFilterTestCase struct {
+	name         string
+	block        *wire.MsgBlock
+	banThreshold int
+	peerFilters  map[string]*gcs.Filter
+	badPeers     []string
+	expectedErr  error
 }
 
 var (
@@ -95,6 +98,22 @@ var (
 		0x3f, 0xc4, 0x45, 0x05, 0xf2, 0x16, 0x10, 0xe5,
 		0x5b, 0x4c, 0x6f, 0x4d,
 	}
+	script4 = []byte{
+		0x6a,           // OP_RETURN
+		txscript.OP_IF, // We add a OP_IF to the script, as everything > OP_16 is considered non-push.
+		0xaa, 0x21, 0xa9, 0xed, 0x26, 0xe6, 0xdd, 0xfa,
+		0x3c, 0xc5, 0x1e, 0x27, 0x61, 0xba, 0xf6, 0xea,
+		0xc4, 0x54, 0xea, 0x11, 0x6d, 0xa3, 0x8f, 0xfb,
+		0x3f, 0xc4, 0x45, 0x05, 0xf2, 0x16, 0x10, 0xe5,
+		0x5b, 0x4c, 0x6f, 0x4d,
+	}
+	script5 = []byte{
+		0x00, // Version 0 witness program
+		0x14, // OP_DATA_20
+		0x9d, 0xda, 0xc6, 0xf3, 0x9d, 0x51, 0xe0, 0x39,
+		0x8e, 0x53, 0x2a, 0x22, 0xc4, 0x1b, 0xa1, 0x89,
+		0x40, 0x6a, 0x85, 0x22, // 20-byte pub key hash
+	}
 
 	// For the purpose of the cfheader mismatch test, we actually only need
 	// to have the scripts of each transaction present.
@@ -121,9 +140,39 @@ var (
 					},
 				},
 			},
+			{
+				TxOut: []*wire.TxOut{
+					{
+						PkScript: script4,
+					},
+				},
+			},
 		},
 	}
 	correctFilter, _ = builder.BuildBasicFilter(block, nil)
+	oldFilter, _     = buildNonPushScriptFilter(block)
+	oldOldFilter, _  = buildAllPkScriptsFilter(block)
+
+	// a filter missing the first output of the block.
+	missingElementFilter, _ = builder.BuildBasicFilter(
+		&wire.MsgBlock{
+			Transactions: block.Transactions[1:],
+		}, nil,
+	)
+
+	// a filter with one extra output script.
+	extraElementFilter, _ = builder.BuildBasicFilter(
+		&wire.MsgBlock{
+			Transactions: append(block.Transactions,
+				&wire.MsgTx{
+					TxOut: []*wire.TxOut{
+						{
+							PkScript: script5,
+						},
+					},
+				}),
+		}, nil,
+	)
 
 	fakeFilter1, _ = gcs.FromBytes(2, builder.DefaultP, builder.DefaultM, []byte{
 		0x30, 0x43, 0x02, 0x1f, 0x4d, 0x23, 0x81, 0xdc,
@@ -332,7 +381,7 @@ var (
 		},
 	}
 
-	resolveCFHTestCases = []*resolveCFHTestCase{
+	resolveFilterTestCases = []*resolveFilterTestCase{
 		{
 			name:  "all bad 1",
 			block: block,
@@ -340,8 +389,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter1,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 2",
@@ -350,8 +399,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 3",
@@ -360,8 +409,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 4",
@@ -370,8 +419,8 @@ var (
 				"a": fakeFilter1,
 				"b": fakeFilter2,
 			},
-			idx:      0,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "all bad 5",
@@ -380,8 +429,8 @@ var (
 				"a": fakeFilter2,
 				"b": fakeFilter1,
 			},
-			idx:      1,
-			badPeers: []string{"a", "b"},
+			banThreshold: 1,
+			badPeers:     []string{"a", "b"},
 		},
 		{
 			name:  "one good",
@@ -391,8 +440,8 @@ var (
 				"b": fakeFilter1,
 				"c": fakeFilter2,
 			},
-			idx:      1,
-			badPeers: []string{"b", "c"},
+			banThreshold: 1,
+			badPeers:     []string{"b", "c"},
 		},
 		{
 			name:  "all good",
@@ -401,8 +450,90 @@ var (
 				"a": correctFilter,
 				"b": correctFilter,
 			},
-			idx:      1,
-			badPeers: []string{},
+			banThreshold: 1,
+			badPeers:     []string{},
+		},
+		{
+			// One peer is serving a filter tha lacks an element,
+			// we should immediately notice this and ban it.
+			name:  "filter missing element",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": missingElementFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
+		},
+		{
+			// One peer is serving the "old-old" filter which
+			// contains all OP_RETURN output, we expect this peer
+			// to be banned first.
+			name:  "old old peer",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": oldFilter,
+				"c": oldOldFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
+		},
+		{
+			// One peer is serving the "old" filter, which contains
+			// non-push OP_RETURNS. We expect this peer to be
+			// banned.
+			name:  "old peer",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": oldFilter,
+				"c": correctFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"b"},
+		},
+		{
+			// We should go with the majority filter in case we
+			// cannot determine who is serving an invalid one.
+			name:  "majority filter",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 1,
+			badPeers:     []string{"c"},
+		},
+		{
+			// We should go with the majority filter in case we
+			// cannot determine who is serving an invalid one.
+			name:  "majority filter 2",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 2,
+			badPeers:     []string{"c"},
+		},
+		{
+			// If we need at least 3 peers to consider a filter
+			// consistent, we shuold fail.
+			name:  "majority filter 3",
+			block: block,
+			peerFilters: map[string]*gcs.Filter{
+				"a": correctFilter,
+				"b": correctFilter,
+				"c": extraElementFilter,
+			},
+			banThreshold: 3,
+			badPeers:     []string{"c"},
+			expectedErr: fmt.Errorf("only 2 peers serving " +
+				"consistent filters, need 3"),
 		},
 	}
 )
@@ -546,17 +677,45 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 	}
 }
 
-func TestResolveCFHeadersMismatch(t *testing.T) {
+func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	t.Parallel()
 
-	for _, testCase := range resolveCFHTestCases {
+	// The correct filter should have the coinbase output and the regular
+	// script output.
+	if correctFilter.N() != 2 {
+		t.Fatalf("expected new filter to have only 2 element, had %d",
+			correctFilter.N())
+	}
+
+	// The oldfilter should in addition have the non-push OP_RETURN output.
+	if oldFilter.N() != 3 {
+		t.Fatalf("expected old filter to have only 3 elements, had %d",
+			oldFilter.N())
+	}
+
+	// The oldOldFilter both OP_RETURN outputs.
+	if oldOldFilter.N() != 4 {
+		t.Fatalf("expected old filter to have 4 elements, had %d",
+			oldOldFilter.N())
+	}
+
+	for _, testCase := range resolveFilterTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			badPeers, err := resolveCFHeaderMismatch(
+			badPeers, err := resolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,
+				testCase.banThreshold,
 			)
 			if err != nil {
-				t.Fatalf("Couldn't resolve cfheader "+
-					"mismatch: %v", err)
+				switch {
+				case testCase.expectedErr == nil:
+					t.Fatalf("Expected no error, got %v", err)
+
+				case err.Error() != testCase.expectedErr.Error():
+					t.Fatalf("Expected error %v, got %v",
+						testCase.expectedErr, err)
+				}
+
+				return
 			}
 
 			if len(badPeers) != len(testCase.badPeers) {
