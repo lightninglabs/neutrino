@@ -297,9 +297,20 @@ func queryChainServiceBatch(
 	}
 	defer close(subQuit)
 
+	// peerState holds a query message and an answer channel that get a
+	// notice when the query got a match. If it's the peer's match, the
+	// peer can mark the query a success and move on to the next query
+	// ahead of timeout.
+	type peerState struct {
+		msg         wire.Message
+		matchSignal chan struct{}
+	}
+
 	// peerStates and its companion mutex allow the peer goroutines to
-	// tell the main goroutine what query they're currently working on.
-	peerStates := make(map[string]wire.Message)
+	// tell the main goroutine what query they're currently working on, and
+	// for the main goroutine to signal the peer when a match has been
+	// received.
+	peerStates := make(map[string]peerState)
 	var mtxPeerStates sync.RWMutex
 
 	// allDone is a helper closure we'll use to determine whether we can
@@ -320,7 +331,7 @@ func queryChainServiceBatch(
 	allDoneSignal := make(chan struct{})
 
 	peerGoroutine := func(sp *ServerPeer, quit <-chan struct{},
-		matchSignal <-chan struct{}, allDoneSignal chan struct{}) {
+		allDoneSignal chan struct{}) {
 
 		// Subscribe to messages from the peer.
 		sp.subscribeRecvMsg(subscription)
@@ -413,8 +424,12 @@ func queryChainServiceBatch(
 			}
 
 			// We have a query we're working on.
+			matchSignal := make(chan struct{}, 1)
 			mtxPeerStates.Lock()
-			peerStates[sp.Addr()] = queryMsgs[handleQuery]
+			peerStates[sp.Addr()] = peerState{
+				msg:         queryMsgs[handleQuery],
+				matchSignal: matchSignal,
+			}
 			mtxPeerStates.Unlock()
 
 			exiting := false
@@ -432,6 +447,13 @@ func queryChainServiceBatch(
 				atomic.StoreUint32(
 					&queryStates[handleQuery], uint32(queryWaitSubmit),
 				)
+
+				// Delete the query from our peer states, to
+				// indicate we are no longer expecting a
+				// response.
+				mtxPeerStates.Lock()
+				delete(peerStates, sp.Addr())
+				mtxPeerStates.Unlock()
 
 				log.Tracef("Query for #%v failed, moving "+
 					"on: %v", handleQuery,
@@ -483,6 +505,13 @@ func queryChainServiceBatch(
 				atomic.StoreUint32(
 					&queryStates[handleQuery], uint32(queryWaitSubmit),
 				)
+
+				// Delete the current state of the peer, so we
+				// won't process any lingering responses from
+				// it.
+				mtxPeerStates.Lock()
+				delete(peerStates, sp.Addr())
+				mtxPeerStates.Unlock()
 				return
 			}
 		}
@@ -491,12 +520,6 @@ func queryChainServiceBatch(
 	// peerQuits holds per-peer quit channels so we can kill the goroutines
 	// when they disconnect.
 	peerQuits := make(map[string]chan struct{})
-
-	// matchSignals holds per-peer answer channels that get a notice that
-	// the query got a match. If it's the peer's match, the peer can
-	// mark the query a success and move on to the next query ahead of
-	// timeout.
-	matchSignals := make(map[string]chan struct{})
 
 	// Clean up on exit.
 	defer func() {
@@ -512,10 +535,9 @@ func queryChainServiceBatch(
 			sp := peer.Addr()
 			if _, ok := peerQuits[sp]; !ok && peer.Connected() {
 				peerQuits[sp] = make(chan struct{})
-				matchSignals[sp] = make(chan struct{})
+
 				go peerGoroutine(
-					peer, peerQuits[sp], matchSignals[sp],
-					allDoneSignal,
+					peer, peerQuits[sp], allDoneSignal,
 				)
 			}
 
@@ -525,24 +547,28 @@ func queryChainServiceBatch(
 			p := s.PeerByAddr(peer)
 			if p == nil || !p.Connected() {
 				close(quitChan)
-				close(matchSignals[peer])
 				delete(peerQuits, peer)
-				delete(matchSignals, peer)
 			}
 		}
 
 		select {
 		case msg := <-msgChan:
 			mtxPeerStates.RLock()
-			curQuery := peerStates[msg.sp.Addr()]
+			curQuery, ok := peerStates[msg.sp.Addr()]
 			mtxPeerStates.RUnlock()
-			if checkResponse(msg.sp, curQuery, msg.msg) {
+
+			// Break if we didn't expect a response from this peer.
+			if !ok {
+				break
+			}
+
+			if checkResponse(msg.sp, curQuery.msg, msg.msg) {
 				select {
 				case <-queryQuit:
 					return
 				case <-s.quit:
 					return
-				case matchSignals[msg.sp.Addr()] <- struct{}{}:
+				case curQuery.matchSignal <- struct{}{}:
 				}
 			}
 		case <-time.After(qo.timeout):
