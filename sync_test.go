@@ -125,8 +125,12 @@ var (
 		for i := 1228; i >= 1226; i-- {
 			log = append(log, []byte("fdbd")...)
 		}
-		// 5 block empty reorg
-		for i := 1226; i <= 1230; i++ {
+		// 1 block reorg with 2 redeeming transactions
+		log = append(log, []byte("rdrdfc")...)
+		log = append(log, 0x02)
+		log = append(log, []byte("bc")...)
+		// 4 block empty reorg
+		for i := 1227; i <= 1230; i++ {
 			log = append(log, []byte("fc")...)
 			log = append(log, 0x00)
 			log = append(log, []byte("bc")...)
@@ -519,9 +523,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(harness.svc, harness.h2)
-	err = harness.svc.SendTransaction(authTx1.Tx,
-		append(queryOptions,
-			neutrino.PeerConnectTimeout(3*time.Second))...)
+	err = harness.svc.SendTransaction(authTx1.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
@@ -535,6 +537,10 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
 	if numTXs != 2 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
 			" %d", numTXs)
@@ -559,9 +565,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
 	banPeer(harness.svc, harness.h2)
-	err = harness.svc.SendTransaction(authTx2.Tx,
-		append(queryOptions,
-			neutrino.PeerConnectTimeout(3*time.Second))...)
+	err = harness.svc.SendTransaction(authTx2.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
@@ -575,6 +579,10 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
 	if numTXs != 2 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
 			" %d", numTXs)
@@ -592,6 +600,10 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
 	if numTXs != 4 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
 			" %d", numTXs)
@@ -662,9 +674,13 @@ func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]b
 
 func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
-	// newly-best chain on h2. This includes the transactions sent via
-	// svc.SendTransaction earlier, so we'll have to check that the rescan
-	// status has updated for the correct number of transactions.
+	// newly-best chain on h2. This will reorg the chain, including the
+	// transactions broadcast earlier, so we'll have to check that the
+	// rescan status has updated for the correct number of transactions.
+	// However, with the addition of the reliable broadcaster, the
+	// transaction will confirm once again on the h2 chain so the rescan
+	// should still show the two received transactions in addition to the
+	// two other transactions spending them.
 	_, err := harness.h2.Node.Generate(5)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit blocks: %s", err)
@@ -675,8 +691,12 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err := checkRescanStatus()
-	if numTXs != 2 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
+	if numTXs != 4 {
+		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
 			" %d", numTXs)
 	}
 
@@ -692,6 +712,10 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
+	if err != nil {
+		checkErrChan(t, errChan)
+		t.Fatalf("Checking rescan status failed: %s", err)
+	}
 	if numTXs != 4 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
 			" %d", numTXs)
@@ -1328,7 +1352,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 func startRescan(t *testing.T, svc *neutrino.ChainService, addr ltcutil.Address,
 	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
-	rescan := svc.NewRescan(
+	rescan := neutrino.NewRescan(
+		&neutrino.RescanChainSource{svc},
 		neutrino.QuitChan(quit),
 		neutrino.WatchAddrs(addr),
 		neutrino.StartBlock(startBlock),

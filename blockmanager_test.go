@@ -13,6 +13,7 @@ import (
 	"github.com/ltcsuite/ltcd/wire"
 	"github.com/ltcsuite/ltcutil/gcs/builder"
 	"github.com/ltcsuite/ltcwallet/walletdb"
+	"github.com/ltcsuite/neutrino/blockntfns"
 	"github.com/ltcsuite/neutrino/headerfs"
 )
 
@@ -53,7 +54,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 
 	cfStore, err := headerfs.NewFilterHeaderStore(
 		tempDir, db, headerfs.RegularFilter,
-		&chaincfg.SimNetParams,
+		&chaincfg.SimNetParams, nil,
 	)
 	if err != nil {
 		cleanUp()
@@ -70,7 +71,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 	}
 
 	// Set up a blockManager with the chain service we defined.
-	bm, err := newBlockManager(cs)
+	bm, err := newBlockManager(cs, nil)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
@@ -376,6 +377,22 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			}
 		}
 
+		// We should expect to see notifications for each new filter
+		// header being connected.
+		startHeight := uint32(1)
+		if test.partialInterval {
+			startHeight = wire.CFCheckptInterval / 3
+		}
+		go func() {
+			for i := startHeight; i <= maxHeight; i++ {
+				ntfn := <-bm.blockNtfnChan
+				if _, ok := ntfn.(*blockntfns.Connected); !ok {
+					t.Fatal("expected block connected " +
+						"notification")
+				}
+			}
+		}()
+
 		// Call the get checkpointed cf headers method with the
 		// checkpoints we created to start the test.
 		bm.getCheckpointedCFHeaders(
@@ -583,6 +600,22 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				}
 			}
 		}
+
+		// We should expect to see notifications for each new filter
+		// header being connected.
+		startHeight := uint32(1)
+		if test.partialInterval {
+			startHeight = wire.CFCheckptInterval / 3
+		}
+		go func() {
+			for i := startHeight; i <= maxHeight; i++ {
+				ntfn := <-bm.blockNtfnChan
+				if _, ok := ntfn.(*blockntfns.Connected); !ok {
+					t.Fatal("expected block connected " +
+						"notification")
+				}
+			}
+		}()
 
 		// Start the test by calling the get checkpointed cf headers
 		// method with the checkpoints we created.
