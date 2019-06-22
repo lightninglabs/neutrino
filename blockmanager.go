@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 )
@@ -1217,6 +1218,37 @@ func (b *blockManager) resolveConflict(
 	store *headerfs.FilterHeaderStore, fType wire.FilterType) (
 	[]*chainhash.Hash, error) {
 
+	// First check the served checkpoints against the hardcoded ones.
+	for peer, cp := range checkpoints {
+		for i, header := range cp {
+			height := uint32((i + 1) * wire.CFCheckptInterval)
+			err := chainsync.ControlCFHeader(
+				b.server.chainParams, fType, height, header,
+			)
+			if err == chainsync.ErrCheckpointMismatch {
+				log.Warnf("Banning peer=%v since served "+
+					"checkpoints didn't match our "+
+					"checkpoint at height %d", peer, height)
+
+				sp := b.server.PeerByAddr(peer)
+				if sp != nil {
+					b.server.BanPeer(sp)
+					sp.Disconnect()
+				}
+				delete(checkpoints, peer)
+				break
+			} else if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if len(checkpoints) == 0 {
+		return nil, fmt.Errorf("no peer is serving good cfheader " +
+			"checkpoints")
+	}
+
+	// Check if the remaining checkpoints are sane.
 	heightDiff, err := checkCFCheckptSanity(checkpoints, store)
 	if err != nil {
 		return nil, err
