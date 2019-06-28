@@ -302,8 +302,25 @@ func queryChainServiceBatch(
 	peerStates := make(map[string]wire.Message)
 	var mtxPeerStates sync.RWMutex
 
+	// allDone is a helper closure we'll use to determine whether we can
+	// exit due to all of our queries being answered.
+	allDone := func() bool {
+		for i := 0; i < len(queryStates); i++ {
+			if atomic.LoadUint32(&queryStates[i]) !=
+				uint32(queryAnswered) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// allDoneSignal is a channel we'll close to signal to the main loop
+	// that all of the queries have been answered.
+	var allDoneOnce sync.Once
+	allDoneSignal := make(chan struct{})
+
 	peerGoroutine := func(sp *ServerPeer, quit <-chan struct{},
-		matchSignal <-chan struct{}) {
+		matchSignal <-chan struct{}, allDoneSignal chan struct{}) {
 
 		// Subscribe to messages from the peer.
 		sp.subscribeRecvMsg(subscription)
@@ -442,13 +459,22 @@ func queryChainServiceBatch(
 					break
 				}
 
+				log.Tracef("Query #%v answered, updating state",
+					handleQuery)
+
 				// We got a match signal so we can mark this
 				// query a success.
 				atomic.StoreUint32(&queryStates[handleQuery],
 					uint32(queryAnswered))
 
-				log.Tracef("Query #%v answered, updating state",
-					handleQuery)
+				// If we're done answering all of our queries,
+				// we can exit now.
+				if allDone() {
+					allDoneOnce.Do(func() {
+						close(allDoneSignal)
+					})
+					return
+				}
 			}
 
 			// Before exiting the peer goroutine, reset the query
@@ -489,6 +515,7 @@ func queryChainServiceBatch(
 				matchSignals[sp] = make(chan struct{})
 				go peerGoroutine(
 					peer, peerQuits[sp], matchSignals[sp],
+					allDoneSignal,
 				)
 			}
 
@@ -519,20 +546,10 @@ func queryChainServiceBatch(
 				}
 			}
 		case <-time.After(qo.timeout):
-			// Check if we're done; if so, quit.
-			allDone := true
-			for i := 0; i < len(queryStates); i++ {
-				if atomic.LoadUint32(&queryStates[i]) !=
-					uint32(queryAnswered) {
-					allDone = false
-				}
-			}
-			if allDone {
-				return
-			}
+		case <-allDoneSignal:
+			return
 		case <-queryQuit:
 			return
-
 		case <-s.quit:
 			return
 		}
