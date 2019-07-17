@@ -162,19 +162,21 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	recvSubscribers map[spMsgSubscription]struct{}
-	mtxSubscribers  sync.RWMutex
+	recvSubscribers  map[spMsgSubscription]struct{}
+	recvSubscribers2 map[query.MsgSubscription]struct{}
+	mtxSubscribers   sync.RWMutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:          s,
-		persistent:      isPersistent,
-		knownAddresses:  make(map[string]struct{}),
-		quit:            make(chan struct{}),
-		recvSubscribers: make(map[spMsgSubscription]struct{}),
+		server:           s,
+		persistent:       isPersistent,
+		knownAddresses:   make(map[string]struct{}),
+		quit:             make(chan struct{}),
+		recvSubscribers:  make(map[spMsgSubscription]struct{}),
+		recvSubscribers2: make(map[query.MsgSubscription]struct{}),
 	}
 }
 
@@ -482,6 +484,17 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 			}
 		}(subscription)
 	}
+	for subscription := range sp.recvSubscribers2 {
+		go func(subscription query.MsgSubscription) {
+			select {
+			case <-subscription.QuitChan:
+			case subscription.MsgChan <- query.SpMsg{
+				Msg:  msg,
+				Peer: sp.Addr(),
+			}:
+			}
+		}(subscription)
+	}
 }
 
 // subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
@@ -489,6 +502,13 @@ func (sp *ServerPeer) subscribeRecvMsg(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	sp.recvSubscribers[subscription] = struct{}{}
+}
+
+func (sp *ServerPeer) SubscribeRecvMsg(subscription query.MsgSubscription) {
+
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	sp.recvSubscribers2[subscription] = struct{}{}
 }
 
 // unsubscribeRecvMsgs handles removing OnRead subscriptions from the server
