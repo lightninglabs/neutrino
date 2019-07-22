@@ -100,7 +100,7 @@ func newBanStore(db walletdb.DB) (*banStore, error) {
 		_, err = banStore.CreateBucketIfNotExists(reasonBucket)
 		return err
 	})
-	if err != nil {
+	if err != nil && err != walletdb.ErrBucketExists {
 		return nil, err
 	}
 
