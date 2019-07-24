@@ -1199,20 +1199,26 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	}()
 
 	var ok bool
-	select {
+	var resultFilter *gcs.Filter
 
-	// We'll return immediately to the caller when the filter arrives.
-	case filter, ok = <-query.filterChan:
-		if !ok {
+	// We will wait for the query to finish before we return the requested
+	// filter to the caller.
+	for {
+		select {
+
+		case filter, ok = <-query.filterChan:
+			if !ok {
+				// Query has finished, if we have a result we'll return it.				
+				return resultFilter, nil
+			}
+
+			// We'll store the filter so we can return it later to the caller.
+			resultFilter = filter
+
+		case <-s.quit:
 			// TODO(halseth): return error?
 			return nil, nil
 		}
-
-		return filter, nil
-
-	case <-s.quit:
-		// TODO(halseth): return error?
-		return nil, nil
 	}
 
 }
