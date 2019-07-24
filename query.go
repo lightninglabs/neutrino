@@ -768,7 +768,10 @@ checkResponses:
 			// peer, we'll reset the main peer timeout as they're
 			// being responsive.
 			if !peerTimeout.Stop() {
-				<-peerTimeout.C
+				select {
+				case <-peerTimeout.C:
+				default:
+				}
 			}
 			peerTimeout.Reset(qo.timeout)
 
@@ -776,7 +779,10 @@ checkResponses:
 			// still active, then we can disable it, as we're
 			// receiving responses from the current peer.
 			if connectionTicker != nil && !connectionTimeout.Stop() {
-				<-connectionTimeout.C
+				select {
+				case <-connectionTimeout.C:
+				default:
+				}
 			}
 			connectionTicker = nil
 
