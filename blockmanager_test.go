@@ -22,8 +22,11 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// maxHeight is the height we will generate filter headers up to.
-const maxHeight = 20 * uint32(wire.CFCheckptInterval)
+// maxHeight is the height we will generate filter headers up to. We use an odd
+// number of checkpoints to ensure we can test cases where the block manager is
+// only able to fetch filter headers for one checkpoint interval rather than
+// two.
+const maxHeight = 21 * uint32(wire.CFCheckptInterval)
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
@@ -454,7 +457,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		// before starting the test.
 		partialInterval bool
 
-		// firstInvalid is the first interval we expect the
+		// firstInvalid is the first interval response we expect the
 		// blockmanager to determine is invalid.
 		firstInvalid int
 	}
@@ -470,30 +473,30 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// With checkpoints calculated from the wrong genesis, and a
 		// partial set of filter headers already written, the first
-		// interval should be considered invalid.
+		// interval response should be considered invalid.
 		{
 			wrongGenesis:    true,
 			partialInterval: true,
 			firstInvalid:    0,
 		},
 
-		// With intervals not lining up, the second interval should
-		// be determined invalid.
+		// With intervals not lining up, the second interval response
+		// should be determined invalid.
 		{
 			intervalMisaligned: true,
-			firstInvalid:       1,
+			firstInvalid:       0,
 		},
 
 		// With misaligned intervals and a partial interval written, the
-		// second interval should be considered invalid.
+		// second interval response should be considered invalid.
 		{
 			intervalMisaligned: true,
 			partialInterval:    true,
-			firstInvalid:       1,
+			firstInvalid:       0,
 		},
 
 		// With responses having invalid prev hashes, the second
-		// interval should be deemed invalid.
+		// interval response should be deemed invalid.
 		{
 			invalidPrevHash: true,
 			firstInvalid:    1,
