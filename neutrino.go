@@ -1250,6 +1250,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 				s.connManager.Disconnect(sp.connReq.ID())
 			} else {
 				s.connManager.Remove(sp.connReq.ID())
+				go s.connManager.NewConnReq()
 			}
 		}
 		delete(list, sp.ID())
@@ -1260,6 +1261,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	// We'll always remove peers that are not persistent.
 	if sp.connReq != nil {
 		s.connManager.Remove(sp.connReq.ID())
+		go s.connManager.NewConnReq()
 	}
 
 	// Update the address' last seen time if the peer has acknowledged
@@ -1355,7 +1357,10 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 		}
 	} else {
 		disconnect = func() {
+			// Since we're completely removing the request for this
+			// peer, we'll need to request a new one.
 			s.connManager.Remove(c.ID())
+			go s.connManager.NewConnReq()
 		}
 	}
 
