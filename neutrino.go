@@ -282,9 +282,7 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
 
-		if sp.connReq != nil {
-			sp.server.connManager.Remove(sp.connReq.ID())
-		}
+		sp.Disconnect()
 
 		return nil
 	}
@@ -1248,22 +1246,20 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		}
 		if !sp.Inbound() && sp.connReq != nil {
-			s.connManager.Disconnect(sp.connReq.ID())
+			if sp.persistent {
+				s.connManager.Disconnect(sp.connReq.ID())
+			} else {
+				s.connManager.Remove(sp.connReq.ID())
+			}
 		}
 		delete(list, sp.ID())
 		log.Debugf("Removed peer %s", sp)
 		return
 	}
 
+	// We'll always remove peers that are not persistent.
 	if sp.connReq != nil {
-		// If the peer has been banned, we'll remove the connection
-		// request from the manager to ensure we don't reconnect again.
-		// Otherwise, we'll just simply disconnect.
-		if s.IsBanned(sp.connReq.Addr.String()) {
-			s.connManager.Remove(sp.connReq.ID())
-		} else {
-			s.connManager.Disconnect(sp.connReq.ID())
-		}
+		s.connManager.Remove(sp.connReq.ID())
 	}
 
 	// Update the address' last seen time if the peer has acknowledged
@@ -1349,18 +1345,31 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 // request instance and the connection itself, and finally notifies the address
 // manager of the attempt.
 func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
+	// In the event that we have to disconnect the peer, we'll choose the
+	// appropriate method to do so based on whether the connection request
+	// is for a persistent peer or not.
+	var disconnect func()
+	if c.Permanent {
+		disconnect = func() {
+			s.connManager.Disconnect(c.ID())
+		}
+	} else {
+		disconnect = func() {
+			s.connManager.Remove(c.ID())
+		}
+	}
+
 	// If the peer is banned, then we'll disconnect them.
 	peerAddr := c.Addr.String()
 	if s.IsBanned(peerAddr) {
-		// Remove will end up closing the connection.
-		s.connManager.Remove(c.ID())
+		disconnect()
 		return
 	}
 
 	// If we're already connected to this peer, then we'll close out the new
 	// connection and keep the old.
 	if s.PeerByAddr(peerAddr) != nil {
-		conn.Close()
+		disconnect()
 		return
 	}
 
@@ -1368,7 +1377,8 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	p, err := peer.NewOutboundPeer(newPeerConfig(sp), peerAddr)
 	if err != nil {
 		log.Debugf("Cannot create outbound peer %s: %s", c.Addr, err)
-		s.connManager.Disconnect(c.ID())
+		disconnect()
+		return
 	}
 	sp.Peer = p
 	sp.connReq = c
