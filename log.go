@@ -3,6 +3,7 @@ package neutrino
 import (
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btclog"
@@ -37,6 +38,7 @@ func UseLogger(logger btclog.Logger) {
 	addrmgr.UseLogger(logger)
 	blockntfns.UseLogger(logger)
 	pushtx.UseLogger(logger)
+	connmgr.UseLogger(logger)
 }
 
 // logClosure is used to provide a closure over expensive logging operations so
