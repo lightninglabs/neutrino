@@ -733,6 +733,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			}
 
 			for tries := 0; tries < 100; tries++ {
+				select {
+				case <-s.quit:
+					return nil, ErrShuttingDown
+				default:
+				}
+
 				addr := s.addrManager.GetAddress()
 				if addr == nil {
 					break
