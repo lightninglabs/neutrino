@@ -786,6 +786,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
+				// Mark an attempt for the valid address.
+				s.addrManager.Attempt(addr.NetAddress())
 				return s.addrStringToNetAddr(addrString)
 			}
 
@@ -1395,7 +1397,6 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	sp.connReq = c
 	sp.AssociateConnection(conn)
 	go s.peerDoneHandler(sp)
-	s.addrManager.Attempt(sp.NA())
 }
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's
