@@ -238,8 +238,6 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 				log.Errorf("Unable to ban peer %v: %v",
 					peerAddr, err)
 			}
-
-			sp.Disconnect()
 		}
 	}
 }
@@ -281,8 +279,6 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		if err != nil {
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
-
-		sp.Disconnect()
 
 		return nil
 	}
@@ -922,10 +918,25 @@ func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	return int32(height), nil
 }
 
-// BanPeer bans a peer due to a specific reason for a duration of BanDuration.
+// BanPeer disconnects and bans a peer due to a specific reason for a duration
+// of BanDuration.
 func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 	log.Warnf("Banning peer %v: duration=%v, reason=%v", addr, BanDuration,
 		reason)
+
+	// We'll want to disconnect the peer after we return regardless of
+	// whether we ban the peer or not. We do this to prevent a possible race
+	// condition where we end up reconnecting with the peer slightly
+	// before the ban succeeds.
+	defer func() {
+		// We do so in a goroutine to prevent blocking if the server is
+		// handling a query or a new/stale peer.
+		go func() {
+			if sp := s.PeerByAddr(addr); sp != nil {
+				sp.Disconnect()
+			}
+		}()
+	}()
 
 	ipNet, err := banman.ParseIPNet(addr, nil)
 	if err != nil {

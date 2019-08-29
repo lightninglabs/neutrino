@@ -748,10 +748,6 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 			if err != nil {
 				log.Errorf("Unable to ban peer %v: %v", peer, err)
 			}
-			sp := b.server.PeerByAddr(peer)
-			if sp != nil {
-				sp.Disconnect()
-			}
 			delete(headers, peer)
 		}
 	}
@@ -784,10 +780,6 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 				if err != nil {
 					log.Errorf("Unable to ban peer %v: %v",
 						peer, err)
-				}
-				sp := b.server.PeerByAddr(peer)
-				if sp != nil {
-					sp.Disconnect()
 				}
 				delete(headers, peer)
 			}
@@ -991,8 +983,6 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 					log.Errorf("Unable to ban peer %v: %v",
 						peerAddr, err)
 				}
-
-				sp.Disconnect()
 
 				return false
 			}
@@ -1273,9 +1263,6 @@ func (b *blockManager) resolveConflict(
 					log.Errorf("Unable to ban peer %v: %v",
 						peer, err)
 				}
-				if sp := b.server.PeerByAddr(peer); sp != nil {
-					sp.Disconnect()
-				}
 				delete(checkpoints, peer)
 				break
 			}
@@ -1363,10 +1350,6 @@ func (b *blockManager) resolveConflict(
 					log.Errorf("Unable to ban peer %v: %v",
 						peer, err)
 				}
-				sp := b.server.PeerByAddr(peer)
-				if sp != nil {
-					sp.Disconnect()
-				}
 				delete(headers, peer)
 				delete(checkpoints, peer)
 			}
@@ -1384,10 +1367,6 @@ func (b *blockManager) resolveConflict(
 			if err != nil {
 				log.Errorf("Unable to ban peer %v: %v", peer,
 					err)
-			}
-			sp := b.server.PeerByAddr(peer)
-			if sp != nil {
-				sp.Disconnect()
 			}
 			delete(checkpoints, peer)
 		}
