@@ -1501,8 +1501,6 @@ func banPeer(t *testing.T, svc *neutrino.ChainService, harness *rpctest.Harness)
 					err)
 			}
 		}
-
-		peer.Disconnect()
 	}
 }
 
