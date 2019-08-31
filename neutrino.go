@@ -280,6 +280,10 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
 
+		// Disconnect the peer even though BanPeer attempts to do so
+		// because it has yet to be added.
+		sp.Disconnect()
+
 		return nil
 	}
 
