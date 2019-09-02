@@ -408,7 +408,17 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// checking timestamps at each block.
 	scanning := ro.startTime.Before(curHeader.Timestamp)
 
+	// Even though we'll have multiple subscriptions, they'll always be
+	// referred to by the same variable, so we only need to defer its
+	// cancellation once at the end. Any intermediate subscriptions should
+	// be properly canceled before registering a new one.
 	var blockSubscription *blockntfns.Subscription
+	defer func() {
+		if blockSubscription != nil {
+			blockSubscription.Cancel()
+			blockSubscription = nil
+		}
+	}()
 
 	// blockRetryInterval is the interval in which we'll continually re-try
 	// to fetch the latest filter from our peers.
@@ -772,12 +782,6 @@ rescanLoop:
 					return fmt.Errorf("unable to register "+
 						"block subscription: %v", err)
 				}
-				defer func() {
-					if blockSubscription != nil {
-						blockSubscription.Cancel()
-						blockSubscription = nil
-					}
-				}()
 
 				continue rescanLoop
 			}
