@@ -480,12 +480,6 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		reFetchMtx.Unlock()
 	}
 
-	// We'll need to keep track of whether we are current with the chain in
-	// order to properly recover from a re-org. We'll start by assuming that
-	// we are not current in order to catch up from the starting point to
-	// the tip of the chain.
-	current := false
-
 	// handleBlockConnected is a closure that handles a new block connected
 	// notification.
 	//
@@ -497,7 +491,6 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// and notify the callers of blocks we may have missed.
 		header := ntfn.Header()
 		if header.PrevBlock != curStamp.Hash {
-			current = false
 			return fmt.Errorf("out of order block %v: expected "+
 				"PrevBlock %v, got %v", header.BlockHash(),
 				curStamp.Hash, header.PrevBlock)
@@ -641,6 +634,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		return nil
 	}
 
+	// We'll need to keep track of whether we are current with the chain in
+	// order to properly recover from a re-org. We'll start by assuming that
+	// we are not current in order to catch up from the starting point to
+	// the tip of the chain.
+	current := false
+
 	// Loop through blocks, one at a time. This relies on the underlying
 	// chain source to deliver notifications in the correct order.
 rescanLoop:
@@ -706,6 +705,14 @@ rescanLoop:
 					if err != nil {
 						log.Errorf("Unable to process "+
 							"%v: %v", ntfn, err)
+
+						// Since we weren't able to
+						// successfully process the
+						// block, we'll set ourselves to
+						// not be current in order to
+						// attempt catching up with the
+						// chain ourselves.
+						current = false
 					}
 
 				case *blockntfns.Disconnected:
