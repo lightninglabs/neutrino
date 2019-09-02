@@ -503,17 +503,15 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 				curStamp.Hash, header.PrevBlock)
 		}
 
-		// Do not process block until we have all filter headers. Don't
-		// worry, the block will get re-queued every time there is a new
-		// filter available. However, if it's a duplicate block
-		// notification, then we can re-process it without any issues.
+		// Ensure the filter header still exists before attempting to
+		// fetch the filter. This should usually succeed since
+		// notifications are delivered once filter headers are synced.
 		nextBlockHeight := uint32(curStamp.Height + 1)
 		_, err := chain.GetFilterHeaderByHeight(nextBlockHeight)
 		if err != nil {
-			log.Warnf("Missing filter header for height=%v, "+
-				"skipping", curStamp.Height+1)
-
-			return nil
+			return fmt.Errorf("unable to get filter header for "+
+				"new block with height %v: %v", nextBlockHeight,
+				err)
 		}
 
 		newStamp := headerfs.BlockStamp{
