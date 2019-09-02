@@ -495,20 +495,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// If we've somehow missed a header in the range, then we'll
 		// mark ourselves as not current so we can walk down the chain
 		// and notify the callers of blocks we may have missed.
-		//
-		// It's possible due to the nature of the current subscription
-		// system that we get a duplicate block. We'll catch this and
-		// continue forwards to avoid an unnecessary state transition
-		// back to the !current state.
 		header := ntfn.Header()
-		if header.PrevBlock != curStamp.Hash &&
-			header.BlockHash() != curStamp.Hash {
-
+		if header.PrevBlock != curStamp.Hash {
 			current = false
-			return fmt.Errorf("out of order block %v: "+
-				"expected PrevBlock %v, got %v",
-				header.BlockHash(), curStamp.Hash,
-				header.PrevBlock)
+			return fmt.Errorf("out of order block %v: expected "+
+				"PrevBlock %v, got %v", header.BlockHash(),
+				curStamp.Hash, header.PrevBlock)
 		}
 
 		// Do not process block until we have all filter headers. Don't
@@ -517,30 +509,25 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// notification, then we can re-process it without any issues.
 		nextBlockHeight := uint32(curStamp.Height + 1)
 		_, err := chain.GetFilterHeaderByHeight(nextBlockHeight)
-		if header.BlockHash() != curStamp.Hash && err != nil {
+		if err != nil {
 			log.Warnf("Missing filter header for height=%v, "+
 				"skipping", curStamp.Height+1)
 
 			return nil
 		}
 
-		// As this could be a re-try, we'll ensure that we don't
-		// incorrectly increment our current time stamp.
-		if curStamp.Hash != header.BlockHash() {
-			curHeader = header
-			curStamp.Hash = header.BlockHash()
-			curStamp.Height++
+		newStamp := headerfs.BlockStamp{
+			Hash:   header.BlockHash(),
+			Height: int32(nextBlockHeight),
 		}
 
-		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
-			curStamp.Hash)
+		log.Tracef("Rescan got block %d (%s)", newStamp.Height,
+			newStamp.Hash)
 
 		// We're only scanning if the header is beyond the horizon of
 		// our start time.
 		if !scanning {
-			scanning = ro.startTime.Before(
-				curHeader.Timestamp,
-			)
+			scanning = ro.startTime.Before(header.Timestamp)
 		}
 
 		// If we're not scanning or our watch list is empty, then we can
@@ -548,15 +535,18 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		if !scanning || len(ro.watchList) == 0 {
 			if ro.ntfn.OnFilteredBlockConnected != nil {
 				ro.ntfn.OnFilteredBlockConnected(
-					curStamp.Height, &curHeader, nil,
+					newStamp.Height, &header, nil,
 				)
 			}
 			if ro.ntfn.OnBlockConnected != nil {
 				ro.ntfn.OnBlockConnected(
-					&curStamp.Hash, curStamp.Height,
-					curHeader.Timestamp,
+					&newStamp.Hash, newStamp.Height,
+					header.Timestamp,
 				)
 			}
+
+			curHeader = header
+			curStamp = newStamp
 
 			return nil
 		}
@@ -565,7 +555,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// relevant transactions and notify them.
 		queryOptions := NumRetries(0)
 		blockFilter, err := chain.GetCFilter(
-			curStamp.Hash, wire.GCSFilterRegular, queryOptions,
+			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 		)
 
 		switch {
@@ -590,11 +580,16 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		}
 
 		err = notifyBlockWithFilter(
-			chain, ro, &curHeader, &curStamp, blockFilter,
+			chain, ro, &header, &newStamp, blockFilter,
 		)
 		if err != nil {
 			return err
 		}
+
+		// With the block successfully notified, we'll advance our state
+		// to it.
+		curHeader = header
+		curStamp = newStamp
 
 		// We've successfully fetched this current block, so we'll reset
 		// the retry timer back to nil.
