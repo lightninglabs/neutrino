@@ -20,7 +20,6 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -865,7 +864,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 // BestBlock retrieves the most recent block's height and hash where we
 // have both the header and filter header ready.
-func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
+func (s *ChainService) BestBlock() (*headerfs.BlockStamp, error) {
 	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
@@ -888,7 +887,7 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 		}
 	}
 
-	return &waddrmgr.BlockStamp{
+	return &headerfs.BlockStamp{
 		Height: int32(bestHeight),
 		Hash:   bestHeader.BlockHash(),
 	}, nil
@@ -1004,12 +1003,12 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
-func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
+func (s *ChainService) rollBackToHeight(height uint32) (*headerfs.BlockStamp, error) {
 	header, headerHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
-	bs := &waddrmgr.BlockStamp{
+	bs := &headerfs.BlockStamp{
 		Height: int32(headerHeight),
 		Hash:   header.BlockHash(),
 	}

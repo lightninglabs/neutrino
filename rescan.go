@@ -19,7 +19,6 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -42,7 +41,7 @@ type ChainSource interface {
 
 	// BestBlock retrieves the most recent block's height and hash where we
 	// have both the header and filter header ready.
-	BestBlock() (*waddrmgr.BlockStamp, error)
+	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the block with the given
 	// height.
@@ -80,9 +79,9 @@ type rescanOptions struct {
 	ntfn rpcclient.NotificationHandlers
 
 	startTime  time.Time
-	startBlock *waddrmgr.BlockStamp
+	startBlock *headerfs.BlockStamp
 
-	endBlock *waddrmgr.BlockStamp
+	endBlock *headerfs.BlockStamp
 
 	watchAddrs  []btcutil.Address
 	watchInputs []InputWithScript
@@ -123,7 +122,7 @@ func NotificationHandlers(ntfn rpcclient.NotificationHandlers) RescanOption {
 // block. This block is assumed to already be known, and no notifications will
 // be sent for this block. The rescan uses the latter of StartBlock and
 // StartTime.
-func StartBlock(startBlock *waddrmgr.BlockStamp) RescanOption {
+func StartBlock(startBlock *headerfs.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.startBlock = startBlock
 	}
@@ -146,7 +145,7 @@ func StartTime(startTime time.Time) RescanOption {
 // channel MUST be specified as Rescan will sync to the tip of the blockchain
 // and continue to stay in sync and pass notifications. This is enforced at
 // runtime.
-func EndBlock(endBlock *waddrmgr.BlockStamp) RescanOption {
+func EndBlock(endBlock *headerfs.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.endBlock = endBlock
 	}
@@ -215,7 +214,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// First, we'll apply the set of default options, then serially apply
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
-	ro.endBlock = &waddrmgr.BlockStamp{
+	ro.endBlock = &headerfs.BlockStamp{
 		Hash:   chainhash.Hash{},
 		Height: 0,
 	}
@@ -263,12 +262,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 				if err == nil {
 					ro.endBlock.Hash = header.BlockHash()
 				} else {
-					ro.endBlock = &waddrmgr.BlockStamp{}
+					ro.endBlock = &headerfs.BlockStamp{}
 				}
 			}
 		}
 	} else {
-		ro.endBlock = &waddrmgr.BlockStamp{}
+		ro.endBlock = &headerfs.BlockStamp{}
 	}
 
 	// If we don't have a quit channel, and the end height is still
@@ -281,7 +280,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// Track our position in the chain.
 	var (
 		curHeader wire.BlockHeader
-		curStamp  waddrmgr.BlockStamp
+		curStamp  headerfs.BlockStamp
 	)
 
 	// If no start block is specified, start the scan from our current best
@@ -811,7 +810,7 @@ rescanLoop:
 
 // notifyBlock calls appropriate listeners based on the block filter.
 func notifyBlock(chain ChainSource, ro *rescanOptions,
-	curHeader wire.BlockHeader, curStamp waddrmgr.BlockStamp,
+	curHeader wire.BlockHeader, curStamp headerfs.BlockStamp,
 	scanning bool) error {
 
 	// Find relevant transactions based on watch list. If scanning is
@@ -852,7 +851,7 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 // extractBlockMatches fetches the target block from the network, and filters
 // out any relevant transactions found within the block.
 func extractBlockMatches(chain ChainSource, ro *rescanOptions,
-	curStamp *waddrmgr.BlockStamp) ([]*btcutil.Tx, error) {
+	curStamp *headerfs.BlockStamp) ([]*btcutil.Tx, error) {
 
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
@@ -914,7 +913,7 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 // This differs from notifyBlock in that is expects the caller to already have
 // obtained the target filter.
 func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
-	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	curHeader *wire.BlockHeader, curStamp *headerfs.BlockStamp,
 	filter *gcs.Filter) error {
 
 	// Based on what we find within the block or the filter, we'll be
@@ -1009,7 +1008,7 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 // updateFilter atomically updates the filter and rewinds to the specified
 // height if not 0.
 func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
-	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
+	curStamp *headerfs.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
 
 	ro.watchAddrs = append(ro.watchAddrs, update.addrs...)
 	ro.watchInputs = append(ro.watchInputs, update.inputs...)
@@ -1343,7 +1342,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	// Before we start we'll fetch the set of default options, and apply
 	// any user specified options in a functional manner.
 	ro := defaultRescanOptions()
-	ro.startBlock = &waddrmgr.BlockStamp{
+	ro.startBlock = &headerfs.BlockStamp{
 		Hash:   *s.chainParams.GenesisHash,
 		Height: 0,
 	}

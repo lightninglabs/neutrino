@@ -25,12 +25,12 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 var (
@@ -299,7 +299,7 @@ var (
 	quitRescan                chan struct{}
 	errChan                   <-chan error
 	rescan                    *neutrino.Rescan
-	startBlock                waddrmgr.BlockStamp
+	startBlock                headerfs.BlockStamp
 	secSrc                    *secSource
 	addr1, addr2, addr3       btcutil.Address
 	script1, script2, script3 []byte
@@ -398,7 +398,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			PkScript: script1,
 			OutPoint: ourOutPoint,
 		}),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
+		neutrino.StartBlock(&headerfs.BlockStamp{Height: 1101}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -415,7 +415,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
 	quitRescan = make(chan struct{})
-	startBlock = waddrmgr.BlockStamp{Height: 1095}
+	startBlock = headerfs.BlockStamp{Height: 1095}
 	rescan, errChan = startRescan(t, harness.svc, addr1, &startBlock,
 		quitRescan)
 	err := waitForSync(t, harness.svc, harness.h1)
@@ -633,7 +633,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 			PkScript: script1,
 			OutPoint: ourOutPoint,
 		}),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+		neutrino.StartBlock(&headerfs.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -803,7 +803,7 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 // laptop with default query optimization settings.
 // TODO: Make this a benchmark instead.
 func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
-	var haveBest *waddrmgr.BlockStamp
+	var haveBest *headerfs.BlockStamp
 	haveBest, err := harness.svc.BestBlock()
 	if err != nil {
 		t.Fatalf("Couldn't get best snapshot from ChainService: %s", err)
@@ -1192,7 +1192,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	if logLevel != btclog.LevelOff {
 		t.Logf("Syncing to %d (%s)", knownBestHeight, knownBestHash)
 	}
-	var haveBest *waddrmgr.BlockStamp
+	var haveBest *headerfs.BlockStamp
 	haveBest, err = svc.BestBlock()
 	if err != nil {
 		return fmt.Errorf("Couldn't get best snapshot from "+
@@ -1351,7 +1351,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 // on the flow of the test. The rescan starts at the genesis block and the
 // notifications continue until the `quit` channel is closed.
 func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
-	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (
+	startBlock *headerfs.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
 	rescan := neutrino.NewRescan(
 		&neutrino.RescanChainSource{svc},

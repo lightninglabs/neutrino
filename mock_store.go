@@ -6,7 +6,6 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -61,7 +60,7 @@ func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 	return 0, nil
 
 }
-func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
+func (m *mockBlockHeaderStore) RollbackLastBlock() (*headerfs.BlockStamp,
 	error) {
 	return nil, nil
 }
