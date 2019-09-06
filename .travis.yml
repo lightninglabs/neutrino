@@ -12,7 +12,7 @@ sudo: false
 install:
   - export PATH=$PATH:$PWD/linux-amd64/
   - mkdir -p $GOPATH/src/github.com/btcsuite/
-  - go get -d github.com/btcsuite/btcd
+  - git clone https://github.com/btcsuite/btcd.git $GOPATH/src/github.com/btcsuite/btcd
   - pushd $GOPATH/src/github.com/btcsuite/btcd
   - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
   - go install . ./cmd/...
