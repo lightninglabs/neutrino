@@ -7,15 +7,29 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
+
+// BlockStamp represents a block, identified by its height and time stamp in
+// the chain. We also lift the timestamp from the block header itself into this
+// struct as well.
+type BlockStamp struct {
+	// Height is the height of the target block.
+	Height int32
+
+	// Hash is the hash that uniquely identifies this block.
+	Hash chainhash.Hash
+
+	// Timestamp is the timestamp of the block in the chain.
+	Timestamp time.Time
+}
 
 // BlockHeaderStore is an interface that provides an abstraction for a generic
 // store for block headers.
@@ -60,7 +74,7 @@ type BlockHeaderStore interface {
 	// disconnects the latest block header from the end of the main chain.
 	// The information about the new header tip after truncation is
 	// returned.
-	RollbackLastBlock() (*waddrmgr.BlockStamp, error)
+	RollbackLastBlock() (*BlockStamp, error)
 }
 
 // headerBufPool is a pool of bytes.Buffer that will be re-used by the various
@@ -306,7 +320,7 @@ func (h *blockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 // information about the new header tip after truncation is returned.
 //
 // NOTE: Part of the BlockHeaderStore interface.
-func (h *blockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
+func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	// Lock store for write.
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
@@ -336,7 +350,7 @@ func (h *blockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp, error) {
 		return nil, err
 	}
 
-	return &waddrmgr.BlockStamp{
+	return &BlockStamp{
 		Height: int32(chainTipHeight) - 1,
 		Hash:   prevHeaderHash,
 	}, nil
@@ -889,7 +903,7 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 // re-org which disconnects the latest filter header from the end of the main
 // chain. The information about the latest header tip after truncation is
 // returned.
-func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr.BlockStamp, error) {
+func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*BlockStamp, error) {
 	// Lock store for write.
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
@@ -918,7 +932,7 @@ func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*waddrmgr
 	}
 
 	// TODO(roasbeef): return chain hash also?
-	return &waddrmgr.BlockStamp{
+	return &BlockStamp{
 		Height: int32(newHeightTip),
 		Hash:   *newHeaderTip,
 	}, nil
