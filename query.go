@@ -50,20 +50,6 @@ var (
 	QueryEncoding = wire.WitnessEncoding
 )
 
-// QueryAccess is an interface that gives acces to query a set of peers in
-// different ways.
-type QueryAccess interface {
-	queryAllPeers(
-		queryMsg wire.Message,
-		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
-		options ...QueryOption)
-}
-
-// A compile-time check to ensure that ChainService implements the
-// QueryAccess interface.
-var _ QueryAccess = (*ChainService)(nil)
-
 // queries are a set of options that can be modified per-query, unlike global
 // options.
 //
@@ -1240,7 +1226,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 		case filter, ok = <-query.filterChan:
 			if !ok {
-				// Query has finished, if we have a result we'll return it.				
+				// Query has finished, if we have a result we'll return it.
 				return resultFilter, nil
 			}
 

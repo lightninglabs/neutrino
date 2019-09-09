@@ -575,11 +575,6 @@ type ChainService struct {
 	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
 		chan<- struct{}), ...QueryOption)
 
-	// queryBatch will be called to distribute a batch of messages across
-	// our connected peers.
-	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
-		wire.Message) bool, <-chan struct{}, ...QueryOption)
-
 	chainParams          chaincfg.Params
 	addrManager          *addrmgr.AddrManager
 	connManager          *connmgr.ConnManager
@@ -667,13 +662,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		queryChainServicePeers(&s, msg, f, qo...)
 	}
 
-	// We do the same for queryBatch.
-	s.queryBatch = func(msgs []wire.Message, f func(*ServerPeer,
-		wire.Message, wire.Message) bool, q <-chan struct{},
-		qo ...QueryOption) {
-		queryChainServiceBatch(&s, msgs, f, q, qo...)
-	}
-
 	var err error
 
 	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
@@ -707,7 +695,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&s, s.firstPeerConnect)
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      s.chainParams,
+		BlockHeaders:     s.BlockHeaders,
+		RegFilterHeaders: s.RegFilterHeaders,
+		TimeSource:       s.timeSource,
+		BanPeer:          s.BanPeer,
+		GetBlock:         s.GetBlock,
+		queryBatch: func(msgs []wire.Message, f func(*ServerPeer,
+			wire.Message, wire.Message) bool, q <-chan struct{},
+			qo ...QueryOption) {
+			queryChainServiceBatch(&s, msgs, f, q, qo...)
+		},
+		queryAllPeers: s.queryAllPeers,
+	}, s.firstPeerConnect)
 	if err != nil {
 		return nil, err
 	}
@@ -999,62 +1000,6 @@ func (s *ChainService) AddBytesReceived(bytesReceived uint64) {
 func (s *ChainService) NetTotals() (uint64, uint64) {
 	return atomic.LoadUint64(&s.bytesReceived),
 		atomic.LoadUint64(&s.bytesSent)
-}
-
-// rollBackToHeight rolls back all blocks until it hits the specified height.
-// It sends notifications along the way.
-func (s *ChainService) rollBackToHeight(height uint32) (*headerfs.BlockStamp, error) {
-	header, headerHeight, err := s.BlockHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-	bs := &headerfs.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
-	}
-
-	_, regHeight, err := s.RegFilterHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-
-	for uint32(bs.Height) > height {
-		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
-		if err != nil {
-			return nil, err
-		}
-
-		newTip := &header.PrevBlock
-
-		// Only roll back filter headers if they've caught up this far.
-		if uint32(bs.Height) <= regHeight {
-			newFilterTip, err := s.RegFilterHeaders.RollbackLastBlock(newTip)
-			if err != nil {
-				return nil, err
-			}
-			regHeight = uint32(newFilterTip.Height)
-		}
-
-		bs, err = s.BlockHeaders.RollbackLastBlock()
-		if err != nil {
-			return nil, err
-		}
-
-		// Notifications are asynchronous, so we include the previous
-		// header in the disconnected notification in case we're rolling
-		// back farther and the notification subscriber needs it but
-		// can't read it before it's deleted from the store.
-		prevHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
-		if err != nil {
-			return nil, err
-		}
-
-		// Now we send the block disconnected notifications.
-		s.blockManager.onBlockDisconnected(
-			*header, headerHeight, *prevHeader,
-		)
-	}
-	return bs, nil
 }
 
 // peerHandler is used to handle peer operations such as adding and removing

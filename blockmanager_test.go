@@ -70,24 +70,13 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			"header store: %s", err)
 	}
 
-	banStore, err := banman.NewStore(db)
-	if err != nil {
-		cleanUp()
-		return nil, nil, nil, nil, fmt.Errorf("unable to initialize "+
-			"ban store: %v", err)
-	}
-
-	// Set up a chain service for the block manager. Each test should set
-	// custom query methods on this chain service.
-	cs := &ChainService{
-		chainParams:      chaincfg.SimNetParams,
+	// Set up a blockManager with the chain service we defined.
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
-		banStore:         banStore,
-	}
-
-	// Set up a blockManager with the chain service we defined.
-	bm, err := newBlockManager(cs, nil)
+		BanPeer:          func(string, banman.Reason) error { return nil },
+	}, nil)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
@@ -346,7 +335,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// We set up a custom query batch method for this test, as we
 		// will use this to feed the blockmanager with our crafted
 		// responses.
-		bm.server.queryBatch = func(msgs []wire.Message,
+		bm.cfg.queryBatch = func(msgs []wire.Message,
 			f func(*ServerPeer, wire.Message, wire.Message) bool,
 			q <-chan struct{}, qo ...QueryOption) {
 
@@ -512,7 +501,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// Create a mock peer to prevent panics when attempting to ban
 		// a peer that served an invalid filter header.
-		mockPeer := newServerPeer(bm.server, false)
+		mockPeer := newServerPeer(&ChainService{}, false)
 		mockPeer.Peer, err = peer.NewOutboundPeer(
 			newPeerConfig(mockPeer), "127.0.0.1:8333",
 		)
@@ -572,7 +561,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			}
 		}
 
-		bm.server.queryBatch = func(msgs []wire.Message,
+		bm.cfg.queryBatch = func(msgs []wire.Message,
 			f func(*ServerPeer, wire.Message, wire.Message) bool,
 			q <-chan struct{}, qo ...QueryOption) {
 
@@ -714,31 +703,6 @@ func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {
 	return nil
 }
 
-type mockQueryAccess struct {
-	answers map[string]wire.Message
-}
-
-func (m *mockQueryAccess) queryAllPeers(
-	queryMsg wire.Message,
-	checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
-	options ...QueryOption) {
-
-	for p, resp := range m.answers {
-		pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
-		if err != nil {
-			panic(err)
-		}
-
-		sp := &ServerPeer{
-			Peer: pp,
-		}
-		checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
-	}
-}
-
-var _ QueryAccess = (*mockQueryAccess)(nil)
-
 // TestBlockManagerDetectBadPeers checks that we detect bad peers, like peers
 // not responding to our filter query, serving inconsistent filters etc.
 func TestBlockManagerDetectBadPeers(t *testing.T) {
@@ -808,17 +772,31 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		// serve a header for the target index.
 		blockHeaders := newMockBlockHeaderStore()
 		blockHeaders.heights[targetIndex] = blockHeader
-		cs := &ChainService{
-			BlockHeaders: blockHeaders,
+
+		// We set up the mock queryAllPeers to only respond according to
+		// the active testcase.
+		answers := make(map[string]wire.Message)
+		queryAllPeers := func(
+			queryMsg wire.Message,
+			checkResponse func(sp *ServerPeer, resp wire.Message,
+				quit chan<- struct{}, peerQuit chan<- struct{}),
+			options ...QueryOption) {
+
+			for p, resp := range answers {
+				pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
+				if err != nil {
+					panic(err)
+				}
+
+				sp := &ServerPeer{
+					Peer: pp,
+				}
+				checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
+			}
 		}
 
-		// We set up the mock QueryAccess to only respond according to
-		// the active testcase.
-		mock := &mockQueryAccess{
-			answers: make(map[string]wire.Message),
-		}
 		for _, peer := range peers {
-			test.filterAnswers(peer, mock.answers)
+			test.filterAnswers(peer, answers)
 		}
 
 		// For the CFHeaders, we pretend all peers responded with the same
@@ -839,8 +817,10 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		}
 
 		bm := &blockManager{
-			server:  cs,
-			queries: mock,
+			cfg: &blockManagerCfg{
+				BlockHeaders:  blockHeaders,
+				queryAllPeers: queryAllPeers,
+			},
 		}
 
 		// Now trying to detect which peers are bad, we should detect the
