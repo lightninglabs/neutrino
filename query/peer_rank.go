@@ -25,6 +25,10 @@ func NewPeerRanking() *peerRanking {
 	}
 }
 
+// A compile time check to ensure peerRanking satisfies the PeerRanking
+// interface.
+var _ PeerRanking = (*peerRanking)(nil)
+
 // Order sorts the given slice of peers based on their current score. If a
 // peer has no current score given, the default will be used.
 func (p *peerRanking) Order(peers []string) {

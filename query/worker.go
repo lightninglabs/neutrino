@@ -59,6 +59,9 @@ type worker struct {
 	nextJob chan *queryJob
 }
 
+// A compile-time check to ensure worker satisfies the Worker interface.
+var _ Worker = (*worker)(nil)
+
 // NewWorker creates a new worker.
 func NewWorker() *worker {
 	return &worker{
