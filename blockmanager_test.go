@@ -371,7 +371,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			// that.
 			perm := rand.Perm(len(responses))
 
-			errChan := make(chan error)
+			errChan := make(chan error, 1)
 			go func() {
 				for i, v := range perm {
 					index := i
@@ -637,7 +637,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				}
 			}
 
-			errChan := make(chan error)
+			errChan := make(chan error, 1)
 			go func() {
 
 				// Check that the success of the callback match what we
@@ -651,6 +651,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 							t.Fatalf("expected interval "+
 								"%d to be invalid", i)
 						}
+						errChan <- fmt.Errorf("invalid interval")
 						break
 					}
 
