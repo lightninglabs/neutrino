@@ -27,6 +27,7 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // These are exported variables so they can be changed by users.
@@ -138,6 +139,13 @@ type spMsgSubscription struct {
 	quitChan <-chan struct{}
 }
 
+// msgSubscription sends all messages from a peer over a channel, allowing
+// pluggable filtering of the messages.
+type msgSubscription struct {
+	msgChan  chan<- wire.Message
+	quitChan <-chan struct{}
+}
+
 // ServerPeer extends the peer to maintain state shared by the server and the
 // blockmanager.
 type ServerPeer struct {
@@ -161,19 +169,23 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	recvSubscribers map[spMsgSubscription]struct{}
-	mtxSubscribers  sync.RWMutex
+	// TODO(halseth): remove one of the maps when all queries go through
+	// work manager.
+	recvSubscribers  map[spMsgSubscription]struct{}
+	recvSubscribers2 map[msgSubscription]struct{}
+	mtxSubscribers   sync.RWMutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:          s,
-		persistent:      isPersistent,
-		knownAddresses:  make(map[string]struct{}),
-		quit:            make(chan struct{}),
-		recvSubscribers: make(map[spMsgSubscription]struct{}),
+		server:           s,
+		persistent:       isPersistent,
+		knownAddresses:   make(map[string]struct{}),
+		quit:             make(chan struct{}),
+		recvSubscribers:  make(map[spMsgSubscription]struct{}),
+		recvSubscribers2: make(map[msgSubscription]struct{}),
 	}
 }
 
@@ -479,6 +491,23 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 			}
 		}(subscription)
 	}
+	for subscription := range sp.recvSubscribers2 {
+		// Quickly determine if this subscription has been canceled, if
+		// so delete it.
+		select {
+		case <-subscription.quitChan:
+			delete(sp.recvSubscribers2, subscription)
+			continue
+		default:
+		}
+
+		go func(subscription msgSubscription) {
+			select {
+			case <-subscription.quitChan:
+			case subscription.msgChan <- msg:
+			}
+		}(subscription)
+	}
 }
 
 // subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
@@ -494,6 +523,43 @@ func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	delete(sp.recvSubscribers, subscription)
+}
+
+// A compile-time check to ensure that ServerPeer implements the query.Peer
+// interface.
+var _ query.Peer = (*ServerPeer)(nil)
+
+// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
+// messages received from this peer will be sent on the returned channel. A
+// closure is also returned, that should be called to cancel the subscription.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	// We won't have to buffer this channel, since we'll always send on it
+	// from a new goroutine.
+	msgChan := make(chan wire.Message)
+	quitChan := make(chan struct{})
+
+	sub := msgSubscription{
+		msgChan:  msgChan,
+		quitChan: quitChan,
+	}
+
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	sp.recvSubscribers2[sub] = struct{}{}
+
+	return msgChan, func() {
+		close(quitChan)
+	}
+}
+
+// OnDisconnect returns a channel that will be closed when this peer is
+// disconnected.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) OnDisconnect() <-chan struct{} {
+	return sp.quit
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
