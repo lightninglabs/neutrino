@@ -666,6 +666,8 @@ type ChainService struct {
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
 
+	// peerSubscribers is a slice of active peer subscriptions, that we
+	// will notify each time a new peer is connected.
 	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
@@ -1286,7 +1288,10 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 		// Ignore subscription if it has been cancelled.
 		case <-sub.cancel:
+			// Avoid GC leak.
+			s.peerSubscribers[i] = nil
 			continue
+
 		case <-s.quit:
 			return false
 		}

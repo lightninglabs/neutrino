@@ -24,8 +24,7 @@ type subConnPeersReply struct {
 	cancelChan chan struct{}
 }
 type subConnPeersMsg struct {
-	cancel <-chan struct{}
-	reply  chan subConnPeersReply
+	reply chan subConnPeersReply
 }
 
 type getPeersMsg struct {
