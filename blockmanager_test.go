@@ -370,48 +370,51 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			// We permute the response order if the test signals
 			// that.
 			perm := rand.Perm(len(responses))
-			for i, v := range perm {
-				index := i
-				if test.permute {
-					index = v
-				}
-
-				// Before sending we take a copy of the
-				// message, as we cannot guarantee that it
-				// won't be modified.
-				r := *responses[index]
-
-				// Let the blockmanager handle the message.
-				progress := requests[index].HandleResp(
-					msgs[index], &r, "",
-				)
-
-				if !progress.Finished {
-					t.Fatalf("got response false on "+
-						"send of index %d: %v",
-						index, testDesc)
-				}
-
-				continue
-				// If we are not testing repeated responses, go
-				// on to the next response.
-				if !test.repeat {
-					continue
-				}
-
-				// Otherwise resend the response we just sent.
-				progress = requests[index].HandleResp(
-					msgs[index], &r, "",
-				)
-				if !progress.Finished {
-					t.Fatalf("got response false on "+
-						"resend of index %d: %v",
-						index, testDesc)
-				}
-
-			}
 
 			errChan := make(chan error)
+			go func() {
+				for i, v := range perm {
+					index := i
+					if test.permute {
+						index = v
+					}
+
+					// Before sending we take a copy of the
+					// message, as we cannot guarantee that it
+					// won't be modified.
+					r := *responses[index]
+
+					// Let the blockmanager handle the message.
+					progress := requests[index].HandleResp(
+						msgs[index], &r, "",
+					)
+
+					if !progress.Finished {
+						t.Fatalf("got response false on "+
+							"send of index %d: %v",
+							index, testDesc)
+					}
+
+					// If we are not testing repeated responses, go
+					// on to the next response.
+					if !test.repeat {
+						continue
+					}
+
+					// Otherwise resend the response we just sent.
+					progress = requests[index].HandleResp(
+						msgs[index], &r, "",
+					)
+					if !progress.Finished {
+						t.Fatalf("got response false on "+
+							"resend of index %d: %v",
+							index, testDesc)
+					}
+
+				}
+				errChan <- nil
+			}()
+
 			return errChan
 		}
 

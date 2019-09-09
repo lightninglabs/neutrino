@@ -1073,19 +1073,18 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		select {
 		case r = <-headerChan:
 		case err := <-errChan:
-			log.Errorf("Query finished with error (%v) before "+
-				"all responses received", err)
-			return
+			if err != nil {
+				log.Errorf("Query finished with error before "+
+					"all responses received: %v", err)
+				return
+			}
+			continue
+
 		case <-b.quit:
 			return
 		}
 
-		checkPointIndex, ok := stopHashes[r.StopHash]
-		if !ok {
-			// We never requested a matching stop hash.
-			log.Errorf("did not request stopHash %v", r.StopHash)
-			return
-		}
+		checkPointIndex := stopHashes[r.StopHash]
 
 		// Find the first and last height for the blocks
 		// represented by this message.
