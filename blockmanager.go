@@ -126,9 +126,6 @@ type blockManagerCfg struct {
 	// GetBlock fetches a block from the p2p network.
 	GetBlock func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 
-	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
-		wire.Message) bool, <-chan struct{}, ...QueryOption)
-
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,

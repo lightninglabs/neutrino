@@ -786,12 +786,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
 		GetBlock:         s.GetBlock,
-		queryBatch: func(msgs []wire.Message, f func(*ServerPeer,
-			wire.Message, wire.Message) bool, q <-chan struct{},
-			qo ...QueryOption) {
-			queryChainServiceBatch(&s, msgs, f, q, qo...)
-		},
-		queryAllPeers: s.queryAllPeers,
+		queryAllPeers:    s.queryAllPeers,
 	}, s.firstPeerConnect)
 	if err != nil {
 		return nil, err
