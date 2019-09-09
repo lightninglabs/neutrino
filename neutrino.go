@@ -620,6 +620,13 @@ type Config struct {
 	AssertFilterHeader *headerfs.FilterHeader
 }
 
+// peerSubscription holds a peer subscription which we'll notify about any
+// connected peers.
+type peerSubscription struct {
+	peers  chan<- query.Peer
+	cancel <-chan struct{}
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -658,6 +665,8 @@ type ChainService struct {
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+
+	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -1267,6 +1276,28 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
 		s.addrManager.Connected(sp.NA())
 	}
+
+	// We'll go through each peer subscriber and notify it about the added
+	// peer.
+	i := 0
+	for _, sub := range s.peerSubscribers {
+		select {
+		case sub.peers <- sp:
+
+		// Ignore subscription if it has been cancelled.
+		case <-sub.cancel:
+			continue
+		case <-s.quit:
+			return false
+		}
+
+		// Keep non-canceled subscribers around.
+		s.peerSubscribers[i] = sub
+		i++
+	}
+
+	// Re-align the slice to only active subscribers.
+	s.peerSubscribers = s.peerSubscribers[:i]
 
 	return true
 }
