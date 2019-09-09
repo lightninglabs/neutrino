@@ -20,6 +20,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // maxHeight is the height we will generate filter headers up to. We use an odd
@@ -27,6 +28,21 @@ import (
 // only able to fetch filter headers for one checkpoint interval rather than
 // two.
 const maxHeight = 21 * uint32(wire.CFCheckptInterval)
+
+// mockDispatcher implements the query.Dispatcher interface and allows us to
+// set up a custom Query method during tests.
+type mockDispatcher struct {
+	query func(requests []*query.Request,
+		options ...query.QueryOption) chan error
+}
+
+var _ query.Dispatcher = (*mockDispatcher)(nil)
+
+func (m *mockDispatcher) Query(requests []*query.Request,
+	options ...query.QueryOption) chan error {
+
+	return m.query(requests, options...)
+}
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
@@ -75,6 +91,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 		ChainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
+		QueryDispatcher:  &mockDispatcher{},
 		BanPeer:          func(string, banman.Reason) error { return nil },
 	}, nil)
 	if err != nil {
@@ -335,9 +352,14 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// We set up a custom query batch method for this test, as we
 		// will use this to feed the blockmanager with our crafted
 		// responses.
-		bm.cfg.queryBatch = func(msgs []wire.Message,
-			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+			requests []*query.Request,
+			options ...query.QueryOption) chan error {
+
+			var msgs []wire.Message
+			for _, q := range requests {
+				msgs = append(msgs, q.Req)
+			}
 
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
@@ -360,12 +382,17 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				r := *responses[index]
 
 				// Let the blockmanager handle the message.
-				if !f(nil, msgs[index], responses[index]) {
+				progress := requests[index].HandleResp(
+					msgs[index], &r, "",
+				)
+
+				if !progress.Finished {
 					t.Fatalf("got response false on "+
 						"send of index %d: %v",
 						index, testDesc)
 				}
 
+				continue
 				// If we are not testing repeated responses, go
 				// on to the next response.
 				if !test.repeat {
@@ -373,13 +400,19 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 				}
 
 				// Otherwise resend the response we just sent.
-				if !f(nil, msgs[index], &r) {
+				progress = requests[index].HandleResp(
+					msgs[index], &r, "",
+				)
+				if !progress.Finished {
 					t.Fatalf("got response false on "+
 						"resend of index %d: %v",
 						index, testDesc)
 				}
 
 			}
+
+			errChan := make(chan error)
+			return errChan
 		}
 
 		// We should expect to see notifications for each new filter
@@ -561,10 +594,14 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			}
 		}
 
-		bm.cfg.queryBatch = func(msgs []wire.Message,
-			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+			requests []*query.Request,
+			options ...query.QueryOption) chan error {
 
+			var msgs []wire.Message
+			for _, q := range requests {
+				msgs = append(msgs, q.Req)
+			}
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
 				t.Fatalf("unable to generate responses: %v",
@@ -597,23 +634,33 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				}
 			}
 
-			// Check that the success of the callback match what we
-			// expect.
-			for i := range responses {
-				success := f(mockPeer, msgs[i], responses[i])
-				if i == test.firstInvalid {
-					if success {
-						t.Fatalf("expected interval "+
-							"%d to be invalid", i)
+			errChan := make(chan error)
+			go func() {
+
+				// Check that the success of the callback match what we
+				// expect.
+				for i := range responses {
+					progress := requests[i].HandleResp(
+						msgs[i], responses[i], "",
+					)
+					if i == test.firstInvalid {
+						if progress.Finished {
+							t.Fatalf("expected interval "+
+								"%d to be invalid", i)
+						}
+						break
 					}
-					break
+
+					if !progress.Finished {
+						t.Fatalf("expected interval %d to be "+
+							"valid", i)
+					}
 				}
 
-				if !success {
-					t.Fatalf("expected interval %d to be "+
-						"valid", i)
-				}
-			}
+				errChan <- nil
+			}()
+
+			return errChan
 		}
 
 		// We should expect to see notifications for each new filter

@@ -63,7 +63,7 @@ type worker struct {
 var _ Worker = (*worker)(nil)
 
 // NewWorker creates a new worker.
-func NewWorker() *worker {
+func NewWorker() Worker {
 	return &worker{
 		nextJob: make(chan *queryJob),
 	}
