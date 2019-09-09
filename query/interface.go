@@ -106,14 +106,14 @@ type Request struct {
 	HandleResp func(req, resp wire.Message, peer string) QueryProgress
 }
 
-// QueryAccess is an interface defining the API for making queries to bitcoin
-// peers.
-type QueryAccess interface {
-	// Query distributes the slice of queries to the set of connected
+// Dispatcher is an interface defining the API for dispatching queries to
+// bitcoin peers.
+type Dispatcher interface {
+	// Query distributes the slice of requests to the set of connected
 	// peers. It returns an error channel where the final result of the
 	// batch of queries will be sent. Responses for the individual queries
-	// should be handled by the response handler of each Query.
-	Query(queries []*Request, options ...QueryOption) chan error
+	// should be handled by the response handler of each Request.
+	Query(reqs []*Request, options ...QueryOption) chan error
 }
 
 // Peer is the interface that defines the methods needed by the query package
