@@ -140,22 +140,18 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 		t.Fatalf("unable to start worker: %v", err)
 	}
 
-	nextJob := ctx.nextJob
-	jobResults := ctx.jobResults
-	peer := ctx.peer
-
 	// Create a new task and give it to the worker.
 	task := makeJob()
 
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
 
 	// The request should be sent to the peer.
 	select {
-	case <-peer.requests:
+	case <-ctx.peer.requests:
 	case <-time.After(time.Second):
 		t.Fatalf("request not sent")
 	}
@@ -164,7 +160,7 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	// ignored.
 	for i := 0; i < 5; i++ {
 		select {
-		case peer.responses <- &wire.MsgTx{}:
+		case ctx.peer.responses <- &wire.MsgTx{}:
 		case <-time.After(time.Second):
 			t.Fatalf("resp not received")
 		}
@@ -172,7 +168,7 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 
 	// Answer the query with the correct response.
 	select {
-	case peer.responses <- finalResp:
+	case ctx.peer.responses <- finalResp:
 	case <-time.After(time.Second):
 		t.Fatalf("resp not received")
 	}
@@ -180,7 +176,7 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	// The worker should respond with a job finished.
 	var result *jobResult
 	select {
-	case result = <-jobResults:
+	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
@@ -195,9 +191,9 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	}
 
 	// And the correct peer.
-	if result.peer != peer {
+	if result.peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.peer)
 	}
 }
 
@@ -213,24 +209,20 @@ func TestWorkerTimeout(t *testing.T) {
 		t.Fatalf("unable to start worker: %v", err)
 	}
 
-	nextJob := ctx.nextJob
-	jobResults := ctx.jobResults
-	peer := ctx.peer
-
 	// Create a task with a small timeout.
 	task := makeJob()
 	task.timeout = timeout
 
 	// Give the worker the new job.
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
 
 	// The request should be given to the peer.
 	select {
-	case <-peer.requests:
+	case <-ctx.peer.requests:
 	case <-time.After(time.Second):
 		t.Fatalf("request not sent")
 	}
@@ -239,7 +231,7 @@ func TestWorkerTimeout(t *testing.T) {
 	// should respond with an error result.
 	var result *jobResult
 	select {
-	case result = <-jobResults:
+	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
@@ -254,14 +246,14 @@ func TestWorkerTimeout(t *testing.T) {
 	}
 
 	// And the correct peer.
-	if result.peer != peer {
+	if result.peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.peer)
 	}
 
 	// It will immediately attempt to fetch another task.
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -277,32 +269,28 @@ func TestWorkerDisconnect(t *testing.T) {
 		t.Fatalf("unable to start worker: %v", err)
 	}
 
-	nextJob := ctx.nextJob
-	jobResults := ctx.jobResults
-	peer := ctx.peer
-
 	// Give the worker a new job.
 	task := makeJob()
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
 
 	// The request should be given to the peer.
 	select {
-	case <-peer.requests:
+	case <-ctx.peer.requests:
 	case <-time.After(time.Second):
 		t.Fatalf("request not sent")
 	}
 
 	// Disconnect the peer.
-	close(peer.quit)
+	close(ctx.peer.quit)
 
 	// The worker should respond with a job failure.
 	var result *jobResult
 	select {
-	case result = <-jobResults:
+	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
@@ -317,14 +305,14 @@ func TestWorkerDisconnect(t *testing.T) {
 	}
 
 	// And the correct peer.
-	if result.peer != peer {
+	if result.peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.peer)
 	}
 
 	// No more jobs should be accepted by the worker after it has exited.
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 		t.Fatalf("exited worker did pick up job")
 	default:
 	}
@@ -347,23 +335,19 @@ func TestWorkerProgress(t *testing.T) {
 		t.Fatalf("unable to start worker: %v", err)
 	}
 
-	nextJob := ctx.nextJob
-	jobResults := ctx.jobResults
-	peer := ctx.peer
-
 	// Create a task with a small timeout, and give it to the worker.
 	task := makeJob()
 	task.timeout = 50 * time.Millisecond
 
 	select {
-	case nextJob <- task:
+	case ctx.nextJob <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
 
 	// The request should be given to the peer.
 	select {
-	case <-peer.requests:
+	case <-ctx.peer.requests:
 	case <-time.After(time.Second):
 		t.Fatalf("request not sent")
 	}
@@ -374,7 +358,7 @@ func TestWorkerProgress(t *testing.T) {
 	// making progress, the timeout won't trigger.
 	for i := 0; i < 5; i++ {
 		select {
-		case peer.responses <- progressResp:
+		case ctx.peer.responses <- progressResp:
 		case <-time.After(time.Second):
 			t.Fatalf("resp not received")
 		}
@@ -384,7 +368,7 @@ func TestWorkerProgress(t *testing.T) {
 
 	// Finally send the final response.
 	select {
-	case peer.responses <- finalResp:
+	case ctx.peer.responses <- finalResp:
 	case <-time.After(time.Second):
 		t.Fatalf("resp not received")
 	}
@@ -392,7 +376,7 @@ func TestWorkerProgress(t *testing.T) {
 	// The worker should respond with a job finised.
 	var result *jobResult
 	select {
-	case result = <-jobResults:
+	case result = <-ctx.jobResults:
 	case <-time.After(time.Second):
 		t.Fatalf("response not received")
 	}
@@ -407,9 +391,9 @@ func TestWorkerProgress(t *testing.T) {
 	}
 
 	// And the correct peer.
-	if result.peer != peer {
+	if result.peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
-			peer.Addr(), result.peer)
+			ctx.peer.Addr(), result.peer)
 	}
 }
 
@@ -423,10 +407,6 @@ func TestWorkerJobCanceled(t *testing.T) {
 		t.Fatalf("unable to start worker: %v", err)
 	}
 
-	nextJob := ctx.nextJob
-	jobResults := ctx.jobResults
-	peer := ctx.peer
-
 	cancelChan := make(chan struct{})
 
 	// Give the worker a new job.
@@ -439,7 +419,7 @@ func TestWorkerJobCanceled(t *testing.T) {
 	canceled := false
 	for i := 0; i < 2; i++ {
 		select {
-		case nextJob <- task:
+		case ctx.nextJob <- task:
 		case <-time.After(1 * time.Second):
 			t.Fatalf("did not pick up job")
 		}
@@ -448,7 +428,7 @@ func TestWorkerJobCanceled(t *testing.T) {
 		// to the peer.
 		if !canceled {
 			select {
-			case <-peer.requests:
+			case <-ctx.peer.requests:
 			case <-time.After(time.Second):
 				t.Fatalf("request not sent")
 			}
@@ -460,7 +440,7 @@ func TestWorkerJobCanceled(t *testing.T) {
 			// If it was already canceled, it should not be given
 			// to the peer.
 			select {
-			case <-peer.requests:
+			case <-ctx.peer.requests:
 				t.Fatalf("canceled job was given to peer")
 			case <-time.After(10 * time.Millisecond):
 			}
@@ -469,7 +449,7 @@ func TestWorkerJobCanceled(t *testing.T) {
 		// The worker should respond with a job failure.
 		var result *jobResult
 		select {
-		case result = <-jobResults:
+		case result = <-ctx.jobResults:
 		case <-time.After(time.Second):
 			t.Fatalf("response not received")
 		}
@@ -484,9 +464,9 @@ func TestWorkerJobCanceled(t *testing.T) {
 		}
 
 		// And the correct peer.
-		if result.peer != peer {
+		if result.peer != ctx.peer {
 			t.Fatalf("expected peer to be %v, was %v",
-				peer.Addr(), result.peer)
+				ctx.peer.Addr(), result.peer)
 		}
 	}
 }
