@@ -1,6 +1,6 @@
 package query
 
-// Task is an interface that have a method for returning their index in the
+// Task is an interface that has a method for returning their index in the
 // work queue.
 type Task interface {
 	// Index returns this Task's index in the work queue.
@@ -46,6 +46,7 @@ func (w *workQueue) Push(x interface{}) {
 func (w *workQueue) Pop() interface{} {
 	n := len(w.tasks)
 	x := w.tasks[n-1]
+	w.tasks[n-1] = nil
 	w.tasks = w.tasks[0 : n-1]
 	return x
 }
