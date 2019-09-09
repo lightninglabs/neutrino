@@ -666,6 +666,7 @@ type ChainService struct {
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
 	workManager          *query.WorkManager
+	queryDispatcher      query.Dispatcher
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -737,6 +738,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
 	})
+	s.queryDispatcher = s.workManager
 
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
