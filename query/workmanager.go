@@ -3,7 +3,6 @@ package query
 import (
 	"container/heap"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -11,6 +10,12 @@ import (
 const (
 	minQueryTimeout = 2 * time.Second
 	maxQueryTimeout = 32 * time.Second
+)
+
+var (
+	// ErrWorkManagerShuttingDown will be returned in case the WorkManager
+	// is in the process of exiting.
+	ErrWorkManagerShuttingDown = errors.New("WorkManager shutting down")
 )
 
 type batch struct {
@@ -74,12 +79,16 @@ type Config struct {
 	// ConnectedPeers is a function that returns a channel where all
 	// connected peers will be sent. It is assumed that all current peers
 	// will be sent imemdiately, and new peers as they connect.
+	//
+	// The returned function closure is called to cancel the subscription.
 	ConnectedPeers func() (<-chan Peer, func(), error)
 
 	// NewWorker is function closure that should start a new worker. We
 	// make this configurable to easily mock the worker used during tests.
 	NewWorker func() Worker
 
+	// Ranking is used to rank the connected peers when determining who to
+	// give work to.
 	Ranking PeerRanking
 }
 
@@ -160,7 +169,7 @@ func (w *WorkManager) workDispatcher() {
 	}
 
 	// We set up a batch index counter to keep track of batches that still
-	// have queries in in flight. This let us track when all queries for a
+	// have queries in flight. This lets us track when all queries for a
 	// batch has been finished, and return an (non-)error to the caller.
 	batchIndex := uint64(0)
 	currentBatches := make(map[uint64]*batchProgress)
@@ -169,7 +178,7 @@ func (w *WorkManager) workDispatcher() {
 	// batches and send on their error channel.
 	defer func() {
 		for _, b := range currentBatches {
-			b.errChan <- errors.New("WorkManager shutting down")
+			b.errChan <- ErrWorkManagerShuttingDown
 		}
 	}()
 
@@ -198,7 +207,6 @@ Loop:
 				}
 
 				freeWorkers = append(freeWorkers, p)
-
 			}
 
 			// Use the historical data to rank them.
@@ -312,11 +320,9 @@ Loop:
 				// If the query ended with any other error, put
 				// it back into the work queue.
 				default:
-					log.Warnf("Query(%d) failed "+
-						"with error: %v. "+
-						"Rescheduling",
-						result.job.index,
-						result.err)
+					log.Warnf("Query(%d) failed with "+
+						"error: %v. Rescheduling",
+						result.job.index, result.err)
 
 					// If it was a timeout, we dynamically
 					// increase it for the next attempt.
@@ -344,17 +350,16 @@ Loop:
 			default:
 				// Get the batch and decrement the number of
 				// queries remaining.
-				b, ok := currentBatches[batchNum]
-				if ok {
-					b.rem--
+				if batch != nil {
+					batch.rem--
 					log.Tracef("Remaining jobs for batch "+
-						"%v: %v ", batchNum, b.rem)
+						"%v: %v ", batchNum, batch.rem)
 
 					// If this was the last query in flight
 					// for this batch, we can notify that
 					// it finished, and delete it.
-					if b.rem == 0 {
-						b.errChan <- nil
+					if batch.rem == 0 {
+						batch.errChan <- nil
 						delete(currentBatches, batchNum)
 						log.Tracef("Batch %v done",
 							batchNum)
@@ -435,7 +440,7 @@ func (w *WorkManager) Query(requests []*Request,
 		errChan:  errChan,
 	}:
 	case <-w.quit:
-		errChan <- fmt.Errorf("workmanager shutting down")
+		errChan <- ErrWorkManagerShuttingDown
 	}
 
 	return errChan
