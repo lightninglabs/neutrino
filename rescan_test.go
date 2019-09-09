@@ -487,3 +487,180 @@ func (ctx *rescanTestContext) assertFilterQueried(hash chainhash.Hash) {
 		ctx.t.Fatal("expected rescan to query for filter")
 	}
 }
+
+// TestRescanNewBlockAfterRetry ensures that the rescan can properly queue
+// blocks for which we are missing a filter for.
+func TestRescanNewBlockAfterRetry(t *testing.T) {
+	t.Parallel()
+
+	// Dummy options to allow the Rescan to fetch block filters.
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve block filters.
+	ctx.chain.setFailGetFilter(true)
+
+	// Adding multiple new blocks to the chain should result in the first
+	// retry block being queried until successful.
+	block1 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block1.Hash)
+	block2 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block1.Hash)
+
+	// Revert the mocked chain so that block filters can be retrieved
+	// successfully.
+	ctx.chain.setFailGetFilter(false)
+
+	// The blocks should now be notified in their expected order.
+	ctx.assertFilterQueried(block1.Hash)
+	ctx.recvBlockConnected(block1)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
+}
+
+// TestRescanReorgAllButFirstRetryBlocks ensures the rescan stops retrying
+// blocks for which it has received disconnected notifications for.
+func TestRescanReorgAllButFirstRetryBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Dummy options to allow the Rescan to fetch block filters.
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve block filters.
+	ctx.chain.setFailGetFilter(true)
+
+	// Adding multiple new blocks to the chain should result in the first
+	// retry block being queried until successful.
+	block := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+
+	// We'll then reorg back to the first retry block. This should cause us
+	// to stop retrying the following reorged blocks.
+	ctx.chain.rollbackToHeight(block.Height, true)
+
+	// Revert the mocked chain so that block filters can be retrieved
+	// successfully.
+	ctx.chain.setFailGetFilter(false)
+
+	// Since the first block wasn't reorged, we should expect a notification
+	// for it.
+	ctx.assertFilterQueried(block.Hash)
+	ctx.recvBlockConnected(block)
+}
+
+// TestRescanReorgAllRetryBlocks ensures the rescan stops retrying blocks for
+// which it has received disconnected notifications for and queries for blocks
+// of the new chain instead.
+func TestRescanReorgAllRetryBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Dummy options to allow the Rescan to fetch block filters.
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Note the block which we'll revert back to.
+	bestBlock, err := ctx.chain.BestBlock()
+	if err != nil {
+		ctx.t.Fatalf("unable to retrieve best block: %v", err)
+	}
+
+	// Modify the mocked chain such that it fails to retrieve block filters.
+	ctx.chain.setFailGetFilter(true)
+
+	// Adding multiple new blocks to the chain should result in the first
+	// retry block being queried until successful.
+	block1 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block1.Hash)
+	block2 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block1.Hash)
+
+	// We'll then reorg back to a height where the new blocks we've added
+	// and retried are stale, causing us to no longer retry them. The rescan
+	// won't deliver any disconnected notifications to its caller since it
+	// never delivered connected notifications for them.
+	ctx.chain.rollbackToHeight(bestBlock.Height, true)
+
+	// Revert the mocked chain so that block filters can be retrieved
+	// successfully.
+	ctx.chain.setFailGetFilter(false)
+
+	// We'll then add two new blocks from a different chain to ensure the
+	// rescan can properly follow it.
+	newBlock1 := ctx.chain.addNewBlockWithHeader(
+		&wire.BlockHeader{PrevBlock: bestBlock.Hash}, true,
+	)
+	if newBlock1.Hash == block1.Hash {
+		ctx.t.Fatal("expected different hashes for blocks on " +
+			"different chains")
+	}
+	ctx.assertFilterQueried(newBlock1.Hash)
+	ctx.recvBlockConnected(newBlock1)
+
+	newBlock2 := ctx.chain.addNewBlock(true)
+	if newBlock2.Hash == block2.Hash {
+		ctx.t.Fatal("expected different hashes for blocks on " +
+			"different chains")
+	}
+	ctx.assertFilterQueried(newBlock2.Hash)
+	ctx.recvBlockConnected(newBlock2)
+}
+
+// TestRescanRetryBlocksAfterCatchingUp ensures the rescan stops retrying blocks
+// after catching up with the chain. Catching up assumes that we already have an
+// accurate representation of the chain.
+func TestRescanRetryBlocksAfterCatchingUp(t *testing.T) {
+	t.Parallel()
+
+	// Dummy options to allow the Rescan to fetch block filters.
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve block filters.
+	ctx.chain.setFailGetFilter(true)
+
+	// Adding multiple new blocks to the chain should result in the first
+	// retry block being queried until successful.
+	block1 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block1.Hash)
+
+	// We'll prevent notifying new blocks and instead notify an invalid
+	// block which should prompt the rescan to catch up with the chain
+	// manually.
+	block2 := ctx.chain.addNewBlock(false)
+	block3 := ctx.chain.addNewBlock(false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(wire.BlockHeader{}, 0)
+
+	// Revert the mocked chain so that block filters can be retrieved
+	// successfully.
+	ctx.chain.setFailGetFilter(false)
+
+	// The notifications for all the blocks added above should now be
+	// delivered as part of catching up.
+	ctx.assertFilterQueried(block1.Hash)
+	ctx.recvBlockConnected(block1)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
+	ctx.assertFilterQueried(block3.Hash)
+	ctx.recvBlockConnected(block3)
+}
