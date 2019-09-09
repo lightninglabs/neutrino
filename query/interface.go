@@ -103,6 +103,12 @@ type Request struct {
 	// should validate the response against the request made, and return a
 	// QueryProgress indicating whether the request was answered by this
 	// particular response.
+	//
+	// NOTE: Since the worker's job queue will be stalled while this method
+	// is running, it should not be doing any expensive operations. It
+	// should validate the response and immediately return the progress.
+	// The response should be handed off to another goroutine for
+	// processing.
 	HandleResp func(req, resp wire.Message, peer string) QueryProgress
 }
 
