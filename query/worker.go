@@ -110,7 +110,7 @@ func (w *worker) Run(peer Peer, results chan<- *jobResult,
 		}
 
 		select {
-		// There is no point in queieing the request if the job already
+		// There is no point in queueing the request if the job already
 		// is canceled, so we check this quickly.
 		case <-job.cancelChan:
 			log.Tracef("Worker %v found job with index %v "+
