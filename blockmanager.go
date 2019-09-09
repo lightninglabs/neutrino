@@ -104,10 +104,19 @@ type blockManagerCfg struct {
 	// ChainParams is the chain that we're running on.
 	ChainParams chaincfg.Params
 
-	BlockHeaders     headerfs.BlockHeaderStore
-	RegFilterHeaders *headerfs.FilterHeaderStore
-	TimeSource       blockchain.MedianTimeSource
+	// BlockHeaders is the store where blockheaders are persistently
+	// stored.
+	BlockHeaders headerfs.BlockHeaderStore
 
+	// RegFilterHeaders is the store where filter headers for the regular
+	// compact filters are persistently stored.
+	RegFilterHeaders *headerfs.FilterHeaderStore
+
+	// TimeSource is used to access a time estimate based on the clocks of
+	// the connected peers.
+	TimeSource blockchain.MedianTimeSource
+
+	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
 
 	// GetBlock fetches a block from the p2p network.
