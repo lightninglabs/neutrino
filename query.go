@@ -20,33 +20,19 @@ import (
 )
 
 var (
-	// QueryTimeout specifies how long to wait for a peer to answer a
+	// queryTimeout specifies how long to wait for a peer to answer a
 	// query.
-	QueryTimeout = time.Second * 10
-
-	// QueryBatchTimout is the total time we'll wait for a batch fetch
-	// query to complete.
-	// TODO(halseth): instead use timeout since last received response?
-	QueryBatchTimeout = time.Second * 30
-
-	// QueryPeerCooldown is the time we'll wait before re-assigning a query
-	// to a peer that previously failed because of a timeout.
-	QueryPeerCooldown = time.Second * 5
+	queryTimeout = time.Second * 10
 
 	// QueryNumRetries specifies how many times to retry sending a query to
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
 	// instances.
-	QueryNumRetries = 2
-
-	// QueryPeerConnectTimeout specifies how long to wait for the
-	// underlying chain service to connect to a peer before giving up
-	// on a query in case we don't have any peers.
-	QueryPeerConnectTimeout = time.Second * 30
+	queryNumRetries = 2
 
 	// QueryEncoding specifies the default encoding (witness or not) for
 	// `getdata` and other similar messages.
-	QueryEncoding = wire.WitnessEncoding
+	queryEncoding = wire.WitnessEncoding
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -62,18 +48,9 @@ type queryOptions struct {
 	// the query.
 	numRetries uint8
 
-	// peerConnectTimeout lets the query know how long to wait for the
-	// underlying chain service to connect to a peer before giving up
-	// on a query in case we don't have any peers.
-	peerConnectTimeout time.Duration
-
 	// encoding lets the query know which encoding to use when queueing
 	// messages to a peer.
 	encoding wire.MessageEncoding
-
-	// doneChan lets the query signal the caller when it's done, in case
-	// it's run in a goroutine.
-	doneChan chan<- struct{}
 
 	// persistToDisk indicates whether the filter should also be written
 	// to disk in addition to the memory cache. For "normal" wallets, they'll
@@ -114,11 +91,10 @@ type QueryOption func(*queryOptions)
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
 func defaultQueryOptions() *queryOptions {
 	return &queryOptions{
-		timeout:            QueryTimeout,
-		numRetries:         uint8(QueryNumRetries),
-		peerConnectTimeout: QueryPeerConnectTimeout,
-		encoding:           QueryEncoding,
-		optimisticBatch:    noBatch,
+		timeout:         queryTimeout,
+		numRetries:      uint8(queryNumRetries),
+		encoding:        queryEncoding,
+		optimisticBatch: noBatch,
 	}
 }
 
@@ -145,28 +121,11 @@ func NumRetries(numRetries uint8) QueryOption {
 	}
 }
 
-// PeerConnectTimeout is a query option that lets the query know how long to
-// wait for the underlying chain service to connect to a peer before giving up
-// on a query in case we don't have any peers.
-func PeerConnectTimeout(timeout time.Duration) QueryOption {
-	return func(qo *queryOptions) {
-		qo.peerConnectTimeout = timeout
-	}
-}
-
 // Encoding is a query option that allows the caller to set a message encoding
 // for the query messages.
 func Encoding(encoding wire.MessageEncoding) QueryOption {
 	return func(qo *queryOptions) {
 		qo.encoding = encoding
-	}
-}
-
-// DoneChan allows the caller to pass a channel that will get closed when the
-// query is finished.
-func DoneChan(doneChan chan<- struct{}) QueryOption {
-	return func(qo *queryOptions) {
-		qo.doneChan = doneChan
 	}
 }
 
@@ -234,7 +193,7 @@ const (
 // the query API into its own package?
 
 // queryAllPeers is a helper function that sends a query to all peers and waits
-// for a timeout specified by the QueryTimeout package-level variable or the
+// for a timeout specified by the queryTimeout package-level variable or the
 // Timeout functional option. The NumRetries option is set to 1 by default
 // unless overridden by the caller.
 func (s *ChainService) queryAllPeers(
@@ -313,11 +272,6 @@ func (s *ChainService) queryAllPeers(
 		// Make sure our main goroutine and the subscription know to
 		// quit.
 		close(allQuit)
-
-		// Close the done channel, if any.
-		if qo.doneChan != nil {
-			close(qo.doneChan)
-		}
 	}()
 
 	// Loop for any messages sent to us via our subscription channel and
