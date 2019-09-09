@@ -330,6 +330,8 @@ func TestWorkerDisconnect(t *testing.T) {
 func TestWorkerProgress(t *testing.T) {
 	t.Parallel()
 
+	const taskTimeout = 50 * time.Millisecond
+
 	ctx, err := startWorker()
 	if err != nil {
 		t.Fatalf("unable to start worker: %v", err)
@@ -337,7 +339,7 @@ func TestWorkerProgress(t *testing.T) {
 
 	// Create a task with a small timeout, and give it to the worker.
 	task := makeJob()
-	task.timeout = 50 * time.Millisecond
+	task.timeout = taskTimeout
 
 	select {
 	case ctx.nextJob <- task:
@@ -363,7 +365,7 @@ func TestWorkerProgress(t *testing.T) {
 			t.Fatalf("resp not received")
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(taskTimeout / 2)
 	}
 
 	// Finally send the final response.
