@@ -78,23 +78,32 @@ func Cancel(cancel chan struct{}) QueryOption {
 	}
 }
 
-// Query is the main struct that defines a bitcoin network query to be sent to
+// QueryProgress encloses the result of handling a response for a given
+// Request, determining whether the response did progress the query.
+type QueryProgress struct {
+	// Finished is true if the query was finished as a result of the
+	// received response.
+	Finished bool
+
+	// Progressed is true if the query made progress towards fully
+	// answering the request as a result of the recived response. This is
+	// used for the requests types where more than one response is
+	// expected.
+	Progressed bool
+}
+
+// Request is the main struct that defines a bitcoin network query to be sent to
 // connected peers.
-type Query struct {
+type Request struct {
 	// Req is the message request to send.
 	Req wire.Message
 
 	// HandleResp is a response handler that will be called for every
 	// message received from the peer that the request was made to. It
-	// should validate the response against the request made, and return
-	// whether the request was answered by this particular response.
-	//
-	// The first bool returned indicates whether the request was fully
-	// answered by this response. If the response did not fully answer the
-	// request, the second boolean indicates whether the response did
-	// make progress towards answering the request. This is used for the
-	// requests types where more than one response is expected.
-	HandleResp func(req, resp wire.Message, peer string) (bool, bool)
+	// should validate the response against the request made, and return a
+	// QueryProgress indicating whether the request was answered by this
+	// particular response.
+	HandleResp func(req, resp wire.Message, peer string) QueryProgress
 }
 
 // QueryAccess is an interface defining the API for making queries to bitcoin
@@ -104,7 +113,7 @@ type QueryAccess interface {
 	// peers. It returns an error channel where the final result of the
 	// batch of queries will be sent. Responses for the individual queries
 	// should be handled by the response handler of each Query.
-	Query(queries []*Query, options ...QueryOption) chan error
+	Query(queries []*Request, options ...QueryOption) chan error
 }
 
 // Peer is the interface that defines the methods needed by the query package
