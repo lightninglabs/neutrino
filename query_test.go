@@ -23,6 +23,7 @@ import (
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 var (
@@ -272,23 +273,19 @@ func TestBlockCache(t *testing.T) {
 		}
 	}
 
-	// Set up a ChainService with a BlockCache that can fit the first half
-	// of the blocks.
-	cs := &ChainService{
-		BlockCache:   lru.NewCache(size),
-		BlockHeaders: headers,
-		chainParams: chaincfg.Params{
-			PowLimit: maxPowLimit,
-		},
-		timeSource: blockchain.NewMedianTime(),
-	}
-
 	// We'll set up the queryPeers method to make sure we are only querying
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
+	query := func(qs []*query.Request,
+		options ...query.QueryOption) chan error {
+
+		if len(qs) != 1 {
+			t.Fatalf("Expected single query")
+		}
+
+		q := qs[0]
+		msg := q.Req
 
 		getData, ok := msg.(*wire.MsgGetData)
 		if !ok {
@@ -311,13 +308,9 @@ func TestBlockCache(t *testing.T) {
 
 				// Execute the callback with the found block,
 				// and wait for the quit channel to be closed.
-				quit := make(chan struct{})
-				f(nil, b.MsgBlock(), quit)
-
-				select {
-				case <-quit:
-				case <-time.After(1 * time.Second):
-					t.Fatalf("channel not closed")
+				progress := q.HandleResp(msg, b.MsgBlock(), "")
+				if !progress.Finished {
+					t.Fatalf("wrong block")
 				}
 
 				// Notify the test about the query.
@@ -327,11 +320,31 @@ func TestBlockCache(t *testing.T) {
 					t.Fatalf("query was not handled")
 				}
 
-				return
+				errChan := make(chan error, 1)
+				errChan <- nil
+				return errChan
 			}
 		}
 
 		t.Fatalf("queried for unknown block: %v", inv.Hash)
+
+		errChan := make(chan error, 1)
+		errChan <- fmt.Errorf("test failure")
+		return errChan
+	}
+
+	// Set up a ChainService with a BlockCache that can fit the first half
+	// of the blocks.
+	cs := &ChainService{
+		BlockCache:   lru.NewCache(size),
+		BlockHeaders: headers,
+		chainParams: chaincfg.Params{
+			PowLimit: maxPowLimit,
+		},
+		timeSource: blockchain.NewMedianTime(),
+		queryDispatcher: &mockDispatcher{
+			query: query,
+		},
 	}
 
 	// fetchAndAssertPeersQueried calls GetBlock and makes sure the block

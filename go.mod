@@ -8,6 +8,7 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.0.0
 	github.com/btcsuite/btcwallet/wtxmgr v1.0.0
 	github.com/davecgh/go-spew v1.1.1
+	github.com/kkdai/bstream v0.0.0-20181106074824-b3251f7901ec // indirect
 	github.com/lightningnetwork/lnd/queue v1.0.1
 )
 

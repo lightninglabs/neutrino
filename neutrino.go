@@ -27,6 +27,7 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // These are exported variables so they can be changed by users.
@@ -138,6 +139,13 @@ type spMsgSubscription struct {
 	quitChan <-chan struct{}
 }
 
+// msgSubscription sends all messages from a peer over a channel, allowing
+// pluggable filtering of the messages.
+type msgSubscription struct {
+	msgChan  chan<- wire.Message
+	quitChan <-chan struct{}
+}
+
 // ServerPeer extends the peer to maintain state shared by the server and the
 // blockmanager.
 type ServerPeer struct {
@@ -161,19 +169,23 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	recvSubscribers map[spMsgSubscription]struct{}
-	mtxSubscribers  sync.RWMutex
+	// TODO(halseth): remove one of the maps when all queries go through
+	// work manager.
+	recvSubscribers  map[spMsgSubscription]struct{}
+	recvSubscribers2 map[msgSubscription]struct{}
+	mtxSubscribers   sync.RWMutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:          s,
-		persistent:      isPersistent,
-		knownAddresses:  make(map[string]struct{}),
-		quit:            make(chan struct{}),
-		recvSubscribers: make(map[spMsgSubscription]struct{}),
+		server:           s,
+		persistent:       isPersistent,
+		knownAddresses:   make(map[string]struct{}),
+		quit:             make(chan struct{}),
+		recvSubscribers:  make(map[spMsgSubscription]struct{}),
+		recvSubscribers2: make(map[msgSubscription]struct{}),
 	}
 }
 
@@ -479,6 +491,23 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 			}
 		}(subscription)
 	}
+	for subscription := range sp.recvSubscribers2 {
+		// Quickly determine if this subscription has been canceled, if
+		// so delete it.
+		select {
+		case <-subscription.quitChan:
+			delete(sp.recvSubscribers2, subscription)
+			continue
+		default:
+		}
+
+		go func(subscription msgSubscription) {
+			select {
+			case <-subscription.quitChan:
+			case subscription.msgChan <- msg:
+			}
+		}(subscription)
+	}
 }
 
 // subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
@@ -494,6 +523,43 @@ func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	delete(sp.recvSubscribers, subscription)
+}
+
+// A compile-time check to ensure that ServerPeer implements the query.Peer
+// interface.
+var _ query.Peer = (*ServerPeer)(nil)
+
+// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
+// messages received from this peer will be sent on the returned channel. A
+// closure is also returned, that should be called to cancel the subscription.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	// We won't have to buffer this channel, since we'll always send on it
+	// from a new goroutine.
+	msgChan := make(chan wire.Message)
+	quitChan := make(chan struct{})
+
+	sub := msgSubscription{
+		msgChan:  msgChan,
+		quitChan: quitChan,
+	}
+
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	sp.recvSubscribers2[sub] = struct{}{}
+
+	return msgChan, func() {
+		close(quitChan)
+	}
+}
+
+// OnDisconnect returns a channel that will be closed when this peer is
+// disconnected.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) OnDisconnect() <-chan struct{} {
+	return sp.quit
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
@@ -554,6 +620,13 @@ type Config struct {
 	AssertFilterHeader *headerfs.FilterHeader
 }
 
+// peerSubscription holds a peer subscription which we'll notify about any
+// connected peers.
+type peerSubscription struct {
+	peers  chan<- query.Peer
+	cancel <-chan struct{}
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -569,16 +642,6 @@ type ChainService struct {
 
 	FilterCache *lru.Cache
 	BlockCache  *lru.Cache
-
-	// queryPeers will be called to send messages to one or more peers,
-	// expecting a response.
-	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
-		chan<- struct{}), ...QueryOption)
-
-	// queryBatch will be called to distribute a batch of messages across
-	// our connected peers.
-	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
-		wire.Message) bool, <-chan struct{}, ...QueryOption)
 
 	chainParams          chaincfg.Params
 	addrManager          *addrmgr.AddrManager
@@ -597,6 +660,12 @@ type ChainService struct {
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+	workManager          *query.WorkManager
+	queryDispatcher      query.Dispatcher
+
+	// peerSubscribers is a slice of active peer subscriptions, that we
+	// will notify each time a new peer is connected.
+	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -659,20 +728,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		nameResolver:      nameResolver,
 		dialer:            dialer,
 	}
-
-	// We set the queryPeers method to point to queryChainServicePeers,
-	// passing a reference to the newly created ChainService.
-	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
-		queryChainServicePeers(&s, msg, f, qo...)
-	}
-
-	// We do the same for queryBatch.
-	s.queryBatch = func(msgs []wire.Message, f func(*ServerPeer,
-		wire.Message, wire.Message) bool, q <-chan struct{},
-		qo ...QueryOption) {
-		queryChainServiceBatch(&s, msgs, f, q, qo...)
-	}
+	s.workManager = query.New(&query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Ranking:        query.NewPeerRanking(),
+	})
+	s.queryDispatcher = s.workManager
 
 	var err error
 
@@ -707,7 +768,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&s, s.firstPeerConnect)
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      s.chainParams,
+		BlockHeaders:     s.BlockHeaders,
+		RegFilterHeaders: s.RegFilterHeaders,
+		TimeSource:       s.timeSource,
+		QueryDispatcher:  s.workManager,
+		BanPeer:          s.BanPeer,
+		GetBlock:         s.GetBlock,
+		queryAllPeers:    s.queryAllPeers,
+	}, s.firstPeerConnect)
 	if err != nil {
 		return nil, err
 	}
@@ -1001,62 +1071,6 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 		atomic.LoadUint64(&s.bytesSent)
 }
 
-// rollBackToHeight rolls back all blocks until it hits the specified height.
-// It sends notifications along the way.
-func (s *ChainService) rollBackToHeight(height uint32) (*headerfs.BlockStamp, error) {
-	header, headerHeight, err := s.BlockHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-	bs := &headerfs.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
-	}
-
-	_, regHeight, err := s.RegFilterHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-
-	for uint32(bs.Height) > height {
-		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
-		if err != nil {
-			return nil, err
-		}
-
-		newTip := &header.PrevBlock
-
-		// Only roll back filter headers if they've caught up this far.
-		if uint32(bs.Height) <= regHeight {
-			newFilterTip, err := s.RegFilterHeaders.RollbackLastBlock(newTip)
-			if err != nil {
-				return nil, err
-			}
-			regHeight = uint32(newFilterTip.Height)
-		}
-
-		bs, err = s.BlockHeaders.RollbackLastBlock()
-		if err != nil {
-			return nil, err
-		}
-
-		// Notifications are asynchronous, so we include the previous
-		// header in the disconnected notification in case we're rolling
-		// back farther and the notification subscriber needs it but
-		// can't read it before it's deleted from the store.
-		prevHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
-		if err != nil {
-			return nil, err
-		}
-
-		// Now we send the block disconnected notifications.
-		s.blockManager.onBlockDisconnected(
-			*header, headerHeight, *prevHeader,
-		)
-	}
-	return bs, nil
-}
-
 // peerHandler is used to handle peer operations such as adding and removing
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
@@ -1256,6 +1270,31 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
 		s.addrManager.Connected(sp.NA())
 	}
+
+	// We'll go through each peer subscriber and notify it about the added
+	// peer.
+	i := 0
+	for _, sub := range s.peerSubscribers {
+		select {
+		case sub.peers <- sp:
+
+		// Ignore subscription if it has been cancelled.
+		case <-sub.cancel:
+			// Avoid GC leak.
+			s.peerSubscribers[i] = nil
+			continue
+
+		case <-s.quit:
+			return false
+		}
+
+		// Keep non-canceled subscribers around.
+		s.peerSubscribers[i] = sub
+		i++
+	}
+
+	// Re-align the slice to only active subscribers.
+	s.peerSubscribers = s.peerSubscribers[:i]
 
 	return true
 }
@@ -1466,6 +1505,7 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
+	s.workManager.Start()
 
 	s.utxoScanner.Start()
 
@@ -1495,6 +1535,7 @@ func (s *ChainService) Stop() error {
 	s.connManager.Stop()
 	s.broadcaster.Stop()
 	s.utxoScanner.Stop()
+	s.workManager.Stop()
 	s.blockSubscriptionMgr.Stop()
 	s.blockManager.Stop()
 	s.addrManager.Stop()
