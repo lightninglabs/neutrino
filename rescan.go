@@ -725,6 +725,9 @@ rescanLoop:
 					// ourselves to not be current in order
 					// to attempt catching up with the chain
 					// ourselves.
+					//
+					// TODO(wilmer): determine if the error
+					// is fatal and return it?
 					default:
 						log.Errorf("Unable to process "+
 							"%v: %v", ntfn, err)
@@ -789,6 +792,9 @@ rescanLoop:
 					// ourselves to not be current in order
 					// to attempt catching up with the chain
 					// ourselves.
+					//
+					// TODO(wilmer): determine if the error
+					// is fatal and return it?
 					default:
 						log.Errorf("Unable to process "+
 							"retry of %v: %v",
