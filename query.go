@@ -1224,8 +1224,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		// If there are elements left to receive, the query failed.
 		if len(query.headerIndex) > 0 {
 			numFilters := query.stopHeight - query.startHeight + 1
+			numRecv := numFilters - int64(len(query.headerIndex))
 			log.Errorf("Query failed with %d out of %d filters "+
-				"received", len(query.headerIndex), numFilters)
+				"received", numRecv, numFilters)
 			return
 		}
 	}()
@@ -1240,11 +1241,13 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 		case filter, ok = <-query.filterChan:
 			if !ok {
-				// Query has finished, if we have a result we'll return it.				
+				// Query has finished, if we have a result we'll
+				// return it.
 				return resultFilter, nil
 			}
 
-			// We'll store the filter so we can return it later to the caller.
+			// We'll store the filter so we can return it later to
+			// the caller.
 			resultFilter = filter
 
 		case <-s.quit:
