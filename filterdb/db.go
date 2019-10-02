@@ -7,7 +7,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 )
 
 var (
@@ -56,7 +56,7 @@ type FilterDatabase interface {
 // FilterStore is an implementation of the FilterDatabase interface which is
 // backed by boltdb.
 type FilterStore struct {
-	db walletdb.DB
+	db *bbolt.DB
 
 	chainParams chaincfg.Params
 }
@@ -67,12 +67,12 @@ var _ FilterDatabase = (*FilterStore)(nil)
 
 // New creates a new instance of the FilterStore given an already open
 // database, and the target chain parameters.
-func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
-	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+func New(db *bbolt.DB, params chaincfg.Params) (*FilterStore, error) {
+	err := db.Update(func(tx *bbolt.Tx) error {
 		// As part of our initial setup, we'll try to create the top
 		// level filter bucket. If this already exists, then we can
 		// exit early.
-		filters, err := tx.CreateTopLevelBucket(filterBucket)
+		filters, err := tx.CreateBucket(filterBucket)
 		if err != nil {
 			return err
 		}
@@ -98,7 +98,7 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 
 		return putFilter(regFilters, genesisHash, basicFilter)
 	})
-	if err != nil && err != walletdb.ErrBucketExists {
+	if err != nil && err != bbolt.ErrBucketExists {
 		return nil, err
 	}
 
@@ -110,7 +110,7 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 // putFilter stores a filter in the database according to the corresponding
 // block hash. The passed bucket is expected to be the proper bucket for the
 // passed filter type.
-func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
+func putFilter(bucket *bbolt.Bucket, hash *chainhash.Hash,
 	filter *gcs.Filter) error {
 
 	if filter == nil {
@@ -132,13 +132,13 @@ func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
 func (f *FilterStore) PutFilter(hash *chainhash.Hash,
 	filter *gcs.Filter, fType FilterType) error {
 
-	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
-		filters := tx.ReadWriteBucket(filterBucket)
+	return f.db.Update(func(tx *bbolt.Tx) error {
+		filters := tx.Bucket(filterBucket)
 
-		var targetBucket walletdb.ReadWriteBucket
+		var targetBucket *bbolt.Bucket
 		switch fType {
 		case RegularFilter:
-			targetBucket = filters.NestedReadWriteBucket(regBucket)
+			targetBucket = filters.Bucket(regBucket)
 		default:
 			return fmt.Errorf("unknown filter type: %v", fType)
 		}
@@ -165,13 +165,13 @@ func (f *FilterStore) FetchFilter(blockHash *chainhash.Hash,
 
 	var filter *gcs.Filter
 
-	err := walletdb.View(f.db, func(tx walletdb.ReadTx) error {
-		filters := tx.ReadBucket(filterBucket)
+	err := f.db.View(func(tx *bbolt.Tx) error {
+		filters := tx.Bucket(filterBucket)
 
-		var targetBucket walletdb.ReadBucket
+		var targetBucket *bbolt.Bucket
 		switch filterType {
 		case RegularFilter:
-			targetBucket = filters.NestedReadBucket(regBucket)
+			targetBucket = filters.Bucket(regBucket)
 		default:
 			return fmt.Errorf("unknown filter type")
 		}

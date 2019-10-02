@@ -16,7 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -39,7 +39,7 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			"temporary directory: %s", err)
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	db, err := bbolt.Open(tempDir+"/weks.db", 0600, nil)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, nil, nil, nil, fmt.Errorf("Error opening DB: %s",

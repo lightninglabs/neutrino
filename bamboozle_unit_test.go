@@ -13,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -550,7 +550,7 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 	}
 	defer os.RemoveAll(tempDir)
 
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	db, err := bbolt.Open(tempDir+"/weks.db", 0600, nil)
 	if err != nil {
 		t.Fatalf("Error opening DB: %s", err)
 	}

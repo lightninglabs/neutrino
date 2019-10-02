@@ -7,6 +7,7 @@ require (
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.0.0
 	github.com/btcsuite/btcwallet/walletdb v1.0.0
 	github.com/btcsuite/btcwallet/wtxmgr v1.0.0
+	github.com/coreos/bbolt v1.3.3
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightningnetwork/lnd/queue v1.0.1
 )

@@ -26,8 +26,8 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/coreos/bbolt"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -1111,7 +1111,7 @@ func TestNeutrinoSync(t *testing.T) {
 		t.Fatalf("Failed to create temporary directory: %s", err)
 	}
 	defer os.RemoveAll(tempDir)
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db")
+	db, err := bbolt.Open(tempDir+"/weks.db", 0600, nil)
 	defer db.Close()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)

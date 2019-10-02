@@ -7,8 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/coreos/bbolt"
 )
 
 func createTestIndex() (func(), *headerIndex, error) {
@@ -17,7 +16,7 @@ func createTestIndex() (func(), *headerIndex, error) {
 		return nil, nil, err
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/test.db")
+	db, err := bbolt.Open(tempDir+"/test.db", 0600, nil)
 	if err != nil {
 		return nil, nil, err
 	}

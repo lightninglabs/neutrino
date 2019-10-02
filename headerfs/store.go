@@ -14,7 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs/builder"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 )
 
 // BlockStamp represents a block, identified by its height and time stamp in
@@ -105,7 +105,7 @@ type headerStore struct {
 // newHeaderStore creates a new headerStore given an already open database, a
 // target file path for the flat-file and a particular header type. The target
 // file will be created as necessary.
-func newHeaderStore(db walletdb.DB, filePath string,
+func newHeaderStore(db *bbolt.DB, filePath string,
 	hType HeaderType) (*headerStore, error) {
 
 	var flatFileName string
@@ -159,7 +159,7 @@ var _ BlockHeaderStore = (*blockHeaderStore)(nil)
 // parameters for the target chain. These parameters are required as if this is
 // the initial start up of the blockHeaderStore, then the initial genesis
 // header will need to be inserted.
-func NewBlockHeaderStore(filePath string, db walletdb.DB,
+func NewBlockHeaderStore(filePath string, db *bbolt.DB,
 	netParams *chaincfg.Params) (BlockHeaderStore, error) {
 
 	hStore, err := newHeaderStore(db, filePath, Block)
@@ -502,10 +502,10 @@ func (h *blockHeaderStore) CheckConnectivity() error {
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
 
-	return walletdb.View(h.db, func(tx walletdb.ReadTx) error {
+	return h.db.View(func(tx *bbolt.Tx) error {
 		// First, we'll fetch the root bucket, in order to use that to
 		// fetch the bucket that houses the header index.
-		rootBucket := tx.ReadBucket(indexBucket)
+		rootBucket := tx.Bucket(indexBucket)
 
 		// With the header bucket retrieved, we'll now fetch the chain
 		// tip so we can start our backwards scan.
@@ -609,7 +609,7 @@ type FilterHeaderStore struct {
 // parameters are required as if this is the initial start up of the
 // FilterHeaderStore, then the initial genesis filter header will need to be
 // inserted.
-func NewFilterHeaderStore(filePath string, db walletdb.DB,
+func NewFilterHeaderStore(filePath string, db *bbolt.DB,
 	filterType HeaderType, netParams *chaincfg.Params,
 	headerStateAssertion *FilterHeader) (*FilterHeaderStore, error) {
 

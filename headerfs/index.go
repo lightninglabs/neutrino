@@ -7,7 +7,7 @@ import (
 	"sort"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 )
 
 var (
@@ -73,23 +73,23 @@ const (
 // crafted in order to ensure maximum write performance during IBD, and also to
 // provide the necessary indexing properties required.
 type headerIndex struct {
-	db walletdb.DB
+	db *bbolt.DB
 
 	indexType HeaderType
 }
 
 // newHeaderIndex creates a new headerIndex given an already open database, and
 // a particular header type.
-func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) {
+func newHeaderIndex(db *bbolt.DB, indexType HeaderType) (*headerIndex, error) {
 	// As an initially step, we'll attempt to create all the buckets
 	// necessary for functioning of the index. If these buckets has already
 	// been created, then we can exit early.
-	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		_, err := tx.CreateTopLevelBucket(indexBucket)
+	err := db.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucket(indexBucket)
 		return err
 
 	})
-	if err != nil && err != walletdb.ErrBucketExists {
+	if err != nil && err != bbolt.ErrBucketExists {
 		return nil, err
 	}
 
@@ -146,8 +146,8 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 	// items are sorted by their hash before insertion into the database.
 	sort.Sort(batch)
 
-	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
+	return h.db.Update(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		var tipKey []byte
 
@@ -195,8 +195,8 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 // spot in the flat files in order to extract the true header.
 func (h *headerIndex) heightFromHash(hash *chainhash.Hash) (uint32, error) {
 	var height uint32
-	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		rootBucket := tx.ReadBucket(indexBucket)
+	err := h.db.View(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		heightBytes := rootBucket.Get(hash[:])
 		if heightBytes == nil {
@@ -222,8 +222,8 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 		tipHash   *chainhash.Hash
 	)
 
-	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		rootBucket := tx.ReadBucket(indexBucket)
+	err := h.db.View(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		var tipKey []byte
 
@@ -271,8 +271,8 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 // chain tip. Optionally, if the entry is to be deleted as well, then the
 // delete flag should be set to true.
 func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
-	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
+	return h.db.Update(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		var tipKey []byte
 

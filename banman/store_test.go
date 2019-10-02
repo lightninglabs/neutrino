@@ -8,8 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/coreos/bbolt"
 	"github.com/lightninglabs/neutrino/banman"
 )
 
@@ -23,7 +22,7 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 	}
 	dbPath := filepath.Join(dbDir, "test.db")
 
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := bbolt.Open(dbPath, 0600, nil)
 	if err != nil {
 		os.RemoveAll(dbDir)
 		t.Fatalf("unable to create db: %v", err)

@@ -15,11 +15,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 	"github.com/davecgh/go-spew/spew"
 )
 
-func createTestBlockHeaderStore() (func(), walletdb.DB, string,
+func createTestBlockHeaderStore() (func(), *bbolt.DB, string,
 	*blockHeaderStore, error) {
 	tempDir, err := ioutil.TempDir("", "store_test")
 	if err != nil {
@@ -27,7 +27,8 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	}
 
 	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath)
+
+	db, err := bbolt.Open(dbPath, 0600, nil)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -223,14 +224,14 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 	}
 }
 
-func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderStore, error) {
+func createTestFilterHeaderStore() (func(), *bbolt.DB, string, *FilterHeaderStore, error) {
 	tempDir, err := ioutil.TempDir("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
 
 	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := bbolt.Open(dbPath, 0600, nil)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -281,8 +282,8 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 
 	// We simulate the expected behavior of the block headers being written
 	// to disk before the filter headers are.
-	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
+	if err := fhs.db.Update(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		for _, header := range blockHeaders {
 			var heightBytes [4]byte
@@ -393,8 +394,8 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 
 	// We simulate the expected behavior of the block headers being written
 	// to disk before the filter headers are.
-	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
-		rootBucket := tx.ReadWriteBucket(indexBucket)
+	if err := fhs.db.Update(func(tx *bbolt.Tx) error {
+		rootBucket := tx.Bucket(indexBucket)
 
 		for _, header := range blockHeaders {
 			var heightBytes [4]byte
@@ -522,7 +523,7 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 	const chainTip = 10
 	filterHeaderChain := createTestFilterHeaderChain(chainTip)
 
-	setup := func(t *testing.T) (func(), string, walletdb.DB) {
+	setup := func(t *testing.T) (func(), string, *bbolt.DB) {
 		cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
 		if err != nil {
 			t.Fatalf("unable to create new filter header store: %v",
@@ -531,8 +532,8 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 
 		// We simulate the expected behavior of the block headers being
 		// written to disk before the filter headers are.
-		if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
-			rootBucket := tx.ReadWriteBucket(indexBucket)
+		if err := fhs.db.Update(func(tx *bbolt.Tx) error {
+			rootBucket := tx.Bucket(indexBucket)
 
 			for _, header := range filterHeaderChain {
 				var heightBytes [4]byte

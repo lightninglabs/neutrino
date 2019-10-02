@@ -20,7 +20,7 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/coreos/bbolt"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
@@ -510,7 +510,7 @@ type Config struct {
 
 	// Database is an *open* database instance that we'll use to storm
 	// indexes of teh chain.
-	Database walletdb.DB
+	Database *bbolt.DB
 
 	// ChainParams is the chain that we're running on.
 	ChainParams chaincfg.Params
