@@ -14,6 +14,7 @@ install:
   - mkdir -p $GOPATH/src/github.com/btcsuite/
   - "[ -d $GOPATH/src/github.com/btcsuite/btcd ] || git clone https://github.com/btcsuite/btcd.git $GOPATH/src/github.com/btcsuite/btcd"
   - pushd $GOPATH/src/github.com/btcsuite/btcd
+  - git checkout .
   - $GOPATH/src/github.com/lightninglabs/neutrino/btcd_checkout.sh
   - go install . ./cmd/...
   - popd
