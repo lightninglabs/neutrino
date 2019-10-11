@@ -48,6 +48,10 @@ var (
 	// QueryEncoding specifies the default encoding (witness or not) for
 	// `getdata` and other similar messages.
 	QueryEncoding = wire.WitnessEncoding
+
+	// ErrFilterFetchFailed is returned in case fetching a compact filter
+	// fails.
+	ErrFilterFetchFailed = fmt.Errorf("unable to fetch cfilter")
 )
 
 // QueryAccess is an interface that gives acces to query a set of peers in
@@ -1210,7 +1214,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		defer close(query.filterChan)
 
 		s.queryPeers(
-			// Send a wire.MsgGetCFilters
+			// Send a wire.MsgGetCFilters.
 			query.queryMsg(),
 
 			// Check responses and if we get one that matches, end
@@ -1243,6 +1247,10 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			if !ok {
 				// Query has finished, if we have a result we'll
 				// return it.
+				if resultFilter == nil {
+					return nil, ErrFilterFetchFailed
+				}
+
 				return resultFilter, nil
 			}
 
@@ -1251,11 +1259,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			resultFilter = filter
 
 		case <-s.quit:
-			// TODO(halseth): return error?
-			return nil, nil
+			return nil, ErrShuttingDown
 		}
 	}
-
 }
 
 // GetBlock gets a block by requesting it from the network, one peer at a
