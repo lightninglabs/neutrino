@@ -289,7 +289,7 @@ func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
 	defer c.mu.Unlock()
 
 	if c.failGetFilter {
-		return nil, nil
+		return nil, errors.New("failed filter")
 	}
 
 	filter, ok := c.filters[hash]

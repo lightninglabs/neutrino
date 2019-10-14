@@ -562,22 +562,13 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		blockFilter, err := chain.GetCFilter(
 			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 		)
-
-		switch {
-		// If the block index doesn't know about this block, then it's
-		// likely we're mid re-org so we'll accept this as we account
-		// for it below.
-		case err == headerfs.ErrHashNotFound:
-
-		case err != nil:
-			return fmt.Errorf("unable to get filter for hash=%v: %v",
-				curStamp.Hash, err)
-		}
-
-		// If the filter is nil, then this either means that we don't
-		// have any peers to fetch this filter from, or the peer(s) that
-		// we're trying to fetch from are in the progress of a re-org.
-		if blockFilter == nil {
+		if err != nil {
+			// If the query failed, then this either means that we
+			// don't have any peers to fetch this filter from, or
+			// the peer(s) that we're trying to fetch from are in
+			// the progress of a re-org.
+			log.Errorf("unable to get filter for hash=%v, "+
+				"retrying: %v", curStamp.Hash, err)
 			return errRetryBlock
 		}
 
@@ -1080,7 +1071,7 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 
 	// If we found the filter, then we'll check the items in the watch list
 	// against it.
-	if filter != nil && filter.N() != 0 {
+	if filter.N() != 0 {
 		return matchBlockFilter(ro, filter, blockHash)
 	}
 
