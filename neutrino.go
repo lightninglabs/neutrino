@@ -252,10 +252,9 @@ func (sp *ServerPeer) pushSendHeadersMsg() error {
 }
 
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
-// to send the "sendheaders" command to peers that are of a sufficienty new
-// protocol version.
+// to kick start communication with them.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
-	sp.pushSendHeadersMsg()
+	sp.server.AddPeer(sp)
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
@@ -322,8 +321,6 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		}
 	}
 
-	// Add valid peer to the server.
-	sp.server.AddPeer(sp)
 	return nil
 }
 
@@ -1336,8 +1333,8 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 func newPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
-			OnVersion: sp.OnVersion,
-			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
+			OnVersion:   sp.OnVersion,
+			OnVerAck:    sp.OnVerAck,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnReject:    sp.OnReject,
