@@ -241,16 +241,6 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 	}
 }
 
-// pushSendHeadersMsg sends a sendheaders message to the connected peer.
-func (sp *ServerPeer) pushSendHeadersMsg() error {
-	if sp.VersionKnown() {
-		if sp.ProtocolVersion() > wire.SendHeadersVersion {
-			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
-		}
-	}
-	return nil
-}
-
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
 // to kick start communication with them.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
