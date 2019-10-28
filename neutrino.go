@@ -241,21 +241,10 @@ func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
 	}
 }
 
-// pushSendHeadersMsg sends a sendheaders message to the connected peer.
-func (sp *ServerPeer) pushSendHeadersMsg() error {
-	if sp.VersionKnown() {
-		if sp.ProtocolVersion() > wire.SendHeadersVersion {
-			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
-		}
-	}
-	return nil
-}
-
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
-// to send the "sendheaders" command to peers that are of a sufficienty new
-// protocol version.
+// to kick start communication with them.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
-	sp.pushSendHeadersMsg()
+	sp.server.AddPeer(sp)
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
@@ -286,47 +275,16 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		return nil
 	}
 
-	// Signal the block manager this peer is a new sync candidate.
-	sp.server.blockManager.NewPeer(sp)
-
-	// Update the address manager and request known addresses from the
-	// remote peer for outbound connections.  This is skipped when running
-	// on the simulation test network since it is only intended to connect
-	// to specified peers and actively avoids advertising and connecting to
-	// discovered peers.
-	if sp.server.chainParams.Net != chaincfg.SimNetParams.Net {
-		addrManager := sp.server.addrManager
-
-		// Request known addresses if the server address manager needs
-		// more and the peer has a protocol version new enough to
-		// include a timestamp with addresses.
-		hasTimestamp := sp.ProtocolVersion() >=
-			wire.NetAddressTimeVersion
-		if addrManager.NeedMoreAddresses() && hasTimestamp {
-			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
-		}
-
-		// Add the address to the addr manager anew, and also mark it
-		// as a good address.
-		sp.server.addrManager.AddAddresses(
-			[]*wire.NetAddress{sp.NA()}, sp.NA(),
-		)
-		addrManager.Good(sp.NA())
-
-		// Update the address manager with the advertised services for
-		// outbound connections in case they have changed. This is not
-		// done for inbound connections to help prevent malicious
-		// behavior and is skipped when running on the simulation test
-		// network since it is only intended to connect to specified
-		// peers and actively avoids advertising and connecting to
-		// discovered peers.
-		if !sp.Inbound() {
-			sp.server.addrManager.SetServices(sp.NA(), msg.Services)
-		}
+	// Update the address manager with the advertised services for outbound
+	// connections in case they have changed. This is not done for inbound
+	// connections to help prevent malicious behavior and is skipped when
+	// running on the simulation test network since it is only intended to
+	// connect to specified peers and actively avoids advertising and
+	// connecting to discovered peers.
+	if !sp.Inbound() {
+		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
 	}
 
-	// Add valid peer to the server.
-	sp.server.AddPeer(sp)
 	return nil
 }
 
@@ -1207,7 +1165,7 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
 func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
-	if sp == nil {
+	if sp == nil || !sp.Connected() {
 		return false
 	}
 
@@ -1255,6 +1213,29 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	// version and has sent us its version as well.
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
 		s.addrManager.Connected(sp.NA())
+	}
+
+	// Signal the block manager this peer is a new sync candidate.
+	s.blockManager.NewPeer(sp)
+
+	// Update the address manager and request known addresses from the
+	// remote peer for outbound connections. This is skipped when running on
+	// the simulation test network since it is only intended to connect to
+	// specified peers and actively avoids advertising and connecting to
+	// discovered peers.
+	if s.chainParams.Net != chaincfg.SimNetParams.Net {
+		// Request known addresses if the server address manager needs
+		// more and the peer has a protocol version new enough to
+		// include a timestamp with addresses.
+		hasTimestamp := sp.ProtocolVersion() >= wire.NetAddressTimeVersion
+		if s.addrManager.NeedMoreAddresses() && hasTimestamp {
+			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
+		}
+
+		// Add the address to the addr manager anew, and also mark it as
+		// a good address.
+		s.addrManager.AddAddresses([]*wire.NetAddress{sp.NA()}, sp.NA())
+		s.addrManager.Good(sp.NA())
 	}
 
 	return true
@@ -1336,8 +1317,8 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 func newPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
-			OnVersion: sp.OnVersion,
-			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
+			OnVersion:   sp.OnVersion,
+			OnVerAck:    sp.OnVerAck,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnReject:    sp.OnReject,
