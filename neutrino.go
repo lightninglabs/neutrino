@@ -255,6 +255,17 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// the local clock to keep the network time in sync.
 	sp.server.timeSource.AddTimeSample(sp.Addr(), msg.Timestamp)
 
+	// If the peer doesn't allow us to relay any transactions to them, then
+	// we won't add them as a peer, as they aren't of much use to us.
+	if msg.DisableRelayTx {
+		log.Debugf("%v does not allow transaction relay, disconecting",
+			sp)
+
+		sp.Disconnect()
+
+		return nil
+	}
+
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
