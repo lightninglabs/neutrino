@@ -836,6 +836,126 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	return err
 }
 
+// checkpointedCFHeadersQuery holds all information necessary to perform and
+// handle a query for checkpointed filter headers.
+type checkpointedCFHeadersQuery struct {
+	blockMgr    *blockManager
+	msgs        []wire.Message
+	checkpoints []*chainhash.Hash
+	stopHashes  map[chainhash.Hash]uint32
+	headerChan  chan *wire.MsgCFHeaders
+}
+
+// requests creates the query.Requests for this CF headers query.
+func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
+	var reqs []*query.Request
+	for _, m := range c.msgs {
+		reqs = append(reqs, &query.Request{
+			Req:        m,
+			HandleResp: c.handleResponse,
+		})
+	}
+	return reqs
+}
+
+// handleResponse is the internal response handler used for requests for this
+// CFHeaders query.
+func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
+	peerAddr string) query.Progress {
+
+	r, ok := resp.(*wire.MsgCFHeaders)
+	if !ok {
+		// We are only looking for cfheaders messages.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	q, ok := req.(*wire.MsgGetCFHeaders)
+	if !ok {
+		// We sent a getcfheaders message, so that's what we should be
+		// comparing against.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// The response doesn't match the query.
+	if q.FilterType != r.FilterType || q.StopHash != r.StopHash {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	checkPointIndex, ok := c.stopHashes[r.StopHash]
+	if !ok {
+		// We never requested a matching stop hash.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// Use either the genesis header or the previous checkpoint index as
+	// the previous checkpoint when verifying that the filter headers in
+	// the response match up.
+	prevCheckpoint := &c.blockMgr.genesisHeader
+	if checkPointIndex > 0 {
+		prevCheckpoint = c.checkpoints[checkPointIndex-1]
+	}
+
+	// The index of the next checkpoint will depend on whether the query
+	// was able to allocate maxCFCheckptsPerQuery.
+	nextCheckPointIndex := checkPointIndex + maxCFCheckptsPerQuery - 1
+	if nextCheckPointIndex >= uint32(len(c.checkpoints)) {
+		nextCheckPointIndex = uint32(len(c.checkpoints)) - 1
+	}
+	nextCheckpoint := c.checkpoints[nextCheckPointIndex]
+
+	// The response doesn't match the checkpoint.
+	if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
+		log.Warnf("Checkpoints at index %v don't match response!!!",
+			checkPointIndex)
+
+		// If the peer gives us a header that doesn't match what we
+		// know to be the best checkpoint, then we'll ban the peer so
+		// we can re-allocate the query elsewhere.
+		err := c.blockMgr.cfg.BanPeer(
+			peerAddr, banman.InvalidFilterHeaderCheckpoint,
+		)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
+		}
+
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// At this point, the response matches the query, and the relevant
+	// checkpoint we got earlier, so we'll deliver the verified headers on
+	// the headerChan.  We'll also return a Progress indicating the query
+	// finished, that the peer looking for the answer to this query can
+	// move on to the next query.
+	select {
+	case c.headerChan <- r:
+	case <-c.blockMgr.quit:
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	return query.Progress{
+		Finished:   true,
+		Progressed: true,
+	}
+}
+
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
 // matches the checkpoints up to the tip of the store.
@@ -946,122 +1066,19 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// amongst all active peers, effectively sharding each query
 	// dynamically.
 	headerChan := make(chan *wire.MsgCFHeaders, len(queryMsgs))
-
-	var msgs []*query.Request
-	for _, m := range queryMsgs {
-		handleResp := func(req, resp wire.Message,
-			peerAddr string) query.Progress {
-
-			r, ok := resp.(*wire.MsgCFHeaders)
-			if !ok {
-				// We are only looking for cfheaders messages.
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			q, ok := req.(*wire.MsgGetCFHeaders)
-			if !ok {
-				// We sent a getcfheaders message, so that's
-				// what we should be comparing against.
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			// The response doesn't match the query.
-			if q.FilterType != r.FilterType ||
-				q.StopHash != r.StopHash {
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			checkPointIndex, ok := stopHashes[r.StopHash]
-			if !ok {
-				// We never requested a matching stop hash.
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			// Use either the genesis header or the previous
-			// checkpoint index as the previous checkpoint when
-			// verifying that the filter headers in the response
-			// match up.
-			prevCheckpoint := &b.genesisHeader
-			if checkPointIndex > 0 {
-				prevCheckpoint = checkpoints[checkPointIndex-1]
-			}
-
-			// The index of the next checkpoint will depend on
-			// whether the query was able to allocate
-			// maxCFCheckptsPerQuery.
-			nextCheckPointIndex := checkPointIndex + maxCFCheckptsPerQuery - 1
-			if nextCheckPointIndex >= uint32(len(checkpoints)) {
-				nextCheckPointIndex = uint32(len(checkpoints)) - 1
-			}
-			nextCheckpoint := checkpoints[nextCheckPointIndex]
-
-			// The response doesn't match the checkpoint.
-			if !verifyCheckpoint(prevCheckpoint, nextCheckpoint, r) {
-				log.Warnf("Checkpoints at index %v don't match "+
-					"response!!!", checkPointIndex)
-
-				// If the peer gives us a header that doesn't
-				// match what we know to be the best
-				// checkpoint, then we'll ban the peer so we
-				// can re-allocate the query elsewhere.
-				err := b.cfg.BanPeer(
-					peerAddr,
-					banman.InvalidFilterHeaderCheckpoint,
-				)
-				if err != nil {
-					log.Errorf("Unable to ban peer %v: %v",
-						peerAddr, err)
-				}
-
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			// At this point, the response matches the query, and
-			// the relevant checkpoint we got earlier, so we'll
-			// deliver the verified headers on the headerChan.
-			// We'll also return a Progress indicating the query
-			// finished, that the peer looking for the answer to
-			// this query can move on to the next query.
-			select {
-			case headerChan <- r:
-			case <-b.quit:
-				return query.Progress{
-					Finished:   false,
-					Progressed: false,
-				}
-			}
-
-			return query.Progress{
-				Finished:   true,
-				Progressed: true,
-			}
-
-		}
-
-		msgs = append(msgs, &query.Request{
-			Req:        m,
-			HandleResp: handleResp,
-		})
+	q := checkpointedCFHeadersQuery{
+		blockMgr:    b,
+		msgs:        queryMsgs,
+		checkpoints: checkpoints,
+		stopHashes:  stopHashes,
+		headerChan:  headerChan,
 	}
 
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
-	errChan := b.cfg.QueryDispatcher.Query(msgs, query.Cancel(b.quit))
+	errChan := b.cfg.QueryDispatcher.Query(
+		q.requests(), query.Cancel(b.quit),
+	)
 
 	// Keep waiting for more headers as long as we haven't received an
 	// answer for our last checkpoint, and no error is encountered.
