@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/pushtx"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -39,6 +40,7 @@ func UseLogger(logger btclog.Logger) {
 	blockntfns.UseLogger(logger)
 	pushtx.UseLogger(logger)
 	connmgr.UseLogger(logger)
+	query.UseLogger(logger)
 }
 
 // logClosure is used to provide a closure over expensive logging operations so
