@@ -623,6 +623,7 @@ type ChainService struct {
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+	workManager          *query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -689,6 +690,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		nameResolver:      nameResolver,
 		dialer:            dialer,
 	}
+	s.workManager = query.New(&query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Ranking:        query.NewPeerRanking(),
+	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
@@ -735,6 +741,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BlockHeaders:     s.BlockHeaders,
 		RegFilterHeaders: s.RegFilterHeaders,
 		TimeSource:       s.timeSource,
+		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
@@ -1511,6 +1518,7 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
+	s.workManager.Start()
 
 	s.utxoScanner.Start()
 
@@ -1540,6 +1548,7 @@ func (s *ChainService) Stop() error {
 	s.connManager.Stop()
 	s.broadcaster.Stop()
 	s.utxoScanner.Stop()
+	s.workManager.Stop()
 	s.blockSubscriptionMgr.Stop()
 	s.blockManager.Stop()
 	s.addrManager.Stop()
