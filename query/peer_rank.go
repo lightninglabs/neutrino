@@ -25,8 +25,12 @@ type peerRanking struct {
 	rank map[string]uint64
 }
 
+// A compile time check to ensure peerRanking satisfies the PeerRanking
+// interface.
+var _ PeerRanking = (*peerRanking)(nil)
+
 // NewPeerRanking returns a new, empty ranking.
-func NewPeerRanking() *peerRanking {
+func NewPeerRanking() PeerRanking {
 	return &peerRanking{
 		rank: make(map[string]uint64),
 	}
