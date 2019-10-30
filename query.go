@@ -54,20 +54,6 @@ var (
 	ErrFilterFetchFailed = fmt.Errorf("unable to fetch cfilter")
 )
 
-// QueryAccess is an interface that gives acces to query a set of peers in
-// different ways.
-type QueryAccess interface {
-	queryAllPeers(
-		queryMsg wire.Message,
-		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
-		options ...QueryOption)
-}
-
-// A compile-time check to ensure that ChainService implements the
-// QueryAccess interface.
-var _ QueryAccess = (*ChainService)(nil)
-
 // queries are a set of options that can be modified per-query, unlike global
 // options.
 //
