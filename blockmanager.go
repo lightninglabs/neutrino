@@ -131,9 +131,6 @@ type blockManagerCfg struct {
 	// try to perform any queries before we have our first peer.
 	firstPeerSignal <-chan struct{}
 
-	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
-		wire.Message) bool, <-chan struct{}, ...QueryOption)
-
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
