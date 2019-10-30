@@ -578,6 +578,13 @@ type Config struct {
 	AssertFilterHeader *headerfs.FilterHeader
 }
 
+// peerSubscription holds a peer subscription which we'll notify about any
+// connected peers.
+type peerSubscription struct {
+	peers  chan<- query.Peer
+	cancel <-chan struct{}
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -616,6 +623,10 @@ type ChainService struct {
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+
+	// peerSubscribers is a slice of active peer subscriptions, that we
+	// will notify each time a new peer is connected.
+	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -1250,7 +1261,48 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		s.addrManager.Good(sp.NA())
 	}
 
+	// We'll go through each peer subscriber and notify it about the added
+	// peer.
+	n := 0
+	for i, sub := range s.peerSubscribers {
+		select {
+		// Quickly check whether this subscription has been canceled.
+		case <-sub.cancel:
+			// Avoid GC leak.
+			s.peerSubscribers[i] = nil
+			continue
+		default:
+		}
+
+		// Keep non-canceled subscribers around.
+		s.peerSubscribers[n] = sub
+		n++
+
+		// Send a notification in a goroutine to avoid blocking the
+		// peerHandler.
+		s.wg.Add(1)
+		go s.notifyConnectedPeer(sub, sp)
+	}
+
+	// Re-align the slice to only active subscribers.
+	s.peerSubscribers = s.peerSubscribers[:n]
+
 	return true
+}
+
+// notifyConnectedPeer sends the given peer to the peerSubsription.
+//
+// NOTE: MUST be run as a goroutine.
+func (s *ChainService) notifyConnectedPeer(
+	sub *peerSubscription, sp *ServerPeer) {
+
+	defer s.wg.Done()
+
+	select {
+	case sub.peers <- sp:
+	case <-sub.cancel:
+	case <-s.quit:
+	}
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
