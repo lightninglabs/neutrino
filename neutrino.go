@@ -1251,16 +1251,14 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		list = state.outboundPeers
 	}
 	if _, ok := list[sp.ID()]; ok {
-		if !sp.Inbound() && sp.VersionKnown() {
+		if sp.VersionKnown() {
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		}
-		if !sp.Inbound() {
-			if sp.persistent {
-				s.connManager.Disconnect(sp.connReq.ID())
-			} else {
-				s.connManager.Remove(sp.connReq.ID())
-				go s.connManager.NewConnReq()
-			}
+		if sp.persistent {
+			s.connManager.Disconnect(sp.connReq.ID())
+		} else {
+			s.connManager.Remove(sp.connReq.ID())
+			go s.connManager.NewConnReq()
 		}
 		delete(list, sp.ID())
 		log.Debugf("Removed peer %s", sp)
