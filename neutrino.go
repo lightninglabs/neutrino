@@ -1254,7 +1254,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		if !sp.Inbound() && sp.VersionKnown() {
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		}
-		if !sp.Inbound() && sp.connReq != nil {
+		if !sp.Inbound() {
 			if sp.persistent {
 				s.connManager.Disconnect(sp.connReq.ID())
 			} else {
@@ -1268,13 +1268,8 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 
 	// We'll always remove peers that are not persistent.
-	if sp.connReq != nil {
-		s.connManager.Remove(sp.connReq.ID())
-		go s.connManager.NewConnReq()
-	}
-
-	// If we get here it means that either we didn't know about the peer
-	// or we purposefully deleted it.
+	s.connManager.Remove(sp.connReq.ID())
+	go s.connManager.NewConnReq()
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
