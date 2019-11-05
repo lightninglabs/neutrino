@@ -20,6 +20,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // maxHeight is the height we will generate filter headers up to. We use an odd
@@ -27,6 +28,21 @@ import (
 // only able to fetch filter headers for one checkpoint interval rather than
 // two.
 const maxHeight = 21 * uint32(wire.CFCheckptInterval)
+
+// mockDispatcher implements the query.Dispatcher interface and allows us to
+// set up a custom Query method during tests.
+type mockDispatcher struct {
+	query func(requests []*query.Request,
+		options ...query.QueryOption) chan error
+}
+
+var _ query.Dispatcher = (*mockDispatcher)(nil)
+
+func (m *mockDispatcher) Query(requests []*query.Request,
+	options ...query.QueryOption) chan error {
+
+	return m.query(requests, options...)
+}
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
@@ -70,24 +86,14 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			"header store: %s", err)
 	}
 
-	banStore, err := banman.NewStore(db)
-	if err != nil {
-		cleanUp()
-		return nil, nil, nil, nil, fmt.Errorf("unable to initialize "+
-			"ban store: %v", err)
-	}
-
-	// Set up a chain service for the block manager. Each test should set
-	// custom query methods on this chain service.
-	cs := &ChainService{
-		chainParams:      chaincfg.SimNetParams,
+	// Set up a blockManager with the chain service we defined.
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      chaincfg.SimNetParams,
 		BlockHeaders:     hdrStore,
 		RegFilterHeaders: cfStore,
-		banStore:         banStore,
-	}
-
-	// Set up a blockManager with the chain service we defined.
-	bm, err := newBlockManager(cs, nil)
+		QueryDispatcher:  &mockDispatcher{},
+		BanPeer:          func(string, banman.Reason) error { return nil },
+	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
@@ -297,6 +303,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 	}
 
 	for _, test := range testCases {
+		test := test
 		testDesc := fmt.Sprintf("permute=%v, partial=%v, repeat=%v",
 			test.permute, test.partialInterval, test.repeat)
 
@@ -346,9 +353,14 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// We set up a custom query batch method for this test, as we
 		// will use this to feed the blockmanager with our crafted
 		// responses.
-		bm.server.queryBatch = func(msgs []wire.Message,
-			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+			requests []*query.Request,
+			options ...query.QueryOption) chan error {
+
+			var msgs []wire.Message
+			for _, q := range requests {
+				msgs = append(msgs, q.Req)
+			}
 
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
@@ -359,38 +371,60 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			// We permute the response order if the test signals
 			// that.
 			perm := rand.Perm(len(responses))
-			for i, v := range perm {
-				index := i
-				if test.permute {
-					index = v
+
+			errChan := make(chan error, 1)
+			go func() {
+				for i, v := range perm {
+					index := i
+					if test.permute {
+						index = v
+					}
+
+					// Before handling the response we take
+					// copies of the message, as we cannot
+					// guarantee that it won't be modified.
+					resp := *responses[index]
+					resp2 := *responses[index]
+
+					// Let the blockmanager handle the
+					// message.
+					progress := requests[index].HandleResp(
+						msgs[index], &resp, "",
+					)
+
+					if !progress.Finished {
+						errChan <- fmt.Errorf("got "+
+							"response false on "+
+							"send of index %d: %v",
+							index, testDesc)
+						return
+					}
+
+					// If we are not testing repeated
+					// responses, go on to the next
+					// response.
+					if !test.repeat {
+						continue
+					}
+
+					// Otherwise resend the response we
+					// just sent.
+					progress = requests[index].HandleResp(
+						msgs[index], &resp2, "",
+					)
+					if !progress.Finished {
+						errChan <- fmt.Errorf("got "+
+							"response false on "+
+							"resend of index %d: "+
+							"%v", index, testDesc)
+						return
+					}
+
 				}
+				errChan <- nil
+			}()
 
-				// Before sending we take a copy of the
-				// message, as we cannot guarantee that it
-				// won't be modified.
-				r := *responses[index]
-
-				// Let the blockmanager handle the message.
-				if !f(nil, msgs[index], responses[index]) {
-					t.Fatalf("got response false on "+
-						"send of index %d: %v",
-						index, testDesc)
-				}
-
-				// If we are not testing repeated responses, go
-				// on to the next response.
-				if !test.repeat {
-					continue
-				}
-
-				// Otherwise resend the response we just sent.
-				if !f(nil, msgs[index], &r) {
-					t.Fatalf("got response false on "+
-						"resend of index %d: %v",
-						index, testDesc)
-				}
-
-			}
+			return errChan
 		}
 
 		// We should expect to see notifications for each new filter
@@ -512,7 +546,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// Create a mock peer to prevent panics when attempting to ban
 		// a peer that served an invalid filter header.
-		mockPeer := newServerPeer(bm.server, false)
+		mockPeer := newServerPeer(&ChainService{}, false)
 		mockPeer.Peer, err = peer.NewOutboundPeer(
 			newPeerConfig(mockPeer), "127.0.0.1:8333",
 		)
@@ -572,10 +606,14 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			}
 		}
 
-		bm.server.queryBatch = func(msgs []wire.Message,
-			f func(*ServerPeer, wire.Message, wire.Message) bool,
-			q <-chan struct{}, qo ...QueryOption) {
+		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+			requests []*query.Request,
+			options ...query.QueryOption) chan error {
 
+			var msgs []wire.Message
+			for _, q := range requests {
+				msgs = append(msgs, q.Req)
+			}
 			responses, err := generateResponses(msgs, headers)
 			if err != nil {
 				t.Fatalf("unable to generate responses: %v",
@@ -608,23 +646,34 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				}
 			}
 
-			// Check that the success of the callback match what we
-			// expect.
-			for i := range responses {
-				success := f(mockPeer, msgs[i], responses[i])
-				if i == test.firstInvalid {
-					if success {
-						t.Fatalf("expected interval "+
-							"%d to be invalid", i)
+			errChan := make(chan error, 1)
+			go func() {
+
+				// Check that the success of the callback match what we
+				// expect.
+				for i := range responses {
+					progress := requests[i].HandleResp(
+						msgs[i], responses[i], "",
+					)
+					if i == test.firstInvalid {
+						if progress.Finished {
+							t.Fatalf("expected interval "+
+								"%d to be invalid", i)
+						}
+						errChan <- fmt.Errorf("invalid interval")
+						break
 					}
-					break
+
+					if !progress.Finished {
+						t.Fatalf("expected interval %d to be "+
+							"valid", i)
+					}
 				}
 
-				if !success {
-					t.Fatalf("expected interval %d to be "+
-						"valid", i)
-				}
-			}
+				errChan <- nil
+			}()
+
+			return errChan
 		}
 
 		// We should expect to see notifications for each new filter
@@ -714,31 +763,6 @@ func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {
 	return nil
 }
 
-type mockQueryAccess struct {
-	answers map[string]wire.Message
-}
-
-func (m *mockQueryAccess) queryAllPeers(
-	queryMsg wire.Message,
-	checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
-	options ...QueryOption) {
-
-	for p, resp := range m.answers {
-		pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
-		if err != nil {
-			panic(err)
-		}
-
-		sp := &ServerPeer{
-			Peer: pp,
-		}
-		checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
-	}
-}
-
-var _ QueryAccess = (*mockQueryAccess)(nil)
-
 // TestBlockManagerDetectBadPeers checks that we detect bad peers, like peers
 // not responding to our filter query, serving inconsistent filters etc.
 func TestBlockManagerDetectBadPeers(t *testing.T) {
@@ -808,17 +832,31 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		// serve a header for the target index.
 		blockHeaders := newMockBlockHeaderStore()
 		blockHeaders.heights[targetIndex] = blockHeader
-		cs := &ChainService{
-			BlockHeaders: blockHeaders,
+
+		// We set up the mock queryAllPeers to only respond according to
+		// the active testcase.
+		answers := make(map[string]wire.Message)
+		queryAllPeers := func(
+			queryMsg wire.Message,
+			checkResponse func(sp *ServerPeer, resp wire.Message,
+				quit chan<- struct{}, peerQuit chan<- struct{}),
+			options ...QueryOption) {
+
+			for p, resp := range answers {
+				pp, err := peer.NewOutboundPeer(&peer.Config{}, p)
+				if err != nil {
+					panic(err)
+				}
+
+				sp := &ServerPeer{
+					Peer: pp,
+				}
+				checkResponse(sp, resp, make(chan struct{}), make(chan struct{}))
+			}
 		}
 
-		// We set up the mock QueryAccess to only respond according to
-		// the active testcase.
-		mock := &mockQueryAccess{
-			answers: make(map[string]wire.Message),
-		}
 		for _, peer := range peers {
-			test.filterAnswers(peer, mock.answers)
+			test.filterAnswers(peer, answers)
 		}
 
 		// For the CFHeaders, we pretend all peers responded with the same
@@ -839,8 +877,10 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		}
 
 		bm := &blockManager{
-			server:  cs,
-			queries: mock,
+			cfg: &blockManagerCfg{
+				BlockHeaders:  blockHeaders,
+				queryAllPeers: queryAllPeers,
+			},
 		}
 
 		// Now trying to detect which peers are bad, we should detect the

@@ -11,10 +11,19 @@ import (
 
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/connmgr"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 type getConnCountMsg struct {
 	reply chan int32
+}
+
+type subConnPeersReply struct {
+	peerChan   chan query.Peer
+	cancelChan chan struct{}
+}
+type subConnPeersMsg struct {
+	reply chan subConnPeersReply
 }
 
 type getPeersMsg struct {
@@ -76,6 +85,28 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			peers = append(peers, sp)
 		})
 		msg.reply <- peers
+
+	// Subscription for connected peers requested.
+	case subConnPeersMsg:
+		// Create a channel and fill it with the current set of
+		// connected peers.
+		cancelChan := make(chan struct{})
+		peerChan := make(chan query.Peer, state.Count())
+		state.forAllPeers(func(sp *ServerPeer) {
+			if !sp.Connected() {
+				return
+			}
+			peerChan <- sp
+		})
+
+		s.peerSubscribers = append(s.peerSubscribers, &peerSubscription{
+			peers:  peerChan,
+			cancel: cancelChan,
+		})
+		msg.reply <- subConnPeersReply{
+			peerChan:   peerChan,
+			cancelChan: cancelChan,
+		}
 
 	case connectNodeMsg:
 		// TODO: duplicate oneshots?
@@ -181,7 +212,31 @@ func (s *ChainService) ConnectedCount() int32 {
 	case <-s.quit:
 		return 0
 	}
+}
 
+// ConnectedPeers is a function that returns a channel where all connected
+// peers will be sent. It is assumed that all current peers will be sent
+// imemdiately, and new peers as they connect.
+func (s *ChainService) ConnectedPeers() (<-chan query.Peer, func(), error) {
+	replyChan := make(chan subConnPeersReply, 1)
+
+	select {
+	case s.query <- subConnPeersMsg{
+		reply: replyChan,
+	}:
+	case <-s.quit:
+		return nil, nil, ErrShuttingDown
+	}
+
+	select {
+	case reply := <-replyChan:
+		return reply.peerChan, func() {
+			close(reply.cancelChan)
+		}, nil
+
+	case <-s.quit:
+		return nil, nil, ErrShuttingDown
+	}
 }
 
 // OutboundGroupCount returns the number of peers connected to the given
