@@ -1257,24 +1257,21 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		delete(list, sp.ID())
 
 		log.Debugf("Removed peer %s", sp)
+	}
 
-		// Only request a new connection if the peer being disconnected
-		// is not persistent. There's no need to do so if the peer is
-		// persistent since the connection manager will attempt to
-		// reconnect.
-		if sp.persistent {
-			s.connManager.Disconnect(sp.connReq.ID())
-		} else {
-			s.connManager.Remove(sp.connReq.ID())
-			go s.connManager.NewConnReq()
-		}
+	// Only request a new connection if the peer being disconnected is not
+	// persistent and we still need more peer connections. There's no need
+	// to do so if the peer is persistent since the connection manager will
+	// attempt to reconnect.
+	if sp.persistent {
+		s.connManager.Disconnect(sp.connReq.ID())
 		return
 	}
 
-	// We'll always request a new connection for peers that have not
-	// completed the version handshake for whatever reason.
 	s.connManager.Remove(sp.connReq.ID())
-	go s.connManager.NewConnReq()
+	if state.Count() < MaxPeers {
+		go s.connManager.NewConnReq()
+	}
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
