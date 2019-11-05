@@ -1244,6 +1244,8 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
 // invoked from the peerHandler goroutine.
 func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
+	// If the peer is being tracked internally, i.e., we received their
+	// VerAck, we'll need to remove them.
 	var list map[int32]*ServerPeer
 	if sp.persistent {
 		list = state.persistentPeers
@@ -1253,17 +1255,24 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	if _, ok := list[sp.ID()]; ok {
 		state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		delete(list, sp.ID())
+
+		log.Debugf("Removed peer %s", sp)
+
+		// Only request a new connection if the peer being disconnected
+		// is not persistent. There's no need to do so if the peer is
+		// persistent since the connection manager will attempt to
+		// reconnect.
 		if sp.persistent {
 			s.connManager.Disconnect(sp.connReq.ID())
 		} else {
 			s.connManager.Remove(sp.connReq.ID())
 			go s.connManager.NewConnReq()
 		}
-		log.Debugf("Removed peer %s", sp)
 		return
 	}
 
-	// We'll always remove peers that are not persistent.
+	// We'll always request a new connection for peers that have not
+	// completed the version handshake for whatever reason.
 	s.connManager.Remove(sp.connReq.ID())
 	go s.connManager.NewConnReq()
 }
