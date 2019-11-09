@@ -1310,6 +1310,8 @@ func (s *ChainService) notifyConnectedPeer(
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
 // invoked from the peerHandler goroutine.
 func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
+	// If the peer is being tracked internally, i.e., we received their
+	// VerAck, we'll need to remove them.
 	var list map[int32]*ServerPeer
 	if sp.persistent {
 		list = state.persistentPeers
@@ -1317,30 +1319,25 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		list = state.outboundPeers
 	}
 	if _, ok := list[sp.ID()]; ok {
-		if !sp.Inbound() && sp.VersionKnown() {
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-		}
-		if !sp.Inbound() && sp.connReq != nil {
-			if sp.persistent {
-				s.connManager.Disconnect(sp.connReq.ID())
-			} else {
-				s.connManager.Remove(sp.connReq.ID())
-				go s.connManager.NewConnReq()
-			}
-		}
+		state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		delete(list, sp.ID())
+
 		log.Debugf("Removed peer %s", sp)
+	}
+
+	// Only request a new connection if the peer being disconnected is not
+	// persistent and we still need more peer connections. There's no need
+	// to do so if the peer is persistent since the connection manager will
+	// attempt to reconnect.
+	if sp.persistent {
+		s.connManager.Disconnect(sp.connReq.ID())
 		return
 	}
 
-	// We'll always remove peers that are not persistent.
-	if sp.connReq != nil {
-		s.connManager.Remove(sp.connReq.ID())
+	s.connManager.Remove(sp.connReq.ID())
+	if state.Count() < MaxPeers {
 		go s.connManager.NewConnReq()
 	}
-
-	// If we get here it means that either we didn't know about the peer
-	// or we purposefully deleted it.
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
