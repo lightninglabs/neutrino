@@ -81,7 +81,7 @@ var headerBufPool = sync.Pool{
 type headerStore struct {
 	mtx sync.RWMutex
 
-	filePath string
+	fileName string
 
 	file *os.File
 
@@ -122,7 +122,7 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}
 
 	return &headerStore{
-		filePath:    filePath,
+		fileName:    flatFileName,
 		file:        headerFile,
 		headerIndex: index,
 	}, nil
@@ -210,7 +210,7 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
 	for fileHeight > tipHeight {
-		if bhs.singleTruncate(); err != nil {
+		if err := bhs.singleTruncate(); err != nil {
 			return nil, err
 		}
 
@@ -596,7 +596,8 @@ type FilterHeaderStore struct {
 // FilterHeaderStore, then the initial genesis filter header will need to be
 // inserted.
 func NewFilterHeaderStore(filePath string, db walletdb.DB,
-	filterType HeaderType, netParams *chaincfg.Params) (*FilterHeaderStore, error) {
+	filterType HeaderType, netParams *chaincfg.Params,
+	headerStateAssertion *FilterHeader) (*FilterHeaderStore, error) {
 
 	fStore, err := newHeaderStore(db, filePath, filterType)
 	if err != nil {
@@ -655,6 +656,25 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		return fhs, nil
 	}
 
+	// If we have a state assertion then we'll check it now to see if we
+	// need to modify our filter header files before we proceed.
+	if headerStateAssertion != nil {
+		reset, err := fhs.maybeResetHeaderState(
+			headerStateAssertion,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// If the filter header store was reset, we'll re-initialize it
+		// to recreate our on-disk state.
+		if reset {
+			return NewFilterHeaderStore(
+				filePath, db, filterType, netParams, nil,
+			)
+		}
+	}
+
 	// As a final initialization step, we'll ensure that the header tip
 	// within the flat files, is in sync with out database index.
 	tipHash, tipHeight, err := fhs.chainTip()
@@ -681,7 +701,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
 	for fileHeight > tipHeight {
-		if fhs.singleTruncate(); err != nil {
+		if err := fhs.singleTruncate(); err != nil {
 			return nil, err
 		}
 
@@ -691,6 +711,42 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// TODO(roasbeef): make above into func
 
 	return fhs, nil
+}
+
+// maybeResetHeaderState will reset the header state if the header assertion
+// fails, but only if the target height is found. The boolean returned indicates
+// that header state was reset.
+func (f *FilterHeaderStore) maybeResetHeaderState(
+	headerStateAssertion *FilterHeader) (bool, error) {
+
+	// First, we'll attempt to locate the header at this height. If no such
+	// header is found, then we'll exit early.
+	assertedHeader, err := f.FetchHeaderByHeight(
+		headerStateAssertion.Height,
+	)
+	if _, ok := err.(*ErrHeaderNotFound); ok {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	// If our on disk state and the provided header assertion don't match,
+	// then we'll purge this state so we can sync it anew once we fully
+	// start up.
+	if *assertedHeader != headerStateAssertion.FilterHash {
+		// Close the file before removing it. This is required by some
+		// OS, e.g., Windows.
+		if err := f.file.Close(); err != nil {
+			return true, err
+		}
+		if err := os.Remove(f.fileName); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // FetchHeader returns the filter header that corresponds to the passed block
@@ -715,6 +771,31 @@ func (f *FilterHeaderStore) FetchHeaderByHeight(height uint32) (*chainhash.Hash,
 	defer f.mtx.RUnlock()
 
 	return f.readHeader(height)
+}
+
+// FetchHeaderAncestors fetches the numHeaders filter headers that are the
+// ancestors of the target stop block hash. A total of numHeaders+1 headers will be
+// returned, as we'll walk back numHeaders distance to collect each header,
+// then return the final header specified by the stop hash. We'll also return
+// the starting height of the header range as well so callers can compute the
+// height of each header without knowing the height of the stop hash.
+func (f *FilterHeaderStore) FetchHeaderAncestors(numHeaders uint32,
+	stopHash *chainhash.Hash) ([]chainhash.Hash, uint32, error) {
+
+	// First, we'll find the final header in the range, this will be the
+	// ending height of our scan.
+	endHeight, err := f.heightFromHash(stopHash)
+	if err != nil {
+		return nil, 0, err
+	}
+	startHeight := endHeight - numHeaders
+
+	headers, err := f.readHeaderRange(startHeight, endHeight)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return headers, startHeight, nil
 }
 
 // FilterHeader represents a filter header (basic or extended). The filter
