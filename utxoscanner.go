@@ -35,6 +35,10 @@ type GetUtxoRequest struct {
 	// request.
 	result *getUtxoResult
 
+	// onProgress is the method to be used by the scanner to report
+	// its progress. It can be nil if not specified by the caller.
+	onProgress ScanProgressHandler
+
 	// mu ensures the first response delivered via resultChan is in fact
 	// what gets cached in result.
 	mu sync.Mutex
@@ -169,7 +173,8 @@ batchShutdown:
 
 // Enqueue takes a GetUtxoRequest and adds it to the next applicable batch.
 func (s *UtxoScanner) Enqueue(input *InputWithScript,
-	birthHeight uint32) (*GetUtxoRequest, error) {
+	birthHeight uint32,
+	progressHandler ScanProgressHandler) (*GetUtxoRequest, error) {
 
 	log.Debugf("Enqueuing request for %s with birth height %d",
 		input.OutPoint.String(), birthHeight)
@@ -178,6 +183,7 @@ func (s *UtxoScanner) Enqueue(input *InputWithScript,
 		Input:       input,
 		BirthHeight: birthHeight,
 		resultChan:  make(chan *getUtxoResult, 1),
+		onProgress:  progressHandler,
 		quit:        s.quit,
 	}
 
@@ -330,6 +336,7 @@ scanToEnd:
 			// If still no match is found, we have no reason to
 			// fetch this block, and can continue to next height.
 			if !match {
+				reporter.NotifyProgress(height)
 				continue
 			}
 		}
@@ -363,6 +370,7 @@ scanToEnd:
 		log.Debugf("Processing block height=%d hash=%s", height, hash)
 
 		reporter.ProcessBlock(block.MsgBlock(), newReqs, height)
+		reporter.NotifyProgress(height)
 	}
 
 	// We've scanned up to the end height, now perform a check to see if we

@@ -42,6 +42,17 @@ func newBatchSpendReporter() *batchSpendReporter {
 	}
 }
 
+// NotifyProgress notifies all requests with the last processed height.
+func (b *batchSpendReporter) NotifyProgress(blockHeight uint32) {
+	for _, requests := range b.requests {
+		for _, r := range requests {
+			if r.onProgress != nil {
+				r.onProgress(blockHeight)
+			}
+		}
+	}
+}
+
 // NotifyUnspentAndUnfound iterates through any requests for which no spends
 // were detected. If we were able to find the initial output, this will be
 // delivered signaling that no spend was detected. If the original output could
