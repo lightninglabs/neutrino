@@ -17,7 +17,7 @@ func createTestIndex() (func(), *headerIndex, error) {
 		return nil, nil, err
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/test.db")
+	db, err := walletdb.Create("bdb", tempDir+"/test.db", true)
 	if err != nil {
 		return nil, nil, err
 	}

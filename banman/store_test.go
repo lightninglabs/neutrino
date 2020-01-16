@@ -23,7 +23,7 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 	}
 	dbPath := filepath.Join(dbDir, "test.db")
 
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := walletdb.Create("bdb", dbPath, true)
 	if err != nil {
 		os.RemoveAll(dbDir)
 		t.Fatalf("unable to create db: %v", err)
