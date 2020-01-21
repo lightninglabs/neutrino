@@ -51,6 +51,9 @@ type FilterDatabase interface {
 	// target block hash cannot be found, then ErrFilterNotFound is to be
 	// returned.
 	FetchFilter(*chainhash.Hash, FilterType) (*gcs.Filter, error)
+
+	// PurgeFilters purge all filters with a given type from persistent storage.
+	PurgeFilters(FilterType) error
 }
 
 // FilterStore is an implementation of the FilterDatabase interface which is
@@ -105,6 +108,29 @@ func New(db walletdb.DB, params chaincfg.Params) (*FilterStore, error) {
 	return &FilterStore{
 		db: db,
 	}, nil
+}
+
+// PurgeFilters purge all filters with a given type from persistent storage.
+//
+// NOTE: This method is a part of the FilterDatabase interface.
+func (f *FilterStore) PurgeFilters(fType FilterType) error {
+	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
+		filters := tx.ReadWriteBucket(filterBucket)
+
+		switch fType {
+		case RegularFilter:
+			if err := filters.DeleteNestedBucket(regBucket); err != nil {
+				return err
+			}
+			if _, err := filters.CreateBucket(regBucket); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown filter type: %v", fType)
+		}
+
+		return nil
+	})
 }
 
 // putFilter stores a filter in the database according to the corresponding
