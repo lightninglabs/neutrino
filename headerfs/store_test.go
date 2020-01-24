@@ -27,7 +27,7 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	}
 
 	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := walletdb.Create("bdb", dbPath, true)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -230,7 +230,7 @@ func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderSt
 	}
 
 	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := walletdb.Create("bdb", dbPath, true)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
