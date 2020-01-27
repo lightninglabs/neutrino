@@ -7,16 +7,11 @@ cache:
     - $GOPATH/src/github.com/golang
     - $GOPATH/src/gopkg.in/alecthomas
 go:
-  - "1.12.x"
+  - "1.13.x"
 sudo: false
 install:
   - export PATH=$PATH:$PWD/linux-amd64/
-  - mkdir -p $GOPATH/src/github.com/ltcsuite/
-  - go get -d github.com/ltcsuite/ltcd
-  - pushd $GOPATH/src/github.com/ltcsuite/ltcd
-  - $GOPATH/src/github.com/lightninglabs/neutrino/ltcd_checkout.sh
-  - go install . ./cmd/...
-  - popd
+  - ./ltcd_checkout.sh
 env:
   matrix:
     - RACE=false

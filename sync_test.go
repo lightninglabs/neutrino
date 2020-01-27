@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btclog"
 	"github.com/ltcsuite/ltcd/btcec"
 	"github.com/ltcsuite/ltcd/btcjson"
 	"github.com/ltcsuite/ltcd/chaincfg"
@@ -22,14 +23,14 @@ import (
 	"github.com/ltcsuite/ltcd/rpcclient"
 	"github.com/ltcsuite/ltcd/txscript"
 	"github.com/ltcsuite/ltcd/wire"
-	"github.com/btcsuite/btclog"
 	"github.com/ltcsuite/ltcutil"
 	"github.com/ltcsuite/ltcutil/gcs/builder"
-	"github.com/ltcsuite/ltcwallet/waddrmgr"
 	"github.com/ltcsuite/ltcwallet/wallet/txauthor"
 	"github.com/ltcsuite/ltcwallet/walletdb"
 	_ "github.com/ltcsuite/ltcwallet/walletdb/bdb"
 	"github.com/ltcsuite/neutrino"
+	"github.com/ltcsuite/neutrino/banman"
+	"github.com/ltcsuite/neutrino/headerfs"
 )
 
 var (
@@ -298,7 +299,7 @@ var (
 	quitRescan                chan struct{}
 	errChan                   <-chan error
 	rescan                    *neutrino.Rescan
-	startBlock                waddrmgr.BlockStamp
+	startBlock                headerfs.BlockStamp
 	secSrc                    *secSource
 	addr1, addr2, addr3       ltcutil.Address
 	script1, script2, script3 []byte
@@ -397,7 +398,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			PkScript: script1,
 			OutPoint: ourOutPoint,
 		}),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 1101}),
+		neutrino.StartBlock(&headerfs.BlockStamp{Height: 1101}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -414,7 +415,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
 	quitRescan = make(chan struct{})
-	startBlock = waddrmgr.BlockStamp{Height: 1095}
+	startBlock = headerfs.BlockStamp{Height: 1095}
 	rescan, errChan = startRescan(t, harness.svc, addr1, &startBlock,
 		quitRescan)
 	err := waitForSync(t, harness.svc, harness.h1)
@@ -522,7 +523,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
-	banPeer(harness.svc, harness.h2)
+	banPeer(t, harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx1.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
@@ -564,7 +565,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
-	banPeer(harness.svc, harness.h2)
+	banPeer(t, harness.svc, harness.h2)
 	err = harness.svc.SendTransaction(authTx2.Tx)
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
@@ -632,7 +633,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 			PkScript: script1,
 			OutPoint: ourOutPoint,
 		}),
-		neutrino.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+		neutrino.StartBlock(&headerfs.BlockStamp{Height: 801}),
 	)
 	if err != nil {
 		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
@@ -802,7 +803,7 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 // laptop with default query optimization settings.
 // TODO: Make this a benchmark instead.
 func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
-	var haveBest *waddrmgr.BlockStamp
+	var haveBest *headerfs.BlockStamp
 	haveBest, err := harness.svc.BestBlock()
 	if err != nil {
 		t.Fatalf("Couldn't get best snapshot from ChainService: %s", err)
@@ -1140,9 +1141,11 @@ func TestNeutrinoSync(t *testing.T) {
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
 
 	for _, test := range testCases {
-		t.Run(test.name, func(t *testing.T) {
+		if ok := t.Run(test.name, func(t *testing.T) {
 			test.test(testHarness, t)
-		})
+		}); !ok {
+			break
+		}
 	}
 }
 
@@ -1191,7 +1194,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	if logLevel != btclog.LevelOff {
 		t.Logf("Syncing to %d (%s)", knownBestHeight, knownBestHash)
 	}
-	var haveBest *waddrmgr.BlockStamp
+	var haveBest *headerfs.BlockStamp
 	haveBest, err = svc.BestBlock()
 	if err != nil {
 		return fmt.Errorf("Couldn't get best snapshot from "+
@@ -1350,7 +1353,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 // on the flow of the test. The rescan starts at the genesis block and the
 // notifications continue until the `quit` channel is closed.
 func startRescan(t *testing.T, svc *neutrino.ChainService, addr ltcutil.Address,
-	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (
+	startBlock *headerfs.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
 	rescan := neutrino.NewRescan(
 		&neutrino.RescanChainSource{svc},
@@ -1483,12 +1486,22 @@ func checkRescanStatus() (int, int32, error) {
 
 // banPeer bans and disconnects the requested harness from the ChainService
 // instance for BanDuration seconds.
-func banPeer(svc *neutrino.ChainService, harness *rpctest.Harness) {
+func banPeer(t *testing.T, svc *neutrino.ChainService, harness *rpctest.Harness) {
+	t.Helper()
+
 	peers := svc.Peers()
 	for _, peer := range peers {
-		if peer.Addr() == harness.P2PAddress() {
-			svc.BanPeer(peer)
-			peer.Disconnect()
+		peerAddr := peer.Addr()
+		if peerAddr != harness.P2PAddress() {
+			continue
+		}
+
+		err := svc.BanPeer(peerAddr, banman.ExceededBanThreshold)
+		if err != nil {
+			if logLevel != btclog.LevelOff {
+				t.Fatalf("unable to ban peer %v: %v", peerAddr,
+					err)
+			}
 		}
 	}
 }

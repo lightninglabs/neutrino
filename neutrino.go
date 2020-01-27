@@ -20,13 +20,14 @@ import (
 	"github.com/ltcsuite/ltcd/peer"
 	"github.com/ltcsuite/ltcd/wire"
 	"github.com/ltcsuite/ltcutil"
-	"github.com/ltcsuite/ltcwallet/waddrmgr"
 	"github.com/ltcsuite/ltcwallet/walletdb"
+	"github.com/ltcsuite/neutrino/banman"
+	"github.com/ltcsuite/neutrino/blockntfns"
 	"github.com/ltcsuite/neutrino/cache/lru"
 	"github.com/ltcsuite/neutrino/filterdb"
 	"github.com/ltcsuite/neutrino/headerfs"
-	"github.com/ltcsuite/neutrino/blockntfns"
 	"github.com/ltcsuite/neutrino/pushtx"
+	"github.com/ltcsuite/neutrino/query"
 )
 
 // These are exported variables so they can be changed by users.
@@ -45,7 +46,7 @@ var (
 
 	// UserAgentVersion is the user agent version and is used to help
 	// identify ourselves to other bitcoin peers.
-	UserAgentVersion = "0.0.4-beta"
+	UserAgentVersion = "0.11.0-beta"
 
 	// Services describes the services that are supported by the server.
 	Services = wire.SFNodeWitness | wire.SFNodeCF
@@ -100,7 +101,6 @@ type updatePeerHeightsMsg struct {
 type peerState struct {
 	outboundPeers   map[int32]*ServerPeer
 	persistentPeers map[int32]*ServerPeer
-	banned          map[string]time.Time
 	outboundGroups  map[string]int
 }
 
@@ -139,6 +139,13 @@ type spMsgSubscription struct {
 	quitChan <-chan struct{}
 }
 
+// msgSubscription sends all messages from a peer over a channel, allowing
+// pluggable filtering of the messages.
+type msgSubscription struct {
+	msgChan  chan<- wire.Message
+	quitChan <-chan struct{}
+}
+
 // ServerPeer extends the peer to maintain state shared by the server and the
 // blockmanager.
 type ServerPeer struct {
@@ -162,19 +169,23 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	recvSubscribers map[spMsgSubscription]struct{}
-	mtxSubscribers  sync.RWMutex
+	// TODO(halseth): remove one of the maps when all queries go through
+	// work manager.
+	recvSubscribers  map[spMsgSubscription]struct{}
+	recvSubscribers2 map[msgSubscription]struct{}
+	mtxSubscribers   sync.RWMutex
 }
 
 // newServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:          s,
-		persistent:      isPersistent,
-		knownAddresses:  make(map[string]struct{}),
-		quit:            make(chan struct{}),
-		recvSubscribers: make(map[spMsgSubscription]struct{}),
+		server:           s,
+		persistent:       isPersistent,
+		knownAddresses:   make(map[string]struct{}),
+		quit:             make(chan struct{}),
+		recvSubscribers:  make(map[spMsgSubscription]struct{}),
+		recvSubscribers2: make(map[msgSubscription]struct{}),
 	}
 }
 
@@ -209,46 +220,43 @@ func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
 // the score is above the ban threshold, the peer will be banned and
 // disconnected.
 func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
-	// No warning is logged and no score is calculated if banning is disabled.
+	// No warning is logged and no score is calculated if banning is
+	// disabled.
 	warnThreshold := BanThreshold >> 1
 	if transient == 0 && persistent == 0 {
-		// The score is not being increased, but a warning message is still
-		// logged if the score is above the warn threshold.
+		// The score is not being increased, but a warning message is
+		// still logged if the score is above the warn threshold.
 		score := sp.banScore.Int()
 		if score > warnThreshold {
-			log.Warnf("Misbehaving peer %s: %s -- ban score is %d, "+
-				"it was not increased this time", sp, reason, score)
+			log.Warnf("Misbehaving peer %s: %s -- ban score is "+
+				"%d, it was not increased this time", sp,
+				reason, score)
 		}
 		return
 	}
+
 	score := sp.banScore.Increase(persistent, transient)
 	if score > warnThreshold {
 		log.Warnf("Misbehaving peer %s: %s -- ban score increased to %d",
 			sp, reason, score)
-		if score > BanThreshold {
-			log.Warnf("Misbehaving peer %s -- banning and disconnecting",
-				sp)
-			sp.server.BanPeer(sp)
-			sp.Disconnect()
-		}
-	}
-}
 
-// pushSendHeadersMsg sends a sendheaders message to the connected peer.
-func (sp *ServerPeer) pushSendHeadersMsg() error {
-	if sp.VersionKnown() {
-		if sp.ProtocolVersion() > wire.SendHeadersVersion {
-			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
+		if score > BanThreshold {
+			peerAddr := sp.Addr()
+			err := sp.server.BanPeer(
+				peerAddr, banman.ExceededBanThreshold,
+			)
+			if err != nil {
+				log.Errorf("Unable to ban peer %v: %v",
+					peerAddr, err)
+			}
 		}
 	}
-	return nil
 }
 
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
-// to send the "sendheaders" command to peers that are of a sufficienty new
-// protocol version.
+// to kick start communication with them.
 func (sp *ServerPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
-	sp.pushSendHeadersMsg()
+	sp.server.AddPeer(sp)
 }
 
 // OnVersion is invoked when a peer receives a version bitcoin message
@@ -266,58 +274,29 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
 		peerServices&wire.SFNodeCF != wire.SFNodeCF {
 
-		log.Infof("Removing peer %v, cannot serve compact "+
-			"filters", sp)
-
-		sp.server.BanPeer(sp)
-		if sp.connReq != nil {
-			sp.server.connManager.Remove(sp.connReq.ID())
+		peerAddr := sp.Addr()
+		err := sp.server.BanPeer(peerAddr, banman.NoCompactFilters)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
+
+		// Disconnect the peer even though BanPeer attempts to do so
+		// because it has yet to be added.
+		sp.Disconnect()
 
 		return nil
 	}
 
-	// Signal the block manager this peer is a new sync candidate.
-	sp.server.blockManager.NewPeer(sp)
-
-	// Update the address manager and request known addresses from the
-	// remote peer for outbound connections.  This is skipped when running
-	// on the simulation test network since it is only intended to connect
-	// to specified peers and actively avoids advertising and connecting to
-	// discovered peers.
-	if sp.server.chainParams.Net != chaincfg.SimNetParams.Net {
-		addrManager := sp.server.addrManager
-
-		// Request known addresses if the server address manager needs
-		// more and the peer has a protocol version new enough to
-		// include a timestamp with addresses.
-		hasTimestamp := sp.ProtocolVersion() >=
-			wire.NetAddressTimeVersion
-		if addrManager.NeedMoreAddresses() && hasTimestamp {
-			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
-		}
-
-		// Add the address to the addr manager anew, and also mark it
-		// as a good address.
-		sp.server.addrManager.AddAddresses(
-			[]*wire.NetAddress{sp.NA()}, sp.NA(),
-		)
-		addrManager.Good(sp.NA())
-
-		// Update the address manager with the advertised services for
-		// outbound connections in case they have changed. This is not
-		// done for inbound connections to help prevent malicious
-		// behavior and is skipped when running on the simulation test
-		// network since it is only intended to connect to specified
-		// peers and actively avoids advertising and connecting to
-		// discovered peers.
-		if !sp.Inbound() {
-			sp.server.addrManager.SetServices(sp.NA(), msg.Services)
-		}
+	// Update the address manager with the advertised services for outbound
+	// connections in case they have changed. This is not done for inbound
+	// connections to help prevent malicious behavior and is skipped when
+	// running on the simulation test network since it is only intended to
+	// connect to specified peers and actively avoids advertising and
+	// connecting to discovered peers.
+	if !sp.Inbound() {
+		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
 	}
 
-	// Add valid peer to the server.
-	sp.server.AddPeer(sp)
 	return nil
 }
 
@@ -470,6 +449,23 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 			}
 		}(subscription)
 	}
+	for subscription := range sp.recvSubscribers2 {
+		// Quickly determine if this subscription has been canceled, if
+		// so delete it.
+		select {
+		case <-subscription.quitChan:
+			delete(sp.recvSubscribers2, subscription)
+			continue
+		default:
+		}
+
+		go func(subscription msgSubscription) {
+			select {
+			case <-subscription.quitChan:
+			case subscription.msgChan <- msg:
+			}
+		}(subscription)
+	}
 }
 
 // subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
@@ -485,6 +481,43 @@ func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
 	delete(sp.recvSubscribers, subscription)
+}
+
+// A compile-time check to ensure that ServerPeer implements the query.Peer
+// interface.
+var _ query.Peer = (*ServerPeer)(nil)
+
+// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
+// messages received from this peer will be sent on the returned channel. A
+// closure is also returned, that should be called to cancel the subscription.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	// We won't have to buffer this channel, since we'll always send on it
+	// from a new goroutine.
+	msgChan := make(chan wire.Message)
+	quitChan := make(chan struct{})
+
+	sub := msgSubscription{
+		msgChan:  msgChan,
+		quitChan: quitChan,
+	}
+
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	sp.recvSubscribers2[sub] = struct{}{}
+
+	return msgChan, func() {
+		close(quitChan)
+	}
+}
+
+// OnDisconnect returns a channel that will be closed when this peer is
+// disconnected.
+//
+// NOTE: Part of the query.Peer interface.
+func (sp *ServerPeer) OnDisconnect() <-chan struct{} {
+	return sp.quit
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
@@ -545,6 +578,13 @@ type Config struct {
 	AssertFilterHeader *headerfs.FilterHeader
 }
 
+// peerSubscription holds a peer subscription which we'll notify about any
+// connected peers.
+type peerSubscription struct {
+	peers  chan<- query.Peer
+	cancel <-chan struct{}
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -566,11 +606,6 @@ type ChainService struct {
 	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
 		chan<- struct{}), ...QueryOption)
 
-	// queryBatch will be called to distribute a batch of messages across
-	// our connected peers.
-	queryBatch func([]wire.Message, func(*ServerPeer, wire.Message,
-		wire.Message) bool, <-chan struct{}, ...QueryOption)
-
 	chainParams          chaincfg.Params
 	addrManager          *addrmgr.AddrManager
 	connManager          *connmgr.ConnManager
@@ -578,7 +613,6 @@ type ChainService struct {
 	blockSubscriptionMgr *blockntfns.SubscriptionManager
 	newPeers             chan *ServerPeer
 	donePeers            chan *ServerPeer
-	banPeers             chan *ServerPeer
 	query                chan interface{}
 	firstPeerConnect     chan struct{}
 	peerHeightsUpdate    chan updatePeerHeightsMsg
@@ -588,6 +622,12 @@ type ChainService struct {
 	services             wire.ServiceFlag
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
+	banStore             banman.Store
+	workManager          *query.WorkManager
+
+	// peerSubscribers is a slice of active peer subscriptions, that we
+	// will notify each time a new peer is connected.
+	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
 	mtxCFilter sync.Mutex
@@ -639,7 +679,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		addrManager:       amgr,
 		newPeers:          make(chan *ServerPeer, MaxPeers),
 		donePeers:         make(chan *ServerPeer, MaxPeers),
-		banPeers:          make(chan *ServerPeer, MaxPeers),
 		query:             make(chan interface{}),
 		quit:              make(chan struct{}),
 		firstPeerConnect:  make(chan struct{}),
@@ -651,19 +690,17 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		nameResolver:      nameResolver,
 		dialer:            dialer,
 	}
+	s.workManager = query.New(&query.Config{
+		ConnectedPeers: s.ConnectedPeers,
+		NewWorker:      query.NewWorker,
+		Ranking:        query.NewPeerRanking(),
+	})
 
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.
 	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
 		wire.Message, chan<- struct{}), qo ...QueryOption) {
 		queryChainServicePeers(&s, msg, f, qo...)
-	}
-
-	// We do the same for queryBatch.
-	s.queryBatch = func(msgs []wire.Message, f func(*ServerPeer,
-		wire.Message, wire.Message) bool, q <-chan struct{},
-		qo ...QueryOption) {
-		queryChainServiceBatch(&s, msgs, f, q, qo...)
 	}
 
 	var err error
@@ -699,7 +736,17 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&s, s.firstPeerConnect)
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      s.chainParams,
+		BlockHeaders:     s.BlockHeaders,
+		RegFilterHeaders: s.RegFilterHeaders,
+		TimeSource:       s.timeSource,
+		QueryDispatcher:  s.workManager,
+		BanPeer:          s.BanPeer,
+		GetBlock:         s.GetBlock,
+		firstPeerSignal:  s.firstPeerConnect,
+		queryAllPeers:    s.queryAllPeers,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -724,6 +771,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			}
 
 			for tries := 0; tries < 100; tries++ {
+				select {
+				case <-s.quit:
+					return nil, ErrShuttingDown
+				default:
+				}
+
 				addr := s.addrManager.GetAddress()
 				if addr == nil {
 					break
@@ -771,6 +824,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
+				// Mark an attempt for the valid address.
+				s.addrManager.Attempt(addr.NetAddress())
 				return s.addrStringToNetAddr(addrString)
 			}
 
@@ -838,12 +893,17 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
+	s.banStore, err = banman.NewStore(cfg.Database)
+	if err != nil {
+		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
+	}
+
 	return &s, nil
 }
 
 // BestBlock retrieves the most recent block's height and hash where we
 // have both the header and filter header ready.
-func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
+func (s *ChainService) BestBlock() (*headerfs.BlockStamp, error) {
 	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
@@ -866,7 +926,7 @@ func (s *ChainService) BestBlock() (*waddrmgr.BlockStamp, error) {
 		}
 	}
 
-	return &waddrmgr.BlockStamp{
+	return &headerfs.BlockStamp{
 		Height: int32(bestHeight),
 		Hash:   bestHeader.BlockHash(),
 	}, nil
@@ -900,13 +960,56 @@ func (s *ChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	return int32(height), nil
 }
 
-// BanPeer bans a peer that has already been connected to the server by ip.
-func (s *ChainService) BanPeer(sp *ServerPeer) {
-	select {
-	case s.banPeers <- sp:
-	case <-s.quit:
-		return
+// BanPeer disconnects and bans a peer due to a specific reason for a duration
+// of BanDuration.
+func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
+	log.Warnf("Banning peer %v: duration=%v, reason=%v", addr, BanDuration,
+		reason)
+
+	// We'll want to disconnect the peer after we return regardless of
+	// whether we ban the peer or not. We do this to prevent a possible race
+	// condition where we end up reconnecting with the peer slightly
+	// before the ban succeeds.
+	defer func() {
+		// We do so in a goroutine to prevent blocking if the server is
+		// handling a query or a new/stale peer.
+		go func() {
+			if sp := s.PeerByAddr(addr); sp != nil {
+				sp.Disconnect()
+			}
+		}()
+	}()
+
+	ipNet, err := banman.ParseIPNet(addr, nil)
+	if err != nil {
+		return fmt.Errorf("unable to parse IP network for peer %v: %v",
+			addr, err)
 	}
+	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
+}
+
+// IsBanned returns true if the peer is banned, and false otherwise.
+func (s *ChainService) IsBanned(addr string) bool {
+	ipNet, err := banman.ParseIPNet(addr, nil)
+	if err != nil {
+		log.Errorf("Unable to parse IP network for peer %v: %v", addr,
+			err)
+		return false
+	}
+	banStatus, err := s.banStore.Status(ipNet)
+	if err != nil {
+		log.Errorf("Unable to determine ban status for peer %v: %v",
+			addr, err)
+		return false
+	}
+
+	// Log how much time left the peer will remain banned for, if any.
+	if time.Now().Before(banStatus.Expiration) {
+		log.Debugf("Peer %v is banned for another %v", addr,
+			banStatus.Expiration.Sub(time.Now()))
+	}
+
+	return banStatus.Banned
 }
 
 // AddPeer adds a new peer that has already been connected to the server.
@@ -937,62 +1040,6 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 		atomic.LoadUint64(&s.bytesSent)
 }
 
-// rollBackToHeight rolls back all blocks until it hits the specified height.
-// It sends notifications along the way.
-func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
-	header, headerHeight, err := s.BlockHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-	bs := &waddrmgr.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
-	}
-
-	_, regHeight, err := s.RegFilterHeaders.ChainTip()
-	if err != nil {
-		return nil, err
-	}
-
-	for uint32(bs.Height) > height {
-		header, _, err := s.BlockHeaders.FetchHeader(&bs.Hash)
-		if err != nil {
-			return nil, err
-		}
-
-		newTip := &header.PrevBlock
-
-		// Only roll back filter headers if they've caught up this far.
-		if uint32(bs.Height) <= regHeight {
-			newFilterTip, err := s.RegFilterHeaders.RollbackLastBlock(newTip)
-			if err != nil {
-				return nil, err
-			}
-			regHeight = uint32(newFilterTip.Height)
-		}
-
-		bs, err = s.BlockHeaders.RollbackLastBlock()
-		if err != nil {
-			return nil, err
-		}
-
-		// Notifications are asynchronous, so we include the previous
-		// header in the disconnected notification in case we're rolling
-		// back farther and the notification subscriber needs it but
-		// can't read it before it's deleted from the store.
-		prevHeader, _, err := s.BlockHeaders.FetchHeader(newTip)
-		if err != nil {
-			return nil, err
-		}
-
-		// Now we send the block disconnected notifications.
-		s.blockManager.onBlockDisconnected(
-			*header, headerHeight, *prevHeader,
-		)
-	}
-	return bs, nil
-}
-
 // peerHandler is used to handle peer operations such as adding and removing
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
@@ -1000,7 +1047,6 @@ func (s *ChainService) peerHandler() {
 	state := &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
-		banned:          make(map[string]time.Time),
 		outboundGroups:  make(map[string]int),
 	}
 
@@ -1010,10 +1056,7 @@ func (s *ChainService) peerHandler() {
 			s.nameResolver, func(addrs []*wire.NetAddress) {
 				var validAddrs []*wire.NetAddress
 				for _, addr := range addrs {
-					if addr.Services&RequiredServices !=
-						RequiredServices {
-						continue
-					}
+					addr.Services = RequiredServices
 
 					validAddrs = append(validAddrs, addr)
 				}
@@ -1049,10 +1092,6 @@ out:
 		case umsg := <-s.peerHeightsUpdate:
 			s.handleUpdatePeerHeights(state, umsg)
 
-		// Peer to ban.
-		case p := <-s.banPeers:
-			s.handleBanPeerMsg(state, p)
-
 		case qmsg := <-s.query:
 			s.handleQuery(state, qmsg)
 
@@ -1073,7 +1112,6 @@ cleanup:
 		select {
 		case <-s.newPeers:
 		case <-s.donePeers:
-		case <-s.banPeers:
 		case <-s.peerHeightsUpdate:
 		case <-s.query:
 		default:
@@ -1149,42 +1187,10 @@ func (s *ChainService) handleUpdatePeerHeights(state *peerState, umsg updatePeer
 	})
 }
 
-// isBanned returns true if the passed peer address is still considered to be
-// banned.
-func (s *ChainService) isBanned(addr string, state *peerState) bool {
-	// First, we'll extract the host so we can consider it without taking
-	// into account the target port.
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		log.Debugf("can't split host/port: %s", err)
-		return false
-	}
-
-	// With the host obtained, we'll check on the ban status of this peer.
-	if banEnd, ok := state.banned[host]; ok {
-		// If the ban duration of this peer is still active, then we'll
-		// ignore it for now as it's still banned.
-		if time.Now().Before(banEnd) {
-			log.Debugf("Peer %s is banned for another %v - ignoring",
-				host, banEnd.Sub(time.Now()))
-			return true
-		}
-
-		// Otherwise, the peer was banned in the past, but is no longer
-		// banned, so we'll remove this ban entry and return back to
-		// the caller.
-		log.Infof("Peer %s is no longer banned", host)
-		delete(state.banned, host)
-		return false
-	}
-
-	return false
-}
-
 // handleAddPeerMsg deals with adding new peers.  It is invoked from the
 // peerHandler goroutine.
 func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
-	if sp == nil {
+	if sp == nil || !sp.Connected() {
 		return false
 	}
 
@@ -1196,7 +1202,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	}
 
 	// Disconnect banned peers.
-	if s.isBanned(sp.Addr(), state) {
+	if s.IsBanned(sp.Addr()) {
 		sp.Disconnect()
 		return false
 	}
@@ -1228,12 +1234,84 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		s.firstPeerConnect = nil
 	}
 
+	// Update the address' last seen time if the peer has acknowledged our
+	// version and has sent us its version as well.
+	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
+		s.addrManager.Connected(sp.NA())
+	}
+
+	// Signal the block manager this peer is a new sync candidate.
+	s.blockManager.NewPeer(sp)
+
+	// Update the address manager and request known addresses from the
+	// remote peer for outbound connections. This is skipped when running on
+	// the simulation test network since it is only intended to connect to
+	// specified peers and actively avoids advertising and connecting to
+	// discovered peers.
+	if s.chainParams.Net != chaincfg.SimNetParams.Net {
+		// Request known addresses if the server address manager needs
+		// more and the peer has a protocol version new enough to
+		// include a timestamp with addresses.
+		hasTimestamp := sp.ProtocolVersion() >= wire.NetAddressTimeVersion
+		if s.addrManager.NeedMoreAddresses() && hasTimestamp {
+			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
+		}
+
+		// Add the address to the addr manager anew, and also mark it as
+		// a good address.
+		s.addrManager.AddAddresses([]*wire.NetAddress{sp.NA()}, sp.NA())
+		s.addrManager.Good(sp.NA())
+	}
+
+	// We'll go through each peer subscriber and notify it about the added
+	// peer.
+	n := 0
+	for i, sub := range s.peerSubscribers {
+		select {
+		// Quickly check whether this subscription has been canceled.
+		case <-sub.cancel:
+			// Avoid GC leak.
+			s.peerSubscribers[i] = nil
+			continue
+		default:
+		}
+
+		// Keep non-canceled subscribers around.
+		s.peerSubscribers[n] = sub
+		n++
+
+		// Send a notification in a goroutine to avoid blocking the
+		// peerHandler.
+		s.wg.Add(1)
+		go s.notifyConnectedPeer(sub, sp)
+	}
+
+	// Re-align the slice to only active subscribers.
+	s.peerSubscribers = s.peerSubscribers[:n]
+
 	return true
+}
+
+// notifyConnectedPeer sends the given peer to the peerSubsription.
+//
+// NOTE: MUST be run as a goroutine.
+func (s *ChainService) notifyConnectedPeer(
+	sub *peerSubscription, sp *ServerPeer) {
+
+	defer s.wg.Done()
+
+	select {
+	case sub.peers <- sp:
+	case <-sub.cancel:
+	case <-s.quit:
+	}
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
 // invoked from the peerHandler goroutine.
 func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
+	// If the peer is being tracked internally, i.e., we received their
+	// VerAck, we'll need to remove them.
 	var list map[int32]*ServerPeer
 	if sp.persistent {
 		list = state.persistentPeers
@@ -1241,48 +1319,25 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 		list = state.outboundPeers
 	}
 	if _, ok := list[sp.ID()]; ok {
-		if !sp.Inbound() && sp.VersionKnown() {
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-		}
-		if !sp.Inbound() && sp.connReq != nil {
-			s.connManager.Disconnect(sp.connReq.ID())
-		}
+		state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		delete(list, sp.ID())
+
 		log.Debugf("Removed peer %s", sp)
+	}
+
+	// Only request a new connection if the peer being disconnected is not
+	// persistent and we still need more peer connections. There's no need
+	// to do so if the peer is persistent since the connection manager will
+	// attempt to reconnect.
+	if sp.persistent {
+		s.connManager.Disconnect(sp.connReq.ID())
 		return
 	}
 
-	if sp.connReq != nil {
-		// If the peer has been banned, we'll remove the connection
-		// request from the manager to ensure we don't reconnect again.
-		// Otherwise, we'll just simply disconnect.
-		if s.isBanned(sp.connReq.Addr.String(), state) {
-			s.connManager.Remove(sp.connReq.ID())
-		} else {
-			s.connManager.Disconnect(sp.connReq.ID())
-		}
+	s.connManager.Remove(sp.connReq.ID())
+	if state.Count() < MaxPeers {
+		go s.connManager.NewConnReq()
 	}
-
-	// Update the address' last seen time if the peer has acknowledged
-	// our version and has sent us its version as well.
-	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
-		s.addrManager.Connected(sp.NA())
-	}
-
-	// If we get here it means that either we didn't know about the peer
-	// or we purposefully deleted it.
-}
-
-// handleBanPeerMsg deals with banning peers.  It is invoked from the
-// peerHandler goroutine.
-func (s *ChainService) handleBanPeerMsg(state *peerState, sp *ServerPeer) {
-	host, _, err := net.SplitHostPort(sp.Addr())
-	if err != nil {
-		log.Debugf("can't split ban peer %s: %s", sp.Addr(), err)
-		return
-	}
-	log.Infof("Banned peer %s for %v", host, BanDuration)
-	state.banned[host] = time.Now().Add(BanDuration)
 }
 
 // disconnectPeer attempts to drop the connection of a tageted peer in the
@@ -1325,8 +1380,8 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 func newPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
-			OnVersion: sp.OnVersion,
-			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
+			OnVersion:   sp.OnVersion,
+			OnVerAck:    sp.OnVerAck,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnReject:    sp.OnReject,
@@ -1358,18 +1413,34 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 // request instance and the connection itself, and finally notifies the address
 // manager of the attempt.
 func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
+	// In the event that we have to disconnect the peer, we'll choose the
+	// appropriate method to do so based on whether the connection request
+	// is for a persistent peer or not.
+	var disconnect func()
+	if c.Permanent {
+		disconnect = func() {
+			s.connManager.Disconnect(c.ID())
+		}
+	} else {
+		disconnect = func() {
+			// Since we're completely removing the request for this
+			// peer, we'll need to request a new one.
+			s.connManager.Remove(c.ID())
+			go s.connManager.NewConnReq()
+		}
+	}
+
 	// If the peer is banned, then we'll disconnect them.
 	peerAddr := c.Addr.String()
 	if s.IsBanned(peerAddr) {
-		// Remove will end up closing the connection.
-		s.connManager.Remove(c.ID())
+		disconnect()
 		return
 	}
 
 	// If we're already connected to this peer, then we'll close out the new
 	// connection and keep the old.
 	if s.PeerByAddr(peerAddr) != nil {
-		conn.Close()
+		disconnect()
 		return
 	}
 
@@ -1377,13 +1448,13 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	p, err := peer.NewOutboundPeer(newPeerConfig(sp), peerAddr)
 	if err != nil {
 		log.Debugf("Cannot create outbound peer %s: %s", c.Addr, err)
-		s.connManager.Disconnect(c.ID())
+		disconnect()
+		return
 	}
 	sp.Peer = p
 	sp.connReq = c
 	sp.AssociateConnection(conn)
 	go s.peerDoneHandler(sp)
-	s.addrManager.Attempt(sp.NA())
 }
 
 // peerDoneHandler handles peer disconnects by notifiying the server that it's
@@ -1439,6 +1510,7 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
+	s.workManager.Start()
 
 	s.utxoScanner.Start()
 
@@ -1468,6 +1540,7 @@ func (s *ChainService) Stop() error {
 	s.connManager.Stop()
 	s.broadcaster.Stop()
 	s.utxoScanner.Stop()
+	s.workManager.Stop()
 	s.blockSubscriptionMgr.Stop()
 	s.blockManager.Stop()
 	s.addrManager.Stop()

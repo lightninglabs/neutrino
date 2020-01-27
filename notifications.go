@@ -11,10 +11,19 @@ import (
 
 	"github.com/ltcsuite/ltcd/addrmgr"
 	"github.com/ltcsuite/ltcd/connmgr"
+	"github.com/ltcsuite/neutrino/query"
 )
 
 type getConnCountMsg struct {
 	reply chan int32
+}
+
+type subConnPeersReply struct {
+	peerChan   chan query.Peer
+	cancelChan chan struct{}
+}
+type subConnPeersMsg struct {
+	reply chan subConnPeersReply
 }
 
 type getPeersMsg struct {
@@ -50,11 +59,6 @@ type forAllPeersMsg struct {
 	closure func(*ServerPeer)
 }
 
-type banQueryMsg struct {
-	addr  string
-	reply chan bool
-}
-
 // TODO: General - abstract out more of blockmanager into queries. It'll make
 // this way more maintainable and usable.
 
@@ -81,6 +85,28 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			peers = append(peers, sp)
 		})
 		msg.reply <- peers
+
+	// Subscription for connected peers requested.
+	case subConnPeersMsg:
+		// Create a channel and fill it with the current set of
+		// connected peers.
+		cancelChan := make(chan struct{})
+		peerChan := make(chan query.Peer, state.Count())
+		state.forAllPeers(func(sp *ServerPeer) {
+			if !sp.Connected() {
+				return
+			}
+			peerChan <- sp
+		})
+
+		s.peerSubscribers = append(s.peerSubscribers, &peerSubscription{
+			peers:  peerChan,
+			cancel: cancelChan,
+		})
+		msg.reply <- subConnPeersReply{
+			peerChan:   peerChan,
+			cancelChan: cancelChan,
+		}
 
 	case connectNodeMsg:
 		// TODO: duplicate oneshots?
@@ -173,10 +199,6 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// Even though this is a query, there's no reply channel as the
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
-
-	// A query to see if a peer is banned or not.
-	case banQueryMsg:
-		msg.reply <- s.isBanned(msg.addr, state)
 	}
 }
 
@@ -190,7 +212,31 @@ func (s *ChainService) ConnectedCount() int32 {
 	case <-s.quit:
 		return 0
 	}
+}
 
+// ConnectedPeers is a function that returns a channel where all connected
+// peers will be sent. It is assumed that all current peers will be sent
+// imemdiately, and new peers as they connect.
+func (s *ChainService) ConnectedPeers() (<-chan query.Peer, func(), error) {
+	replyChan := make(chan subConnPeersReply, 1)
+
+	select {
+	case s.query <- subConnPeersMsg{
+		reply: replyChan,
+	}:
+	case <-s.quit:
+		return nil, nil, ErrShuttingDown
+	}
+
+	select {
+	case reply := <-replyChan:
+		return reply.peerChan, func() {
+			close(reply.cancelChan)
+		}, nil
+
+	case <-s.quit:
+		return nil, nil, ErrShuttingDown
+	}
 }
 
 // OutboundGroupCount returns the number of peers connected to the given
@@ -323,20 +369,5 @@ func (s *ChainService) ForAllPeers(closure func(sp *ServerPeer)) {
 	select {
 	case s.query <- forAllPeersMsg{closure: closure}:
 	case <-s.quit:
-	}
-}
-
-// IsBanned retursn true if the peer is banned, and false otherwise.
-func (s *ChainService) IsBanned(addr string) bool {
-	replyChan := make(chan bool, 1)
-
-	select {
-	case s.query <- banQueryMsg{
-		addr:  addr,
-		reply: replyChan,
-	}:
-		return <-replyChan
-	case <-s.quit:
-		return false
 	}
 }

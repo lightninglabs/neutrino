@@ -19,7 +19,6 @@ import (
 	"github.com/ltcsuite/ltcutil"
 	"github.com/ltcsuite/ltcutil/gcs"
 	"github.com/ltcsuite/ltcutil/gcs/builder"
-	"github.com/ltcsuite/ltcwallet/waddrmgr"
 	"github.com/ltcsuite/neutrino/blockntfns"
 	"github.com/ltcsuite/neutrino/headerfs"
 )
@@ -32,6 +31,10 @@ var (
 	// ErrRescanExit is an error returned to the caller in case the ongoing
 	// rescan exits.
 	ErrRescanExit = errors.New("rescan exited")
+
+	// errRetryBlock is an internal error used to signal to the rescan
+	// should it should attempt to retry processing a block.
+	errRetryBlock = errors.New("block must be retried")
 )
 
 // ChainSource is an interface that's in charge of retrieving information about
@@ -42,7 +45,7 @@ type ChainSource interface {
 
 	// BestBlock retrieves the most recent block's height and hash where we
 	// have both the header and filter header ready.
-	BestBlock() (*waddrmgr.BlockStamp, error)
+	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the block with the given
 	// height.
@@ -80,9 +83,9 @@ type rescanOptions struct {
 	ntfn rpcclient.NotificationHandlers
 
 	startTime  time.Time
-	startBlock *waddrmgr.BlockStamp
+	startBlock *headerfs.BlockStamp
 
-	endBlock *waddrmgr.BlockStamp
+	endBlock *headerfs.BlockStamp
 
 	watchAddrs  []ltcutil.Address
 	watchInputs []InputWithScript
@@ -123,7 +126,7 @@ func NotificationHandlers(ntfn rpcclient.NotificationHandlers) RescanOption {
 // block. This block is assumed to already be known, and no notifications will
 // be sent for this block. The rescan uses the latter of StartBlock and
 // StartTime.
-func StartBlock(startBlock *waddrmgr.BlockStamp) RescanOption {
+func StartBlock(startBlock *headerfs.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.startBlock = startBlock
 	}
@@ -146,7 +149,7 @@ func StartTime(startTime time.Time) RescanOption {
 // channel MUST be specified as Rescan will sync to the tip of the blockchain
 // and continue to stay in sync and pass notifications. This is enforced at
 // runtime.
-func EndBlock(endBlock *waddrmgr.BlockStamp) RescanOption {
+func EndBlock(endBlock *headerfs.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.endBlock = endBlock
 	}
@@ -201,6 +204,66 @@ func QuitChan(quit <-chan struct{}) RescanOption {
 	}
 }
 
+// blockRetryQueue is a helper struct that maintains a queue of blocks for which
+// we need to fetch filters.
+type blockRetryQueue struct {
+	blocks []*blockntfns.Connected
+}
+
+// newBlockRetryQueue constructs a new, empty retry block queue.
+func newBlockRetryQueue() *blockRetryQueue {
+	return &blockRetryQueue{}
+}
+
+// push enqueues a block at the end of the queue.
+func (q *blockRetryQueue) push(block *blockntfns.Connected) {
+	q.blocks = append(q.blocks, block)
+}
+
+// peek returns the next block to be retried but doesn't consume it.
+func (q *blockRetryQueue) peek() *blockntfns.Connected {
+	if len(q.blocks) == 0 {
+		return nil
+	}
+	return q.blocks[0]
+}
+
+// pop returns and consumes the next block to be retried.
+func (q *blockRetryQueue) pop() *blockntfns.Connected {
+	if len(q.blocks) == 0 {
+		return nil
+	}
+	block := q.blocks[0]
+	q.blocks[0] = nil
+	q.blocks = q.blocks[1:]
+	return block
+}
+
+// remove removes the block from the queue and any others that follow it. If the
+// block doesn't exit within the queue, then this acts as a NOP.
+func (q *blockRetryQueue) remove(header wire.BlockHeader) {
+	headerIdx := -1
+	targetHash := header.BlockHash()
+	for i, block := range q.blocks {
+		blockHeader := block.Header()
+		if blockHeader.BlockHash() == targetHash {
+			headerIdx = i
+			break
+		}
+	}
+	if headerIdx != -1 {
+		for i := headerIdx; i < len(q.blocks); i++ {
+			q.blocks[i] = nil
+		}
+		q.blocks = q.blocks[:headerIdx]
+	}
+}
+
+// clear clears the queue.
+func (q *blockRetryQueue) clear() {
+	q.blocks = nil
+}
+
 // updateChan specifies an update channel. This is for internal use by the
 // Rescan.Update functionality.
 func updateChan(update <-chan *updateOptions) RescanOption {
@@ -215,7 +278,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// First, we'll apply the set of default options, then serially apply
 	// all the options that've been passed in.
 	ro := defaultRescanOptions()
-	ro.endBlock = &waddrmgr.BlockStamp{
+	ro.endBlock = &headerfs.BlockStamp{
 		Hash:   chainhash.Hash{},
 		Height: 0,
 	}
@@ -263,12 +326,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 				if err == nil {
 					ro.endBlock.Hash = header.BlockHash()
 				} else {
-					ro.endBlock = &waddrmgr.BlockStamp{}
+					ro.endBlock = &headerfs.BlockStamp{}
 				}
 			}
 		}
 	} else {
-		ro.endBlock = &waddrmgr.BlockStamp{}
+		ro.endBlock = &headerfs.BlockStamp{}
 	}
 
 	// If we don't have a quit channel, and the end height is still
@@ -281,7 +344,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// Track our position in the chain.
 	var (
 		curHeader wire.BlockHeader
-		curStamp  waddrmgr.BlockStamp
+		curStamp  headerfs.BlockStamp
 	)
 
 	// If no start block is specified, start the scan from our current best
@@ -409,73 +472,27 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// checking timestamps at each block.
 	scanning := ro.startTime.Before(curHeader.Timestamp)
 
+	// Even though we'll have multiple subscriptions, they'll always be
+	// referred to by the same variable, so we only need to defer its
+	// cancellation once at the end. Any intermediate subscriptions should
+	// be properly canceled before registering a new one.
 	var blockSubscription *blockntfns.Subscription
+	defer func() {
+		if blockSubscription != nil {
+			blockSubscription.Cancel()
+			blockSubscription = nil
+		}
+	}()
 
-	// blockRetryInterval is the interval in which we'll continually re-try
-	// to fetch the latest filter from our peers.
-	//
-	// TODO(roasbeef): add exponential back-off
-	blockRetryInterval := time.Millisecond * 100
-
-	// blockReFetchTimer is a stoppable timer that we'll use to reminder
-	// ourselves to refetch a block in the case that we're unable to fetch
-	// the filter for a block the first time around.
 	var (
-		blockReFetchTimer *time.Timer
-		reFetchMtx        sync.Mutex
+		blockRetrySignal <-chan time.Time
+		// blockRetryInterval is the interval in which we'll continually
+		// retry to fetch the latest filter from our peers.
+		//
+		// TODO(roasbeef): add exponential back-off
+		blockRetryInterval = time.Millisecond * 100
+		blockRetryQueue    = newBlockRetryQueue()
 	)
-
-	resetBlockReFetchTimer := func(headerTip wire.BlockHeader, height uint32) {
-		// If so, then we'll avoid notifying the block, and will
-		// instead add this to our retry queue, as we should be getting
-		// block disconnected notifications in short order.
-		if blockReFetchTimer != nil {
-			blockReFetchTimer.Stop()
-		}
-
-		log.Infof("Setting timer to attempt to re-fetch filter for "+
-			"hash=%v, height=%v", headerTip.BlockHash(), height)
-
-		blockReFetch := func() {
-			// If we're unable to process notifications at the
-			// moment (due to not being current), we'll reset our
-			// timer.
-			reFetchMtx.Lock()
-			if blockReFetchTimer != nil && blockSubscription == nil {
-				if !blockReFetchTimer.Stop() {
-					<-blockReFetchTimer.C
-				}
-				blockReFetchTimer.Reset(blockRetryInterval)
-
-				reFetchMtx.Unlock()
-				return
-			}
-			reFetchMtx.Unlock()
-
-			log.Infof("Resending rescan header for block hash=%v, "+
-				"height=%v", headerTip.BlockHash(), height)
-
-			ntfn := blockntfns.NewBlockConnected(headerTip, height)
-			select {
-			case blockSubscription.Notifications <- ntfn:
-			case <-ro.quit:
-			}
-		}
-
-		// We'll start a timer to re-send this header so we re-process
-		// if in the case that we don't get a re-org soon afterwards.
-		reFetchMtx.Lock()
-		blockReFetchTimer = time.AfterFunc(
-			blockRetryInterval, blockReFetch,
-		)
-		reFetchMtx.Unlock()
-	}
-
-	// We'll need to keep track of whether we are current with the chain in
-	// order to properly recover from a re-org. We'll start by assuming that
-	// we are not current in order to catch up from the starting point to
-	// the tip of the chain.
-	current := false
 
 	// handleBlockConnected is a closure that handles a new block connected
 	// notification.
@@ -486,52 +503,36 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// If we've somehow missed a header in the range, then we'll
 		// mark ourselves as not current so we can walk down the chain
 		// and notify the callers of blocks we may have missed.
-		//
-		// It's possible due to the nature of the current subscription
-		// system that we get a duplicate block. We'll catch this and
-		// continue forwards to avoid an unnecessary state transition
-		// back to the !current state.
 		header := ntfn.Header()
-		if header.PrevBlock != curStamp.Hash &&
-			header.BlockHash() != curStamp.Hash {
-
-			current = false
-			return fmt.Errorf("out of order block %v: "+
-				"expected PrevBlock %v, got %v",
-				header.BlockHash(), curStamp.Hash,
-				header.PrevBlock)
+		if header.PrevBlock != curStamp.Hash {
+			return fmt.Errorf("out of order block %v: expected "+
+				"PrevBlock %v, got %v", header.BlockHash(),
+				curStamp.Hash, header.PrevBlock)
 		}
 
-		// Do not process block until we have all filter headers. Don't
-		// worry, the block will get re-queued every time there is a new
-		// filter available. However, if it's a duplicate block
-		// notification, then we can re-process it without any issues.
+		// Ensure the filter header still exists before attempting to
+		// fetch the filter. This should usually succeed since
+		// notifications are delivered once filter headers are synced.
 		nextBlockHeight := uint32(curStamp.Height + 1)
 		_, err := chain.GetFilterHeaderByHeight(nextBlockHeight)
-		if header.BlockHash() != curStamp.Hash && err != nil {
-			log.Warnf("Missing filter header for height=%v, "+
-				"skipping", curStamp.Height+1)
-
-			return nil
+		if err != nil {
+			return fmt.Errorf("unable to get filter header for "+
+				"new block with height %v: %v", nextBlockHeight,
+				err)
 		}
 
-		// As this could be a re-try, we'll ensure that we don't
-		// incorrectly increment our current time stamp.
-		if curStamp.Hash != header.BlockHash() {
-			curHeader = header
-			curStamp.Hash = header.BlockHash()
-			curStamp.Height++
+		newStamp := headerfs.BlockStamp{
+			Hash:   header.BlockHash(),
+			Height: int32(nextBlockHeight),
 		}
 
-		log.Tracef("Rescan got block %d (%s)", curStamp.Height,
-			curStamp.Hash)
+		log.Tracef("Rescan got block %d (%s)", newStamp.Height,
+			newStamp.Hash)
 
 		// We're only scanning if the header is beyond the horizon of
 		// our start time.
 		if !scanning {
-			scanning = ro.startTime.Before(
-				curHeader.Timestamp,
-			)
+			scanning = ro.startTime.Before(header.Timestamp)
 		}
 
 		// If we're not scanning or our watch list is empty, then we can
@@ -539,15 +540,18 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		if !scanning || len(ro.watchList) == 0 {
 			if ro.ntfn.OnFilteredBlockConnected != nil {
 				ro.ntfn.OnFilteredBlockConnected(
-					curStamp.Height, &curHeader, nil,
+					newStamp.Height, &header, nil,
 				)
 			}
 			if ro.ntfn.OnBlockConnected != nil {
 				ro.ntfn.OnBlockConnected(
-					&curStamp.Hash, curStamp.Height,
-					curHeader.Timestamp,
+					&newStamp.Hash, newStamp.Height,
+					header.Timestamp,
 				)
 			}
+
+			curHeader = header
+			curStamp = newStamp
 
 			return nil
 		}
@@ -556,43 +560,29 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// relevant transactions and notify them.
 		queryOptions := NumRetries(0)
 		blockFilter, err := chain.GetCFilter(
-			curStamp.Hash, wire.GCSFilterRegular, queryOptions,
+			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 		)
-
-		switch {
-		// If the block index doesn't know about this block, then it's
-		// likely we're mid re-org so we'll accept this as we account
-		// for it below.
-		case err == headerfs.ErrHashNotFound:
-
-		case err != nil:
-			return fmt.Errorf("unable to get filter for hash=%v: %v",
-				curStamp.Hash, err)
-		}
-
-		// If the filter is nil, then this either means that we don't
-		// have any peers to fetch this filter from, or the peer(s) that
-		// we're trying to fetch from are in the progress of a re-org.
-		if blockFilter == nil {
-			// TODO(halseth): this is racy, as blocks can come in
-			// before we refetch.
-			resetBlockReFetchTimer(header, uint32(curStamp.Height))
-			return nil
+		if err != nil {
+			// If the query failed, then this either means that we
+			// don't have any peers to fetch this filter from, or
+			// the peer(s) that we're trying to fetch from are in
+			// the progress of a re-org.
+			log.Errorf("unable to get filter for hash=%v, "+
+				"retrying: %v", curStamp.Hash, err)
+			return errRetryBlock
 		}
 
 		err = notifyBlockWithFilter(
-			chain, ro, &curHeader, &curStamp, blockFilter,
+			chain, ro, &header, &newStamp, blockFilter,
 		)
 		if err != nil {
 			return err
 		}
 
-		// We've successfully fetched this current block, so we'll reset
-		// the retry timer back to nil.
-		if blockReFetchTimer != nil {
-			blockReFetchTimer.Stop()
-			blockReFetchTimer = nil
-		}
+		// With the block successfully notified, we'll advance our state
+		// to it.
+		curHeader = header
+		curStamp = newStamp
 
 		return nil
 	}
@@ -600,12 +590,12 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// handleBlockDisconnected is a helper closure that handles a new block
 	// disconnected notification.
 	handleBlockDisconnected := func(ntfn *blockntfns.Disconnected) error {
-		log.Debugf("Rescan disconnect block %d (%s)\n", curStamp.Height,
-			curStamp.Hash)
+		blockDisconnected := ntfn.Header()
+		log.Debugf("Rescan got disconnected block %d (%s)",
+			ntfn.Height(), blockDisconnected.BlockHash())
 
 		// Only deal with it if it's the current block we know about.
 		// Otherwise, it's in the future.
-		blockDisconnected := ntfn.Header()
 		if blockDisconnected.BlockHash() != curStamp.Hash {
 			return nil
 		}
@@ -628,16 +618,14 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		curStamp.Hash = curHeader.BlockHash()
 		curStamp.Height--
 
-		// Now that we got a re-org, if we had a re-fetch timer going,
-		// we'll reset it be at the new header tip.
-		if blockReFetchTimer != nil {
-			resetBlockReFetchTimer(
-				curHeader, uint32(curStamp.Height),
-			)
-		}
-
 		return nil
 	}
+
+	// We'll need to keep track of whether we are current with the chain in
+	// order to properly recover from a re-org. We'll start by assuming that
+	// we are not current in order to catch up from the starting point to
+	// the tip of the chain.
+	current := false
 
 	// Loop through blocks, one at a time. This relies on the underlying
 	// chain source to deliver notifications in the correct order.
@@ -700,13 +688,51 @@ rescanLoop:
 
 				switch ntfn := ntfn.(type) {
 				case *blockntfns.Connected:
+					// If we have any blocks to retry, we'll
+					// defer processing this notification
+					// until later.
+					if blockRetryQueue.peek() != nil {
+						log.Debugf("Stashing %v", ntfn)
+						blockRetryQueue.push(ntfn)
+						continue rescanLoop
+					}
+
 					err := handleBlockConnected(ntfn)
-					if err != nil {
+					switch err {
+					case nil:
+
+					// We'll need to retry the block again
+					// as we couldn't fetch its filter.
+					case errRetryBlock:
+						log.Debugf("Retrying %v after %v",
+							ntfn, blockRetryInterval)
+						blockRetryQueue.push(ntfn)
+						blockRetrySignal = time.After(
+							blockRetryInterval,
+						)
+
+					// Since we weren't able to successfully
+					// process the block, we'll set
+					// ourselves to not be current in order
+					// to attempt catching up with the chain
+					// ourselves.
+					//
+					// TODO(wilmer): determine if the error
+					// is fatal and return it?
+					default:
 						log.Errorf("Unable to process "+
 							"%v: %v", ntfn, err)
+						current = false
 					}
 
 				case *blockntfns.Disconnected:
+					// Check whether the block being
+					// disconnected is one for which we've
+					// queued up to retry. If it is, we'll
+					// remove it and any others that follow
+					// as they are now considered stale.
+					blockRetryQueue.remove(ntfn.Header())
+
 					err := handleBlockDisconnected(ntfn)
 					if err != nil {
 						log.Errorf("Unable to process "+
@@ -716,6 +742,57 @@ rescanLoop:
 				default:
 					log.Warnf("Received unhandled block "+
 						"notification: %T", ntfn)
+				}
+
+			// Our retry signal has fired, so we'll attempt to
+			// refetch and notify the filter for our queued blocks.
+			case <-blockRetrySignal:
+				blockRetrySignal = nil
+
+				// We'll go through all of our retry blocks in
+				// order unless we need to retry any of them.
+			retryLoop:
+				for {
+					retryBlock := blockRetryQueue.peek()
+					if retryBlock == nil {
+						continue rescanLoop
+					}
+
+					err := handleBlockConnected(retryBlock)
+					switch err {
+					// We successfully notified the block
+					// this time, so we can remove it from
+					// our queue and move on to the next.
+					case nil:
+						_ = blockRetryQueue.pop()
+						continue retryLoop
+
+					// We'll need to retry the block again
+					// as we couldn't fetch its filter.
+					case errRetryBlock:
+						log.Debugf("Retrying %v after "+
+							"%v", retryBlock,
+							blockRetryInterval)
+						blockRetrySignal = time.After(
+							blockRetryInterval,
+						)
+						continue rescanLoop
+
+					// Since we weren't able to successfully
+					// process the block, we'll set
+					// ourselves to not be current in order
+					// to attempt catching up with the chain
+					// ourselves.
+					//
+					// TODO(wilmer): determine if the error
+					// is fatal and return it?
+					default:
+						log.Errorf("Unable to process "+
+							"retry of %v: %v",
+							retryBlock, err)
+						current = false
+						continue rescanLoop
+					}
 				}
 			}
 
@@ -753,12 +830,6 @@ rescanLoop:
 			// ourselves as current and follow notifications.
 			nextHeight := curStamp.Height + 1
 			if nextHeight > bestBlock.Height {
-				log.Debugf("Rescan became current at %d (%s), "+
-					"subscribing to block notifications",
-					curStamp.Height, curStamp.Hash)
-
-				current = true
-
 				// Ensure we cancel the old subscription if
 				// we're going back to scan for missed blocks.
 				if blockSubscription != nil {
@@ -773,12 +844,13 @@ rescanLoop:
 					return fmt.Errorf("unable to register "+
 						"block subscription: %v", err)
 				}
-				defer func() {
-					if blockSubscription != nil {
-						blockSubscription.Cancel()
-						blockSubscription = nil
-					}
-				}()
+
+				log.Debugf("Rescan became current at %d (%s), "+
+					"subscribing to block notifications",
+					curStamp.Height, curStamp.Hash)
+
+				current = true
+				blockRetryQueue.clear()
 
 				continue rescanLoop
 			}
@@ -811,7 +883,7 @@ rescanLoop:
 
 // notifyBlock calls appropriate listeners based on the block filter.
 func notifyBlock(chain ChainSource, ro *rescanOptions,
-	curHeader wire.BlockHeader, curStamp waddrmgr.BlockStamp,
+	curHeader wire.BlockHeader, curStamp headerfs.BlockStamp,
 	scanning bool) error {
 
 	// Find relevant transactions based on watch list. If scanning is
@@ -852,7 +924,7 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 // extractBlockMatches fetches the target block from the network, and filters
 // out any relevant transactions found within the block.
 func extractBlockMatches(chain ChainSource, ro *rescanOptions,
-	curStamp *waddrmgr.BlockStamp) ([]*ltcutil.Tx, error) {
+	curStamp *headerfs.BlockStamp) ([]*ltcutil.Tx, error) {
 
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
@@ -914,7 +986,7 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 // This differs from notifyBlock in that is expects the caller to already have
 // obtained the target filter.
 func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
-	curHeader *wire.BlockHeader, curStamp *waddrmgr.BlockStamp,
+	curHeader *wire.BlockHeader, curStamp *headerfs.BlockStamp,
 	filter *gcs.Filter) error {
 
 	// Based on what we find within the block or the filter, we'll be
@@ -999,7 +1071,7 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 
 	// If we found the filter, then we'll check the items in the watch list
 	// against it.
-	if filter != nil && filter.N() != 0 {
+	if filter.N() != 0 {
 		return matchBlockFilter(ro, filter, blockHash)
 	}
 
@@ -1009,7 +1081,7 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 // updateFilter atomically updates the filter and rewinds to the specified
 // height if not 0.
 func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
-	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
+	curStamp *headerfs.BlockStamp, curHeader *wire.BlockHeader) (bool, error) {
 
 	ro.watchAddrs = append(ro.watchAddrs, update.addrs...)
 	ro.watchInputs = append(ro.watchInputs, update.inputs...)
@@ -1343,7 +1415,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	// Before we start we'll fetch the set of default options, and apply
 	// any user specified options in a functional manner.
 	ro := defaultRescanOptions()
-	ro.startBlock = &waddrmgr.BlockStamp{
+	ro.startBlock = &headerfs.BlockStamp{
 		Hash:   *s.chainParams.GenesisHash,
 		Height: 0,
 	}

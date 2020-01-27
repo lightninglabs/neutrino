@@ -6,7 +6,6 @@ import (
 	"github.com/ltcsuite/ltcd/blockchain"
 	"github.com/ltcsuite/ltcd/chaincfg/chainhash"
 	"github.com/ltcsuite/ltcd/wire"
-	"github.com/ltcsuite/ltcwallet/waddrmgr"
 	"github.com/ltcsuite/neutrino/headerfs"
 )
 
@@ -53,7 +52,7 @@ func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 	return 0, nil
 
 }
-func (m *mockBlockHeaderStore) RollbackLastBlock() (*waddrmgr.BlockStamp,
+func (m *mockBlockHeaderStore) RollbackLastBlock() (*headerfs.BlockStamp,
 	error) {
 	return nil, nil
 }
