@@ -88,6 +88,12 @@ type queryOptions struct {
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
 	optimisticBatch optimisticBatchType
+
+	// maxBatchSize is the maximum items that the query should return in the
+	// case the optimisticBatch option is used. It saves bandwidth in the case
+	// the caller has a limited amount of items to fetch but still wants to use
+	// batching.
+	maxBatchSize int64
 }
 
 // optimisticBatchType is a type indicating the kind of batching we want to
@@ -194,6 +200,14 @@ func OptimisticBatch() QueryOption {
 func OptimisticReverseBatch() QueryOption {
 	return func(qo *queryOptions) {
 		qo.optimisticBatch = reverseBatch
+	}
+}
+
+// MaxBatchSize allows the caller to limit the number of items fetched
+// in a batch.
+func MaxBatchSize(maxSize int64) QueryOption {
+	return func(qo *queryOptions) {
+		qo.maxBatchSize = maxSize
 	}
 }
 
@@ -583,9 +597,17 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	qo.applyQueryOptions(options...)
 
 	// If the query specifies an optimistic batch we will attempt to fetch
-	// the maximum number of filters in anticipation of calls for the
-	// following or preceding filters.
+	// the maximum number of filters, which is defaulted to
+	// wire.MaxGetCFiltersReqRange, in anticipation of calls for the following
+	// or preceding filters.
 	var startHeight, stopHeight int64
+	batchSize := int64(wire.MaxGetCFiltersReqRange)
+
+	// If the query specifies a maximum batch size, we will limit the number of
+	// requested filters accordingly.
+	if qo.maxBatchSize > 0 && qo.maxBatchSize < wire.MaxGetCFiltersReqRange {
+		batchSize = qo.maxBatchSize
+	}
 
 	switch qo.optimisticBatch {
 
@@ -597,7 +619,7 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	// Forward batch, fetch as many of the following filters as possible.
 	case forwardBatch:
 		startHeight = int64(height)
-		stopHeight = startHeight + wire.MaxGetCFiltersReqRange - 1
+		stopHeight = startHeight + batchSize - 1
 
 		// We need a longer timeout, since we are going to receive more
 		// than a single response.
@@ -606,7 +628,7 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	// Reverse batch, fetch as many of the preceding filters as possible.
 	case reverseBatch:
 		stopHeight = int64(height)
-		startHeight = stopHeight - wire.MaxGetCFiltersReqRange + 1
+		startHeight = stopHeight - batchSize + 1
 
 		// We need a longer timeout, since we are going to receive more
 		// than a single response.
