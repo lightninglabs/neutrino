@@ -1268,6 +1268,16 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		return nil, 0, err
 	}
 
+	// We'll also set the new header tip and notify any peers that the tip
+	// has changed as well. Unlike the set of notifications below, this is
+	// for sub-system that only need to know the height has changed rather
+	// than know each new header that's been added to the tip.
+	b.newFilterHeadersMtx.Lock()
+	b.filterHeaderTip = lastHeight
+	b.filterHeaderTipHash = lastHash
+	b.newFilterHeadersMtx.Unlock()
+	b.newFilterHeadersSignal.Broadcast()
+
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
 	for i, header := range matchingBlockHeaders {
@@ -1280,16 +1290,6 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 		b.onBlockConnected(header, headerHeight)
 	}
-
-	// We'll also set the new header tip and notify any peers that the tip
-	// has changed as well. Unlike the set of notifications above, this is
-	// for sub-system that only need to know the height has changed rather
-	// than know each new header that's been added to the tip.
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = lastHash
-	b.newFilterHeadersMtx.Unlock()
-	b.newFilterHeadersSignal.Broadcast()
 
 	return &lastHeader, lastHeight, nil
 }
