@@ -853,23 +853,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.connManager = cmgr
 
-	// Start up persistent peers.
-	permanentPeers := cfg.ConnectPeers
-	if len(permanentPeers) == 0 {
-		permanentPeers = cfg.AddPeers
-	}
-	for _, addr := range permanentPeers {
-		tcpAddr, err := s.addrStringToNetAddr(addr)
-		if err != nil {
-			return nil, err
-		}
-
-		go s.connManager.Connect(&connmgr.ConnReq{
-			Addr:      tcpAddr,
-			Permanent: true,
-		})
-	}
-
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
@@ -896,6 +879,49 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.banStore, err = banman.NewStore(cfg.Database)
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
+	}
+
+	// Start up persistent peers.
+	permanentPeers := cfg.ConnectPeers
+	if len(permanentPeers) == 0 {
+		permanentPeers = cfg.AddPeers
+	}
+
+	for _, addr := range permanentPeers {
+		addr := addr
+
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+
+			// Since netwok access might not be established yet, we
+			// loop until we are able to look up the permanent
+			// peer.
+			var tcpAddr net.Addr
+			for {
+				var err error
+				tcpAddr, err = s.addrStringToNetAddr(addr)
+				if err != nil {
+					log.Warnf("unable to lookup IP for "+
+						"%v: %v", addr, err)
+
+					select {
+					// Try again in 5 seconds.
+					case <-time.After(ConnectionRetryInterval):
+					case <-s.quit:
+						return
+					}
+					continue
+				}
+
+				break
+			}
+
+			s.connManager.Connect(&connmgr.ConnReq{
+				Addr:      tcpAddr,
+				Permanent: true,
+			})
+		}()
 	}
 
 	return &s, nil
