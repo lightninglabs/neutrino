@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -21,7 +22,9 @@ func createTestDatabase() (func(), FilterDatabase, error) {
 		return nil, nil, err
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/test.db", true)
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/test.db", true, time.Second*10,
+	)
 	if err != nil {
 		return nil, nil, err
 	}

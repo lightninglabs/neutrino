@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -23,11 +24,15 @@ import (
 	"github.com/lightninglabs/neutrino/query"
 )
 
-// maxHeight is the height we will generate filter headers up to. We use an odd
-// number of checkpoints to ensure we can test cases where the block manager is
-// only able to fetch filter headers for one checkpoint interval rather than
-// two.
-const maxHeight = 21 * uint32(wire.CFCheckptInterval)
+const (
+	// maxHeight is the height we will generate filter headers up to. We use an odd
+	// number of checkpoints to ensure we can test cases where the block manager is
+	// only able to fetch filter headers for one checkpoint interval rather than
+	// two.
+	maxHeight = 21 * uint32(wire.CFCheckptInterval)
+
+	dbOpenTimeout = time.Second * 10
+)
 
 // mockDispatcher implements the query.Dispatcher interface and allows us to
 // set up a custom Query method during tests.
@@ -55,7 +60,9 @@ func setupBlockManager() (*blockManager, headerfs.BlockHeaderStore,
 			"temporary directory: %s", err)
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+	)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, nil, nil, nil, fmt.Errorf("Error opening DB: %s",

@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -17,7 +18,9 @@ func createTestIndex() (func(), *headerIndex, error) {
 		return nil, nil, err
 	}
 
-	db, err := walletdb.Create("bdb", tempDir+"/test.db", true)
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/test.db", true, time.Second*10,
+	)
 	if err != nil {
 		return nil, nil, err
 	}

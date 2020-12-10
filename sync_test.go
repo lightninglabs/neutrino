@@ -43,6 +43,8 @@ var (
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 
+	dbOpenTimeout = time.Second * 10
+
 	// Don't set this too high for your platform, or the tests will miss
 	// messages.
 	// TODO: Make this a benchmark instead.
@@ -1017,7 +1019,7 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
-		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
@@ -1034,7 +1036,7 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Create a second btcd SimNet node
 	h2, err := rpctest.New(
-		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
@@ -1047,7 +1049,7 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Create a third btcd SimNet node and generate 1200 blocks
 	h3, err := rpctest.New(
-		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
 	if err != nil {
 		t.Fatalf("Couldn't create harness: %s", err)
@@ -1111,7 +1113,9 @@ func TestNeutrinoSync(t *testing.T) {
 		t.Fatalf("Failed to create temporary directory: %s", err)
 	}
 	defer os.RemoveAll(tempDir)
-	db, err := walletdb.Create("bdb", tempDir+"/weks.db", true)
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+	)
 	defer db.Close()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
@@ -1153,7 +1157,7 @@ func TestNeutrinoSync(t *testing.T) {
 // reorg testing. It brings up and tears down a temporary node, otherwise the
 // nodes try to reconnect to each other which results in unintended reorgs.
 func csd(harnesses []*rpctest.Harness) error {
-	hTemp, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	hTemp, err := rpctest.New(&chaincfg.SimNetParams, nil, nil, "")
 	if err != nil {
 		return err
 	}
