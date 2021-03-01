@@ -2620,6 +2620,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					hmsg.peer.Disconnect()
 					return
 				}
+				// Make sure headers being processed are connecting
+				prevBlockHashInReorganizationList := b.reorgList.Back().Header.BlockHash()
+				if !reorgHeader.PrevBlock.IsEqual(&prevBlockHashInReorganizationList) {
+					log.Warnf("Header does not connect -- disconnecting peer")
+					hmsg.peer.Disconnect()
+					return
+				}
 				totalWork.Add(totalWork,
 					blockchain.CalcWork(reorgHeader.Bits))
 				b.reorgList.PushBack(headerlist.Node{
