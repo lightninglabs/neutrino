@@ -2520,8 +2520,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			})
 			totalWork := big.NewInt(0)
 			for j, reorgHeader := range msg.Headers[i:] {
-				err = b.checkHeaderSanity(reorgHeader,
-					maxTimestamp, true)
+				err = b.checkHeaderSanity(
+					reorgHeader, maxTimestamp, true,
+				)
 				if err != nil {
 					log.Warnf("Header doesn't pass sanity"+
 						" check: %s -- disconnecting "+
@@ -2529,8 +2530,28 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					hmsg.peer.Disconnect()
 					return
 				}
-				totalWork.Add(totalWork,
-					blockchain.CalcWork(reorgHeader.Bits))
+
+				// Make sure headers being processed are
+				// connecting correctly to the previous block.
+				prevBlock := b.reorgList.Back()
+				prevBlockHash := prevBlock.Header.BlockHash()
+				if !reorgHeader.PrevBlock.IsEqual(
+					&prevBlockHash,
+				) {
+
+					log.Warnf("Header %v does not connect "+
+						"to previous block %v -- "+
+						"disconnecting peer",
+						reorgHeader.BlockHash(),
+						prevBlockHash)
+					hmsg.peer.Disconnect()
+					return
+				}
+
+				totalWork.Add(
+					totalWork,
+					blockchain.CalcWork(reorgHeader.Bits),
+				)
 				b.reorgList.PushBack(headerlist.Node{
 					Header: *reorgHeader,
 					Height: int32(backHeight+1) + int32(j),
