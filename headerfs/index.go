@@ -234,47 +234,55 @@ func (h *headerIndex) chainTip() (*chainhash.Hash, uint32, error) {
 	)
 
 	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		rootBucket := tx.ReadBucket(indexBucket)
-
-		var tipKey []byte
-
-		// Based on the specified index type of this instance of the
-		// index, we'll grab the particular key that tracks the chain
-		// tip.
-		switch h.indexType {
-		case Block:
-			tipKey = bitcoinTip
-		case RegularFilter:
-			tipKey = regFilterTip
-		default:
-			return fmt.Errorf("unknown chain tip index type: %v", h.indexType)
-		}
-
-		// Now that we have the particular tip key for this header
-		// type, we'll fetch the hash for this tip, then using that
-		// we'll fetch the height that corresponds to that hash.
-		tipHashBytes := rootBucket.Get(tipKey)
-		tipHeightBytes := rootBucket.Get(tipHashBytes)
-		if len(tipHeightBytes) != 4 {
-			return ErrHeightNotFound
-		}
-
-		// With the height fetched, we can now populate our return
-		// parameters.
-		h, err := chainhash.NewHash(tipHashBytes)
-		if err != nil {
-			return err
-		}
-		tipHash = h
-		tipHeight = binary.BigEndian.Uint32(tipHeightBytes)
-
-		return nil
+		var err error
+		tipHash, tipHeight, err = h.chainTipWithTx(tx)
+		return err
 	})
 	if err != nil {
 		return nil, 0, err
 	}
 
 	return tipHash, tipHeight, nil
+}
+
+// chainTipWithTx returns the best hash and height that the index knows of by
+// using the given DB transaction.
+func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
+	uint32, error) {
+
+	rootBucket := tx.ReadBucket(indexBucket)
+
+	var tipKey []byte
+
+	// Based on the specified index type of this instance of the index,
+	// we'll grab the particular key that tracks the chain tip.
+	switch h.indexType {
+	case Block:
+		tipKey = bitcoinTip
+	case RegularFilter:
+		tipKey = regFilterTip
+	default:
+		return nil, 0, fmt.Errorf("unknown chain tip index type: %v",
+			h.indexType)
+	}
+
+	// Now that we have the particular tip key for this header type, we'll
+	// fetch the hash for this tip, then using that we'll fetch the height
+	// that corresponds to that hash.
+	tipHashBytes := rootBucket.Get(tipKey)
+	tipHeightBytes := rootBucket.Get(tipHashBytes)
+	if len(tipHeightBytes) != 4 {
+		return nil, 0, ErrHeightNotFound
+	}
+
+	// With the height fetched, we can now populate our return
+	// parameters.
+	tipHash, err := chainhash.NewHash(tipHashBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return tipHash, binary.BigEndian.Uint32(tipHeightBytes), nil
 }
 
 // truncateIndex truncates the index for a particluar header type by a single
