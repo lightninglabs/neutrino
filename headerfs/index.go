@@ -196,23 +196,34 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 func (h *headerIndex) heightFromHash(hash *chainhash.Hash) (uint32, error) {
 	var height uint32
 	err := walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		rootBucket := tx.ReadBucket(indexBucket)
-
-		heightBytes := rootBucket.Get(hash[:])
-		if heightBytes == nil {
-			// If the hash wasn't found, then we don't know of this
-			// hash within the index.
-			return ErrHashNotFound
-		}
-
-		height = binary.BigEndian.Uint32(heightBytes)
-		return nil
+		var err error
+		height, err = h.heightFromHashWithTx(tx, hash)
+		return err
 	})
 	if err != nil {
 		return 0, err
 	}
 
 	return height, nil
+}
+
+// heightFromHashWithTx returns the height of the entry that matches the
+// specified hash by using the given DB transaction. With this height, the
+// caller is then able to seek to the appropriate spot in the flat files in
+// order to extract the true header.
+func (h *headerIndex) heightFromHashWithTx(tx walletdb.ReadTx,
+	hash *chainhash.Hash) (uint32, error) {
+
+	rootBucket := tx.ReadBucket(indexBucket)
+
+	heightBytes := rootBucket.Get(hash[:])
+	if heightBytes == nil {
+		// If the hash wasn't found, then we don't know of this hash
+		// within the index.
+		return 0, ErrHashNotFound
+	}
+
+	return binary.BigEndian.Uint32(heightBytes), nil
 }
 
 // chainTip returns the best hash and height that the index knows of.
