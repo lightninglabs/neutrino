@@ -65,6 +65,19 @@ const (
 	// RegularFilterHeaderSize is the size in bytes of the RegularFilter
 	// header type.
 	RegularFilterHeaderSize = 32
+
+	// numSubBucketBytes is the number of bytes of a hash that's used as a
+	// sub bucket to store the index keys (hash->height) in. Storing a large
+	// number of keys in the same bucket has a large impact on memory usage
+	// in bbolt if small-ish batch sizes are used (the b+ tree needs to be
+	// copied with every resize operation). Using sub buckets is a
+	// compromise between memory usage and access time. 2 bytes (=max 65535
+	// sub buckets) seems to be the sweet spot (-50% memory usage,
+	// +30% access time). We take the bytes from the beginning of the byte-
+	// serialized hash since all Bitcoin hashes are reverse-serialized when
+	// displayed as strings. That means the leading zeroes of a block hash
+	// are actually at the end of the byte slice.
+	numSubBucketBytes = 2
 )
 
 // headerIndex is an index stored within the database that allows for random
@@ -171,10 +184,7 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 		)
 
 		for _, header := range batch {
-			var heightBytes [4]byte
-			binary.BigEndian.PutUint32(heightBytes[:], header.height)
-			err := rootBucket.Put(header.hash[:], heightBytes[:])
-			if err != nil {
+			if err := putHeaderEntry(rootBucket, header); err != nil {
 				return err
 			}
 
@@ -216,14 +226,7 @@ func (h *headerIndex) heightFromHashWithTx(tx walletdb.ReadTx,
 
 	rootBucket := tx.ReadBucket(indexBucket)
 
-	heightBytes := rootBucket.Get(hash[:])
-	if heightBytes == nil {
-		// If the hash wasn't found, then we don't know of this hash
-		// within the index.
-		return 0, ErrHashNotFound
-	}
-
-	return binary.BigEndian.Uint32(heightBytes), nil
+	return getHeaderEntry(rootBucket, hash[:])
 }
 
 // chainTip returns the best hash and height that the index knows of.
@@ -270,8 +273,8 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 	// fetch the hash for this tip, then using that we'll fetch the height
 	// that corresponds to that hash.
 	tipHashBytes := rootBucket.Get(tipKey)
-	tipHeightBytes := rootBucket.Get(tipHashBytes)
-	if len(tipHeightBytes) != 4 {
+	tipHeight, err := getHeaderEntry(rootBucket, tipHashBytes)
+	if err != nil {
 		return nil, 0, ErrHeightNotFound
 	}
 
@@ -282,10 +285,10 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 		return nil, 0, err
 	}
 
-	return tipHash, binary.BigEndian.Uint32(tipHeightBytes), nil
+	return tipHash, tipHeight, nil
 }
 
-// truncateIndex truncates the index for a particluar header type by a single
+// truncateIndex truncates the index for a particular header type by a single
 // header entry. The passed newTip pointer should point to the hash of the new
 // chain tip. Optionally, if the entry is to be deleted as well, then the
 // delete flag should be set to true.
@@ -312,7 +315,8 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
 		// being rolled back.
 		if delete {
 			prevTipHash := rootBucket.Get(tipKey)
-			if err := rootBucket.Delete(prevTipHash); err != nil {
+			err := delHeaderEntry(rootBucket, prevTipHash)
+			if err != nil {
 				return err
 			}
 		}
@@ -321,4 +325,90 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
 		// to point to the new hash.
 		return rootBucket.Put(tipKey, newTip[:])
 	})
+}
+
+// putHeaderEntry stores a headerEntry into the bbolt database. The entry is
+// always placed below a sub bucket with the first few bytes of the hash as its
+// name to improve write performance.
+func putHeaderEntry(rootBucket walletdb.ReadWriteBucket,
+	header headerEntry) error {
+
+	// Place key in a sub bucket to improve bbolt memory behavior at the
+	// expense of a slight increase in access latency.
+	subBucket, err := rootBucket.CreateBucketIfNotExists(
+		header.hash[0:numSubBucketBytes],
+	)
+	if err != nil {
+		return err
+	}
+
+	var heightBytes [4]byte
+	binary.BigEndian.PutUint32(heightBytes[:], header.height)
+	return subBucket.Put(header.hash[:], heightBytes[:])
+}
+
+// getHeaderEntry tries to look up the height of a header by its hash. It first
+// looks in the "new" prefixed sub bucket that we use to store new headers. If
+// the header isn't found there, we fall back to the old place where we used to
+// store the keys (the root bucket). If no key for the given hash is found in
+// either places, ErrHashNotFound is returned.
+func getHeaderEntry(rootBucket walletdb.ReadBucket, hashBytes []byte) (uint32,
+	error) {
+
+	subBucket := rootBucket.NestedReadBucket(hashBytes[0:numSubBucketBytes])
+	if subBucket == nil {
+		// Fall back to the old method which will return the
+		// ErrHashNotFound error if there's no key in the root bucket.
+		return getHeaderEntryFallback(rootBucket, hashBytes)
+	}
+
+	heightBytes := subBucket.Get(hashBytes)
+	if heightBytes == nil {
+		// Fall back to the old method which will return the
+		// ErrHashNotFound error if there's no key in the root bucket.
+		return getHeaderEntryFallback(rootBucket, hashBytes)
+	}
+
+	return binary.BigEndian.Uint32(heightBytes), nil
+}
+
+// getHeaderEntryFallback tries to look up the height of a header by its hash by
+// looking at the root bucket directly, which is the old place we used to store
+// header entries. If no key for the given hash is found, ErrHashNotFound is
+// returned.
+func getHeaderEntryFallback(rootBucket walletdb.ReadBucket,
+	hashBytes []byte) (uint32, error) {
+
+	heightBytes := rootBucket.Get(hashBytes)
+	if heightBytes == nil {
+		// If the hash wasn't found, then we don't know of this hash
+		// within the index.
+		return 0, ErrHashNotFound
+	}
+
+	return binary.BigEndian.Uint32(heightBytes), nil
+}
+
+// delHeaderEntry tries to remove a header entry from the bbolt database. It
+// first looks if a key for it exists in the old place, the root bucket. If it
+// does, it's deleted from there. If not, it's attempted to be deleted from the
+// sub bucket instead.
+func delHeaderEntry(rootBucket walletdb.ReadWriteBucket, hashBytes []byte) error {
+	// In case this header was stored in the old place (the root bucket
+	// directly), let's remove it from there.
+	if len(rootBucket.Get(hashBytes)) == 4 {
+		return rootBucket.Delete(hashBytes)
+	}
+
+	// The hash wasn't stored in the root bucket. So we try the sub bucket
+	// now. If that doesn't exist, something is wrong and we want to return
+	// an error here.
+	subBucket := rootBucket.NestedReadWriteBucket(
+		hashBytes[0:numSubBucketBytes],
+	)
+	if subBucket == nil {
+		return ErrHashNotFound
+	}
+
+	return subBucket.Delete(hashBytes)
 }

@@ -3,6 +3,7 @@ package headerfs
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io/ioutil"
 	mathRand "math/rand"
@@ -107,6 +108,125 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	if !bytes.Equal(dbTip[:], lastEntry.hash[:]) {
 		t.Fatalf("tip doesn't match: expected %x, got %x",
 			lastEntry.hash[:], dbTip[:])
+	}
+}
+
+// TestHeaderStorageFallback makes sure that the changes to the header storage
+// location in the bbolt database for reduced memory consumption don't impact
+// existing users that already have entries in their database.
+func TestHeaderStorageFallback(t *testing.T) {
+	cleanUp, hIndex, err := createTestIndex()
+	if err != nil {
+		t.Fatalf("unable to create test db: %v", err)
+	}
+	defer cleanUp()
+
+	// First, write some headers directly to the root index bucket manually
+	// to simulate users with the old database format.
+	const numHeaders = 100
+	oldHeaderEntries := make(headerBatch, numHeaders)
+
+	err = walletdb.Update(hIndex.db, func(tx walletdb.ReadWriteTx) error {
+		rootBucket := tx.ReadWriteBucket(indexBucket)
+
+		for i := uint32(0); i < numHeaders; i++ {
+			var header headerEntry
+			if _, err := rand.Read(header.hash[:]); err != nil {
+				return fmt.Errorf("unable to read header: %v",
+					err)
+			}
+			header.height = i
+			oldHeaderEntries[i] = header
+
+			var heightBytes [4]byte
+			binary.BigEndian.PutUint32(heightBytes[:], header.height)
+			err := rootBucket.Put(header.hash[:], heightBytes[:])
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("error writing random batch with old data: %v", err)
+	}
+
+	// Next, we'll create a a series of random headers that we'll use to
+	// write into the database through the normal interface. This means they
+	// will be written to the new sub buckets.
+	newHeaderEntries, _, err := writeRandomBatch(hIndex, numHeaders)
+	if err != nil {
+		t.Fatalf("error writing random batch: %v", err)
+	}
+
+	// Now we'll check that we can read all the headers.
+	for _, header := range oldHeaderEntries {
+		height, err := hIndex.heightFromHash(&header.hash)
+		if err != nil {
+			t.Fatalf("error reading old entry: %v", err)
+		}
+
+		if height != header.height {
+			t.Fatalf("unexpected height, got %d wanted %d", height,
+				header.height)
+		}
+	}
+	for _, header := range newHeaderEntries {
+		height, err := hIndex.heightFromHash(&header.hash)
+		if err != nil {
+			t.Fatalf("error reading old entry: %v", err)
+		}
+
+		if height != header.height {
+			t.Fatalf("unexpected height, got %d wanted %d", height,
+				header.height)
+		}
+	}
+
+	// And finally, we trim the chain all the way down to the first header.
+	// To do so, we first need to make sure the tip points to the last entry
+	// we added.
+	lastEntry := newHeaderEntries[len(newHeaderEntries)-1]
+	if err := hIndex.truncateIndex(&lastEntry.hash, false); err != nil {
+		t.Fatalf("error setting new tip: %v", err)
+	}
+	for _, header := range newHeaderEntries {
+		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+			t.Fatalf("error truncating tip: %v", err)
+		}
+	}
+	for _, header := range oldHeaderEntries {
+		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+			t.Fatalf("error truncating tip: %v", err)
+		}
+	}
+
+	// All the headers except the very last should now be deleted.
+	for i := 0; i < len(oldHeaderEntries)-1; i++ {
+		header := oldHeaderEntries[i]
+		if _, err := hIndex.heightFromHash(&header.hash); err == nil {
+			t.Fatalf("expected error reading old entry %x",
+				header.hash[:])
+		}
+	}
+	for _, header := range newHeaderEntries {
+		if _, err := hIndex.heightFromHash(&header.hash); err == nil {
+			t.Fatalf("expected error reading old entry %x",
+				header.hash[:])
+		}
+	}
+
+	// The last entry should still be there.
+	lastEntry = oldHeaderEntries[len(oldHeaderEntries)-1]
+	height, err := hIndex.heightFromHash(&lastEntry.hash)
+	if err != nil {
+		t.Fatalf("error reading old entry: %v", err)
+	}
+
+	if height != lastEntry.height {
+		t.Fatalf("unexpected height, got %d wanted %d", height,
+			lastEntry.height)
 	}
 }
 
