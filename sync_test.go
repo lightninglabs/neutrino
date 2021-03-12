@@ -318,6 +318,8 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 	secSrc = newSecSource(&modParams)
 
 	newPkScript := func() (btcutil.Address, []byte, *wire.TxOut) {
+		t.Helper()
+
 		privKey, err := btcec.NewPrivateKey(btcec.S256())
 		if err != nil {
 			t.Fatalf("Couldn't generate private key: %s", err)
@@ -338,6 +340,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 
 	createTx := func(txOuts ...*wire.TxOut) *wire.MsgTx {
 		t.Helper()
+
 		// Fee rate is satoshis per byte
 		tx, err := harness.h1.CreateTransaction(
 			txOuts, 1000, true,
