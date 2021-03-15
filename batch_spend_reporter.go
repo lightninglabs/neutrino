@@ -177,7 +177,7 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 	// Iterate over the transactions in this block, hashing each and
 	// querying our reverse index to see if any requests depend on the txn.
 	initialTxns := make(map[wire.OutPoint]*SpendReport)
-	for _, tx := range block.Transactions {
+	for i, tx := range block.Transactions {
 		// If our reverse index has been cleared, we are done.
 		if len(txidReverseIndex) == 0 {
 			break
@@ -206,8 +206,13 @@ func (b *batchSpendReporter) findInitialTransactions(block *wire.MsgBlock,
 				continue
 			}
 
+			h := block.BlockHash()
+
 			initialTxns[op] = &SpendReport{
-				Output: txOuts[op.Index],
+				Output:      txOuts[op.Index],
+				BlockHash:   &h,
+				BlockHeight: height,
+				BlockIndex:  uint32(i),
 			}
 		}
 	}

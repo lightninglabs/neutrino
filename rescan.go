@@ -1419,6 +1419,25 @@ type SpendReport struct {
 	// NOTE: This field will only be populated if the target is still
 	// unspent.
 	Output *wire.TxOut
+
+	// BlockHash is the block hash of the block that includes the unspent
+	// output.
+	//
+	// NOTE: This field will only be populated if the target is still
+	// unspent.
+	BlockHash *chainhash.Hash
+
+	// BlockHeight is the height of the block that includes the unspent output.
+	//
+	// NOTE: This field will only be populated if the target is still
+	// unspent.
+	BlockHeight uint32
+
+	// BlockIndex is the index of the output's transaction in its block.
+	//
+	// NOTE: This field will only be populated if the target is still
+	// unspent.
+	BlockIndex uint32
 }
 
 // GetUtxo gets the appropriate TxOut or errors if it's spent. The option
