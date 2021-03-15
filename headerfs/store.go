@@ -2,7 +2,6 @@ package headerfs
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -503,19 +502,16 @@ func (h *blockHeaderStore) CheckConnectivity() error {
 	defer h.mtx.RUnlock()
 
 	return walletdb.View(h.db, func(tx walletdb.ReadTx) error {
-		// First, we'll fetch the root bucket, in order to use that to
-		// fetch the bucket that houses the header index.
-		rootBucket := tx.ReadBucket(indexBucket)
-
-		// With the header bucket retrieved, we'll now fetch the chain
-		// tip so we can start our backwards scan.
-		tipHash := rootBucket.Get(bitcoinTip)
-		tipHeightBytes := rootBucket.Get(tipHash)
+		// First, we'll fetch the chain tip so we can start our
+		// backwards scan.
+		_, tipHeight, err := h.chainTipWithTx(tx)
+		if err != nil {
+			return err
+		}
 
 		// With the height extracted, we'll now read the _last_ block
 		// header within the file before we kick off our connectivity
 		// loop.
-		tipHeight := binary.BigEndian.Uint32(tipHeightBytes)
 		header, err := h.readHeader(tipHeight)
 		if err != nil {
 			return err
@@ -531,34 +527,35 @@ func (h *blockHeaderStore) CheckConnectivity() error {
 			// and also compute the block hash for it.
 			newHeader, err = h.readHeader(height)
 			if err != nil {
-				return fmt.Errorf("Couldn't retrieve header %s:"+
-					" %s", header.PrevBlock, err)
+				return fmt.Errorf("couldn't retrieve header "+
+					"%s: %s", header.PrevBlock, err)
 			}
 			newHeaderHash := newHeader.BlockHash()
 
 			// With the header retrieved, we'll now fetch the
 			// height for this current header hash to ensure the
 			// on-disk state and the index matches up properly.
-			indexHeightBytes := rootBucket.Get(newHeaderHash[:])
-			if indexHeightBytes == nil {
-				return fmt.Errorf("index and on-disk file out of sync "+
-					"at height: %v", height)
+			indexHeight, err := h.heightFromHashWithTx(
+				tx, &newHeaderHash,
+			)
+			if err != nil {
+				return fmt.Errorf("index and on-disk file "+
+					"out of sync at height: %v", height)
 			}
-			indexHeight := binary.BigEndian.Uint32(indexHeightBytes)
 
 			// With the index entry retrieved, we'll now assert
 			// that the height matches up with our current height
 			// in this backwards walk.
 			if indexHeight != height {
-				return fmt.Errorf("index height isn't monotonically " +
-					"increasing")
+				return fmt.Errorf("index height isn't " +
+					"monotonically increasing")
 			}
 
 			// Finally, we'll assert that this new header is
 			// actually the prev header of the target header from
 			// the last loop. This ensures connectivity.
 			if newHeader.BlockHash() != header.PrevBlock {
-				return fmt.Errorf("Block %s doesn't match "+
+				return fmt.Errorf("block %s doesn't match "+
 					"block %s's PrevBlock (%s)",
 					newHeader.BlockHash(),
 					header.BlockHash(), header.PrevBlock)
