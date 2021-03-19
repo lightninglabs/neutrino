@@ -566,8 +566,13 @@ type Config struct {
 	// hold in memory at most.
 	FilterCacheSize uint64
 
+	// BlockCache is an LRU block cache. If none is provided then the a new
+	// one will be instantiated.
+	BlockCache *lru.Cache
+
 	// BlockCacheSize indicates the size (in bytes) of blocks the block
-	// cache will hold in memory at most.
+	// cache will hold in memory at most. If a BlockCache is provided then
+	// BlockCacheSize is ignored.
 	BlockCacheSize uint64
 
 	// AssertFilterHeader is an optional field that allows the creator of
@@ -716,11 +721,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.FilterCache = lru.NewCache(filterCacheSize)
 
-	blockCacheSize := DefaultBlockCacheSize
-	if cfg.BlockCacheSize != 0 {
-		blockCacheSize = cfg.BlockCacheSize
+	if cfg.BlockCache != nil {
+		s.BlockCache = cfg.BlockCache
+	} else {
+		blockCacheSize := DefaultBlockCacheSize
+		if cfg.BlockCacheSize != 0 {
+			blockCacheSize = cfg.BlockCacheSize
+		}
+		s.BlockCache = lru.NewCache(blockCacheSize)
 	}
-	s.BlockCache = lru.NewCache(blockCacheSize)
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
 		cfg.DataDir, cfg.Database, &cfg.ChainParams,
