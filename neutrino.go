@@ -860,9 +860,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		BlockFilterMatches: func(ro *rescanOptions,
 			blockHash *chainhash.Hash) (bool, error) {
 
-			return blockFilterMatches(
+			matches, _, err := blockFilterMatches(
 				&RescanChainSource{&s}, ro, blockHash,
 			)
+
+			return matches, err
 		},
 	})
 
