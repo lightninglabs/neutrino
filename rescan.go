@@ -953,8 +953,19 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 		return nil, err
 	}
 	if block == nil {
-		return nil, fmt.Errorf("Couldn't get block %d (%s) from "+
+		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
 			"network", curStamp.Height, curStamp.Hash)
+	}
+
+	// Before we go through the transactions, let's make sure the filter we
+	// got from our peer is valid and includes all spent previous output
+	// scripts. If there's a problem, the error returned here will be
+	// interpreted by the block manager to disconnect/ban said peer.
+	if _, err := VerifyBasicBlockFilter(filter, block); err != nil {
+		return nil, fmt.Errorf("error verifying filter against "+
+			"downloaded block %d (%s), possibly got invalid "+
+			"filter from peer: %v", curStamp.Height, curStamp.Hash,
+			err)
 	}
 
 	blockHeader := block.MsgBlock().Header
