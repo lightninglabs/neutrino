@@ -42,7 +42,7 @@ var (
 // loadBlocks loads the blocks contained in the testdata directory and returns
 // a slice of them.
 //
-// NOTE: copied from btcsuite/btcd/database/ffldb/interface_test.go
+// NOTE: copied from btcsuite/btcd/database/ffldb/interface_test.go.
 func loadBlocks(t *testing.T, dataFile string, network wire.BitcoinNet) (
 	[]*btcutil.Block, error) {
 	// Open the file that contains the blocks for reading.
@@ -123,7 +123,7 @@ func genRandomBlockHash() *chainhash.Hash {
 // will then convert that filter into CacheableFilter to compute it's size for
 // convenience. It will return the filter along with it's size and randomly
 // generated block hash. testing.T is passed in as a convenience to deal with
-// errors in this method and making the test code more straigthforward. Method
+// errors in this method and making the test code more straightforward. Method
 // originally taken from filterdb/db_test.go.
 func genRandFilter(numElements uint32, t *testing.T) (
 	*chainhash.Hash, *gcs.Filter, uint64) {
@@ -172,7 +172,7 @@ func getFilter(cs *ChainService, b *chainhash.Hash, t *testing.T) *gcs.Filter {
 	return val
 }
 
-func assertEqual(t *testing.T, a interface{}, b interface{}, message string) {
+func assertEqual(t *testing.T, a interface{}, b interface{}, message string) { // nolint:unparam
 	if a == b {
 		return
 	}
@@ -266,7 +266,7 @@ func TestBlockCache(t *testing.T) {
 		}
 		headers.WriteHeaders(header)
 
-		sz, _ := (&cache.CacheableBlock{b}).Size()
+		sz, _ := (&cache.CacheableBlock{Block: b}).Size()
 		if i < len(blocks)/2 {
 			size += sz
 		}

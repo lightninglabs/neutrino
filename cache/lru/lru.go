@@ -25,7 +25,7 @@ type Cache struct {
 	// of elements or a number of bytes, decided by the cache.Value's Size.
 	capacity uint64
 
-	// size represents the size of all the elements currenty in the cache.
+	// size represents the size of all the elements currently in the cache.
 	size uint64
 
 	// ll is a doubly linked list which keeps track of recency of used

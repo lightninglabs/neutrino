@@ -66,6 +66,7 @@ func TestIPNetSerialization(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
+		testCase := testCase
 		success := t.Run(testCase.name, func(t *testing.T) {
 			// Serialize the IP network and deserialize it back.
 			// We'll do this to ensure we are properly serializing

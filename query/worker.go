@@ -64,7 +64,7 @@ type worker struct {
 // A compile-time check to ensure worker satisfies the Worker interface.
 var _ Worker = (*worker)(nil)
 
-// NewWorker creates a new worker assosiated with the given peer.
+// NewWorker creates a new worker associated with the given peer.
 func NewWorker(peer Peer) Worker {
 	return &worker{
 		peer:    peer,
@@ -167,7 +167,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					// queries with multiple responses
 					// expected won't timeout before all
 					// responses have been handled.
-					// TODO(halseth): separete progress
+					// TODO(halseth): separate progress
 					// timeout value.
 					if progress.Progressed {
 						timeout.Stop()
@@ -194,7 +194,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 
 				break Loop
 
-			// If the peer disconnectes before giving us a valid
+			// If the peer disconnects before giving us a valid
 			// answer, we'll also exit with an error.
 			case <-peer.OnDisconnect():
 				log.Debugf("Peer %v for worker disconnected, "+

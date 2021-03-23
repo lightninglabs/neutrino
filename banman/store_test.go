@@ -80,8 +80,8 @@ func TestBanStore(t *testing.T) {
 			t.Fatalf("expected ban reason \"%v\", got \"%v\"",
 				reason, banStatus.Reason)
 		}
-		banDuration := banStatus.Expiration.Sub(time.Now())
-		if banStatus.Expiration.Sub(time.Now()) > duration {
+		banDuration := time.Until(banStatus.Expiration)
+		if banDuration > duration {
 			t.Fatalf("expected ban duration to be within %v, got %v",
 				duration, banDuration)
 		}

@@ -23,7 +23,7 @@ var (
 	// query.
 	QueryTimeout = time.Second * 10
 
-	// QueryBatchTimout is the total time we'll wait for a batch fetch
+	// QueryBatchTimeout is the total time we'll wait for a batch fetch
 	// query to complete.
 	// TODO(halseth): instead use timeout since last received response?
 	QueryBatchTimeout = time.Second * 30
@@ -500,7 +500,10 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{
+		BlockHash:  *blockHash,
+		FilterType: filterType,
+	}
 
 	filterValue, err := s.FilterCache.Get(cacheKey)
 	if err != nil {
@@ -512,9 +515,12 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 
 // putFilterToCache inserts a given filter in ChainService's FilterCache.
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
-	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) {
+	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) { // nolint:unparam
 
-	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{
+		BlockHash:  *blockHash,
+		FilterType: filterType,
+	}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
@@ -911,7 +917,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// can't request it.
 	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
+		return nil, fmt.Errorf("couldn't get header for block %s "+
 			"from database", blockHash)
 	}
 
@@ -939,7 +945,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(inv)
+	_ = getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -1011,12 +1017,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		options...,
 	)
 	if foundBlock == nil {
-		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
+		return nil, fmt.Errorf("couldn't retrieve block %s from "+
 			"network", blockHash)
 	}
 
 	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
@@ -1047,7 +1053,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// Create an inv.
 	txHash := tx.TxHash()
 	inv := wire.NewMsgInv()
-	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
 
 	// We'll gather all of the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use

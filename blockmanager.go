@@ -29,7 +29,7 @@ import (
 
 const (
 	// maxTimeOffset is the maximum duration a block time is allowed to be
-	// ahead of the curent time. This is currently 2 hours.
+	// ahead of the current time. This is currently 2 hours.
 	maxTimeOffset = 2 * time.Hour
 
 	// numMaxMemHeaders is the max number of headers to store in memory for
@@ -402,7 +402,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 			return
 		}
 		stopHash := &zeroHash
-		sp.PushGetHeadersMsg(locator, stopHash)
+		_ = sp.PushGetHeadersMsg(locator, stopHash)
 	}
 
 	// Start syncing by choosing the best candidate if needed.
@@ -802,7 +802,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// set of peers.
 	pristineHeaders, ok := headers[key]
 	if !ok {
-		return fmt.Errorf("All peers served bogus headers! Retrying " +
+		return fmt.Errorf("all peers served bogus headers, retrying " +
 			"with new set")
 	}
 
@@ -985,15 +985,14 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		// maxCFCheckptsPerQuery unless we don't have enough checkpoints
 		// to do so. In that case, our query will consist of whatever is
 		// left.
-		startHeightRange := uint32(
-			currentInterval*wire.CFCheckptInterval,
-		) + 1
+		startHeightRange :=
+			(currentInterval * wire.CFCheckptInterval) + 1
 
 		nextInterval := currentInterval + maxCFCheckptsPerQuery
 		if nextInterval > uint32(len(checkpoints)) {
 			nextInterval = uint32(len(checkpoints))
 		}
-		endHeightRange := uint32(nextInterval * wire.CFCheckptInterval)
+		endHeightRange := nextInterval * wire.CFCheckptInterval
 
 		log.Tracef("Checkpointed cfheaders request start_range=%v, "+
 			"end_range=%v", startHeightRange, endHeightRange)
@@ -1012,7 +1011,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		// Once we have the stop hash, we can construct the query
 		// message itself.
 		queryMsg := wire.NewMsgGetCFHeaders(
-			fType, uint32(startHeightRange), &stopHash,
+			fType, startHeightRange, &stopHash,
 		)
 
 		// We'll mark that the ith interval is queried by this message,
@@ -1070,7 +1069,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				return
 			}
 
-			// The query did finish succesfully, but continue to
+			// The query did finish successfully, but continue to
 			// allow picking up the last header sent on the
 			// headerChan.
 			continue
@@ -1191,7 +1190,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	}
 	if *tip != msg.PrevFilterHeader {
 		return nil, 0, fmt.Errorf("attempt to write cfheaders out of "+
-			"order! Tip=%v (height=%v), prev_hash=%v.", *tip,
+			"order, tip=%v (height=%v), prev_hash=%v", *tip,
 			tipHeight, msg.PrevFilterHeader)
 	}
 
@@ -1785,6 +1784,9 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	// or at the end of the maximum-size response message, whichever is
 	// larger.
 	stopHeader, stopHeight, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return nil, 0
+	}
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
 		stopHeader, err = b.cfg.BlockHeaders.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
@@ -1808,8 +1810,9 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 		msg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
-			switch m := resp.(type) {
-			case *wire.MsgCFHeaders:
+
+			m, isHeaders := resp.(*wire.MsgCFHeaders)
+			if isHeaders {
 				if m.StopHash == stopHash &&
 					m.FilterType == fType &&
 					len(m.FilterHashes) == numHeaders {
@@ -1894,8 +1897,9 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 		getCheckptMsg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
-			switch m := resp.(type) {
-			case *wire.MsgCFCheckpt:
+
+			m, isCheckpoint := resp.(*wire.MsgCFCheckpt)
+			if isCheckpoint {
 				if m.FilterType == fType &&
 					m.StopHash == *lastHash {
 					checkpoints[sp.Addr()] = m.FilterHeaders
@@ -2164,7 +2168,7 @@ func (b *blockManager) startSync(peers *list.List) {
 
 		// With our stop hash selected, we'll kick off the sync from
 		// this peer with an initial GetHeaders message.
-		b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
+		_ = b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}

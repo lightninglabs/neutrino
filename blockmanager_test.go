@@ -120,7 +120,7 @@ type headers struct {
 // generateHeaders generates block headers, filter header and hashes, and
 // checkpoints from the given genesis. The onCheckpoint method will be called
 // with the current cf header on each checkpoint to modify the derivation of
-// the next interval
+// the next interval.
 func generateHeaders(genesisBlockHeader *wire.BlockHeader,
 	genesisFilterHeader *chainhash.Hash,
 	onCheckpoint func(*chainhash.Hash)) (*headers, error) {
@@ -444,8 +444,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			for i := startHeight; i <= maxHeight; i++ {
 				ntfn := <-bm.blockNtfnChan
 				if _, ok := ntfn.(*blockntfns.Connected); !ok {
-					t.Fatal("expected block connected " +
+					t.Error("expected block connected " +
 						"notification")
+					return
 				}
 			}
 		}()
@@ -545,6 +546,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 	}
 
 	for _, test := range testCases {
+		test := test
 		bm, hdrStore, cfStore, cleanUp, err := setupBlockManager()
 		if err != nil {
 			t.Fatalf("unable to set up ChainService: %v", err)
@@ -664,16 +666,18 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 					)
 					if i == test.firstInvalid {
 						if progress.Finished {
-							t.Fatalf("expected interval "+
+							t.Errorf("expected interval "+
 								"%d to be invalid", i)
+							return
 						}
 						errChan <- fmt.Errorf("invalid interval")
 						break
 					}
 
 					if !progress.Finished {
-						t.Fatalf("expected interval %d to be "+
+						t.Errorf("expected interval %d to be "+
 							"valid", i)
+						return
 					}
 				}
 
@@ -693,8 +697,9 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			for i := startHeight; i <= maxHeight; i++ {
 				ntfn := <-bm.blockNtfnChan
 				if _, ok := ntfn.(*blockntfns.Connected); !ok {
-					t.Fatal("expected block connected " +
+					t.Error("expected block connected " +
 						"notification")
+					return
 				}
 			}
 		}()
@@ -789,7 +794,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		peers  = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
 		expBad = map[string]struct{}{
-			"bad:1": struct{}{},
+			"bad:1": {},
 		}
 	)
 
@@ -875,7 +880,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		}
 
 		for i := uint32(0); i < 2*badIndex; i++ {
-			msg.AddCFHash(&filterHash)
+			_ = msg.AddCFHash(&filterHash)
 		}
 
 		headers := make(map[string]*wire.MsgCFHeaders)

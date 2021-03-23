@@ -485,7 +485,7 @@ type Config struct {
 	DataDir string
 
 	// Database is an *open* database instance that we'll use to storm
-	// indexes of teh chain.
+	// indexes of the chain.
 	Database walletdb.DB
 
 	// ChainParams is the chain that we're running on.
@@ -558,7 +558,7 @@ type peerSubscription struct {
 	cancel <-chan struct{}
 }
 
-// ChainService is instantiated with functional options
+// ChainService is instantiated with functional options.
 type ChainService struct {
 	// The following variables must only be used atomically.
 	// Putting the uint64s first makes them 64-bit aligned for 32-bit systems.
@@ -1021,7 +1021,7 @@ func (s *ChainService) IsBanned(addr string) bool {
 	// Log how much time left the peer will remain banned for, if any.
 	if time.Now().Before(banStatus.Expiration) {
 		log.Debugf("Peer %v is banned for another %v", addr,
-			banStatus.Expiration.Sub(time.Now()))
+			time.Until(banStatus.Expiration))
 	}
 
 	return banStatus.Banned

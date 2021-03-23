@@ -8,7 +8,7 @@ import (
 	"github.com/lightninglabs/neutrino/cache"
 )
 
-func assertEqual(t *testing.T, a interface{}, b interface{}, message string) {
+func assertEqual(t *testing.T, a interface{}, b interface{}, message string) { // nolint:unparam
 	if a == b {
 		return
 	}
@@ -220,7 +220,7 @@ func TestConcurrencySimple(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}
@@ -231,7 +231,7 @@ func TestConcurrencySimple(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}
@@ -254,7 +254,7 @@ func TestConcurrencySmallCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}
@@ -265,7 +265,7 @@ func TestConcurrencySmallCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}
@@ -288,7 +288,7 @@ func TestConcurrencyBigCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Put(i, &sizeable{value: i, size: 1})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}
@@ -299,7 +299,7 @@ func TestConcurrencyBigCache(t *testing.T) {
 			defer wg.Done()
 			_, err := c.Get(i)
 			if err != nil && err != cache.ErrElementNotFound {
-				t.Fatal(err)
+				t.Error(err)
 			}
 		}(i)
 	}

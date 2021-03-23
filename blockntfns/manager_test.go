@@ -217,7 +217,7 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 
 		return nil, 0, errors.New("")
 	}
-	sub, err := subMgr.NewSubscription(0)
+	_, err := subMgr.NewSubscription(0)
 	if err == nil {
 		t.Fatal("expected registration to fail due to not delivering " +
 			"backlog")
@@ -228,13 +228,13 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 	// NotificationsSinceHeight should then return notifications for blocks
 	// 11-20.
 	const chainTip uint32 = 20
-	subCurrentHeight := uint32(chainTip / 2)
+	subCurrentHeight := chainTip / 2
 	numBacklog := chainTip - subCurrentHeight
 	blockSource.blocksSinceHeight = func(uint32) ([]blockntfns.BlockNtfn,
 		uint32, error) {
 
 		blocks := make([]blockntfns.BlockNtfn, 0, numBacklog)
-		for i := uint32(subCurrentHeight + 1); i <= chainTip; i++ {
+		for i := subCurrentHeight + 1; i <= chainTip; i++ {
 			blocks = append(blocks, blockntfns.NewBlockConnected(
 				emptyHeader, i,
 			))
@@ -244,7 +244,7 @@ func TestManagerHistoricalBacklog(t *testing.T) {
 	}
 
 	// Register a new client with the expected current height.
-	sub, err = subMgr.NewSubscription(subCurrentHeight)
+	sub, err := subMgr.NewSubscription(subCurrentHeight)
 	if err != nil {
 		t.Fatalf("unable to register new subscription: %v", err)
 	}

@@ -27,7 +27,7 @@ type batchSpendReporter struct {
 	outpoints map[wire.OutPoint][]byte
 
 	// filterEntries holds the current set of watched outpoint, and is
-	// applied to cfilters to guage whether we should download the block.
+	// applied to cfilters to gauge whether we should download the block.
 	//
 	// NOTE: This watchlist is updated during each call to ProcessBlock.
 	filterEntries [][]byte
