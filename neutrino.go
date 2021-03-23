@@ -1525,9 +1525,13 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
-	s.workManager.Start()
+	if err := s.workManager.Start(); err != nil {
+		return fmt.Errorf("unable to start work manager: %v", err)
+	}
 
-	s.utxoScanner.Start()
+	if err := s.utxoScanner.Start(); err != nil {
+		return fmt.Errorf("unable to start utxo scanner: %v", err)
+	}
 
 	if err := s.broadcaster.Start(); err != nil {
 		return fmt.Errorf("unable to start transaction broadcaster: %v",
@@ -1552,18 +1556,31 @@ func (s *ChainService) Stop() error {
 		return nil
 	}
 
+	var returnErr error
 	s.connManager.Stop()
 	s.broadcaster.Stop()
-	s.utxoScanner.Stop()
-	s.workManager.Stop()
+	if err := s.utxoScanner.Stop(); err != nil {
+		log.Errorf("error stopping utxo scanner: %v", err)
+		returnErr = err
+	}
+	if err := s.workManager.Stop(); err != nil {
+		log.Errorf("error stopping work manager: %v", err)
+		returnErr = err
+	}
 	s.blockSubscriptionMgr.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
+	if err := s.blockManager.Stop(); err != nil {
+		log.Errorf("error stopping block manager: %v", err)
+		returnErr = err
+	}
+	if err := s.addrManager.Stop(); err != nil {
+		log.Errorf("error stopping address manager: %v", err)
+		returnErr = err
+	}
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
-	return nil
+	return returnErr
 }
 
 // IsCurrent lets the caller know whether the chain service's block manager
