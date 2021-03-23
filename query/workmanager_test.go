@@ -15,10 +15,6 @@ type mockWorker struct {
 
 var _ Worker = (*mockWorker)(nil)
 
-func (m *mockWorker) exited() <-chan struct{} {
-	return nil
-}
-
 func (m *mockWorker) NewJob() chan<- *queryJob {
 	return m.nextJob
 }
@@ -57,9 +53,6 @@ func (p *mockPeerRanking) Order(peers []string) {
 	sort.Slice(peers, func(i, j int) bool {
 		return p.less(peers[i], peers[j])
 	})
-}
-
-func (p *mockPeerRanking) addPeer(peer string) {
 }
 
 func (p *mockPeerRanking) Punish(peer string) {

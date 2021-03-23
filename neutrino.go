@@ -157,10 +157,7 @@ type ServerPeer struct {
 	connReq        *connmgr.ConnReq
 	server         *ChainService
 	persistent     bool
-	continueHash   *chainhash.Hash
-	requestQueue   []*wire.InvVect
 	knownAddresses map[string]struct{}
-	banScore       connmgr.DynamicBanScore
 	quit           chan struct{}
 
 	// The following map of subcribers is used to subscribe to messages
@@ -205,51 +202,6 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
 	for _, na := range addresses {
 		sp.knownAddresses[addrmgr.NetAddressKey(na)] = struct{}{}
-	}
-}
-
-// addressKnown true if the given address is already known to the peer.
-func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
-	_, exists := sp.knownAddresses[addrmgr.NetAddressKey(na)]
-	return exists
-}
-
-// addBanScore increases the persistent and decaying ban score fields by the
-// values passed as parameters. If the resulting score exceeds half of the ban
-// threshold, a warning is logged including the reason provided. Further, if
-// the score is above the ban threshold, the peer will be banned and
-// disconnected.
-func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
-	// No warning is logged and no score is calculated if banning is
-	// disabled.
-	warnThreshold := BanThreshold >> 1
-	if transient == 0 && persistent == 0 {
-		// The score is not being increased, but a warning message is
-		// still logged if the score is above the warn threshold.
-		score := sp.banScore.Int()
-		if score > warnThreshold {
-			log.Warnf("Misbehaving peer %s: %s -- ban score is "+
-				"%d, it was not increased this time", sp,
-				reason, score)
-		}
-		return
-	}
-
-	score := sp.banScore.Increase(persistent, transient)
-	if score > warnThreshold {
-		log.Warnf("Misbehaving peer %s: %s -- ban score increased to %d",
-			sp, reason, score)
-
-		if score > BanThreshold {
-			peerAddr := sp.Addr()
-			err := sp.server.BanPeer(
-				peerAddr, banman.ExceededBanThreshold,
-			)
-			if err != nil {
-				log.Errorf("Unable to ban peer %v: %v",
-					peerAddr, err)
-			}
-		}
 	}
 }
 

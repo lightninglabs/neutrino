@@ -60,8 +60,6 @@ type FilterDatabase interface {
 // backed by boltdb.
 type FilterStore struct {
 	db walletdb.DB
-
-	chainParams chaincfg.Params
 }
 
 // A compile-time check to ensure the FilterStore adheres to the FilterDatabase

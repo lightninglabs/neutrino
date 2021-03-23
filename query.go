@@ -197,28 +197,6 @@ func MaxBatchSize(maxSize int64) QueryOption {
 	}
 }
 
-// queryState is an atomically updated per-query state for each query in a
-// batch.
-//
-// State transitions are:
-//
-// * queryWaitSubmit->queryWaitResponse - send query to peer
-// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
-//   response
-// * queryWaitResponse->queryAnswered - acceptable response to query received
-type queryState uint32
-
-const (
-	// Waiting to be submitted to a peer.
-	queryWaitSubmit queryState = iota
-
-	// Submitted to a peer, waiting for reply.
-	queryWaitResponse
-
-	// Valid reply received.
-	queryAnswered
-)
-
 // We provide 3 kinds of queries:
 //
 // * queryAllPeers allows a single query to be broadcast to all peers, and

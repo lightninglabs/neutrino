@@ -26,12 +26,6 @@ var (
 	// current block hash of the best known chain that the headers for
 	// regular filter are synced to.
 	regFilterTip = []byte("regular")
-
-	// extFilterTip is the key which tracks the "tip" of the extended
-	// compact filter header chain. The value of this key will be the
-	// current block hash of the best known chain that the headers for
-	// extended filter are synced to.
-	extFilterTip = []byte("ext")
 )
 
 var (

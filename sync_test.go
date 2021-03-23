@@ -251,10 +251,6 @@ func newSecSource(params *chaincfg.Params) *secSource {
 	}
 }
 
-type testLogger struct {
-	t *testing.T
-}
-
 type neutrinoHarness struct {
 	h1, h2, h3 *rpctest.Harness
 	svc        *neutrino.ChainService
@@ -305,7 +301,7 @@ var (
 	secSrc                    *secSource
 	addr1, addr2, addr3       btcutil.Address
 	script1, script2, script3 []byte
-	tx1, tx2, tx3             *wire.MsgTx
+	tx1, tx2                  *wire.MsgTx
 	ourOutPoint               wire.OutPoint
 )
 
@@ -995,7 +991,6 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 	if lastErr != nil {
 		t.Fatal(lastErr)
 	}
-	return
 }
 
 func TestNeutrinoSync(t *testing.T) {

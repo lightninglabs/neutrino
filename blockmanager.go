@@ -49,21 +49,6 @@ const (
 	maxCFCheckptsPerQuery = wire.MaxCFHeadersPerMsg / wire.CFCheckptInterval
 )
 
-// filterStoreLookup
-type filterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
-
-var (
-	// filterTypes is a map of filter types to synchronize to a lookup
-	// function for the service's store for that filter type.
-	filterTypes = map[wire.FilterType]filterStoreLookup{
-		wire.GCSFilterRegular: func(
-			s *ChainService) *headerfs.FilterHeaderStore {
-
-			return s.RegFilterHeaders
-		},
-	}
-)
-
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
 var zeroHash chainhash.Hash
 
@@ -88,13 +73,6 @@ type headersMsg struct {
 
 // donePeerMsg signifies a newly disconnected peer to the block handler.
 type donePeerMsg struct {
-	peer *ServerPeer
-}
-
-// txMsg packages a bitcoin tx message and the peer it came from together
-// so the block handler has access to that information.
-type txMsg struct {
-	tx   *btcutil.Tx
 	peer *ServerPeer
 }
 
