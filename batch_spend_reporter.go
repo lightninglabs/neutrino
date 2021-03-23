@@ -61,6 +61,8 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 	log.Debugf("Finished batch, %d unspent outpoints", len(b.requests))
 
 	for outpoint, requests := range b.requests {
+		op := outpoint
+
 		// A nil SpendReport indicates the output was not found.
 		tx, ok := b.initialTxns[outpoint]
 		if !ok {
@@ -68,7 +70,7 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 				outpoint)
 		}
 
-		b.notifyRequests(&outpoint, requests, tx, nil)
+		b.notifyRequests(&op, requests, tx, nil)
 	}
 }
 
@@ -78,7 +80,8 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 //     return reporter.FailRemaining(err)
 func (b *batchSpendReporter) FailRemaining(err error) error {
 	for outpoint, requests := range b.requests {
-		b.notifyRequests(&outpoint, requests, nil, err)
+		op := outpoint
+		b.notifyRequests(&op, requests, nil, err)
 	}
 	return err
 }
