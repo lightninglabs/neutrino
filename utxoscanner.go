@@ -297,6 +297,7 @@ func (s *UtxoScanner) scanFromHeight(initHeight uint32) error {
 	)
 
 	reporter := newBatchSpendReporter()
+	options := defaultRescanOptions()
 
 scanToEnd:
 	// Scan forward through the blockchain and look for any transactions that
@@ -324,11 +325,9 @@ scanToEnd:
 		// outpoints.
 		fetch := len(newReqs) > 0
 		if !fetch {
-			options := rescanOptions{
-				watchList: reporter.filterEntries,
-			}
+			options.watchList = reporter.filterEntries
 
-			match, err := s.cfg.BlockFilterMatches(&options, hash)
+			match, err := s.cfg.BlockFilterMatches(options, hash)
 			if err != nil {
 				return reporter.FailRemaining(err)
 			}
