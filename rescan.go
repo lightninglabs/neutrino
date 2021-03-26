@@ -910,14 +910,16 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 		// If we have a non-empty watch list, then we need to see if it
 		// matches the rescan's filters, so we get the basic filter
 		// from the DB or network.
-		matched, err := blockFilterMatches(chain, ro, &curStamp.Hash)
+		matched, filter, err := blockFilterMatches(
+			chain, ro, &curStamp.Hash,
+		)
 		if err != nil {
 			return err
 		}
 
 		if matched {
 			relevantTxs, err = extractBlockMatches(
-				chain, ro, &curStamp,
+				chain, ro, &curStamp, filter,
 			)
 			if err != nil {
 				return err
@@ -941,7 +943,8 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 // extractBlockMatches fetches the target block from the network, and filters
 // out any relevant transactions found within the block.
 func extractBlockMatches(chain ChainSource, ro *rescanOptions,
-	curStamp *headerfs.BlockStamp) ([]*btcutil.Tx, error) {
+	curStamp *headerfs.BlockStamp, filter *gcs.Filter) ([]*btcutil.Tx,
+	error) {
 
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
@@ -950,8 +953,19 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 		return nil, err
 	}
 	if block == nil {
-		return nil, fmt.Errorf("Couldn't get block %d (%s) from "+
+		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
 			"network", curStamp.Height, curStamp.Hash)
+	}
+
+	// Before we go through the transactions, let's make sure the filter we
+	// got from our peer is valid and includes all spent previous output
+	// scripts. If there's a problem, the error returned here will be
+	// interpreted by the block manager to disconnect/ban said peer.
+	if _, err := VerifyBasicBlockFilter(filter, block); err != nil {
+		return nil, fmt.Errorf("error verifying filter against "+
+			"downloaded block %d (%s), possibly got invalid "+
+			"filter from peer: %v", curStamp.Height, curStamp.Hash,
+			err)
 	}
 
 	blockHeader := block.MsgBlock().Header
@@ -1022,7 +1036,7 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 
 		if matched {
 			relevantTxs, err = extractBlockMatches(
-				chain, ro, curStamp,
+				chain, ro, curStamp, filter,
 			)
 			if err != nil {
 				return err
@@ -1067,7 +1081,7 @@ func matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
 // items. If this returns false, it means the block is certainly not interesting
 // to us.
 func blockFilterMatches(chain ChainSource, ro *rescanOptions,
-	blockHash *chainhash.Hash) (bool, error) {
+	blockHash *chainhash.Hash) (bool, *gcs.Filter, error) {
 
 	// TODO(roasbeef): need to ENSURE always get filter
 
@@ -1081,18 +1095,19 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
 			// Block has been reorged out from under us.
-			return false, nil
+			return false, nil, nil
 		}
-		return false, err
+		return false, nil, err
 	}
 
 	// If we found the filter, then we'll check the items in the watch list
 	// against it.
 	if filter.N() != 0 {
-		return matchBlockFilter(ro, filter, blockHash)
+		matched, err := matchBlockFilter(ro, filter, blockHash)
+		return matched, filter, err
 	}
 
-	return false, nil
+	return false, nil, nil
 }
 
 // updateFilter atomically updates the filter and rewinds to the specified

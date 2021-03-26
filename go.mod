@@ -9,6 +9,7 @@ require (
 	github.com/btcsuite/btcwallet/wtxmgr v1.2.0
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightningnetwork/lnd/queue v1.0.1
+	github.com/stretchr/testify v1.5.1 // indirect
 )
 
 go 1.13

@@ -15,7 +15,6 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
@@ -1663,9 +1662,6 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 
 	badPeers := make(map[string]struct{})
 
-	blockHash := block.BlockHash()
-	filterKey := builder.DeriveKey(&blockHash)
-
 	log.Infof("Attempting to pinpoint mismatch in cfheaders for block=%v",
 		block.Header.BlockHash())
 
@@ -1674,14 +1670,6 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	if fType != wire.GCSFilterRegular {
 		return nil, fmt.Errorf("unknown filter: %v", fType)
 	}
-
-	// With the current set of items that we can fetch from the p2p
-	// network, we're forced to only verify what we can at this point. So
-	// we'll just ensure that each of the filters returned contains the
-	// expected outputs in the block. We don't have the prev outs so we
-	// cannot fully verify the filter.
-	//
-	// TODO(roasbeef): update after BLOCK_WITH_PREV_OUTS is a thing
 
 	// Since we don't expect OP_RETURN scripts to be included in the block,
 	// we keep a counter for how many matches for each peer. Since there
@@ -1693,89 +1681,26 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	// We'll now run through each peer and ensure that each output
 	// script is included in the filter that they responded with to
 	// our query.
-peerVerification:
 	for peerAddr, filter := range filtersFromPeers {
 		// We'll ensure that all the filters include every output
-		// script within the block.
-		//
+		// script within the block. From the scriptSig and witnesses of
+		// the inputs we can also derive most of the scripts of the
+		// outputs being spent (at least for standard scripts).
+		numOpReturns, err := VerifyBasicBlockFilter(
+			filter, btcutil.NewBlock(block),
+		)
+		if err != nil {
+			// Mark peer bad if we cannot verify its filter.
+			log.Warnf("Unable to check filter match for "+
+				"peer %v, marking as bad: %v", peerAddr, err)
+
+			badPeers[peerAddr] = struct{}{}
+			continue
+		}
+		opReturnMatches[peerAddr] = numOpReturns
+
 		// TODO(roasbeef): eventually just do a comparison against
 		// decompressed filters
-		for _, tx := range block.Transactions {
-			for _, txOut := range tx.TxOut {
-				switch {
-				// If the script itself is blank, then we'll
-				// skip this as it doesn't contain any useful
-				// information.
-				case len(txOut.PkScript) == 0:
-					continue
-
-				// We'll also skip any OP_RETURN scripts as
-				// well since we don't index these in order to
-				// avoid a circular dependency.
-				case txOut.PkScript[0] == txscript.OP_RETURN:
-					// Previous versions of the filters did
-					// include OP_RETURNs. To be able
-					// disconnect bad peers still serving
-					// these old filters we attempt to
-					// check if there's an unexpected
-					// match. Since there might be false
-					// positives, an OP_RETURN can still
-					// match filters not including them.
-					// Therefore, we count the number of
-					// such unexpected matches for each
-					// peer, such that we can ban peers
-					// matching more than the rest.
-					match, err := filter.Match(
-						filterKey, txOut.PkScript,
-					)
-					if err != nil {
-						// Mark peer bad if we cannot
-						// match on its filter.
-						log.Warnf("Unable to check "+
-							"filter match for "+
-							"peer %v, marking as "+
-							"bad: %v", peerAddr,
-							err)
-
-						badPeers[peerAddr] = struct{}{}
-						continue peerVerification
-					}
-
-					// If it matches on the OP_RETURN
-					// output, we increase the op return
-					// counter.
-					if match {
-						opReturnMatches[peerAddr]++
-					}
-					continue
-				}
-
-				match, err := filter.Match(
-					filterKey, txOut.PkScript,
-				)
-				if err != nil {
-					// If we're unable to query this
-					// filter, then we'll immediately ban
-					// this peer.
-					log.Warnf("Unable to check filter "+
-						"match for peer %v, marking "+
-						"as bad: %v", peerAddr, err)
-
-					badPeers[peerAddr] = struct{}{}
-					continue peerVerification
-				}
-
-				if match {
-					continue
-				}
-
-				// If this filter doesn't match, then we'll
-				// mark this peer as bad and move on to the
-				// next peer.
-				badPeers[peerAddr] = struct{}{}
-				continue peerVerification
-			}
-		}
 	}
 
 	// TODO: We can add an after-the-fact countermeasure here against
