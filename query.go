@@ -78,12 +78,6 @@ type queryOptions struct {
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
 
-	// persistToDisk indicates whether the filter should also be written
-	// to disk in addition to the memory cache. For "normal" wallets, they'll
-	// almost never need to re-match a filter once it's been fetched unless
-	// they're doing something like a key import.
-	persistToDisk bool
-
 	// optimisticBatch indicates whether we expect more calls to follow,
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
@@ -176,14 +170,6 @@ func Encoding(encoding wire.MessageEncoding) QueryOption {
 func DoneChan(doneChan chan<- struct{}) QueryOption {
 	return func(qo *queryOptions) {
 		qo.doneChan = doneChan
-	}
-}
-
-// PersistToDisk allows the caller to tell that the filter should be kept
-// on disk once it's found.
-func PersistToDisk() QueryOption {
-	return func(qo *queryOptions) {
-		qo.persistToDisk = true
 	}
 }
 
@@ -792,7 +778,7 @@ func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
 
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(q.options...)
-	if qo.persistToDisk {
+	if s.persistToDisk {
 		err = s.FilterDB.PutFilter(
 			&response.BlockHash, gotFilter, dbFilterType,
 		)
