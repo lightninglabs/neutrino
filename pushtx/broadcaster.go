@@ -20,6 +20,10 @@ var (
 )
 
 const (
+	// DefaultBroadcastTimeout is the default timeout used when broadcasting
+	// transactions to network peers.
+	DefaultBroadcastTimeout = 5 * time.Second
+
 	// DefaultRebroadcastInterval is the default period that we'll wait
 	// between blocks to attempt another rebroadcast.
 	DefaultRebroadcastInterval = time.Minute
