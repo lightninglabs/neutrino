@@ -1114,10 +1114,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				rejections[*broadcastErr]++
 			}
 		},
-		// Default to 10s timeout. Default for queryAllPeers is a
-		// single try.
 		append(
-			[]QueryOption{Timeout(time.Second * 10)},
+			[]QueryOption{Timeout(s.broadcastTimeout)},
 			options...,
 		)...,
 	)
