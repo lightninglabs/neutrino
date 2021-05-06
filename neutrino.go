@@ -337,7 +337,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
-	var addrsSupportingServices []*wire.NetAddress
+	addrsSupportingServices := make([]*wire.NetAddress, 0, len(msg.AddrList))
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {

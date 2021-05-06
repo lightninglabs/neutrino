@@ -32,10 +32,6 @@ linters:
     # land.
     - gocyclo
 
-    # Instances of table driven tests that don't pre-allocate shouldn't trigger
-    # the linter.
-    - prealloc
-
     # Init functions are used by loggers throughout the codebase.
     - gochecknoinits
 
@@ -48,3 +44,7 @@ issues:
         - gosec
         - errcheck
         - dupl
+
+        # Instances of table driven tests that don't pre-allocate shouldn't
+        # trigger the linter.
+        - prealloc

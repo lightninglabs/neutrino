@@ -822,12 +822,12 @@ type checkpointedCFHeadersQuery struct {
 
 // requests creates the query.Requests for this CF headers query.
 func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
-	var reqs []*query.Request
-	for _, m := range c.msgs {
-		reqs = append(reqs, &query.Request{
+	reqs := make([]*query.Request, len(c.msgs))
+	for idx, m := range c.msgs {
+		reqs[idx] = &query.Request{
 			Req:        m,
 			HandleResp: c.handleResponse,
-		})
+		}
 	}
 	return reqs
 }
