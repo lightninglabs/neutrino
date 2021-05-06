@@ -1260,8 +1260,8 @@ txOutLoop:
 // client with updateable filters. It's meant to be close to a drop-in
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
-type Rescan struct {
-	started uint32
+type Rescan struct { // nolint:maligned
+	started uint32 // To be used atomically.
 
 	running    chan struct{}
 	updateChan chan *updateOptions
@@ -1374,7 +1374,6 @@ func DisableDisconnectedNtfns(disabled bool) UpdateOption {
 
 // Update sends an update to a long-running rescan/notification goroutine.
 func (r *Rescan) Update(options ...UpdateOption) error {
-
 	ro := defaultRescanOptions()
 	for _, option := range r.options {
 		option(ro)

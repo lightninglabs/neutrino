@@ -117,9 +117,9 @@ type blockManagerCfg struct {
 
 // blockManager provides a concurrency safe block manager for handling all
 // incoming blocks.
-type blockManager struct {
-	started  int32
-	shutdown int32
+type blockManager struct { // nolint:maligned
+	started  int32 // To be used atomically.
+	shutdown int32 // To be used atomically.
 
 	cfg *blockManagerCfg
 

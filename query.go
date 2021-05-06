@@ -57,37 +57,37 @@ var (
 //
 // TODO: Make more query options that override global options.
 type queryOptions struct {
+	// maxBatchSize is the maximum items that the query should return in the
+	// case the optimisticBatch option is used. It saves bandwidth in the case
+	// the caller has a limited amount of items to fetch but still wants to use
+	// batching.
+	maxBatchSize int64
+
 	// timeout lets the query know how long to wait for a peer to answer
 	// the query before moving onto the next peer.
 	timeout time.Duration
-
-	// numRetries tells the query how many times to retry asking each peer
-	// the query.
-	numRetries uint8
 
 	// peerConnectTimeout lets the query know how long to wait for the
 	// underlying chain service to connect to a peer before giving up
 	// on a query in case we don't have any peers.
 	peerConnectTimeout time.Duration
 
+	// doneChan lets the query signal the caller when it's done, in case
+	// it's run in a goroutine.
+	doneChan chan<- struct{}
+
 	// encoding lets the query know which encoding to use when queueing
 	// messages to a peer.
 	encoding wire.MessageEncoding
 
-	// doneChan lets the query signal the caller when it's done, in case
-	// it's run in a goroutine.
-	doneChan chan<- struct{}
+	// numRetries tells the query how many times to retry asking each peer
+	// the query.
+	numRetries uint8
 
 	// optimisticBatch indicates whether we expect more calls to follow,
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
 	optimisticBatch optimisticBatchType
-
-	// maxBatchSize is the maximum items that the query should return in the
-	// case the optimisticBatch option is used. It saves bandwidth in the case
-	// the caller has a limited amount of items to fetch but still wants to use
-	// batching.
-	maxBatchSize int64
 }
 
 // optimisticBatchType is a type indicating the kind of batching we want to

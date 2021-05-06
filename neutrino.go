@@ -559,7 +559,7 @@ type peerSubscription struct {
 }
 
 // ChainService is instantiated with functional options.
-type ChainService struct {
+type ChainService struct { // nolint:maligned
 	// The following variables must only be used atomically.
 	// Putting the uint64s first makes them 64-bit aligned for 32-bit systems.
 	bytesReceived uint64 // Total bytes received from all peers since start.
