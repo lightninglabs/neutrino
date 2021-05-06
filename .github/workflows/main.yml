@@ -13,6 +13,8 @@ defaults:
     shell: bash
 
 env:
+  GOCACHE: /home/runner/work/go/pkg/build
+  GOPATH: /home/runner/work/go
   GO_VERSION: 1.16.x
 
 jobs:
@@ -43,9 +45,10 @@ jobs:
     steps:
       - name: git checkout
         uses: actions/checkout@v2
-
-      - name: Fetch all history for linter
-        run: git fetch --prune --unshallow
+        with:
+          # The same as "git fetch --unshallow" but also works when running the
+          # action locally with "act".
+          fetch-depth: 0
 
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v2
