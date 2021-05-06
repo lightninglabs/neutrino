@@ -23,7 +23,7 @@ var (
 	// query.
 	QueryTimeout = time.Second * 10
 
-	// QueryBatchTimout is the total time we'll wait for a batch fetch
+	// QueryBatchTimeout is the total time we'll wait for a batch fetch
 	// query to complete.
 	// TODO(halseth): instead use timeout since last received response?
 	QueryBatchTimeout = time.Second * 30
@@ -57,37 +57,37 @@ var (
 //
 // TODO: Make more query options that override global options.
 type queryOptions struct {
+	// maxBatchSize is the maximum items that the query should return in the
+	// case the optimisticBatch option is used. It saves bandwidth in the case
+	// the caller has a limited amount of items to fetch but still wants to use
+	// batching.
+	maxBatchSize int64
+
 	// timeout lets the query know how long to wait for a peer to answer
 	// the query before moving onto the next peer.
 	timeout time.Duration
-
-	// numRetries tells the query how many times to retry asking each peer
-	// the query.
-	numRetries uint8
 
 	// peerConnectTimeout lets the query know how long to wait for the
 	// underlying chain service to connect to a peer before giving up
 	// on a query in case we don't have any peers.
 	peerConnectTimeout time.Duration
 
+	// doneChan lets the query signal the caller when it's done, in case
+	// it's run in a goroutine.
+	doneChan chan<- struct{}
+
 	// encoding lets the query know which encoding to use when queueing
 	// messages to a peer.
 	encoding wire.MessageEncoding
 
-	// doneChan lets the query signal the caller when it's done, in case
-	// it's run in a goroutine.
-	doneChan chan<- struct{}
+	// numRetries tells the query how many times to retry asking each peer
+	// the query.
+	numRetries uint8
 
 	// optimisticBatch indicates whether we expect more calls to follow,
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
 	optimisticBatch optimisticBatchType
-
-	// maxBatchSize is the maximum items that the query should return in the
-	// case the optimisticBatch option is used. It saves bandwidth in the case
-	// the caller has a limited amount of items to fetch but still wants to use
-	// batching.
-	maxBatchSize int64
 }
 
 // optimisticBatchType is a type indicating the kind of batching we want to
@@ -196,28 +196,6 @@ func MaxBatchSize(maxSize int64) QueryOption {
 		qo.maxBatchSize = maxSize
 	}
 }
-
-// queryState is an atomically updated per-query state for each query in a
-// batch.
-//
-// State transitions are:
-//
-// * queryWaitSubmit->queryWaitResponse - send query to peer
-// * queryWaitResponse->queryWaitSubmit - query timeout with no acceptable
-//   response
-// * queryWaitResponse->queryAnswered - acceptable response to query received
-type queryState uint32
-
-const (
-	// Waiting to be submitted to a peer.
-	queryWaitSubmit queryState = iota
-
-	// Submitted to a peer, waiting for reply.
-	queryWaitResponse
-
-	// Valid reply received.
-	queryAnswered
-)
 
 // We provide 3 kinds of queries:
 //
@@ -522,7 +500,10 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{
+		BlockHash:  *blockHash,
+		FilterType: filterType,
+	}
 
 	filterValue, err := s.FilterCache.Get(cacheKey)
 	if err != nil {
@@ -534,9 +515,12 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 
 // putFilterToCache inserts a given filter in ChainService's FilterCache.
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
-	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) {
+	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) { // nolint:unparam
 
-	cacheKey := cache.FilterCacheKey{*blockHash, filterType}
+	cacheKey := cache.FilterCacheKey{
+		BlockHash:  *blockHash,
+		FilterType: filterType,
+	}
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
@@ -933,7 +917,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// can't request it.
 	blockHeader, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil, fmt.Errorf("Couldn't get header for block %s "+
+		return nil, fmt.Errorf("couldn't get header for block %s "+
 			"from database", blockHash)
 	}
 
@@ -961,7 +945,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(inv)
+	_ = getData.AddInvVect(inv)
 
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -1033,12 +1017,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		options...,
 	)
 	if foundBlock == nil {
-		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
+		return nil, fmt.Errorf("couldn't retrieve block %s from "+
 			"network", blockHash)
 	}
 
 	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{foundBlock})
+	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
@@ -1069,7 +1053,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// Create an inv.
 	txHash := tx.TxHash()
 	inv := wire.NewMsgInv()
-	inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
 
 	// We'll gather all of the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use

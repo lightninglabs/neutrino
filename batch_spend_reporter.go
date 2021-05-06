@@ -27,7 +27,7 @@ type batchSpendReporter struct {
 	outpoints map[wire.OutPoint][]byte
 
 	// filterEntries holds the current set of watched outpoint, and is
-	// applied to cfilters to guage whether we should download the block.
+	// applied to cfilters to gauge whether we should download the block.
 	//
 	// NOTE: This watchlist is updated during each call to ProcessBlock.
 	filterEntries [][]byte
@@ -61,6 +61,8 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 	log.Debugf("Finished batch, %d unspent outpoints", len(b.requests))
 
 	for outpoint, requests := range b.requests {
+		op := outpoint
+
 		// A nil SpendReport indicates the output was not found.
 		tx, ok := b.initialTxns[outpoint]
 		if !ok {
@@ -68,7 +70,7 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 				outpoint)
 		}
 
-		b.notifyRequests(&outpoint, requests, tx, nil)
+		b.notifyRequests(&op, requests, tx, nil)
 	}
 }
 
@@ -78,7 +80,8 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 //     return reporter.FailRemaining(err)
 func (b *batchSpendReporter) FailRemaining(err error) error {
 	for outpoint, requests := range b.requests {
-		b.notifyRequests(&outpoint, requests, nil, err)
+		op := outpoint
+		b.notifyRequests(&op, requests, nil, err)
 	}
 	return err
 }

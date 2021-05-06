@@ -599,6 +599,7 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
+		testCase := testCase
 		success := t.Run(testCase.name, func(t *testing.T) {
 			// We'll start the test by setting up our required
 			// dependencies.

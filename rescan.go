@@ -354,7 +354,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// If we don't have a quit channel, and the end height is still
 	// unspecified, then we'll exit out here.
 	if ro.quit == nil && ro.endBlock.Height == 0 {
-		return fmt.Errorf("Rescan request must specify a quit channel" +
+		return fmt.Errorf("rescan request must specify a quit channel" +
 			" or valid end block")
 	}
 
@@ -560,8 +560,8 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 					newStamp.Height, &header, nil,
 				)
 			}
-			if ro.ntfn.OnBlockConnected != nil {
-				ro.ntfn.OnBlockConnected(
+			if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
+				ro.ntfn.OnBlockConnected( // nolint:staticcheck
 					&newStamp.Hash, newStamp.Height,
 					header.Timestamp,
 				)
@@ -606,7 +606,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 
 	// handleBlockDisconnected is a helper closure that handles a new block
 	// disconnected notification.
-	handleBlockDisconnected := func(ntfn *blockntfns.Disconnected) error {
+	handleBlockDisconnected := func(ntfn *blockntfns.Disconnected) error { // nolint:unparam
 		blockDisconnected := ntfn.Header()
 		log.Debugf("Rescan got disconnected block %d (%s)",
 			ntfn.Height(), blockDisconnected.BlockHash())
@@ -624,8 +624,8 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 				curStamp.Height, &curHeader,
 			)
 		}
-		if ro.ntfn.OnBlockDisconnected != nil {
-			ro.ntfn.OnBlockDisconnected(
+		if ro.ntfn.OnBlockDisconnected != nil { // nolint:staticcheck
+			ro.ntfn.OnBlockDisconnected( // nolint:staticcheck
 				&curStamp.Hash, curStamp.Height,
 				curHeader.Timestamp,
 			)
@@ -932,8 +932,8 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 			relevantTxs)
 	}
 
-	if ro.ntfn.OnBlockConnected != nil {
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
+	if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
+		ro.ntfn.OnBlockConnected(&curStamp.Hash, // nolint:staticcheck
 			curStamp.Height, curHeader.Timestamp)
 	}
 
@@ -984,8 +984,8 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 
 		if ro.spendsWatchedInput(tx) {
 			relevant = true
-			if ro.ntfn.OnRedeemingTx != nil {
-				ro.ntfn.OnRedeemingTx(tx, &txDetails)
+			if ro.ntfn.OnRedeemingTx != nil { // nolint:staticcheck
+				ro.ntfn.OnRedeemingTx(tx, &txDetails) // nolint:staticcheck
 			}
 		}
 
@@ -1000,8 +1000,8 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 
 		if pays {
 			relevant = true
-			if ro.ntfn.OnRecvTx != nil {
-				ro.ntfn.OnRecvTx(tx, &txDetails)
+			if ro.ntfn.OnRecvTx != nil { // nolint:staticcheck
+				ro.ntfn.OnRecvTx(tx, &txDetails) // nolint:staticcheck
 			}
 		}
 
@@ -1049,8 +1049,8 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 			relevantTxs)
 	}
 
-	if ro.ntfn.OnBlockConnected != nil {
-		ro.ntfn.OnBlockConnected(&curStamp.Hash,
+	if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
+		ro.ntfn.OnBlockConnected(&curStamp.Hash, // nolint:staticcheck
 			curStamp.Height, curHeader.Timestamp)
 	}
 
@@ -1148,9 +1148,9 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 	// If we need to rewind, then we'll walk backwards in the chain until
 	// we arrive at the block _just_ before the rewind.
 	for curStamp.Height > int32(update.rewind) {
-		if ro.ntfn.OnBlockDisconnected != nil &&
+		if ro.ntfn.OnBlockDisconnected != nil && // nolint:staticcheck
 			!update.disableDisconnectedNtfns {
-			ro.ntfn.OnBlockDisconnected(&curStamp.Hash,
+			ro.ntfn.OnBlockDisconnected(&curStamp.Hash, // nolint:staticcheck
 				curStamp.Height, curHeader.Timestamp)
 		}
 		if ro.ntfn.OnFilteredBlockDisconnected != nil &&
@@ -1260,8 +1260,8 @@ txOutLoop:
 // client with updateable filters. It's meant to be close to a drop-in
 // replacement for the btcd rescan and notification functionality used in
 // wallets. It only contains information about whether a goroutine is running.
-type Rescan struct {
-	started uint32
+type Rescan struct { // nolint:maligned
+	started uint32 // To be used atomically.
 
 	running    chan struct{}
 	updateChan chan *updateOptions
@@ -1301,7 +1301,7 @@ func (r *Rescan) Start() <-chan error {
 	errChan := make(chan error, 1)
 
 	if !atomic.CompareAndSwapUint32(&r.started, 0, 1) {
-		errChan <- fmt.Errorf("Rescan already started")
+		errChan <- fmt.Errorf("rescan already started")
 		return errChan
 	}
 
@@ -1374,7 +1374,6 @@ func DisableDisconnectedNtfns(disabled bool) UpdateOption {
 
 // Update sends an update to a long-running rescan/notification goroutine.
 func (r *Rescan) Update(options ...UpdateOption) error {
-
 	ro := defaultRescanOptions()
 	for _, option := range r.options {
 		option(ro)
@@ -1461,7 +1460,7 @@ type SpendReport struct {
 // used to give a hint of which transaction in the block matches it (coinbase
 // is 0, first normal transaction is 1, etc.).
 //
-// TODO(roasbeef): WTB utxo-commitments
+// TODO(roasbeef): WTB utxo-commitments.
 func (s *ChainService) GetUtxo(options ...RescanOption) (*SpendReport, error) {
 	// Before we start we'll fetch the set of default options, and apply
 	// any user specified options in a functional manner.

@@ -219,7 +219,7 @@ func (s *secSource) add(privKey *btcec.PrivateKey) (btcutil.Address, error) {
 	return addr, nil
 }
 
-// GetKey is required by the txscript.KeyDB interface
+// GetKey is required by the txscript.KeyDB interface.
 func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
 	error) {
 	privKey, ok := s.keys[addr.String()]
@@ -229,7 +229,7 @@ func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
 	return privKey, true, nil
 }
 
-// GetScript is required by the txscript.ScriptDB interface
+// GetScript is required by the txscript.ScriptDB interface.
 func (s *secSource) GetScript(addr btcutil.Address) ([]byte, error) {
 	script, ok := s.scripts[addr.String()]
 	if !ok {
@@ -249,10 +249,6 @@ func newSecSource(params *chaincfg.Params) *secSource {
 		scripts: make(map[string]*[]byte),
 		params:  params,
 	}
-}
-
-type testLogger struct {
-	t *testing.T
 }
 
 type neutrinoHarness struct {
@@ -305,7 +301,7 @@ var (
 	secSrc                    *secSource
 	addr1, addr2, addr3       btcutil.Address
 	script1, script2, script3 []byte
-	tx1, tx2, tx3             *wire.MsgTx
+	tx1, tx2                  *wire.MsgTx
 	ourOutPoint               wire.OutPoint
 )
 
@@ -995,7 +991,6 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 	if lastErr != nil {
 		t.Fatal(lastErr)
 	}
-	return
 }
 
 func TestNeutrinoSync(t *testing.T) {
@@ -1107,10 +1102,10 @@ func TestNeutrinoSync(t *testing.T) {
 	db, err := walletdb.Create(
 		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
 	)
-	defer db.Close()
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
 	}
+	defer db.Close()
 	config := neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
@@ -1135,9 +1130,10 @@ func TestNeutrinoSync(t *testing.T) {
 	// Create a test harness with the three nodes and the neutrino instance.
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
 
-	for _, test := range testCases {
-		if ok := t.Run(test.name, func(t *testing.T) {
-			test.test(testHarness, t)
+	for _, testCase := range testCases {
+		testCase := testCase
+		if ok := t.Run(testCase.name, func(t *testing.T) {
+			testCase.test(testHarness, t)
 		}); !ok {
 			break
 		}

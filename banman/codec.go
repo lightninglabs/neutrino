@@ -72,11 +72,11 @@ func decodeIPNet(r io.Reader) (*net.IPNet, error) {
 	// Once we have the type and its corresponding length, attempt to read
 	// it and its mask.
 	ip := make([]byte, ipLen)
-	if _, err := r.Read(ip[:]); err != nil {
+	if _, err := r.Read(ip); err != nil {
 		return nil, err
 	}
 	mask := make([]byte, ipLen)
-	if _, err := r.Read(mask[:]); err != nil {
+	if _, err := r.Read(mask); err != nil {
 		return nil, err
 	}
 	return &net.IPNet{IP: ip, Mask: mask}, nil

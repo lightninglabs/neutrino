@@ -26,12 +26,6 @@ var (
 	// current block hash of the best known chain that the headers for
 	// regular filter are synced to.
 	regFilterTip = []byte("regular")
-
-	// extFilterTip is the key which tracks the "tip" of the extended
-	// compact filter header chain. The value of this key will be the
-	// current block hash of the best known chain that the headers for
-	// extended filter are synced to.
-	extFilterTip = []byte("ext")
 )
 
 var (
@@ -148,7 +142,7 @@ func (h headerBatch) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 }
 
-// addHeaders writes a batch of header entries in a single atomic batch
+// addHeaders writes a batch of header entries in a single atomic batch.
 func (h *headerIndex) addHeaders(batch headerBatch) error {
 	// If we're writing a 0-length batch, make no changes and return.
 	if len(batch) == 0 {

@@ -42,7 +42,6 @@ type checkCFHTestCase struct {
 
 type resolveFilterTestCase struct {
 	name         string
-	block        *wire.MsgBlock
 	banThreshold int
 	peerFilters  map[string]*gcs.Filter
 	badPeers     []string
@@ -210,17 +209,6 @@ var (
 			decodeHashNoError("01234567890abcdeffedcba09f76543210"),
 		},
 	}
-	headers4 = func() *wire.MsgCFHeaders {
-		cfh := &wire.MsgCFHeaders{
-			FilterHashes: []*chainhash.Hash{
-				decodeHashNoError("fedcba09f7654321001234567890abcdef"),
-			},
-		}
-		filter, _ := builder.BuildBasicFilter(block, nil)
-		filterHash, _ := builder.GetFilterHash(filter)
-		cfh.FilterHashes = append(cfh.FilterHashes, &filterHash)
-		return cfh
-	}()
 
 	cfCheckptTestCases = []*cfCheckptTestCase{
 		{
@@ -383,8 +371,7 @@ var (
 
 	resolveFilterTestCases = []*resolveFilterTestCase{
 		{
-			name:  "all bad 1",
-			block: block,
+			name: "all bad 1",
 			peerFilters: map[string]*gcs.Filter{
 				"a": fakeFilter1,
 				"b": fakeFilter1,
@@ -393,8 +380,7 @@ var (
 			badPeers:     []string{"a", "b"},
 		},
 		{
-			name:  "all bad 2",
-			block: block,
+			name: "all bad 2",
 			peerFilters: map[string]*gcs.Filter{
 				"a": fakeFilter2,
 				"b": fakeFilter2,
@@ -403,8 +389,7 @@ var (
 			badPeers:     []string{"a", "b"},
 		},
 		{
-			name:  "all bad 3",
-			block: block,
+			name: "all bad 3",
 			peerFilters: map[string]*gcs.Filter{
 				"a": fakeFilter2,
 				"b": fakeFilter2,
@@ -413,8 +398,7 @@ var (
 			badPeers:     []string{"a", "b"},
 		},
 		{
-			name:  "all bad 4",
-			block: block,
+			name: "all bad 4",
 			peerFilters: map[string]*gcs.Filter{
 				"a": fakeFilter1,
 				"b": fakeFilter2,
@@ -423,8 +407,7 @@ var (
 			badPeers:     []string{"a", "b"},
 		},
 		{
-			name:  "all bad 5",
-			block: block,
+			name: "all bad 5",
 			peerFilters: map[string]*gcs.Filter{
 				"a": fakeFilter2,
 				"b": fakeFilter1,
@@ -433,8 +416,7 @@ var (
 			badPeers:     []string{"a", "b"},
 		},
 		{
-			name:  "one good",
-			block: block,
+			name: "one good",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": fakeFilter1,
@@ -444,8 +426,7 @@ var (
 			badPeers:     []string{"b", "c"},
 		},
 		{
-			name:  "all good",
-			block: block,
+			name: "all good",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": correctFilter,
@@ -456,8 +437,7 @@ var (
 		{
 			// One peer is serving a filter tha lacks an element,
 			// we should immediately notice this and ban it.
-			name:  "filter missing element",
-			block: block,
+			name: "filter missing element",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": correctFilter,
@@ -470,8 +450,7 @@ var (
 			// One peer is serving the "old-old" filter which
 			// contains all OP_RETURN output, we expect this peer
 			// to be banned first.
-			name:  "old old peer",
-			block: block,
+			name: "old old peer",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": oldFilter,
@@ -484,8 +463,7 @@ var (
 			// One peer is serving the "old" filter, which contains
 			// non-push OP_RETURNS. We expect this peer to be
 			// banned.
-			name:  "old peer",
-			block: block,
+			name: "old peer",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": oldFilter,
@@ -497,8 +475,7 @@ var (
 		{
 			// We should go with the majority filter in case we
 			// cannot determine who is serving an invalid one.
-			name:  "majority filter",
-			block: block,
+			name: "majority filter",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": correctFilter,
@@ -510,8 +487,7 @@ var (
 		{
 			// We should go with the majority filter in case we
 			// cannot determine who is serving an invalid one.
-			name:  "majority filter 2",
-			block: block,
+			name: "majority filter 2",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": correctFilter,
@@ -523,8 +499,7 @@ var (
 		{
 			// If we need at least 3 peers to consider a filter
 			// consistent, we shuold fail.
-			name:  "majority filter 3",
-			block: block,
+			name: "majority filter 3",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": correctFilter,
@@ -656,6 +631,7 @@ func TestCheckCFCheckptSanity(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range cfCheckptTestCases {
+		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			runCheckCFCheckptSanityTestCase(t, testCase)
 		})
@@ -666,6 +642,7 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range checkCFHTestCases {
+		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			mismatch := checkForCFHeaderMismatch(
 				testCase.headers, testCase.idx,
@@ -702,6 +679,7 @@ func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	}
 
 	for _, testCase := range resolveFilterTestCases {
+		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			badPeers, err := resolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,

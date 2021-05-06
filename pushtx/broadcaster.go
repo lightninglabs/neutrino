@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	// ErrBroadcastStopped is an error returned when we attempt to process a
-	// request to broadcast a transaction but the Broadcaster has already
+	// ErrBroadcasterStopped is an error returned when we attempt to process
+	// a request to broadcast a transaction but the Broadcaster has already
 	// been stopped.
 	ErrBroadcasterStopped = errors.New("broadcaster has been stopped")
 )
@@ -85,11 +85,11 @@ func NewBroadcaster(cfg *Config) *Broadcaster {
 // Start starts all of the necessary steps for the Broadcaster to begin properly
 // carrying out its duties.
 func (b *Broadcaster) Start() error {
-	var err error
+	var returnErr error
 	b.start.Do(func() {
 		sub, err := b.cfg.SubscribeBlocks()
 		if err != nil {
-			err = fmt.Errorf("unable to subscribe for block "+
+			returnErr = fmt.Errorf("unable to subscribe for block "+
 				"notifications: %v", err)
 			return
 		}
@@ -97,7 +97,7 @@ func (b *Broadcaster) Start() error {
 		b.wg.Add(1)
 		go b.broadcastHandler(sub)
 	})
-	return err
+	return returnErr
 }
 
 // Stop halts the Broadcaster from rebroadcasting pending transactions.

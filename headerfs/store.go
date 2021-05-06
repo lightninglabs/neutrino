@@ -85,14 +85,14 @@ var headerBufPool = sync.Pool{
 }
 
 // headerStore combines a on-disk set of headers within a flat file in addition
-// to a databse which indexes that flat file. Together, these two abstractions
+// to a database which indexes that flat file. Together, these two abstractions
 // can be used in order to build an indexed header store for any type of
 // "header" as it deals only with raw bytes, and leaves it to a higher layer to
 // interpret those raw bytes accordingly.
 //
-// TODO(roasbeef): quickcheck coverage
+// TODO(roasbeef): quickcheck coverage.
 type headerStore struct {
-	mtx sync.RWMutex
+	mtx sync.RWMutex // nolint:structcheck // false positive because used as embedded struct only
 
 	fileName string
 
@@ -429,7 +429,7 @@ func (h *blockHeaderStore) blockLocatorFromHash(hash *chainhash.Hash) (
 	locator = append(locator, hash)
 
 	// If hash isn't found in DB or this is the genesis block, return the
-	// locator as is
+	// locator as is.
 	height, err := h.heightFromHash(hash)
 	if height == 0 || err != nil {
 		return locator, nil

@@ -27,4 +27,4 @@ vendor/
 breakpoints.txt
 
 # coverage output
-profile.cov
+coverage.txt

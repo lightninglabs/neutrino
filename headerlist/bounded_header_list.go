@@ -1,6 +1,6 @@
 package headerlist
 
-// BoundedMemoryChain is an implemetnation of the headerlist.Chain interface
+// BoundedMemoryChain is an implementation of the headerlist.Chain interface
 // which has a bounded size. The chain will be stored purely in memory. This is
 // useful for enforcing that only the past N headers are stored in memory, or
 // even as the primary header store. If an element inserted to the end of the

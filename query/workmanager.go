@@ -146,7 +146,7 @@ func (w *WorkManager) Stop() error {
 // workDispatcher receives batches of queries to be performed from external
 // callers, and dispatches these to active workers.  It makes sure to
 // prioritize the queries in the order they come in, such that early queries
-// will be attemped completed first.
+// will be attempted completed first.
 //
 // NOTE: MUST be run as a goroutine.
 func (w *WorkManager) workDispatcher() {

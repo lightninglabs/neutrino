@@ -49,11 +49,11 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	// for that number of bytes, and read directly from the file into the
 	// buffer.
 	rawHeader := make([]byte, headerSize)
-	if _, err := h.file.ReadAt(rawHeader[:], int64(seekDist)); err != nil {
+	if _, err := h.file.ReadAt(rawHeader, int64(seekDist)); err != nil {
 		return nil, &ErrHeaderNotFound{err}
 	}
 
-	return rawHeader[:], nil
+	return rawHeader, nil
 }
 
 // readHeaderRange will attempt to fetch a series of block headers within the

@@ -15,10 +15,6 @@ type mockWorker struct {
 
 var _ Worker = (*mockWorker)(nil)
 
-func (m *mockWorker) exited() <-chan struct{} {
-	return nil
-}
-
 func (m *mockWorker) NewJob() chan<- *queryJob {
 	return m.nextJob
 }
@@ -57,9 +53,6 @@ func (p *mockPeerRanking) Order(peers []string) {
 	sort.Slice(peers, func(i, j int) bool {
 		return p.less(peers[i], peers[j])
 	})
-}
-
-func (p *mockPeerRanking) addPeer(peer string) {
 }
 
 func (p *mockPeerRanking) Punish(peer string) {
@@ -209,19 +202,17 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 		scheduledJobs[i] = make(chan sched)
 	}
 
-	// Fot each wotker, spin up a goroutine that will forward the job it
-	// got to our slice of sheduled jobs, such that we can handle them in
+	// Fot each worker, spin up a goroutine that will forward the job it
+	// got to our slice of scheduled jobs, such that we can handle them in
 	// order.
 	for i := 0; i < len(workers); i++ {
 		wk := workers[i]
 		go func() {
 			for {
-				select {
-				case job := <-wk.nextJob:
-					scheduledJobs[job.index] <- sched{
-						wk:  wk,
-						job: job,
-					}
+				job := <-wk.nextJob
+				scheduledJobs[job.index] <- sched{
+					wk:  wk,
+					job: job,
 				}
 			}
 		}()
@@ -470,7 +461,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 		q := &Request{}
 		queries = append(queries, q)
 	}
-	errChan = wm.Query(queries)
+	_ = wm.Query(queries)
 
 	// The new jobs should be scheduled on the even numbered workers.
 	for i := 0; i < len(workers); i += 2 {

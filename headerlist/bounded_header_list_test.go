@@ -172,7 +172,6 @@ func TestBoundedMemoryChainPrevIteration(t *testing.T) {
 
 	// We'll now walk backwards with the iterNode until we run into the nil
 	// pointer.
-	numIters := 0
 	for iterNode != nil {
 		nextNode := iterNode
 		iterNode = iterNode.Prev()
@@ -182,7 +181,5 @@ func TestBoundedMemoryChainPrevIteration(t *testing.T) {
 				spew.Sdump(nextNode.Prev()),
 				spew.Sdump(iterNode))
 		}
-
-		numIters++
 	}
 }

@@ -36,7 +36,7 @@ type queryOptions struct {
 // methods, such as GetBlock and GetCFilter (when that resorts to a network
 // query). These are always processed in order, with later options overriding
 // earlier ones.
-type QueryOption func(*queryOptions)
+type QueryOption func(*queryOptions) // nolint:golint
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
 func defaultQueryOptions() *queryOptions {
@@ -86,7 +86,7 @@ type Progress struct {
 	Finished bool
 
 	// Progressed is true if the query made progress towards fully
-	// answering the request as a result of the recived response. This is
+	// answering the request as a result of the received response. This is
 	// used for the requests types where more than one response is
 	// expected.
 	Progressed bool

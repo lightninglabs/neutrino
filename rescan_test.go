@@ -348,7 +348,7 @@ type rescanTestContext struct {
 
 // newRescanTestContext creates a new test harness for the Rescan struct backed
 // by a chain of numBlocks.
-func newRescanTestContext(t *testing.T, numBlocks int,
+func newRescanTestContext(t *testing.T, numBlocks int, // nolint:unparam
 	options ...RescanOption) *rescanTestContext {
 
 	blocksConnected := make(chan headerfs.BlockStamp)
@@ -393,7 +393,7 @@ func newRescanTestContext(t *testing.T, numBlocks int,
 }
 
 // start starts the backing rescan.
-func (ctx *rescanTestContext) start(waitUntilSynced bool) {
+func (ctx *rescanTestContext) start(waitUntilSynced bool) { // nolint:unparam
 	if !waitUntilSynced {
 		ctx.errChan = ctx.rescan.Start()
 		return

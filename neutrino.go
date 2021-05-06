@@ -157,10 +157,7 @@ type ServerPeer struct {
 	connReq        *connmgr.ConnReq
 	server         *ChainService
 	persistent     bool
-	continueHash   *chainhash.Hash
-	requestQueue   []*wire.InvVect
 	knownAddresses map[string]struct{}
-	banScore       connmgr.DynamicBanScore
 	quit           chan struct{}
 
 	// The following map of subcribers is used to subscribe to messages
@@ -205,51 +202,6 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
 	for _, na := range addresses {
 		sp.knownAddresses[addrmgr.NetAddressKey(na)] = struct{}{}
-	}
-}
-
-// addressKnown true if the given address is already known to the peer.
-func (sp *ServerPeer) addressKnown(na *wire.NetAddress) bool {
-	_, exists := sp.knownAddresses[addrmgr.NetAddressKey(na)]
-	return exists
-}
-
-// addBanScore increases the persistent and decaying ban score fields by the
-// values passed as parameters. If the resulting score exceeds half of the ban
-// threshold, a warning is logged including the reason provided. Further, if
-// the score is above the ban threshold, the peer will be banned and
-// disconnected.
-func (sp *ServerPeer) addBanScore(persistent, transient uint32, reason string) {
-	// No warning is logged and no score is calculated if banning is
-	// disabled.
-	warnThreshold := BanThreshold >> 1
-	if transient == 0 && persistent == 0 {
-		// The score is not being increased, but a warning message is
-		// still logged if the score is above the warn threshold.
-		score := sp.banScore.Int()
-		if score > warnThreshold {
-			log.Warnf("Misbehaving peer %s: %s -- ban score is "+
-				"%d, it was not increased this time", sp,
-				reason, score)
-		}
-		return
-	}
-
-	score := sp.banScore.Increase(persistent, transient)
-	if score > warnThreshold {
-		log.Warnf("Misbehaving peer %s: %s -- ban score increased to %d",
-			sp, reason, score)
-
-		if score > BanThreshold {
-			peerAddr := sp.Addr()
-			err := sp.server.BanPeer(
-				peerAddr, banman.ExceededBanThreshold,
-			)
-			if err != nil {
-				log.Errorf("Unable to ban peer %v: %v",
-					peerAddr, err)
-			}
-		}
 	}
 }
 
@@ -385,7 +337,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
-	var addrsSupportingServices []*wire.NetAddress
+	addrsSupportingServices := make([]*wire.NetAddress, 0, len(msg.AddrList))
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {
@@ -533,7 +485,7 @@ type Config struct {
 	DataDir string
 
 	// Database is an *open* database instance that we'll use to storm
-	// indexes of teh chain.
+	// indexes of the chain.
 	Database walletdb.DB
 
 	// ChainParams is the chain that we're running on.
@@ -606,8 +558,8 @@ type peerSubscription struct {
 	cancel <-chan struct{}
 }
 
-// ChainService is instantiated with functional options
-type ChainService struct {
+// ChainService is instantiated with functional options.
+type ChainService struct { // nolint:maligned
 	// The following variables must only be used atomically.
 	// Putting the uint64s first makes them 64-bit aligned for 32-bit systems.
 	bytesReceived uint64 // Total bytes received from all peers since start.
@@ -1069,7 +1021,7 @@ func (s *ChainService) IsBanned(addr string) bool {
 	// Log how much time left the peer will remain banned for, if any.
 	if time.Now().Before(banStatus.Expiration) {
 		log.Debugf("Peer %v is banned for another %v", addr,
-			banStatus.Expiration.Sub(time.Now()))
+			time.Until(banStatus.Expiration))
 	}
 
 	return banStatus.Banned
@@ -1573,9 +1525,13 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
-	s.workManager.Start()
+	if err := s.workManager.Start(); err != nil {
+		return fmt.Errorf("unable to start work manager: %v", err)
+	}
 
-	s.utxoScanner.Start()
+	if err := s.utxoScanner.Start(); err != nil {
+		return fmt.Errorf("unable to start utxo scanner: %v", err)
+	}
 
 	if err := s.broadcaster.Start(); err != nil {
 		return fmt.Errorf("unable to start transaction broadcaster: %v",
@@ -1600,18 +1556,31 @@ func (s *ChainService) Stop() error {
 		return nil
 	}
 
+	var returnErr error
 	s.connManager.Stop()
 	s.broadcaster.Stop()
-	s.utxoScanner.Stop()
-	s.workManager.Stop()
+	if err := s.utxoScanner.Stop(); err != nil {
+		log.Errorf("error stopping utxo scanner: %v", err)
+		returnErr = err
+	}
+	if err := s.workManager.Stop(); err != nil {
+		log.Errorf("error stopping work manager: %v", err)
+		returnErr = err
+	}
 	s.blockSubscriptionMgr.Stop()
-	s.blockManager.Stop()
-	s.addrManager.Stop()
+	if err := s.blockManager.Stop(); err != nil {
+		log.Errorf("error stopping block manager: %v", err)
+		returnErr = err
+	}
+	if err := s.addrManager.Stop(); err != nil {
+		log.Errorf("error stopping address manager: %v", err)
+		returnErr = err
+	}
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
-	return nil
+	return returnErr
 }
 
 // IsCurrent lets the caller know whether the chain service's block manager

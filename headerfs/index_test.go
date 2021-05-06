@@ -79,7 +79,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	for i, headerEntry := range headerEntries {
 		height, err := hIndex.heightFromHash(&headerEntry.hash)
 		if err != nil {
-			t.Fatalf("unable to retreive height(%v): %v", i, err)
+			t.Fatalf("unable to retrieve height(%v): %v", i, err)
 		}
 		if height != headerEntry.height {
 			t.Fatalf("height doesn't match: expected %v, got %v",
