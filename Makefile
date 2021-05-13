@@ -1,5 +1,6 @@
 PKG := github.com/lightninglabs/neutrino
 
+BTCD_PKG := github.com/btcsuite/btcd
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
@@ -19,6 +20,12 @@ GOTEST := GO111MODULE=on go test
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
 GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+
+BTCD_COMMIT := $(shell cat go.mod | \
+		grep $(BTCD_PKG) | \
+		head -n1 | \
+		awk -F " " '{ print $$2 }' | \
+		awk -F "/" '{ print $$1 }')
 
 RM := rm -f
 CP := cp
@@ -47,6 +54,10 @@ all: build check
 # DEPENDENCIES
 # ============
 
+btcd:
+	@$(call print, "Installing btcd.")
+	$(DEPGET) $(BTCD_PKG)@$(BTCD_COMMIT)
+
 $(LINT_BIN):
 	@$(call print, "Fetching linter")
 	$(DEPGET) $(LINT_PKG)@$(LINT_COMMIT)
@@ -73,15 +84,15 @@ build:
 
 check: unit
 
-unit:
+unit: btcd
 	@$(call print, "Running unit tests.")
 	$(GOLIST) | $(XARGS) env $(GOTEST)
 
-unit-cover: $(GOACC_BIN)
+unit-cover: btcd $(GOACC_BIN)
 	@$(call print, "Running unit coverage tests.")
 	$(GOACC_BIN) $(GOLIST_COVER)
 
-unit-race:
+unit-race: btcd
 	@$(call print, "Running unit race tests.")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race
 
@@ -104,6 +115,7 @@ clean:
 	$(RM) coverage.txt
 
 .PHONY: all \
+	btcd \
 	default \
 	build \
 	check \
