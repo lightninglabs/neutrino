@@ -3,6 +3,7 @@ package pushtx
 import (
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -179,4 +180,26 @@ func TestRebroadcast(t *testing.T) {
 	// This time however, only the last two transactions will be rebroadcast
 	// since the first one confirmed in the previous rebroadcast attempt.
 	assertBroadcastOrder(txs[1:])
+
+	// We now manually mark one of the transactions as confirmed.
+	broadcaster.MarkAsConfirmed(txs[1].TxHash())
+
+	// Trigger a new block notification to rebroadcast the transactions.
+	ntfnChan <- blockntfns.NewBlockConnected(wire.BlockHeader{}, 101)
+
+	// We assert that only the last transaction is rebroadcast.
+	assertBroadcastOrder(txs[2:])
+
+	// Manually mark the last transaction as confirmed.
+	broadcaster.MarkAsConfirmed(txs[2].TxHash())
+
+	// Trigger a new block notification.
+	ntfnChan <- blockntfns.NewBlockConnected(wire.BlockHeader{}, 102)
+
+	// Assert that no transactions were rebroadcast.
+	select {
+	case tx := <-broadcastChan:
+		t.Fatalf("unexpected rebroadcast of tx %s", tx.TxHash())
+	case <-time.Tick(100 * time.Millisecond):
+	}
 }
