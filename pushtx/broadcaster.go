@@ -67,6 +67,10 @@ type Broadcaster struct {
 	// requests from external callers will be streamed through.
 	broadcastReqs chan *broadcastReq
 
+	// confChan is a channel used to notify the broadcast handler about
+	// confirmed transactions.
+	confChan chan chainhash.Hash
+
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -76,6 +80,7 @@ func NewBroadcaster(cfg *Config) *Broadcaster {
 	b := &Broadcaster{
 		cfg:           *cfg,
 		broadcastReqs: make(chan *broadcastReq),
+		confChan:      make(chan chainhash.Hash),
 		quit:          make(chan struct{}),
 	}
 
@@ -123,10 +128,6 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 	// and are still not confirmed.
 	transactions := make(map[chainhash.Hash]*wire.MsgTx)
 
-	// confChan is a channel used to notify the broadcast handler about
-	// confirmed transactions.
-	confChan := make(chan chainhash.Hash)
-
 	// The rebroadcast semaphore is used to ensure we have only one
 	// rebroadcast running at a time.
 	rebroadcastSem := make(chan struct{}, 1)
@@ -157,7 +158,7 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 		go func() {
 			defer b.wg.Done()
 
-			b.rebroadcast(txs, confChan)
+			b.rebroadcast(txs, b.confChan)
 			rebroadcastSem <- struct{}{}
 		}()
 
@@ -182,7 +183,7 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 
 		// A tx was confirmed, and we can remove it from our set of
 		// transactions.
-		case txHash := <-confChan:
+		case txHash := <-b.confChan:
 			delete(transactions, txHash)
 
 		// A new block notification has arrived, so we'll rebroadcast
@@ -291,4 +292,10 @@ func (b *Broadcaster) Broadcast(tx *wire.MsgTx) error {
 	case <-b.quit:
 		return ErrBroadcasterStopped
 	}
+}
+
+// MarkAsConfirmed is used to tell the broadcaster that a transaction has been
+// confirmed and that it is no longer necessary to rebroadcast this transaction.
+func (b *Broadcaster) MarkAsConfirmed(txHash chainhash.Hash) {
+	b.confChan <- txHash
 }
