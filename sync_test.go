@@ -863,12 +863,21 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 				return
 			}
 			// Get basic cfilter from network.
-			haveFilter, err := harness.svc.GetCFilter(blockHash,
-				wire.GCSFilterRegular, queryOptions...)
+			haveFilters, err := harness.svc.GetCFilters(
+				int32(height), blockHash, wire.GCSFilterRegular,
+				queryOptions...,
+			)
 			if err != nil {
 				errChan <- err
 				return
 			}
+
+			haveFilter, ok := haveFilters[blockHash]
+			if !ok {
+				errChan <- fmt.Errorf("filter not received")
+				return
+			}
+
 			// Get basic cfilter from RPC.
 			wantFilter, err := harness.h1.Node.GetCFilter(
 				&blockHash, wire.GCSFilterRegular)

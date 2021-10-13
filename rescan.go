@@ -61,10 +61,10 @@ type ChainSource interface {
 	// the given height.
 	GetFilterHeaderByHeight(uint32) (*chainhash.Hash, error)
 
-	// GetCFilter returns the filter of the given type for the block with
-	// the given hash.
-	GetCFilter(chainhash.Hash, wire.FilterType,
-		...QueryOption) (*gcs.Filter, error)
+	// GetCFilters returns the filters of the given type for the blocks
+	// between the given start height and the end hash.
+	GetCFilters(int32, chainhash.Hash, wire.FilterType,
+		...QueryOption) (map[chainhash.Hash]*gcs.Filter, error)
 
 	// Subscribe returns a block subscription that delivers block
 	// notifications in order. The bestHeight parameter can be used to
@@ -576,8 +576,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		// Otherwise, we'll attempt to fetch the filter to retrieve the
 		// relevant transactions and notify them.
 		queryOptions := NumRetries(0)
-		blockFilter, err := chain.GetCFilter(
-			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
+		blockFilters, err := chain.GetCFilters(
+			newStamp.Height, newStamp.Hash, wire.GCSFilterRegular,
+			queryOptions,
 		)
 		if err != nil {
 			// If the query failed, then this either means that we
@@ -585,12 +586,19 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			// the peer(s) that we're trying to fetch from are in
 			// the progress of a re-org.
 			log.Errorf("unable to get filter for hash=%v, "+
-				"retrying: %v", curStamp.Hash, err)
+				"retrying: %v", newStamp.Hash, err)
+			return errRetryBlock
+		}
+
+		filter, ok := blockFilters[newStamp.Hash]
+		if !ok {
+			log.Errorf("filter for block hash=%v was not returned"+
+				"by GetCFilters. retrying.", newStamp.Hash)
 			return errRetryBlock
 		}
 
 		err = notifyBlockWithFilter(
-			chain, ro, &header, &newStamp, blockFilter,
+			chain, ro, &header, &newStamp, filter,
 		)
 		if err != nil {
 			return err
@@ -1096,8 +1104,14 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	// utxoscanner, we expect more calls to follow for the subsequent
 	// filters. To speed up the fetching, we make an optimistic batch
 	// query.
-	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, OptimisticBatch(),
+	_, height, err := chain.GetBlockHeader(blockHash)
+	if err != nil {
+		return false, nil, err
+	}
+
+	filters, err := chain.GetCFilters(
+		int32(height), *blockHash, wire.GCSFilterRegular,
+		OptimisticBatch(),
 	)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {
@@ -1105,6 +1119,11 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 			return false, nil, nil
 		}
 		return false, nil, err
+	}
+
+	filter, ok := filters[*blockHash]
+	if !ok {
+		return false, nil, ErrFilterFetchFailed
 	}
 
 	// If we found the filter, then we'll check the items in the watch list

@@ -278,11 +278,12 @@ func (c *mockChainSource) setFailGetFilter(b bool) {
 
 // GetCFilter returns the filter of the given type for the block with the given
 // hash.
-func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
-	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
+func (c *mockChainSource) GetCFilters(startHash int32, endHash chainhash.Hash,
+	filterType wire.FilterType,
+	options ...QueryOption) (map[chainhash.Hash]*gcs.Filter, error) {
 
 	defer func() {
-		c.filtersQueried <- hash
+		c.filtersQueried <- endHash
 	}()
 
 	c.mu.Lock()
@@ -292,11 +293,7 @@ func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
 		return nil, errors.New("failed filter")
 	}
 
-	filter, ok := c.filters[hash]
-	if !ok {
-		return nil, errors.New("filter not found")
-	}
-	return filter, nil
+	return c.filters, nil
 }
 
 // overrideSubscribe allows us to override the mockChainSource's Subscribe
