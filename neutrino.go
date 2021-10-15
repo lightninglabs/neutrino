@@ -84,6 +84,13 @@ var (
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
 
+// isDevNetwork indicates if the chain is a private development network, namely
+// simnet or regtest/regnet.
+func isDevNetwork(net wire.BitcoinNet) bool {
+	return net == chaincfg.SimNetParams.Net ||
+		net == chaincfg.RegressionNetParams.Net
+}
+
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
 // after a new block has been accepted. The purpose of the message is to update
 // the heights of peers that were known to announce the block before we
@@ -316,11 +323,11 @@ func (sp *ServerPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
 // used to notify the server about advertised addresses.
 func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
-	// Ignore addresses when running on the simulation test network.  This
+	// Ignore addresses when running on a private development network.  This
 	// helps prevent the network from becoming another public test network
 	// since it will not be able to learn about other peers that have not
 	// specifically been provided.
-	if sp.server.chainParams.Net == chaincfg.SimNetParams.Net {
+	if isDevNetwork(sp.server.chainParams.Net) {
 		return
 	}
 
@@ -741,12 +748,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
 
 	// Only setup a function to return new addresses to connect to when not
-	// running in connect-only mode.  The simulation network is always in
-	// connect-only mode since it is only intended to connect to specified
-	// peers and actively avoid advertising and connecting to discovered
-	// peers in order to prevent it from becoming a public test network.
+	// running in connect-only mode.  Private development networks are always in
+	// connect-only mode since it is only intended to connect to specified peers
+	// and actively avoid advertising and connecting to discovered peers in
+	// order to prevent it from becoming a public test network.
 	var newAddressFunc func() (net.Addr, error)
-	if s.chainParams.Net != chaincfg.SimNetParams.Net {
+	if !isDevNetwork(s.chainParams.Net) {
 		newAddressFunc = func() (net.Addr, error) {
 
 			// Gather our set of currently connected peers to avoid
@@ -1260,10 +1267,10 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// Update the address manager and request known addresses from the
 	// remote peer for outbound connections. This is skipped when running on
-	// the simulation test network since it is only intended to connect to
+	// a development network since it is only intended to connect to
 	// specified peers and actively avoids advertising and connecting to
 	// discovered peers.
-	if s.chainParams.Net != chaincfg.SimNetParams.Net {
+	if !isDevNetwork(s.chainParams.Net) {
 		// Request known addresses if the server address manager needs
 		// more and the peer has a protocol version new enough to
 		// include a timestamp with addresses.
