@@ -1059,6 +1059,8 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
 func (s *ChainService) peerHandler() {
+	defer s.wg.Done()
+
 	state := &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
@@ -1133,7 +1135,7 @@ cleanup:
 			break cleanup
 		}
 	}
-	s.wg.Done()
+
 	log.Tracef("Peer handler done")
 }
 
