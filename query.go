@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lightninglabs/neutrino/query"
+
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -524,6 +526,11 @@ func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
 }
 
+type filterResponse struct {
+	blockHash *chainhash.Hash
+	filter    *gcs.Filter
+}
+
 // cfiltersQuery is a struct that holds all the information necessary to
 // perform batch GetCFilters request, and handle the responses.
 type cfiltersQuery struct {
@@ -531,10 +538,10 @@ type cfiltersQuery struct {
 	startHeight   int64
 	stopHeight    int64
 	stopHash      *chainhash.Hash
+	msgs          []wire.Message
 	filterHeaders []chainhash.Hash
 	headerIndex   map[chainhash.Hash]int
-	targetHash    chainhash.Hash
-	filterChan    chan *gcs.Filter
+	filterChan    chan *filterResponse
 	options       []QueryOption
 }
 
@@ -543,6 +550,120 @@ func (q *cfiltersQuery) queryMsg() wire.Message {
 	return wire.NewMsgGetCFilters(
 		q.filterType, uint32(q.startHeight), q.stopHash,
 	)
+}
+
+func (q *cfiltersQuery) requests() []*query.Request {
+	reqs := make([]*query.Request, len(q.msgs))
+	for idx, m := range q.msgs {
+		reqs[idx] = &query.Request{
+			Req:        m,
+			HandleResp: q.handleResponse,
+		}
+	}
+	return reqs
+}
+
+func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
+	_ string) query.Progress {
+
+	// The request must have been a "getcfilters" msg.
+	request, ok := req.(*wire.MsgGetCFilters)
+	if !ok {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// We're only interested in "cfilter" messages.
+	response, ok := resp.(*wire.MsgCFilter)
+	if !ok {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// If the request doesn't match our request, ignore this message.
+	if q.filterType != request.FilterType {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// If the response doesn't match our request, ignore this message.
+	if q.filterType != response.FilterType {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// If this filter is for a block not in our index, we can ignore it, as
+	// we either already got it, or it is out of our queried range.
+	i, ok := q.headerIndex[response.BlockHash]
+	if !ok {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	gotFilter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, response.Data,
+	)
+	if err != nil {
+		// Malformed filter data. We can ignore this message.
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// Now that we have a proper filter, ensure that re-calculating the
+	// filter header hash for the header _after_ the filter in the chain
+	// checks out. If not, we can ignore this response.
+	curHeader := q.filterHeaders[i]
+	prevHeader := q.filterHeaders[i-1]
+	gotHeader, err := builder.MakeHeaderForFilter(
+		gotFilter, prevHeader,
+	)
+	if err != nil {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	if gotHeader != curHeader {
+		return query.Progress{
+			Finished:   false,
+			Progressed: false,
+		}
+	}
+
+	// At this point, the filter matches what we know about it and we
+	// declare it sane.
+	q.filterChan <- &filterResponse{
+		blockHash: &response.BlockHash,
+		filter:    gotFilter,
+	}
+
+	delete(q.headerIndex, response.BlockHash)
+
+	if len(q.headerIndex) != 0 {
+		return query.Progress{
+			Finished:   false,
+			Progressed: true,
+		}
+	}
+
+	close(q.filterChan)
+	return query.Progress{
+		Finished:   true,
+		Progressed: true,
+	}
 }
 
 // prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
@@ -622,6 +743,10 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 			"stopHeight=%d: %v", stopHeight, err)
 	}
 
+	queryMsg := wire.NewMsgGetCFilters(
+		filterType, uint32(startHeight), stopHash,
+	)
+
 	// In order to verify the authenticity of the received filters, we'll
 	// fetch the block headers and filter headers in the range
 	// [startHeight-1, stopHeight]. We go one below our startHeight since
@@ -667,122 +792,19 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 		headerIndex[block.BlockHash()] = i
 	}
 
-	// We'll immediately respond to the caller with the requested filter
-	// when it is received, so we make a channel to notify on when it's
-	// ready.
-	filterChan := make(chan *gcs.Filter, 1)
+	filterChan := make(chan *filterResponse, numFilters)
 
 	return &cfiltersQuery{
+		msgs:          []wire.Message{queryMsg},
 		filterType:    filterType,
 		startHeight:   startHeight,
 		stopHeight:    stopHeight,
 		stopHash:      stopHash,
 		filterHeaders: filterHeaders,
 		headerIndex:   headerIndex,
-		targetHash:    blockHash,
 		filterChan:    filterChan,
 		options:       options,
 	}, nil
-}
-
-// handleCFiltersRespons is called every time we receive a response for the
-// GetCFilters request.
-func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
-	resp wire.Message, quit chan<- struct{}) {
-
-	// We're only interested in "cfilter" messages.
-	response, ok := resp.(*wire.MsgCFilter)
-	if !ok {
-		return
-	}
-
-	// If the response doesn't match our request, ignore this message.
-	if q.filterType != response.FilterType {
-		return
-	}
-
-	// If this filter is for a block not in our index, we can ignore it, as
-	// we either already got it, or it is out of our queried range.
-	i, ok := q.headerIndex[response.BlockHash]
-	if !ok {
-		return
-	}
-
-	gotFilter, err := gcs.FromNBytes(
-		builder.DefaultP, builder.DefaultM, response.Data,
-	)
-	if err != nil {
-		// Malformed filter data. We can ignore this message.
-		return
-	}
-
-	// Now that we have a proper filter, ensure that re-calculating the
-	// filter header hash for the header _after_ the filter in the chain
-	// checks out. If not, we can ignore this response.
-	curHeader := q.filterHeaders[i]
-	prevHeader := q.filterHeaders[i-1]
-	gotHeader, err := builder.MakeHeaderForFilter(
-		gotFilter, prevHeader,
-	)
-	if err != nil {
-		return
-	}
-
-	if gotHeader != curHeader {
-		return
-	}
-
-	// At this point, the filter matches what we know about it and we
-	// declare it sane. If this is the filter requested initially, send it
-	// to the caller immediately.
-	if response.BlockHash == q.targetHash {
-		q.filterChan <- gotFilter
-	}
-
-	// Put the filter in the cache and persistToDisk if the caller
-	// requested it.
-	// TODO(halseth): for an LRU we could take care to insert the next
-	// height filter last.
-	dbFilterType := filterdb.RegularFilter
-	evict, err := s.putFilterToCache(
-		&response.BlockHash, dbFilterType, gotFilter,
-	)
-	if err != nil {
-		log.Warnf("Couldn't write filter to cache: %v", err)
-	}
-
-	// TODO(halseth): dynamically increase/decrease the batch size to match
-	// our cache capacity.
-	numFilters := q.stopHeight - q.startHeight + 1
-	if evict && s.FilterCache.Len() < int(numFilters) {
-		log.Debugf("Items evicted from the cache with less "+
-			"than %d elements. Consider increasing the "+
-			"cache size...", numFilters)
-	}
-
-	qo := defaultQueryOptions()
-	qo.applyQueryOptions(q.options...)
-	if s.persistToDisk {
-		err = s.FilterDB.PutFilter(
-			&response.BlockHash, gotFilter, dbFilterType,
-		)
-		if err != nil {
-			log.Warnf("Couldn't write filter to filterDB: "+
-				"%v", err)
-		}
-
-		log.Tracef("Wrote filter for block %s, type %d",
-			&response.BlockHash, dbFilterType)
-	}
-
-	// Finally, we can delete it from the headerIndex.
-	delete(q.headerIndex, response.BlockHash)
-
-	// If the headerIndex is empty, we got everything we wanted, and can
-	// exit.
-	if len(q.headerIndex) == 0 {
-		close(quit)
-	}
 }
 
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
@@ -840,7 +862,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 	// We didn't get the filter from the DB, so we'll try to get it from
 	// the network.
-	query, err := s.prepareCFiltersQuery(blockHash, filterType, options...)
+	q, err := s.prepareCFiltersQuery(blockHash, filterType, options...)
 	if err != nil {
 		s.mtxCFilter.Unlock()
 		return nil, err
@@ -849,60 +871,106 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
 	log.Debugf("Fetching filters for heights=[%v, %v], stophash=%v",
-		query.startHeight, query.stopHeight, query.stopHash)
+		q.startHeight, q.stopHeight, q.stopHash)
 
+	targetFilter := make(chan *gcs.Filter, 1)
 	go func() {
 		defer s.mtxCFilter.Unlock()
-		defer close(query.filterChan)
+		defer close(targetFilter)
 
-		s.queryPeers(
-			// Send a wire.MsgGetCFilters.
-			query.queryMsg(),
-
-			// Check responses and if we get one that matches, end
-			// the query early.
-			func(_ *ServerPeer, resp wire.Message, quit chan<- struct{}) {
-				s.handleCFiltersResponse(query, resp, quit)
-			},
-			query.options...,
+		// Hand the query to the work manager, and consume the verified
+		// responses as they come back.
+		errChan := s.workManager.Query(
+			q.requests(), query.Cancel(s.quit),
 		)
 
-		// If there are elements left to receive, the query failed.
-		if len(query.headerIndex) > 0 {
-			numFilters := query.stopHeight - query.startHeight + 1
-			numRecv := numFilters - int64(len(query.headerIndex))
-			log.Errorf("Query failed with %d out of %d filters "+
-				"received", numRecv, numFilters)
-			return
+		for {
+			var (
+				resp *filterResponse
+				ok   bool
+			)
+
+			select {
+			case resp, ok = <-q.filterChan:
+				if !ok {
+					return
+				}
+
+			case err := <-errChan:
+				switch {
+				case err == query.ErrWorkManagerShuttingDown:
+					return
+				case err != nil:
+					log.Errorf("Query finished with "+
+						"error before all responses "+
+						"received: %v", err)
+					return
+				}
+
+				// The query did finish successfully, but
+				// continue to allow picking up the last header
+				// sent on the headerChan.
+				continue
+
+			case <-s.quit:
+				return
+			}
+
+			if *resp.blockHash == blockHash {
+				targetFilter <- resp.filter
+			}
+
+			// Put the filter in the cache and persistToDisk if the
+			// caller requested it.
+			// TODO(halseth): for an LRU we could take care to
+			//  insert the next height filter last.
+			dbFilterType := filterdb.RegularFilter
+			evict, err := s.putFilterToCache(
+				resp.blockHash, dbFilterType, resp.filter,
+			)
+			if err != nil {
+				log.Warnf("Couldn't write filter to cache: %v",
+					err)
+			}
+
+			// TODO(halseth): dynamically increase/decrease the
+			//  batch size to match our cache capacity.
+			numFilters := q.stopHeight - q.startHeight + 1
+			if evict && s.FilterCache.Len() < int(numFilters) {
+				log.Debugf("Items evicted from the cache "+
+					"with less than %d elements. Consider "+
+					"increasing the cache size...",
+					numFilters)
+			}
+
+			qo := defaultQueryOptions()
+			qo.applyQueryOptions(q.options...)
+			if s.persistToDisk {
+				err = s.FilterDB.PutFilter(
+					resp.blockHash, resp.filter,
+					dbFilterType,
+				)
+				if err != nil {
+					log.Warnf("Couldn't write filter to "+
+						"filterDB: %v", err)
+				}
+
+				log.Tracef("Wrote filter for block %s, type %d",
+					resp.blockHash, dbFilterType)
+			}
 		}
 	}()
 
-	var ok bool
-	var resultFilter *gcs.Filter
+	select {
+	case filter, ok := <-targetFilter:
+		if !ok {
+			return nil, ErrFilterFetchFailed
 
-	// We will wait for the query to finish before we return the requested
-	// filter to the caller.
-	for {
-		select {
-
-		case filter, ok = <-query.filterChan:
-			if !ok {
-				// Query has finished, if we have a result we'll
-				// return it.
-				if resultFilter == nil {
-					return nil, ErrFilterFetchFailed
-				}
-
-				return resultFilter, nil
-			}
-
-			// We'll store the filter so we can return it later to
-			// the caller.
-			resultFilter = filter
-
-		case <-s.quit:
-			return nil, ErrShuttingDown
 		}
+		return filter, nil
+
+	case <-s.quit:
+		return nil, ErrShuttingDown
 	}
 }
 
