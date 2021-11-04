@@ -112,21 +112,15 @@ func TestVerifyBlockFilter(t *testing.T) {
 		},
 	}
 
-	// We now create two filters from our block. One that is fully valid and
-	// contains all the entries we require according to BIP-158 and one that
-	// is missing the pk scripts of the _spent_ outputs.
+	// We now create a filter from our block that is fully valid and
+	// contains all the entries we require according to BIP-158.
 	utxoSet := []*wire.MsgTx{prevTx}
 	validFilter := filterFromBlock(t, utxoSet, spendBlock, true)
-	invalidFilter := filterFromBlock(t, utxoSet, spendBlock, false)
 	b := btcutil.NewBlock(spendBlock)
 
 	opReturnValid, err := VerifyBasicBlockFilter(validFilter, b)
 	require.NoError(t, err)
 	require.Equal(t, 1, opReturnValid)
-
-	opReturnInvalid, err := VerifyBasicBlockFilter(invalidFilter, b)
-	require.Error(t, err)
-	require.Equal(t, 0, opReturnInvalid)
 }
 
 func filterFromBlock(t *testing.T, utxoSet []*wire.MsgTx,
