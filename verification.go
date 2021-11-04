@@ -141,10 +141,12 @@ func VerifyBasicBlockFilter(filter *gcs.Filter, block *btcutil.Block) (int,
 			}
 
 			if !match {
-				return 0, fmt.Errorf("filter for block %v is "+
+				log.Errorf("filter for block %v might be "+
 					"invalid, input %d of tx %v spends "+
 					"pk script %x which wasn't matched by "+
-					"filter", block.Hash(), inIdx,
+					"filter. The input likely spends a "+
+					"taproot output which is not yet"+
+					"supported", block.Hash(), inIdx,
 					tx.Hash(), script.Script())
 			}
 		}
