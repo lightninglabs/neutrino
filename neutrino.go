@@ -949,8 +949,9 @@ func (s *ChainService) BestBlock() (*headerfs.BlockStamp, error) {
 	}
 
 	return &headerfs.BlockStamp{
-		Height: int32(bestHeight),
-		Hash:   bestHeader.BlockHash(),
+		Height:    int32(bestHeight),
+		Hash:      bestHeader.BlockHash(),
+		Timestamp: bestHeader.Timestamp,
 	}, nil
 }
 

@@ -539,8 +539,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 		}
 
 		newStamp := headerfs.BlockStamp{
-			Hash:   header.BlockHash(),
-			Height: int32(nextBlockHeight),
+			Hash:      header.BlockHash(),
+			Height:    int32(nextBlockHeight),
+			Timestamp: header.Timestamp,
 		}
 
 		log.Tracef("Rescan got block %d (%s)", newStamp.Height,

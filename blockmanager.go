@@ -1278,8 +1278,9 @@ func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, er
 		return nil, err
 	}
 	bs := &headerfs.BlockStamp{
-		Height: int32(headerHeight),
-		Hash:   header.BlockHash(),
+		Height:    int32(headerHeight),
+		Hash:      header.BlockHash(),
+		Timestamp: header.Timestamp,
 	}
 
 	_, regHeight, err := b.cfg.RegFilterHeaders.ChainTip()
