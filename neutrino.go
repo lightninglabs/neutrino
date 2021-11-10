@@ -575,11 +575,6 @@ type ChainService struct { // nolint:maligned
 	FilterCache *lru.Cache
 	BlockCache  *lru.Cache
 
-	// queryPeers will be called to send messages to one or more peers,
-	// expecting a response.
-	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
-		chan<- struct{}), ...QueryOption)
-
 	chainParams          chaincfg.Params
 	addrManager          *addrmgr.AddrManager
 	connManager          *connmgr.ConnManager
@@ -681,13 +676,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	})
 
 	s.queryDispatcher = s.workManager
-
-	// We set the queryPeers method to point to queryChainServicePeers,
-	// passing a reference to the newly created ChainService.
-	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
-		queryChainServicePeers(&s, msg, f, qo...)
-	}
 
 	var err error
 
