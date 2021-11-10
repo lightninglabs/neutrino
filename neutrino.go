@@ -597,6 +597,7 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+	queryDispatcher      query.Dispatcher
 	workManager          *query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
@@ -678,6 +679,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
 	})
+
+	s.queryDispatcher = s.workManager
 
 	// We set the queryPeers method to point to queryChainServicePeers,
 	// passing a reference to the newly created ChainService.

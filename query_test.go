@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightninglabs/neutrino/query"
+
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -280,19 +282,27 @@ func TestBlockCache(t *testing.T) {
 		chainParams: chaincfg.Params{
 			PowLimit: maxPowLimit,
 		},
-		timeSource: blockchain.NewMedianTime(),
+		timeSource:      blockchain.NewMedianTime(),
+		queryDispatcher: &mockDispatcher{},
 	}
 
 	// We'll set up the queryPeers method to make sure we are only querying
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
+	cs.queryDispatcher.(*mockDispatcher).query = func(requests []*query.Request,
+		options ...query.QueryOption) chan error {
 
-		getData, ok := msg.(*wire.MsgGetData)
+		errChan := make(chan error, 1)
+		defer close(errChan)
+
+		if len(requests) != 1 {
+			t.Fatalf("unexpected 1 request, got %d", len(requests))
+		}
+
+		getData, ok := requests[0].Req.(*wire.MsgGetData)
 		if !ok {
-			t.Fatalf("unexpected type: %T", msg)
+			t.Fatalf("unexpected type: %T", requests[0].Req)
 		}
 
 		if len(getData.InvList) != 1 {
@@ -308,17 +318,17 @@ func TestBlockCache(t *testing.T) {
 		// Serve the block that matches the requested block header.
 		for _, b := range blocks {
 			if *b.Hash() == inv.Hash {
-
-				// Execute the callback with the found block,
-				// and wait for the quit channel to be closed.
-				quit := make(chan struct{})
-				f(nil, b.MsgBlock(), quit)
-
-				select {
-				case <-quit:
-				case <-time.After(1 * time.Second):
-					t.Fatalf("channel not closed")
+				header, _, err := headers.FetchHeader(b.Hash())
+				if err != nil {
+					t.Fatalf("")
 				}
+
+				resp := &wire.MsgBlock{
+					Header:       *header,
+					Transactions: b.MsgBlock().Transactions,
+				}
+
+				requests[0].HandleResp(requests[0].Req, resp, "")
 
 				// Notify the test about the query.
 				select {
@@ -327,11 +337,12 @@ func TestBlockCache(t *testing.T) {
 					t.Fatalf("query was not handled")
 				}
 
-				return
+				return errChan
 			}
 		}
 
 		t.Fatalf("queried for unknown block: %v", inv.Hash)
+		return errChan
 	}
 
 	// fetchAndAssertPeersQueried calls GetBlock and makes sure the block
