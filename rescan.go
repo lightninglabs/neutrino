@@ -332,7 +332,7 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			}
 		}
 
-		// If the ending hash it nil, then check to see if the target
+		// If the ending hash is nil, then check to see if the target
 		// height is non-nil. If not, then we'll use this to find the
 		// stopping hash.
 		if (ro.endBlock.Hash == chainhash.Hash{}) {
@@ -409,19 +409,24 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 	// begin processing updates from the client.
 	var updates []*updateOptions
 
-	// We'll need to ensure that the backing chain has actually caught up to
-	// the rescan's starting height.
-	bestBlock, err := chain.BestBlock()
-	if err != nil {
-		return err
-	}
+	// waitFor is a helper closure that can be used to wait on block
+	// notifications until the given predicate returns true.
+	waitFor := func(predicate func(hash chainhash.Hash,
+		height uint32) bool) error {
 
-	// If it hasn't, we'll subscribe for block notifications at tip and wait
-	// until we receive a notification for a block with the rescan's
-	// starting height.
-	if bestBlock.Height < curStamp.Height {
-		log.Debugf("Waiting to catch up to the rescan start height=%d "+
-			"from height=%d", curStamp.Height, bestBlock.Height)
+		bestBlock, err := chain.BestBlock()
+		if err != nil {
+			return err
+		}
+
+		// Before subscribing to block notifications, first check if the
+		// predicate is not already satisfied by the current best block.
+		if predicate(bestBlock.Hash, uint32(bestBlock.Height)) {
+			return nil
+		}
+
+		log.Debugf("Waiting for blocks. Starting from height=%d",
+			bestBlock.Height)
 
 		blockSubscription, err := chain.Subscribe(
 			uint32(bestBlock.Height),
@@ -430,7 +435,9 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			return err
 		}
 
-	waitUntilSynced:
+		defer blockSubscription.Cancel()
+
+	waitForBlocks:
 		for {
 			select {
 			// We'll make sure to process any updates while we're
@@ -449,22 +456,23 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 						"while waiting to catch up")
 				}
 
-				if _, ok := ntfn.(*blockntfns.Connected); !ok {
-					continue
-				}
-				if ntfn.Height() < uint32(curStamp.Height) {
+				connectedNtfn, ok := ntfn.(*blockntfns.Connected)
+				if !ok {
 					continue
 				}
 
-				break waitUntilSynced
+				header := connectedNtfn.Header()
+				if predicate(
+					header.BlockHash(),
+					connectedNtfn.Height(),
+				) {
+					break waitForBlocks
+				}
 
 			case <-ro.quit:
-				blockSubscription.Cancel()
 				return ErrRescanExit
 			}
 		}
-
-		blockSubscription.Cancel()
 
 		// If any updates were queued while waiting to catch up to the
 		// start height of the rescan, apply them now.
@@ -475,6 +483,51 @@ func rescan(chain ChainSource, options ...RescanOption) error {
 			if err != nil {
 				return err
 			}
+		}
+
+		return nil
+	}
+
+	// We'll need to ensure that the backing chain has actually caught up to
+	// the rescan's starting height. If it hasn't, we'll subscribe for block
+	// notifications at tip and wait until we receive a notification for a
+	// block with the rescan's starting height.
+	log.Debugf("Waiting to catch up to the rescan start height=%d",
+		curStamp.Height)
+
+	if err := waitFor(func(_ chainhash.Hash, height uint32) bool {
+		return height >= uint32(curStamp.Height)
+	}); err != nil {
+		return err
+	}
+
+	// To ensure that we batch as many filter queries as possible, we also
+	// wait for the header chain to either be current or for the .
+	r, ok := chain.(*RescanChainSource)
+	if ok {
+		log.Debugf("Waiting for the chain source to be current or " +
+			"for the rescan end height to be reached.")
+
+		if err := waitFor(func(hash chainhash.Hash, height uint32) bool {
+			// If the header chain is current, then there
+			// is no need to wait.
+			if r.IsCurrent() {
+				return true
+			}
+
+			// If an end height was specified then we wait until
+			// the notification corresponding to that block height.
+			if ro.endBlock.Height > 0 &&
+				height >= uint32(ro.endBlock.Height) {
+
+				return true
+			}
+
+			// If a block hash was specified, check if the
+			// notification is for that block.
+			return hash == ro.endBlock.Hash
+		}); err != nil {
+			return err
 		}
 	}
 
