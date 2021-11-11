@@ -714,7 +714,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	log.Debugf("Fetching filters for heights=[%v, %v], stophash=%v",
 		q.startHeight, q.stopHeight, q.stopHash)
 
+	persistChan := make(chan *filterResponse, len(q.headerIndex))
 	go func() {
+		defer close(persistChan)
 		defer s.mtxCFilter.Unlock()
 
 		// Hand the query to the work manager, and consume the verified
@@ -782,7 +784,33 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 					numFilters)
 			}
 
-			if s.persistToDisk {
+			persistChan <- resp
+		}
+	}()
+
+	if s.persistToDisk {
+		// Persisting to disk is the bottleneck for fetching filters.
+		// So we run the persisting logic in a separate goroutine so
+		// that we can unlock the mtxCFilter mutex as soon as we are
+		// done with caching the filters in order to allow more
+		// GetCFilter calls from the caller sooner.
+		go func() {
+			var (
+				resp *filterResponse
+				ok   bool
+			)
+
+			for {
+				select {
+				case resp, ok = <-persistChan:
+					if !ok {
+						return
+					}
+
+				case <-s.quit:
+					return
+				}
+
 				err = s.FilterDB.PutFilter(
 					resp.blockHash, resp.filter,
 					dbFilterType,
@@ -795,8 +823,8 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 				log.Tracef("Wrote filter for block %s, type %d",
 					resp.blockHash, dbFilterType)
 			}
-		}
-	}()
+		}()
+	}
 
 	var ok bool
 	var resultFilter *gcs.Filter
