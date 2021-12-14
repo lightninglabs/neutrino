@@ -330,14 +330,15 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 		return nil, err
 	}
 
-	// With this height obtained, we'll use it to read the latest header
+	// With this height obtained, we'll use it to read the previous header
 	// from disk, so we can populate our return value which requires the
 	// prev header hash.
-	bestHeader, err := h.readHeader(chainTipHeight)
+	prevHeader, err := h.readHeader(chainTipHeight - 1)
 	if err != nil {
 		return nil, err
 	}
-	prevHeaderHash := bestHeader.PrevBlock
+
+	prevHeaderHash := prevHeader.BlockHash()
 
 	// Now that we have the information we need to return from this
 	// function, we can now truncate the header file, and then use the hash
@@ -350,8 +351,9 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	}
 
 	return &BlockStamp{
-		Height: int32(chainTipHeight) - 1,
-		Hash:   prevHeaderHash,
+		Height:    int32(chainTipHeight) - 1,
+		Hash:      prevHeaderHash,
+		Timestamp: prevHeader.Timestamp,
 	}, nil
 }
 
