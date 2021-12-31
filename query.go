@@ -1078,6 +1078,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 						)
 
 						numReplied++
+
+						close(peerQuit)
 					}
 				}
 
@@ -1096,6 +1098,13 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					response, sp.Addr(),
 				)
 				rejections[*broadcastErr]++
+
+				log.Debugf("Transaction %v rejected by peer "+
+					"%v: code = %v, reason = %q", txHash,
+					sp.Addr(), broadcastErr.Code,
+					broadcastErr.Reason)
+
+				close(peerQuit)
 			}
 		},
 		append(
@@ -1109,7 +1118,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// transaction upon every block connected/disconnected.
 	if numReplied == 0 {
 		log.Debugf("No peers replied to inv message for transaction %v",
-			tx.TxHash())
+			txHash)
 		return nil
 	}
 
@@ -1118,7 +1127,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// it so we'll return the most rejected error between all of our peers.
 	//
 	// TODO(wilmer): This might be too naive, some rejections are more
-	// critical than others.
+	// critical than others. e.g. pushtx.Mempool and pushtx.Confirmed are OK.
 	//
 	// TODO(wilmer): This does not cover the case where a peer also rejected
 	// our transaction but didn't send the response within our given timeout
@@ -1126,7 +1135,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// threshold of rejections instead.
 	if numReplied == len(rejections) {
 		log.Warnf("All peers rejected transaction %v checking errors",
-			tx.TxHash())
+			txHash)
 
 		mostRejectedCount := 0
 		var mostRejectedErr pushtx.BroadcastError

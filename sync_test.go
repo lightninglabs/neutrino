@@ -474,6 +474,29 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		}
 	}
 
+	// waitTx will poll for a transaction to appear on given node for up to
+	// 5 seconds.
+	waitTx := func(node *rpcclient.Client, hash chainhash.Hash) {
+		t.Helper()
+		exitTimer := time.NewTimer(5 * time.Second)
+		defer exitTimer.Stop()
+		for {
+			<-time.After(200 * time.Millisecond)
+
+			select {
+			case <-exitTimer.C:
+				t.Fatalf("Timeout waiting to see transaction.")
+			default:
+			}
+
+			if _, err := node.GetRawTransaction(&hash); err != nil {
+				continue
+			}
+
+			return
+		}
+	}
+
 	// Create another address to send to so we don't trip the rescan with
 	// the old address and we can test monitoring both OutPoint usage and
 	// receipt by addresses.
@@ -517,6 +540,9 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
+	// SendTransaction does not know when the MsgTx was actually sent, only
+	// that a getdata request was received and a MsgTx queued to send.
+	waitTx(harness.h1.Node, authTx1.Tx.TxHash())
 	_, err = harness.h1.Node.Generate(1)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit block: %s", err)
@@ -559,6 +585,7 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 	if err != nil && !strings.Contains(err.Error(), "already have") {
 		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
+	waitTx(harness.h1.Node, authTx2.Tx.TxHash())
 	_, err = harness.h1.Node.Generate(1)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit block: %s", err)
