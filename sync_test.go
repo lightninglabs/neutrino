@@ -501,8 +501,11 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		// Fee rate is satoshis per kilobyte
 		1024000,
 		inSrc(*tx1),
-		func() ([]byte, error) {
-			return script3, nil
+		&txauthor.ChangeSource{
+			NewScript: func() ([]byte, error) {
+				return script3, nil
+			},
+			ScriptSize: len(script3),
 		},
 	)
 	if err != nil {
@@ -543,8 +546,11 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		// Fee rate is satoshis per kilobyte
 		1024000,
 		inSrc(*tx2),
-		func() ([]byte, error) {
-			return script3, nil
+		&txauthor.ChangeSource{
+			NewScript: func() ([]byte, error) {
+				return script3, nil
+			},
+			ScriptSize: len(script3),
 		},
 	)
 	if err != nil {
