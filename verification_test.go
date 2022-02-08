@@ -4,13 +4,13 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,11 +34,11 @@ var (
 // TestVerifyBlockFilter tests that a filter is correctly inspected for validity
 // against a downloaded block.
 func TestVerifyBlockFilter(t *testing.T) {
-	privKey, err := btcec.NewPrivateKey(btcec.S256())
+	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
 	pubKey := privKey.PubKey()
-	pubKey2 := incrementKey(pubKey)
+	pubKey2 := doubleKey(pubKey)
 
 	// We'll create an initial block with just one TX that spends to all
 	// currently known standard output types (P2PKH, P2SH, NP2WKH, P2WKH and
@@ -351,12 +351,13 @@ func scriptP2PKH(t *testing.T, pubKey *btcec.PublicKey) []byte {
 	return script
 }
 
-func incrementKey(key *btcec.PublicKey) *btcec.PublicKey {
-	curveParams := key.Curve.Params()
-	newX, newY := key.Curve.Add(key.X, key.Y, curveParams.Gx, curveParams.Gy)
-	return &btcec.PublicKey{
-		X:     newX,
-		Y:     newY,
-		Curve: btcec.S256(),
-	}
+func doubleKey(key *btcec.PublicKey) *btcec.PublicKey {
+	var keyJacobian btcec.JacobianPoint
+	key.AsJacobian(&keyJacobian)
+
+	btcec.DoubleNonConst(&keyJacobian, &keyJacobian)
+
+	keyJacobian.ToAffine()
+
+	return btcec.NewPublicKey(&keyJacobian.X, &keyJacobian.Y)
 }
