@@ -1059,6 +1059,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// the ones who rejected it and their reason for rejecting it. We'll use
 	// this to determine whether our transaction was actually rejected.
 	numReplied := 0
+	numCriticalRejections := 0
 	rejections := make(map[pushtx.BroadcastError]int)
 
 	// Send the peer query and listen for getdata.
@@ -1104,6 +1105,12 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					sp.Addr(), broadcastErr.Code,
 					broadcastErr.Reason)
 
+				numReplied++
+
+				if broadcastErr.Code.IsCritical() {
+					numCriticalRejections++
+				}
+
 				close(peerQuit)
 			}
 		},
@@ -1123,17 +1130,15 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	}
 
 	// If all of our peers who replied to our query also rejected our
-	// transaction, we'll deem that there was actually something wrong with
-	// it so we'll return the most rejected error between all of our peers.
-	//
-	// TODO(wilmer): This might be too naive, some rejections are more
-	// critical than others. e.g. pushtx.Mempool and pushtx.Confirmed are OK.
+	// transaction with a critical error, we'll deem that there was actually
+	// something wrong with it so we'll return the most rejected error
+	// between all of our peers.
 	//
 	// TODO(wilmer): This does not cover the case where a peer also rejected
 	// our transaction but didn't send the response within our given timeout
 	// and certain other cases. Due to this, we should probably decide on a
 	// threshold of rejections instead.
-	if numReplied == len(rejections) {
+	if numReplied == numCriticalRejections {
 		log.Warnf("All peers rejected transaction %v checking errors",
 			txHash)
 
