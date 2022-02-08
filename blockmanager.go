@@ -1879,6 +1879,8 @@ func (b *blockManager) fetchFilterFromAllPeers(
 				// and wait for the next response.
 				filterResponses[sp.Addr()] = gcsFilter
 
+				close(peerQuit)
+
 			default:
 			}
 		},
