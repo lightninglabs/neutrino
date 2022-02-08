@@ -47,6 +47,13 @@ func (c BroadcastErrorCode) String() string {
 	}
 }
 
+// IsCritical returns true if the error returned from the peer on broadcast
+// indicates that there was a problem that cased the transaction not to be
+// accepted and broadcast by them.
+func (c BroadcastErrorCode) IsCritical() bool {
+	return c != Mempool && c != Confirmed
+}
+
 // BroadcastError is an error type that encompasses the different possible
 // broadcast errors returned by the network.
 type BroadcastError struct {
