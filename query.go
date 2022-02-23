@@ -32,6 +32,11 @@ var (
 	// to a peer that previously failed because of a timeout.
 	QueryPeerCooldown = time.Second * 5
 
+	// QueryRejectTimeout is the time we'll wait after sending a response to
+	// an INV query for a potential reject answer. If we don't get a reject
+	// before this delay, we assume the TX was accepted.
+	QueryRejectTimeout = time.Second
+
 	// QueryNumRetries specifies how many times to retry sending a query to
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
@@ -71,6 +76,12 @@ type queryOptions struct {
 	// underlying chain service to connect to a peer before giving up
 	// on a query in case we don't have any peers.
 	peerConnectTimeout time.Duration
+
+	// rejectTimeout is the time we'll wait after sending a response to an
+	// INV query for a potential reject answer. If we don't get a reject
+	// before this delay, we assume the TX was accepted. This option is only
+	// used when publishing a transaction.
+	rejectTimeout time.Duration
 
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
@@ -120,6 +131,7 @@ func defaultQueryOptions() *queryOptions {
 		timeout:            QueryTimeout,
 		numRetries:         uint8(QueryNumRetries),
 		peerConnectTimeout: QueryPeerConnectTimeout,
+		rejectTimeout:      QueryRejectTimeout,
 		encoding:           QueryEncoding,
 		optimisticBatch:    noBatch,
 	}
@@ -154,6 +166,17 @@ func NumRetries(numRetries uint8) QueryOption {
 func PeerConnectTimeout(timeout time.Duration) QueryOption {
 	return func(qo *queryOptions) {
 		qo.peerConnectTimeout = timeout
+	}
+}
+
+// RejectTimeout is the time we'll wait after sending a response to an INV
+// query for a potential reject answer. If we don't get a reject before this
+// delay, we assume the TX was accepted.
+//
+// NOTE: This option is currently only used when publishing a transaction.
+func RejectTimeout(rejectTimeout time.Duration) QueryOption {
+	return func(qo *queryOptions) {
+		qo.rejectTimeout = rejectTimeout
 	}
 }
 
@@ -1055,18 +1078,32 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	inv := wire.NewMsgInv()
 	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
 
-	// We'll gather all of the peers who replied to our query, along with
+	// We'll gather all the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use
 	// this to determine whether our transaction was actually rejected.
 	replies := make(map[int32]struct{})
 	rejections := make(map[int32]*pushtx.BroadcastError)
 	rejectCodes := make(map[pushtx.BroadcastErrorCode]int)
 
+	// closers is a map that tracks the delayed closers we need to make sure
+	// the peer quit channel is closed after a timeout.
+	closers := make(map[int32]*delayedCloser)
+
 	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
 		inv,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
+
+			// The "closer" can be used to either close the peer
+			// quit channel after a certain timeout or immediately.
+			closer, ok := closers[sp.ID()]
+			if !ok {
+				closer = newDelayedCloser(
+					peerQuit, qo.rejectTimeout,
+				)
+				closers[sp.ID()] = closer
+			}
 
 			switch response := resp.(type) {
 			// A peer has replied with a GetData message, so we'll
@@ -1084,7 +1121,18 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 						// using a map.
 						replies[sp.ID()] = struct{}{}
 
-						close(peerQuit)
+						// Okay, so the peer responded
+						// with an INV message, and we
+						// sent out the TX. If we never
+						// hear anything back from the
+						// peer it means they accepted
+						// the tx. If we get a reject,
+						// things are clear as well. But
+						// what if they are just slow to
+						// respond? We'll give them
+						// another bit of time to
+						// respond.
+						closer.closeEventually(s.quit)
 					}
 				}
 
@@ -1110,7 +1158,10 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					sp.Addr(), broadcastErr.Code,
 					broadcastErr.Reason)
 
-				close(peerQuit)
+				// A reject message is final, so we can close
+				// the peer quit channel now, we don't expect
+				// any further messages.
+				closer.closeNow()
 			}
 		},
 		append(
@@ -1172,4 +1223,43 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	}
 
 	return nil
+}
+
+// delayedCloser is a struct that makes sure a subject channel is closed at some
+// point, either after a delay or immediately.
+type delayedCloser struct {
+	subject chan<- struct{}
+	timeout time.Duration
+	once    sync.Once
+}
+
+// newDelayedCloser creates a new delayed closer for the given subject channel.
+func newDelayedCloser(subject chan<- struct{},
+	timeout time.Duration) *delayedCloser {
+
+	return &delayedCloser{
+		subject: subject,
+		timeout: timeout,
+	}
+}
+
+// closeEventually closes the subject channel after the configured timeout or
+// immediately if the quit channel is closed.
+func (t *delayedCloser) closeEventually(quit chan struct{}) {
+	go func() {
+		defer t.closeNow()
+
+		select {
+		case <-time.After(t.timeout):
+		case <-quit:
+		}
+	}()
+}
+
+// closeNow immediately closes the subject channel. This can safely be called
+// multiple times as it will only attempt to close the channel at most once.
+func (t *delayedCloser) closeNow() {
+	t.once.Do(func() {
+		close(t.subject)
+	})
 }
