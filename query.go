@@ -1058,8 +1058,9 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// We'll gather all of the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use
 	// this to determine whether our transaction was actually rejected.
-	numReplied := 0
-	rejections := make(map[pushtx.BroadcastError]int)
+	replies := make(map[int32]struct{})
+	rejections := make(map[int32]*pushtx.BroadcastError)
+	rejectCodes := make(map[pushtx.BroadcastErrorCode]int)
 
 	// Send the peer query and listen for getdata.
 	s.queryAllPeers(
@@ -1077,7 +1078,11 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 							tx, nil, qo.encoding,
 						)
 
-						numReplied++
+						// Peers might send the INV
+						// request multiple times, we
+						// need to de-duplicate them
+						// using a map.
+						replies[sp.ID()] = struct{}{}
 
 						close(peerQuit)
 					}
@@ -1097,7 +1102,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				broadcastErr := pushtx.ParseBroadcastError(
 					response, sp.Addr(),
 				)
-				rejections[*broadcastErr]++
+				rejections[sp.ID()] = broadcastErr
+				rejectCodes[broadcastErr.Code]++
 
 				log.Debugf("Transaction %v rejected by peer "+
 					"%v: code = %v, reason = %q", txHash,
@@ -1116,7 +1122,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// If none of our peers replied to our query, we'll avoid returning an
 	// error as the reliable broadcaster will take care of broadcasting this
 	// transaction upon every block connected/disconnected.
-	if numReplied == 0 {
+	if len(replies) == 0 {
 		log.Debugf("No peers replied to inv message for transaction %v",
 			txHash)
 		return nil
@@ -1133,21 +1139,36 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// our transaction but didn't send the response within our given timeout
 	// and certain other cases. Due to this, we should probably decide on a
 	// threshold of rejections instead.
-	if numReplied == len(rejections) {
+	log.Debugf("Got replies from %d peers and %d rejections", len(replies),
+		len(rejections))
+	if len(replies) == len(rejections) {
 		log.Warnf("All peers rejected transaction %v checking errors",
 			txHash)
 
-		mostRejectedCount := 0
-		var mostRejectedErr pushtx.BroadcastError
-
-		for broadcastErr, count := range rejections {
+		// First, find the reject code that was returned most often.
+		var (
+			mostRejectedCount = 0
+			mostRejectedCode  pushtx.BroadcastErrorCode
+		)
+		for code, count := range rejectCodes {
 			if count > mostRejectedCount {
 				mostRejectedCount = count
-				mostRejectedErr = broadcastErr
+				mostRejectedCode = code
 			}
 		}
 
-		return &mostRejectedErr
+		// Then return the first error we have for that code (it doesn't
+		// really matter which one, as long as our error code parsing is
+		// correct).
+		for _, broadcastErr := range rejections {
+			if broadcastErr.Code == mostRejectedCode {
+				return broadcastErr
+			}
+		}
+
+		// We can't really get here unless something is totally wrong in
+		// the above error mapping code.
+		return fmt.Errorf("invalid error mapping")
 	}
 
 	return nil
