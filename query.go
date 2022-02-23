@@ -37,6 +37,12 @@ var (
 	// before this delay, we assume the TX was accepted.
 	QueryRejectTimeout = time.Second
 
+	// QueryInvalidTxThreshold is the threshold for the fraction of peers
+	// that need to respond to a TX with a code of pushtx.Invalid to count
+	// it as invalid, even if not all peers respond. This currently
+	// corresponds to 60% of peers that need to reject.
+	QueryInvalidTxThreshold float32 = 0.6
+
 	// QueryNumRetries specifies how many times to retry sending a query to
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
@@ -95,6 +101,12 @@ type queryOptions struct {
 	// the query.
 	numRetries uint8
 
+	// invalidTxThreshold is the threshold for the fraction of peers
+	// that need to respond to a TX with a code of pushtx.Invalid to count
+	// it as invalid, even if not all peers respond. This option is only
+	// used when publishing a transaction.
+	invalidTxThreshold float32
+
 	// optimisticBatch indicates whether we expect more calls to follow,
 	// and that we should attempt to batch more items with the query such
 	// that they can be cached, avoiding the extra round trip.
@@ -133,6 +145,7 @@ func defaultQueryOptions() *queryOptions {
 		peerConnectTimeout: QueryPeerConnectTimeout,
 		rejectTimeout:      QueryRejectTimeout,
 		encoding:           QueryEncoding,
+		invalidTxThreshold: QueryInvalidTxThreshold,
 		optimisticBatch:    noBatch,
 	}
 }
@@ -157,6 +170,17 @@ func Timeout(timeout time.Duration) QueryOption {
 func NumRetries(numRetries uint8) QueryOption {
 	return func(qo *queryOptions) {
 		qo.numRetries = numRetries
+	}
+}
+
+// InvalidTxThreshold is the threshold for the fraction of peers that need to
+// respond to a TX with a code of pushtx.Invalid to count it as invalid, even
+// if not all peers respond.
+//
+// NOTE: This option is currently only used when publishing a transaction.
+func InvalidTxThreshold(invalidTxThreshold float32) QueryOption {
+	return func(qo *queryOptions) {
+		qo.invalidTxThreshold = invalidTxThreshold
 	}
 }
 
@@ -1179,17 +1203,23 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 		return nil
 	}
 
+	// firstRejectWithCode returns the first reject error that we have for
+	// a certain error code.
+	firstRejectWithCode := func(code pushtx.BroadcastErrorCode) error {
+		for _, broadcastErr := range rejections {
+			if broadcastErr.Code == code {
+				return broadcastErr
+			}
+		}
+
+		// We can't really get here unless something is totally wrong in
+		// the above error mapping code.
+		return fmt.Errorf("invalid error mapping")
+	}
+
 	// If all of our peers who replied to our query also rejected our
 	// transaction, we'll deem that there was actually something wrong with
-	// it so we'll return the most rejected error between all of our peers.
-	//
-	// TODO(wilmer): This might be too naive, some rejections are more
-	// critical than others. e.g. pushtx.Mempool and pushtx.Confirmed are OK.
-	//
-	// TODO(wilmer): This does not cover the case where a peer also rejected
-	// our transaction but didn't send the response within our given timeout
-	// and certain other cases. Due to this, we should probably decide on a
-	// threshold of rejections instead.
+	// it, so we'll return the most rejected error between all of our peers.
 	log.Debugf("Got replies from %d peers and %d rejections", len(replies),
 		len(rejections))
 	if len(replies) == len(rejections) {
@@ -1211,15 +1241,32 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 		// Then return the first error we have for that code (it doesn't
 		// really matter which one, as long as our error code parsing is
 		// correct).
-		for _, broadcastErr := range rejections {
-			if broadcastErr.Code == mostRejectedCode {
-				return broadcastErr
-			}
-		}
+		return firstRejectWithCode(mostRejectedCode)
+	}
 
-		// We can't really get here unless something is totally wrong in
-		// the above error mapping code.
-		return fmt.Errorf("invalid error mapping")
+	// We did get some rejections, but not from all peers. Perhaps that's
+	// due to some peers responding too slowly. Or it could also be a
+	// malicious peer trying to block us from publishing a TX. That's why
+	// we want to check if more than 60% of the peers (by default) that
+	// replied in time also sent a reject, we can be pretty certain that
+	// this TX is probably invalid.
+	if len(rejections) > 0 {
+		numInvalid := float32(rejectCodes[pushtx.Invalid])
+		numPeersResponded := float32(len(replies))
+
+		log.Debugf("Of %d peers that replied, %d think the TX is "+
+			"invalid", numPeersResponded, numInvalid)
+
+		// 60% or more (by default) of the peers declared this TX as
+		// invalid.
+		if numInvalid/numPeersResponded >= qo.invalidTxThreshold {
+			log.Warnf("Threshold of %d reached (%d out of %d "+
+				"peers), declaring TX %v as invalid",
+				qo.invalidTxThreshold, numInvalid,
+				numPeersResponded, txHash)
+
+			return firstRejectWithCode(pushtx.Invalid)
+		}
 	}
 
 	return nil
