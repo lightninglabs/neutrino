@@ -238,7 +238,6 @@ func generateResponses(msgs []wire.Message,
 
 		var prevFilterHeader chainhash.Hash
 		switch q.StartHeight {
-
 		// If the start height is 1 the prevFilterHeader is set to the
 		// genesis header.
 		case 1:
@@ -426,7 +425,6 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 							"%v", index, testDesc)
 						return
 					}
-
 				}
 				errChan <- nil
 			}()
@@ -657,7 +655,6 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 			errChan := make(chan error, 1)
 			go func() {
-
 				// Check that the success of the callback match what we
 				// expect.
 				for i := range responses {
@@ -726,6 +723,7 @@ func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 			// had a push-only script.
 			if txOut.PkScript[0] == txscript.OP_RETURN &&
 				txscript.IsPushOnlyScript(txOut.PkScript[1:]) {
+
 				continue
 			}
 

@@ -66,7 +66,6 @@ type forAllPeersMsg struct {
 // goroutines related to peer state.
 func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 	switch msg := querymsg.(type) {
-
 	case getConnCountMsg:
 		nconnected := int32(0)
 		state.forAllPeers(func(sp *ServerPeer) {

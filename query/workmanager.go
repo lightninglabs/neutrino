@@ -253,7 +253,6 @@ Loop:
 		// previous query to come back, a new peer to connect, or for a
 		// new batch of queries to be scheduled.
 		select {
-
 		// Spin up a goroutine that runs a worker each time a peer
 		// connects.
 		case peer := <-peersConnected:
@@ -315,7 +314,6 @@ Loop:
 				if batch != nil {
 					batch.errChan <- result.err
 					delete(currentBatches, batchNum)
-					batch = nil
 
 					log.Debugf("Canceled batch %v",
 						batchNum)
@@ -364,7 +362,6 @@ Loop:
 					if batch.rem == 0 {
 						batch.errChan <- nil
 						delete(currentBatches, batchNum)
-						batch = nil
 
 						log.Tracef("Batch %v done",
 							batchNum)
@@ -380,7 +377,6 @@ Loop:
 				case <-batch.timeout:
 					batch.errChan <- ErrQueryTimeout
 					delete(currentBatches, batchNum)
-					batch = nil
 
 					log.Warnf("Query(%d) failed with "+
 						"error: %v. Timing out.",

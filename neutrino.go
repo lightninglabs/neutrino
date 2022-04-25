@@ -365,7 +365,6 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		}
 
 		addrsSupportingServices = append(addrsSupportingServices, na)
-
 	}
 
 	// Ignore any addr messages if none of them contained our required
@@ -690,6 +689,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// passing a reference to the newly created ChainService.
 	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
 		wire.Message, chan<- struct{}), qo ...QueryOption) {
+
 		queryChainServicePeers(&s, msg, f, qo...)
 	}
 
@@ -755,7 +755,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	var newAddressFunc func() (net.Addr, error)
 	if !isDevNetwork(s.chainParams.Net) {
 		newAddressFunc = func() (net.Addr, error) {
-
 			// Gather our set of currently connected peers to avoid
 			// connecting to them again.
 			connectedPeers := make(map[string]struct{})
@@ -815,6 +814,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				// allow nondefault ports after 50 failed tries.
 				if tries < 50 && fmt.Sprintf("%d", addr.NetAddress().Port) !=
 					s.chainParams.DefaultPort {
+
 					continue
 				}
 
@@ -969,6 +969,7 @@ func (s *ChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
 // error if the hash doesn't exist or is unknown.
 func (s *ChainService) GetBlockHeader(
 	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+
 	header, _, err := s.BlockHeaders.FetchHeader(blockHash)
 	return header, err
 }
@@ -1621,12 +1622,14 @@ var _ ChainSource = (*RescanChainSource)(nil)
 // GetBlockHeaderByHeight returns the header of the block with the given height.
 func (s *RescanChainSource) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
+
 	return s.BlockHeaders.FetchHeaderByHeight(height)
 }
 
 // GetBlockHeader returns the header of the block with the given hash.
 func (s *RescanChainSource) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+
 	return s.BlockHeaders.FetchHeader(hash)
 }
 
@@ -1634,6 +1637,7 @@ func (s *RescanChainSource) GetBlockHeader(
 // height.
 func (s *RescanChainSource) GetFilterHeaderByHeight(
 	height uint32) (*chainhash.Hash, error) {
+
 	return s.RegFilterHeaders.FetchHeaderByHeight(height)
 }
 
@@ -1643,5 +1647,6 @@ func (s *RescanChainSource) GetFilterHeaderByHeight(
 // of 0, a backlog will not be delivered.
 func (s *RescanChainSource) Subscribe(
 	bestHeight uint32) (*blockntfns.Subscription, error) {
+
 	return s.blockSubscriptionMgr.NewSubscription(bestHeight)
 }

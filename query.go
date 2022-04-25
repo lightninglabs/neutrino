@@ -627,7 +627,6 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	}
 
 	switch qo.optimisticBatch {
-
 	// No batching, the start and stop height will be the same.
 	case noBatch:
 		startHeight = int64(height)
@@ -931,7 +930,6 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// filter to the caller.
 	for {
 		select {
-
 		case filter, ok = <-query.filterChan:
 			if !ok {
 				// Query has finished, if we have a result we'll
@@ -1005,8 +1003,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 		// Check responses and if we get one that matches, end the
 		// query early.
-		func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}) {
+		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{}) {
 			switch response := resp.(type) {
 			// We're only interested in "block" messages.
 			case *wire.MsgBlock:

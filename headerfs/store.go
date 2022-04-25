@@ -634,7 +634,6 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	// If the size of the file is zero, then this means that we haven't yet
 	// written the initial genesis header to disk, so we'll do so now.
 	if fileInfo.Size() == 0 {
-
 		var genesisFilterHash chainhash.Hash
 		switch filterType {
 		case RegularFilter:
