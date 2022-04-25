@@ -146,7 +146,6 @@ func TestBoundedMemoryChainSizeLimit(t *testing.T) {
 			}
 		}
 	}
-
 }
 
 // TestBoundedMemoryChainPrevIteration tests that once we insert elements, we

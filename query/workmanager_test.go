@@ -365,7 +365,6 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("result not handled")
 		}
-
 	}
 
 	// The query should exit with an error.
@@ -422,6 +421,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 		even := func(p string) bool {
 			if p == "mock0" || p == "mock2" || p == "mock4" ||
 				p == "mock6" {
+
 				return true
 			}
 			return false
@@ -436,7 +436,6 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 		}
 
 		return i < j
-
 	}
 	// Go backwards, and succeed the queries.
 	for i := numQueries - 1; i >= 0; i-- {

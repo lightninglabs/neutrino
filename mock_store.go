@@ -33,11 +33,12 @@ func newMockBlockHeaderStore() *mockBlockHeaderStore {
 
 func (m *mockBlockHeaderStore) ChainTip() (*wire.BlockHeader,
 	uint32, error) {
-	return nil, 0, nil
 
+	return nil, 0, nil
 }
 func (m *mockBlockHeaderStore) LatestBlockLocator() (
 	blockchain.BlockLocator, error) {
+
 	return nil, nil
 }
 
@@ -58,15 +59,16 @@ func (m *mockBlockHeaderStore) FetchHeaderAncestors(uint32,
 }
 func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 	return 0, nil
-
 }
 func (m *mockBlockHeaderStore) RollbackLastBlock() (*headerfs.BlockStamp,
 	error) {
+
 	return nil, nil
 }
 
 func (m *mockBlockHeaderStore) FetchHeader(h *chainhash.Hash) (
 	*wire.BlockHeader, uint32, error) {
+
 	if header, ok := m.headers[*h]; ok {
 		return &header, 0, nil
 	}

@@ -36,6 +36,7 @@ func (c *MockChainClient) SetBlock(hash *chainhash.Hash, block *btcutil.Block) {
 
 func (c *MockChainClient) GetBlockFromNetwork(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+
 	return c.getBlockResponse[blockHash], nil
 }
 
@@ -61,6 +62,7 @@ func (c *MockChainClient) BestSnapshot() (*headerfs.BlockStamp, error) {
 
 func (c *MockChainClient) blockFilterMatches(ro *rescanOptions,
 	blockHash *chainhash.Hash) (bool, error) {
+
 	return true, nil
 }
 
@@ -75,7 +77,6 @@ func makeTestInputWithScript() *InputWithScript {
 		},
 		PkScript: pkScript,
 	}
-
 }
 
 // TestFindSpends tests that findSpends properly returns spend reports.
@@ -474,8 +475,9 @@ func TestUtxoScannerCancelRequest(t *testing.T) {
 	// finally returns.
 	block := make(chan struct{})
 	scanner := NewUtxoScanner(&UtxoScannerConfig{
-		GetBlock: func(chainhash.Hash, ...QueryOption,
-		) (*btcutil.Block, error) {
+		GetBlock: func(chainhash.Hash,
+			...QueryOption) (*btcutil.Block, error) {
+
 			<-block
 			return nil, fetchErr
 		},
