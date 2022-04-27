@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,7 +165,7 @@ type ServerPeer struct {
 	connReq        *connmgr.ConnReq
 	server         *ChainService
 	persistent     bool
-	knownAddresses map[string]struct{}
+	knownAddresses *lru.Cache
 	quit           chan struct{}
 
 	// The following map of subcribers is used to subscribe to messages
@@ -186,7 +187,7 @@ func newServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
 		server:           s,
 		persistent:       isPersistent,
-		knownAddresses:   make(map[string]struct{}),
+		knownAddresses:   lru.NewCache(5000),
 		quit:             make(chan struct{}),
 		recvSubscribers:  make(map[spMsgSubscription]struct{}),
 		recvSubscribers2: make(map[msgSubscription]struct{}),
@@ -206,9 +207,14 @@ func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
 // the peer to prevent sending duplicate addresses.
-func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddress) {
+func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddressV2) {
 	for _, na := range addresses {
-		sp.knownAddresses[addrmgr.NetAddressKey(na)] = struct{}{}
+		_, err := sp.knownAddresses.Put(
+			addrmgr.NetAddressKey(na), &cachedAddr{},
+		)
+		if err != nil {
+			log.Debugf("Could not store known addresses: %v", err)
+		}
 	}
 }
 
@@ -344,7 +350,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 		return
 	}
 
-	addrsSupportingServices := make([]*wire.NetAddress, 0, len(msg.AddrList))
+	addrs := make([]*wire.NetAddressV2, 0, len(msg.AddrList))
 	for _, na := range msg.AddrList {
 		// Don't add more address if we're disconnecting.
 		if !sp.Connected() {
@@ -356,7 +362,7 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 			continue
 		}
 
-		// Set the timestamp to 5 days ago if it's more than 24 hours
+		// Set the timestamp to 5 days ago if it's more than 10 minutes
 		// in the future so this address is one of the first to be
 		// removed when space is needed.
 		now := time.Now()
@@ -364,25 +370,80 @@ func (sp *ServerPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 			na.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
 		}
 
-		addrsSupportingServices = append(addrsSupportingServices, na)
-
+		// Convert the wire.NetAddress to wire.NetAddressV2 since that
+		// is what is used by the addrmgr.
+		currentNa := wire.NetAddressV2FromBytes(
+			na.Timestamp, na.Services, na.IP, na.Port,
+		)
+		addrs = append(addrs, currentNa)
 	}
 
 	// Ignore any addr messages if none of them contained our required
 	// services.
-	if len(addrsSupportingServices) == 0 {
+	if len(addrs) == 0 {
 		return
 	}
 
-	// Add address to known addresses for this peer.
-	sp.addKnownAddresses(addrsSupportingServices)
+	// Add addresses to the set of known addresses for this peer.
+	sp.addKnownAddresses(addrs)
 
 	// Add addresses to server address manager.  The address manager handles
 	// the details of things such as preventing duplicate addresses, max
 	// addresses, and last seen updates.
 	// XXX bitcoind gives a 2 hour time penalty here, do we want to do the
 	// same?
-	sp.server.addrManager.AddAddresses(addrsSupportingServices, sp.NA())
+	sp.server.addrManager.AddAddresses(addrs, sp.NA())
+}
+
+// OnAddrV2 is called when a peer receives an AddrV2 message from its peer.
+func (sp *ServerPeer) OnAddrV2(_ *peer.Peer, msg *wire.MsgAddrV2) {
+	// Ignore addresses when running on a private development network for
+	// the same reason that OnAddr does.
+	if isDevNetwork(sp.server.chainParams.Net) {
+		return
+	}
+
+	// An empty AddrV2 message is invalid.
+	if len(msg.AddrList) == 0 {
+		log.Errorf("Command [%s] from %s does not contain any "+
+			"addresses", msg.Command(), sp.Addr())
+		sp.Disconnect()
+		return
+	}
+
+	addrs := make([]*wire.NetAddressV2, 0, len(msg.AddrList))
+	for _, na := range msg.AddrList {
+		// Don't add more addresses if we're disconnecting.
+		if !sp.Connected() {
+			return
+		}
+
+		// Skip any that don't advertise our required services.
+		if na.Services&RequiredServices != RequiredServices {
+			continue
+		}
+
+		// Set the timestamp to 5 days ago if it's more than 10 minutes
+		// in the future so this address is one of the first to be
+		// removed when space is needed.
+		now := time.Now()
+		if na.Timestamp.After(now.Add(time.Minute * 10)) {
+			na.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
+		}
+		addrs = append(addrs, na)
+	}
+
+	// Ignore addrv2 message if no addresses contained our required
+	// services.
+	if len(addrs) == 0 {
+		return
+	}
+
+	// Add the addresses to the set of known addresses for this peer.
+	sp.addKnownAddresses(addrs)
+
+	// Add addresses to the address manager.
+	sp.server.addrManager.AddAddresses(addrs, sp.NA())
 }
 
 // OnRead is invoked when a peer receives a message and it is used to update
@@ -690,6 +751,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// passing a reference to the newly created ChainService.
 	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
 		wire.Message, chan<- struct{}), qo ...QueryOption) {
+
 		queryChainServicePeers(&s, msg, f, qo...)
 	}
 
@@ -755,7 +817,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	var newAddressFunc func() (net.Addr, error)
 	if !isDevNetwork(s.chainParams.Net) {
 		newAddressFunc = func() (net.Addr, error) {
-
 			// Gather our set of currently connected peers to avoid
 			// connecting to them again.
 			connectedPeers := make(map[string]struct{})
@@ -815,6 +876,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				// allow nondefault ports after 50 failed tries.
 				if tries < 50 && fmt.Sprintf("%d", addr.NetAddress().Port) !=
 					s.chainParams.DefaultPort {
+
 					continue
 				}
 
@@ -969,6 +1031,7 @@ func (s *ChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
 // error if the hash doesn't exist or is unknown.
 func (s *ChainService) GetBlockHeader(
 	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+
 	header, _, err := s.BlockHeaders.FetchHeader(blockHash)
 	return header, err
 }
@@ -1076,8 +1139,8 @@ func (s *ChainService) peerHandler() {
 	if !DisableDNSSeed {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
-			s.nameResolver, func(addrs []*wire.NetAddress) {
-				var validAddrs []*wire.NetAddress
+			s.nameResolver, func(addrs []*wire.NetAddressV2) {
+				var validAddrs []*wire.NetAddressV2
 				for _, addr := range addrs {
 					addr.Services = RequiredServices
 
@@ -1159,6 +1222,12 @@ func (s *ChainService) addrStringToNetAddr(addr string) (net.Addr, error) {
 		default:
 			return nil, err
 		}
+	}
+
+	// Tor addresses cannot be resolved to an IP, so just return onionAddr
+	// instead.
+	if strings.HasSuffix(host, ".onion") {
+		return &onionAddr{addr: addr}, nil
 	}
 
 	// Attempt to look up an IP address associated with the parsed host.
@@ -1282,7 +1351,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 		// Add the address to the addr manager anew, and also mark it as
 		// a good address.
-		s.addrManager.AddAddresses([]*wire.NetAddress{sp.NA()}, sp.NA())
+		s.addrManager.AddAddresses([]*wire.NetAddressV2{sp.NA()}, sp.NA())
 		s.addrManager.Good(sp.NA())
 	}
 
@@ -1410,6 +1479,7 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 			OnReject:    sp.OnReject,
 			OnFeeFilter: sp.OnFeeFilter,
 			OnAddr:      sp.OnAddr,
+			OnAddrV2:    sp.OnAddrV2,
 			OnRead:      sp.OnRead,
 			OnWrite:     sp.OnWrite,
 
@@ -1425,7 +1495,7 @@ func newPeerConfig(sp *ServerPeer) *peer.Config {
 		UserAgentVersion: sp.server.userAgentVersion,
 		ChainParams:      &sp.server.chainParams,
 		Services:         sp.server.services,
-		ProtocolVersion:  wire.FeeFilterVersion,
+		ProtocolVersion:  wire.AddrV2Version,
 		DisableRelayTx:   true,
 	}
 }
@@ -1621,12 +1691,14 @@ var _ ChainSource = (*RescanChainSource)(nil)
 // GetBlockHeaderByHeight returns the header of the block with the given height.
 func (s *RescanChainSource) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
+
 	return s.BlockHeaders.FetchHeaderByHeight(height)
 }
 
 // GetBlockHeader returns the header of the block with the given hash.
 func (s *RescanChainSource) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+
 	return s.BlockHeaders.FetchHeader(hash)
 }
 
@@ -1634,6 +1706,7 @@ func (s *RescanChainSource) GetBlockHeader(
 // height.
 func (s *RescanChainSource) GetFilterHeaderByHeight(
 	height uint32) (*chainhash.Hash, error) {
+
 	return s.RegFilterHeaders.FetchHeaderByHeight(height)
 }
 
@@ -1643,5 +1716,35 @@ func (s *RescanChainSource) GetFilterHeaderByHeight(
 // of 0, a backlog will not be delivered.
 func (s *RescanChainSource) Subscribe(
 	bestHeight uint32) (*blockntfns.Subscription, error) {
+
 	return s.blockSubscriptionMgr.NewSubscription(bestHeight)
 }
+
+// cachedAddr is an empty struct used to satisfy the cache.Value interface.
+type cachedAddr struct{}
+
+// Size returns the size of cachedAddr, which is 1.
+func (c *cachedAddr) Size() (uint64, error) {
+	return 1, nil
+}
+
+// onionAddr implements the net.Addr interface and represents a tor address.
+// This code is identical to btcd's unexported onionAddr. It is used so that
+// neutrino can connect to v2 addresses without relying on the OnionCat
+// encoding. It also enables connecting to v3 addresses.
+type onionAddr struct {
+	addr string
+}
+
+// String returns the onion address.
+func (o *onionAddr) String() string {
+	return o.addr
+}
+
+// Network returns "onion".
+func (o *onionAddr) Network() string {
+	return "onion"
+}
+
+// Ensure onionAddr implements the net.Addr interface.
+var _ net.Addr = (*onionAddr)(nil)

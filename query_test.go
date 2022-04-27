@@ -127,6 +127,7 @@ func genRandomBlockHash() *chainhash.Hash {
 // originally taken from filterdb/db_test.go.
 func genRandFilter(numElements uint32, t *testing.T) (
 	*chainhash.Hash, *gcs.Filter, uint64) {
+
 	elements := make([][]byte, numElements)
 	for i := uint32(0); i < numElements; i++ {
 		var elem [20]byte
@@ -308,7 +309,6 @@ func TestBlockCache(t *testing.T) {
 		// Serve the block that matches the requested block header.
 		for _, b := range blocks {
 			if *b.Hash() == inv.Hash {
-
 				// Execute the callback with the found block,
 				// and wait for the quit channel to be closed.
 				quit := make(chan struct{})

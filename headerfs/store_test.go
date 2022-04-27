@@ -20,6 +20,7 @@ import (
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	*blockHeaderStore, error) {
+
 	tempDir, err := ioutil.TempDir("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err

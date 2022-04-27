@@ -215,7 +215,6 @@ type blockManager struct { // nolint:maligned
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
 // processing asynchronous block and inv updates.
 func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
-
 	targetTimespan := int64(cfg.ChainParams.TargetTimespan / time.Second)
 	targetTimePerBlock := int64(cfg.ChainParams.TargetTimePerBlock / time.Second)
 	adjustmentFactor := cfg.ChainParams.RetargetAdjustmentFactor
@@ -509,8 +508,8 @@ waitForHeaders:
 		case <-b.quit:
 			b.newHeadersSignal.L.Unlock()
 			return
-		default:
 
+		default:
 		}
 
 		// Re-acquire the lock in order to check for the filter header
@@ -547,7 +546,6 @@ waitForHeaders:
 	// from all peers. We can go on and just request the cfheaders.
 	var goodCheckpoints []*chainhash.Hash
 	for len(goodCheckpoints) == 0 && lastHeight >= wire.CFCheckptInterval {
-
 		// Quit if requested.
 		select {
 		case <-b.quit:
@@ -1272,10 +1270,10 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
-func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, error) {
+func (b *blockManager) rollBackToHeight(height uint32) error {
 	header, headerHeight, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	bs := &headerfs.BlockStamp{
 		Height:    int32(headerHeight),
@@ -1285,13 +1283,13 @@ func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, er
 
 	_, regHeight, err := b.cfg.RegFilterHeaders.ChainTip()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	for uint32(bs.Height) > height {
 		header, headerHeight, err := b.cfg.BlockHeaders.FetchHeader(&bs.Hash)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		newTip := &header.PrevBlock
@@ -1300,14 +1298,14 @@ func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, er
 		if uint32(bs.Height) <= regHeight {
 			newFilterTip, err := b.cfg.RegFilterHeaders.RollbackLastBlock(newTip)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			regHeight = uint32(newFilterTip.Height)
 		}
 
 		bs, err = b.cfg.BlockHeaders.RollbackLastBlock()
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// Notifications are asynchronous, so we include the previous
@@ -1316,7 +1314,7 @@ func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, er
 		// can't read it before it's deleted from the store.
 		prevHeader, _, err := b.cfg.BlockHeaders.FetchHeader(newTip)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// Now we send the block disconnected notifications.
@@ -1324,7 +1322,8 @@ func (b *blockManager) rollBackToHeight(height uint32) (*headerfs.BlockStamp, er
 			*header, headerHeight, *prevHeader,
 		)
 	}
-	return bs, nil
+
+	return nil
 }
 
 // minCheckpointHeight returns the height of the last filter checkpoint for the
@@ -1858,6 +1857,7 @@ func (b *blockManager) fetchFilterFromAllPeers(
 				// Ignore this message.
 				if blockHash != response.BlockHash ||
 					filterType != response.FilterType {
+
 					return
 				}
 
@@ -1903,6 +1903,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 			if isCheckpoint {
 				if m.FilterType == fType &&
 					m.StopHash == *lastHash {
+
 					checkpoints[sp.Addr()] = m.FilterHeaders
 					close(peerQuit)
 				}
@@ -2592,7 +2593,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.syncPeerMutex.Lock()
 			b.syncPeer = hmsg.peer
 			b.syncPeerMutex.Unlock()
-			_, err = b.rollBackToHeight(backHeight)
+			err = b.rollBackToHeight(backHeight)
 			if err != nil {
 				panic(fmt.Sprintf("Rollback failed: %s", err))
 				// Should we panic here?
@@ -2644,7 +2645,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					prevCheckpoint.Height,
 					prevCheckpoint.Hash)
 
-				_, err := b.rollBackToHeight(uint32(
+				err := b.rollBackToHeight(uint32(
 					prevCheckpoint.Height),
 				)
 				if err != nil {
@@ -2708,6 +2709,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	maxTimestamp time.Time, reorgAttempt bool) error {
+
 	diff, err := b.calcNextRequiredDifficulty(
 		blockHeader.Timestamp, reorgAttempt)
 	if err != nil {
@@ -2848,7 +2850,7 @@ func (b *blockManager) findPrevTestNetDifficulty(hList headerlist.Chain) (uint32
 	iterNode := &startNode.Header
 	iterHeight := startNode.Height
 	for iterNode != nil && iterHeight%b.blocksPerRetarget != 0 &&
-		iterNode.Bits == b.cfg.ChainParams.PowLimitBits {
+		iterNode.Bits == b.cfg.ChainParams.PowLimitBits { // nolint
 
 		// Get the previous block node.  This function is used over
 		// simply accessing iterNode.parent directly as it will

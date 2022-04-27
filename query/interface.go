@@ -36,7 +36,7 @@ type queryOptions struct {
 // methods, such as GetBlock and GetCFilter (when that resorts to a network
 // query). These are always processed in order, with later options overriding
 // earlier ones.
-type QueryOption func(*queryOptions) // nolint:golint
+type QueryOption func(*queryOptions) // nolint
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.
 func defaultQueryOptions() *queryOptions {

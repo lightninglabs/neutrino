@@ -654,6 +654,7 @@ rescanLoop:
 		if curStamp.Hash == ro.endBlock.Hash ||
 			(ro.endBlock.Height > 0 &&
 				curStamp.Height == ro.endBlock.Height) {
+
 			return nil
 		}
 
@@ -667,7 +668,6 @@ rescanLoop:
 			// alternatively, forward ourselves to the next block
 			// if possible.
 			select {
-
 			case <-ro.quit:
 				return ErrRescanExit
 
@@ -1158,13 +1158,18 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 	for curStamp.Height > int32(update.rewind) {
 		if ro.ntfn.OnBlockDisconnected != nil && // nolint:staticcheck
 			!update.disableDisconnectedNtfns {
-			ro.ntfn.OnBlockDisconnected(&curStamp.Hash, // nolint:staticcheck
-				curStamp.Height, curHeader.Timestamp)
+
+			ro.ntfn.OnBlockDisconnected( // nolint:staticcheck
+				&curStamp.Hash,
+				curStamp.Height, curHeader.Timestamp,
+			)
 		}
 		if ro.ntfn.OnFilteredBlockDisconnected != nil &&
 			!update.disableDisconnectedNtfns {
-			ro.ntfn.OnFilteredBlockDisconnected(curStamp.Height,
-				curHeader)
+
+			ro.ntfn.OnFilteredBlockDisconnected(
+				curStamp.Height, curHeader,
+			)
 		}
 
 		// We just disconnected a block above, so we're now in rewind
@@ -1317,7 +1322,7 @@ func (r *Rescan) Start() <-chan error {
 	go func() {
 		defer r.wg.Done()
 
-		rescanArgs := append(r.options, updateChan(r.updateChan))
+		rescanArgs := append(r.options, updateChan(r.updateChan)) // nolint
 		err := rescan(r.chain, rescanArgs...)
 
 		close(r.running)

@@ -94,7 +94,6 @@ func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) 
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		_, err := tx.CreateTopLevelBucket(indexBucket)
 		return err
-
 	})
 	if err != nil && err != walletdb.ErrBucketExists {
 		return nil, err
@@ -285,8 +284,8 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 // truncateIndex truncates the index for a particular header type by a single
 // header entry. The passed newTip pointer should point to the hash of the new
 // chain tip. Optionally, if the entry is to be deleted as well, then the
-// delete flag should be set to true.
-func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
+// remove flag should be set to true.
+func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, remove bool) error {
 	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
@@ -304,10 +303,10 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, delete bool) error {
 			return fmt.Errorf("unknown index type: %v", h.indexType)
 		}
 
-		// If the delete flag is set, then we'll also delete this entry
+		// If the remove flag is set, then we'll also delete this entry
 		// from the database as the primary index (block headers) is
 		// being rolled back.
-		if delete {
+		if remove {
 			prevTipHash := rootBucket.Get(tipKey)
 			err := delHeaderEntry(rootBucket, prevTipHash)
 			if err != nil {

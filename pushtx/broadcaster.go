@@ -161,7 +161,6 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 			b.rebroadcast(txs, b.confChan)
 			rebroadcastSem <- struct{}{}
 		}()
-
 	}
 
 	reBroadcastTicker := time.NewTicker(b.cfg.RebroadcastInterval)

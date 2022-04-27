@@ -171,9 +171,7 @@ func (c *mockChainSource) rollback(notify bool) headerfs.BlockStamp {
 
 // rollbackToHeight rolls back the chain to the specified height. The notify
 // boolean can be used to notify all stale blocks.
-func (c *mockChainSource) rollbackToHeight(height int32,
-	notify bool) headerfs.BlockStamp {
-
+func (c *mockChainSource) rollbackToHeight(height int32, notify bool) {
 	c.mu.Lock()
 	bestBlock := c.bestBlock
 	c.mu.Unlock()
@@ -181,8 +179,6 @@ func (c *mockChainSource) rollbackToHeight(height int32,
 	for bestBlock.Height > height {
 		bestBlock = c.rollback(notify)
 	}
-
-	return bestBlock
 }
 
 // ChainParams returns the parameters of the current chain.
