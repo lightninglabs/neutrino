@@ -1,7 +1,7 @@
 module github.com/lightninglabs/neutrino
 
 require (
-	github.com/btcsuite/btcd v0.22.0-beta.0.20220413172512-bf64c8bdbbbf
+	github.com/btcsuite/btcd v0.23.0
 	github.com/btcsuite/btcd/btcec/v2 v2.1.3
 	github.com/btcsuite/btcd/btcutil v1.1.1
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.0.1
