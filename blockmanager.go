@@ -2736,6 +2736,11 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	reorgAttempt bool) (uint32, error) {
 
+	// bitcoind doesn't do retargeting on regtest, we do the same to ensure compatibility
+	if b.cfg.ChainParams.Name == "regtest" {
+		return b.cfg.ChainParams.PowLimitBits, nil
+	}
+
 	hList := b.headerList
 	if reorgAttempt {
 		hList = b.reorgList
