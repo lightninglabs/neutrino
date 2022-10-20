@@ -553,9 +553,9 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// Create a mock peer to prevent panics when attempting to ban
 		// a peer that served an invalid filter header.
-		mockPeer := newServerPeer(&ChainService{}, false)
+		mockPeer := NewServerPeer(&ChainService{}, false)
 		mockPeer.Peer, err = peer.NewOutboundPeer(
-			newPeerConfig(mockPeer), "127.0.0.1:8333",
+			NewPeerConfig(mockPeer), "127.0.0.1:8333",
 		)
 		if err != nil {
 			t.Fatal(err)
