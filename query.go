@@ -557,7 +557,7 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 		return nil, err
 	}
 
-	return filterValue.(*CacheableFilter).Filter, nil
+	return filterValue.Filter, nil
 }
 
 // putFilterToCache inserts a given filter in ChainService's FilterCache.
@@ -982,7 +982,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// If the block is already in the cache, we can return it immediately.
 	blockValue, err := s.BlockCache.Get(*inv)
 	if err == nil && blockValue != nil {
-		return blockValue.(*CacheableBlock).Block, err
+		return blockValue.Block, err
 	}
 	if err != nil && err != cache.ErrElementNotFound {
 		return nil, err
