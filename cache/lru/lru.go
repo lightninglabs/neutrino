@@ -1,7 +1,6 @@
 package lru
 
 import (
-	"container/list"
 	"fmt"
 	"sync"
 
@@ -9,26 +8,7 @@ import (
 )
 
 // elementMap is an alias for a map from a generic interface to a list.Element.
-type elementMap[K comparable] struct {
-	// TODO(roasbeef): list.List generic version?
-	m map[K]*list.Element
-}
-
-// Del deletes an item from the cache.
-func (e *elementMap[K]) Del(key K) {
-	delete(e.m, key)
-}
-
-// Lookup attempts to lookup a value in the cache.
-func (e *elementMap[K]) Lookup(key K) (*list.Element, bool) {
-	el, ok := e.m[key]
-	return el, ok
-}
-
-// Store attempts to store an item in the cache.
-func (e *elementMap[K]) Store(key K, val *list.Element) {
-	e.m[key] = val
-}
+type elementMap[K comparable, V any] map[K]V
 
 // entry represents a (key,value) pair entry in the Cache. The Cache's list
 // stores entries which let us get the cache key when an entry is evicted.
@@ -49,11 +29,11 @@ type Cache[K comparable, V cache.Value] struct {
 
 	// ll is a doubly linked list which keeps track of recency of used
 	// elements by moving them to the front.
-	ll *list.List
+	ll *List[entry[K, V]]
 
 	// cache is a generic cache which allows us to find an elements position
 	// in the ll list from a given key.
-	cache elementMap[K]
+	cache elementMap[K, *Element[entry[K, V]]]
 
 	// mtx is used to make sure the Cache is thread-safe.
 	mtx sync.RWMutex
@@ -64,10 +44,8 @@ type Cache[K comparable, V cache.Value] struct {
 func NewCache[K comparable, V cache.Value](capacity uint64) *Cache[K, V] {
 	return &Cache[K, V]{
 		capacity: capacity,
-		ll:       list.New(),
-		cache: elementMap[K]{
-			m: make(map[K]*list.Element),
-		},
+		ll:       NewList[entry[K, V]](),
+		cache:    make(map[K]*Element[entry[K, V]]),
 	}
 }
 
@@ -93,7 +71,7 @@ func (c *Cache[K, V]) evict(needed uint64) (bool, error) {
 		// Find the least recently used item.
 		if elr := c.ll.Back(); elr != nil {
 			// Determine lru item's size.
-			ce := elr.Value.(*entry[K, V])
+			ce := elr.Value
 			es, err := ce.value.Size()
 			if err != nil {
 				return false, fmt.Errorf("couldn't determine "+
@@ -106,7 +84,7 @@ func (c *Cache[K, V]) evict(needed uint64) (bool, error) {
 
 			// Remove the element from the cache.
 			c.ll.Remove(elr)
-			c.cache.Del(ce.key)
+			delete(c.cache, ce.key)
 			evicted = true
 		}
 	}
@@ -134,9 +112,9 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 	defer c.mtx.Unlock()
 
 	// If the element already exists, remove it and decrease cache's size.
-	el, ok := c.cache.Lookup(key)
+	el, ok := c.cache[key]
 	if ok {
-		es, err := el.Value.(*entry[K, V]).value.Size()
+		es, err := el.Value.value.Size()
 		if err != nil {
 			return false, fmt.Errorf("couldn't determine size of "+
 				"existing cache value %v", err)
@@ -153,8 +131,8 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 	}
 
 	// We have made enough space in the cache, so just insert it.
-	el = c.ll.PushFront(&entry[K, V]{key, value})
-	c.cache.Store(key, el)
+	el = c.ll.PushFront(entry[K, V]{key, value})
+	c.cache[key] = el
 	c.size += vs
 
 	return evicted, nil
@@ -168,7 +146,7 @@ func (c *Cache[K, V]) Get(key K) (V, error) {
 
 	var defaultVal V
 
-	el, ok := c.cache.Lookup(key)
+	el, ok := c.cache[key]
 	if !ok {
 		// Element not found in the cache.
 		return defaultVal, cache.ErrElementNotFound
@@ -178,7 +156,7 @@ func (c *Cache[K, V]) Get(key K) (V, error) {
 	// one, it starts eviction from the back, so by moving this element to
 	// the front, it's eviction is delayed because it's recently accessed.
 	c.ll.MoveToFront(el)
-	return el.Value.(*entry[K, V]).value, nil
+	return el.Value.value, nil
 }
 
 // Len returns number of elements in the cache.
