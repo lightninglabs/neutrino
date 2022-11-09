@@ -28,11 +28,11 @@ func TestBlockFilterCaches(t *testing.T) {
 
 	// Initialize all types of caches we want to test, for both filters and
 	// blocks. Currently the LRU cache is the only implementation.
-	filterCaches := []cache.Cache[cache.FilterCacheKey, *cache.CacheableFilter]{
-		lru.NewCache[cache.FilterCacheKey, *cache.CacheableFilter](cacheSize),
+	filterCaches := []cache.Cache[FilterCacheKey, *CacheableFilter]{
+		lru.NewCache[FilterCacheKey, *CacheableFilter](cacheSize),
 	}
-	blockCaches := []cache.Cache[wire.InvVect, *cache.CacheableBlock]{
-		lru.NewCache[wire.InvVect, *cache.CacheableBlock](cacheSize),
+	blockCaches := []cache.Cache[wire.InvVect, *CacheableBlock]{
+		lru.NewCache[wire.InvVect, *CacheableBlock](cacheSize),
 	}
 
 	// Generate a list of hashes, filters and blocks that we will use as
