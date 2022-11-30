@@ -15,3 +15,5 @@ require (
 )
 
 go 1.13
+
+replace github.com/btcsuite/btcd => /Users/nsa/go/src/github.com/btcsuite/btcd
