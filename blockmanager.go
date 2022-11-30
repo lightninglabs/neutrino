@@ -2383,6 +2383,33 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// atomically in order to improve peformance.
 	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
 
+	// Explicitly check that each header in msg.Headers builds off of the
+	// previous one.
+	var (
+		lastHeader chainhash.Hash
+		emptyHash  chainhash.Hash
+	)
+
+	for _, blockHeader := range msg.Headers {
+		blockHash := blockHeader.BlockHash()
+
+		if lastHeader == emptyHash {
+			// If we haven't yet set lastHeader, set it now.
+			lastHeader = blockHash
+		} else {
+			// Ensure that blockHeader.PrevBlock matches
+			// lastHeader.
+			if blockHeader.PrevBlock != lastHeader {
+				log.Warnf("Headers received from peer don't " +
+					"connect")
+				hmsg.peer.Disconnect()
+				return
+			}
+
+			lastHeader = blockHash
+		}
+	}
+
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
 	receivedCheckpoint := false
