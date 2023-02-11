@@ -343,8 +343,8 @@ Loop:
 				heap.Push(work, result.job)
 				currentQueries[result.job.index] = batchNum
 
-			// Otherwise we we got a successful result and  update
-			// the status of the batch this query is a part of.
+			// Otherwise we got a successful result and  update the
+			// status of the batch this query is a part of.
 			default:
 				// Reward the peer for the successful query.
 				w.cfg.Ranking.Reward(result.peer.Addr())
