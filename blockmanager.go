@@ -1625,14 +1625,14 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 //
 // We'll use a few strategies to figure out which peers we believe serve
 // invalid filters:
-//	1. If a peers' filter doesn't match on a script that must match, we know
-//	the filter is invalid.
-//	2. If a peers' filter matches on a script that _should not_ match, it
-//	is potentially invalid. In this case we ban peers that matches more
-//	such scripts than other peers.
-//	3. If we cannot detect which filters are invalid from the block
-//	contents, we ban peers serving filters different from the majority of
-//	peers.
+//  1. If a peers' filter doesn't match on a script that must match, we know
+//     the filter is invalid.
+//  2. If a peers' filter matches on a script that _should not_ match, it
+//     is potentially invalid. In this case we ban peers that matches more
+//     such scripts than other peers.
+//  3. If we cannot detect which filters are invalid from the block
+//     contents, we ban peers serving filters different from the majority of
+//     peers.
 func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 	fType wire.FilterType, filtersFromPeers map[string]*gcs.Filter,
 	threshold int) ([]string, error) {

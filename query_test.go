@@ -19,7 +19,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -153,7 +152,7 @@ func genRandFilter(numElements uint32, t *testing.T) (
 	}
 
 	// Convert into CacheableFilter and compute Size.
-	c := &cache.CacheableFilter{Filter: filter}
+	c := &CacheableFilter{Filter: filter}
 	s, err := c.Size()
 	if err != nil {
 		t.Fatalf("unable to create random filter: %v", err)
@@ -267,7 +266,7 @@ func TestBlockCache(t *testing.T) {
 		}
 		headers.WriteHeaders(header)
 
-		sz, _ := (&cache.CacheableBlock{Block: b}).Size()
+		sz, _ := (&CacheableBlock{Block: b}).Size()
 		if i < len(blocks)/2 {
 			size += sz
 		}
