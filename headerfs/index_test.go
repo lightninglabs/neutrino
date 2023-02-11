@@ -50,7 +50,7 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 		t.Fatalf("unable to create test db: %v", err)
 	}
 
-	// First, we'll create a a series of random headers that we'll use to
+	// First, we'll create a series of random headers that we'll use to
 	// write into the database.
 	const numHeaders = 100
 	headerEntries, headerIndex, err := writeRandomBatch(hIndex, numHeaders)
@@ -152,7 +152,7 @@ func TestHeaderStorageFallback(t *testing.T) {
 		t.Fatalf("error writing random batch with old data: %v", err)
 	}
 
-	// Next, we'll create a a series of random headers that we'll use to
+	// Next, we'll create a series of random headers that we'll use to
 	// write into the database through the normal interface. This means they
 	// will be written to the new sub buckets.
 	newHeaderEntries, _, err := writeRandomBatch(hIndex, numHeaders)

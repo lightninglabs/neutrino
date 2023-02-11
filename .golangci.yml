@@ -86,6 +86,8 @@ linters:
     - nilnil
     - stylecheck
     - thelper
+    - exhaustruct
+    - nosnakecase
 
 issues:
   exclude-rules:

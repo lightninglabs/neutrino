@@ -75,7 +75,7 @@ var (
 	// DefaultFilterCacheSize is the size (in bytes) of filters neutrino
 	// will keep in memory if no size is specified in the neutrino.Config.
 	// Since we utilize the cache during batch filter fetching, it is
-	// beneficial if it is able to to keep a whole batch. The current batch
+	// beneficial if it is able to keep a whole batch. The current batch
 	// size is 1000, so we default to 30 MB, which can fit about 1450 to
 	// 2300 mainnet filters.
 	DefaultFilterCacheSize uint64 = 3120 * 10 * 1000
@@ -165,7 +165,7 @@ type ServerPeer struct {
 	connReq        *connmgr.ConnReq
 	server         *ChainService
 	persistent     bool
-	knownAddresses *lru.Cache
+	knownAddresses *lru.Cache[string, *cachedAddr]
 	quit           chan struct{}
 
 	// The following map of subcribers is used to subscribe to messages
@@ -187,7 +187,7 @@ func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
 		server:           s,
 		persistent:       isPersistent,
-		knownAddresses:   lru.NewCache(5000),
+		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
 		quit:             make(chan struct{}),
 		recvSubscribers:  make(map[spMsgSubscription]struct{}),
 		recvSubscribers2: make(map[msgSubscription]struct{}),
@@ -588,7 +588,7 @@ type Config struct {
 
 	// BlockCache is an LRU block cache. If none is provided then the a new
 	// one will be instantiated.
-	BlockCache *lru.Cache
+	BlockCache *lru.Cache[wire.InvVect, *CacheableBlock]
 
 	// BlockCacheSize indicates the size (in bytes) of blocks the block
 	// cache will hold in memory at most. If a BlockCache is provided then
@@ -640,8 +640,8 @@ type ChainService struct { // nolint:maligned
 	RegFilterHeaders *headerfs.FilterHeaderStore
 	persistToDisk    bool
 
-	FilterCache *lru.Cache
-	BlockCache  *lru.Cache
+	FilterCache *lru.Cache[FilterCacheKey, *CacheableFilter]
+	BlockCache  *lru.Cache[wire.InvVect, *CacheableBlock]
 
 	// queryPeers will be called to send messages to one or more peers,
 	// expecting a response.
@@ -766,7 +766,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	if cfg.FilterCacheSize != 0 {
 		filterCacheSize = cfg.FilterCacheSize
 	}
-	s.FilterCache = lru.NewCache(filterCacheSize)
+	s.FilterCache = lru.NewCache[FilterCacheKey, *CacheableFilter](
+		filterCacheSize,
+	)
 
 	if cfg.BlockCache != nil {
 		s.BlockCache = cfg.BlockCache
@@ -775,7 +777,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		if cfg.BlockCacheSize != 0 {
 			blockCacheSize = cfg.BlockCacheSize
 		}
-		s.BlockCache = lru.NewCache(blockCacheSize)
+		s.BlockCache = lru.NewCache[wire.InvVect, *CacheableBlock](
+			blockCacheSize,
+		)
 	}
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
@@ -998,7 +1002,7 @@ func (s *ChainService) BestBlock() (*headerfs.BlockStamp, error) {
 		return nil, err
 	}
 
-	// Filter headers might lag behind block headers, so we can can fetch a
+	// Filter headers might lag behind block headers, so we can fetch a
 	// previous block header if the filter headers are not caught up.
 	if filterHeight < bestHeight {
 		bestHeight = filterHeight
@@ -1568,8 +1572,8 @@ func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 	close(sp.quit)
 }
 
-// UpdatePeerHeights updates the heights of all peers who have have announced
-// the latest connected main chain block, or a recognized orphan. These height
+// UpdatePeerHeights updates the heights of all peers who have announced the
+// latest connected main chain block, or a recognized orphan. These height
 // updates allow us to dynamically refresh peer heights, ensuring sync peer
 // selection has access to the latest block heights for each peer.
 func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash,

@@ -15,7 +15,7 @@ defaults:
 env:
   GOCACHE: /home/runner/work/go/pkg/build
   GOPATH: /home/runner/work/go
-  GO_VERSION: 1.18.x
+  GO_VERSION: 1.19.x
 
 jobs:
   ########################

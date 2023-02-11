@@ -1,22 +1,12 @@
 package lru
 
 import (
-	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/lightninglabs/neutrino/cache"
+	"github.com/stretchr/testify/require"
 )
-
-func assertEqual(t *testing.T, a interface{}, b interface{}, message string) { // nolint:unparam
-	if a == b {
-		return
-	}
-	if len(message) == 0 {
-		message = fmt.Sprintf("%v != %v", a, b)
-	}
-	t.Fatal(message)
-}
 
 // sizeable is a simple struct that represents an element of arbitrary size
 // which holds a simple integer.
@@ -39,21 +29,21 @@ func getSizeableValue(generic cache.Value, _ error) int {
 // TestEmptyCacheSizeZero will check that an empty cache has a size of 0.
 func TestEmptyCacheSizeZero(t *testing.T) {
 	t.Parallel()
-	c := NewCache(10)
-	assertEqual(t, c.Len(), 0, "")
+	c := NewCache[int, *sizeable](10)
+	require.Equal(t, 0, c.Len())
 }
 
 // TestCacheNeverExceedsSize inserts many filters into the cache and verifies
 // at each step that the cache never exceeds it's initial size.
 func TestCacheNeverExceedsSize(t *testing.T) {
 	t.Parallel()
-	c := NewCache(2)
+	c := NewCache[int, *sizeable](2)
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
-	assertEqual(t, c.Len(), 2, "")
+	require.Equal(t, 2, c.Len())
 	for i := 0; i < 10; i++ {
 		c.Put(i, &sizeable{value: i, size: 1})
-		assertEqual(t, c.Len(), 2, "")
+		require.Equal(t, 2, c.Len())
 	}
 }
 
@@ -62,43 +52,43 @@ func TestCacheNeverExceedsSize(t *testing.T) {
 // behavior when items put in the cache exceeds cache capacity.
 func TestCacheAlwaysHasLastAccessedItems(t *testing.T) {
 	t.Parallel()
-	c := NewCache(2)
+	c := NewCache[int, *sizeable](2)
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
 	two := getSizeableValue(c.Get(2))
 	one := getSizeableValue(c.Get(1))
-	assertEqual(t, two, 2, "")
-	assertEqual(t, one, 1, "")
+	require.Equal(t, 2, two)
+	require.Equal(t, 1, one)
 
-	c = NewCache(2)
+	c = NewCache[int, *sizeable](2)
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
 	c.Put(3, &sizeable{value: 3, size: 1})
-	oneEntry, _ := c.Get(1)
+	_, err := c.Get(1)
 	two = getSizeableValue(c.Get(2))
 	three := getSizeableValue(c.Get(3))
-	assertEqual(t, oneEntry, nil, "")
-	assertEqual(t, two, 2, "")
-	assertEqual(t, three, 3, "")
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
+	require.Equal(t, two, 2)
+	require.Equal(t, three, 3)
 
-	c = NewCache(2)
+	c = NewCache[int, *sizeable](2)
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
 	c.Get(1)
 	c.Put(3, &sizeable{value: 3, size: 1})
 	one = getSizeableValue(c.Get(1))
-	twoEntry, _ := c.Get(2)
+	_, err = c.Get(2)
 	three = getSizeableValue(c.Get(3))
-	assertEqual(t, one, 1, "")
-	assertEqual(t, twoEntry, nil, "")
-	assertEqual(t, three, 3, "")
+	require.Equal(t, one, 1)
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
+	require.Equal(t, three, 3)
 }
 
 // TestElementSizeCapacityEvictsEverything tests that Cache evicts everything
 // from cache when an element with size=capacity is inserted.
 func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	t.Parallel()
-	c := NewCache(3)
+	c := NewCache[int, *sizeable](3)
 
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
@@ -106,36 +96,36 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 
 	// Insert element with size=capacity of cache, should evict everything.
 	c.Put(4, &sizeable{value: 4, size: 3})
-	assertEqual(t, c.Len(), 1, "")
-	assertEqual(t, len(c.cache), 1, "")
+	require.Equal(t, c.Len(), 1)
+	require.Equal(t, len(c.cache), 1)
 	four := getSizeableValue(c.Get(4))
-	assertEqual(t, four, 4, "")
+	require.Equal(t, four, 4)
 
-	c = NewCache(6)
+	c = NewCache[int, *sizeable](6)
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 2})
 	c.Put(3, &sizeable{value: 3, size: 3})
-	assertEqual(t, c.size, uint64(6), "")
+	require.Equal(t, c.size, uint64(6))
 
 	// Insert element with size=capacity of cache.
 	c.Put(4, &sizeable{value: 4, size: 6})
-	assertEqual(t, c.Len(), 1, "")
-	assertEqual(t, len(c.cache), 1, "")
+	require.Equal(t, c.Len(), 1)
+	require.Equal(t, len(c.cache), 1)
 	four = getSizeableValue(c.Get(4))
-	assertEqual(t, four, 4, "")
+	require.Equal(t, four, 4)
 }
 
 // TestCacheFailsInsertionSizeBiggerCapacity tests that the cache fails the
 // put operation when the element's size is bigger than it's capacity.
 func TestCacheFailsInsertionSizeBiggerCapacity(t *testing.T) {
 	t.Parallel()
-	c := NewCache(2)
+	c := NewCache[int, *sizeable](2)
 
 	_, err := c.Put(1, &sizeable{value: 1, size: 3})
 	if err == nil {
 		t.Fatal("shouldn't be able to put elements larger than cache")
 	}
-	assertEqual(t, c.Len(), 0, "")
+	require.Equal(t, c.Len(), 0)
 }
 
 // TestManySmallElementCanInsertAfterBigEviction tests that when a big element
@@ -143,34 +133,34 @@ func TestCacheFailsInsertionSizeBiggerCapacity(t *testing.T) {
 // eviction taking place.
 func TestManySmallElementCanInsertAfterBigEviction(t *testing.T) {
 	t.Parallel()
-	c := NewCache(3)
+	c := NewCache[int, *sizeable](3)
 
 	_, err := c.Put(1, &sizeable{value: 1, size: 3})
 	if err != nil {
 		t.Fatal("couldn't insert element")
 	}
 
-	assertEqual(t, c.Len(), 1, "")
+	require.Equal(t, c.Len(), 1)
 
 	c.Put(2, &sizeable{value: 2, size: 1})
 	two := getSizeableValue(c.Get(2))
-	oneEntry, _ := c.Get(1)
-	assertEqual(t, c.Len(), 1, "")
-	assertEqual(t, two, 2, "")
-	assertEqual(t, oneEntry, nil, "")
+	_, err = c.Get(1)
+	require.Equal(t, c.Len(), 1)
+	require.Equal(t, two, 2)
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
 
 	c.Put(3, &sizeable{value: 3, size: 1})
-	assertEqual(t, c.Len(), 2, "")
+	require.Equal(t, c.Len(), 2)
 
 	c.Put(4, &sizeable{value: 4, size: 1})
-	assertEqual(t, c.Len(), 3, "")
+	require.Equal(t, c.Len(), 3)
 
 	two = getSizeableValue(c.Get(2))
 	three := getSizeableValue(c.Get(3))
 	four := getSizeableValue(c.Get(4))
-	assertEqual(t, two, 2, "")
-	assertEqual(t, three, 3, "")
-	assertEqual(t, four, 4, "")
+	require.Equal(t, two, 2)
+	require.Equal(t, three, 3)
+	require.Equal(t, four, 4)
 }
 
 // TestReplacingElementValueSmallerSize tests that if an existing element is
@@ -178,7 +168,7 @@ func TestManySmallElementCanInsertAfterBigEviction(t *testing.T) {
 // insert without an eviction taking place.
 func TestReplacingElementValueSmallerSize(t *testing.T) {
 	t.Parallel()
-	c := NewCache(2)
+	c := NewCache[int, *sizeable](2)
 
 	c.Put(1, &sizeable{value: 1, size: 2})
 
@@ -186,24 +176,24 @@ func TestReplacingElementValueSmallerSize(t *testing.T) {
 	c.Put(2, &sizeable{value: 2, size: 1})
 	one := getSizeableValue(c.Get(1))
 	two := getSizeableValue(c.Get(2))
-	assertEqual(t, one, 1, "")
-	assertEqual(t, two, 2, "")
-	assertEqual(t, c.Len(), 2, "")
+	require.Equal(t, one, 1)
+	require.Equal(t, two, 2)
+	require.Equal(t, c.Len(), 2)
 }
 
 // TestReplacingElementValueBiggerSize tests that if an existing element is
 // replaced with a value of size bigger, that it evicts accordingly.
 func TestReplacingElementValueBiggerSize(t *testing.T) {
 	t.Parallel()
-	c := NewCache(2)
+	c := NewCache[int, *sizeable](2)
 
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 1})
 
 	c.Put(1, &sizeable{value: 3, size: 2})
-	assertEqual(t, c.Len(), 1, "")
+	require.Equal(t, c.Len(), 1)
 	one := getSizeableValue(c.Get(1))
-	assertEqual(t, one, 3, "")
+	require.Equal(t, one, 3)
 }
 
 // TestConcurrencySimple is a very simple test that checks concurrent access to
@@ -211,7 +201,7 @@ func TestReplacingElementValueBiggerSize(t *testing.T) {
 // "go test" command.
 func TestConcurrencySimple(t *testing.T) {
 	t.Parallel()
-	c := NewCache(5)
+	c := NewCache[int, *sizeable](5)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 5; i++ {
@@ -245,7 +235,7 @@ func TestConcurrencySimple(t *testing.T) {
 // "go test" command.
 func TestConcurrencySmallCache(t *testing.T) {
 	t.Parallel()
-	c := NewCache(5)
+	c := NewCache[int, *sizeable](5)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 20; i++ {
@@ -279,7 +269,7 @@ func TestConcurrencySmallCache(t *testing.T) {
 // "go test" command.
 func TestConcurrencyBigCache(t *testing.T) {
 	t.Parallel()
-	c := NewCache(100)
+	c := NewCache[int, *sizeable](100)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 50; i++ {

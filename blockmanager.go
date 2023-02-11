@@ -275,8 +275,8 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		return nil, err
 	}
 
-	// We must also ensure the the filter header tip hash is set to the
-	// block hash at the filter tip height.
+	// We must also ensure the filter header tip hash is set to the block
+	// hash at the filter tip height.
 	fh, err := cfg.BlockHeaders.FetchHeaderByHeight(bm.filterHeaderTip)
 	if err != nil {
 		return nil, err

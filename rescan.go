@@ -685,7 +685,7 @@ rescanLoop:
 
 				// If we have to rewind our state, then we'll
 				// mark ourselves as not current so we can walk
-				// forward in the chain again until we we are
+				// forward in the chain again until we are
 				// current. This is our way of doing a manual
 				// rescan.
 				if rewound {
