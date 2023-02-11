@@ -450,7 +450,7 @@ var (
 			// One peer is serving the "old-old" filter which
 			// contains all OP_RETURN output, we expect this peer
 			// to be banned first.
-			name: "old old peer",
+			name: "very old peer",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
 				"b": oldFilter,

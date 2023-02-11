@@ -62,7 +62,8 @@ var (
 	// "rd":	OnRedeemingTx
 	// "bd":	OnBlockDisconnected
 	// "fd":	OnFilteredBlockDisconnected.
-	wantLog = func() (log []byte) {
+	wantLog = func() []byte {
+		var log []byte
 		for i := 1096; i <= 1100; i++ {
 			// FilteredBlockConnected
 			log = append(log, []byte("fc")...)
@@ -452,17 +453,17 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 				ourIndex = i
 			}
 		}
-		return func(target btcutil.Amount) (total btcutil.Amount,
-			inputs []*wire.TxIn, inputValues []btcutil.Amount,
-			scripts [][]byte, err error) {
+		return func(target btcutil.Amount) (btcutil.Amount,
+			[]*wire.TxIn, []btcutil.Amount,
+			[][]byte, error) {
 
 			if ourIndex == 1<<30 {
 				err = fmt.Errorf("Couldn't find our address " +
 					"in the passed transaction's outputs.")
-				return
+				return 0, nil, nil, nil, err
 			}
-			total = target
-			inputs = []*wire.TxIn{
+			total := target
+			inputs := []*wire.TxIn{
 				{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  tx.TxHash(),
@@ -470,11 +471,12 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 					},
 				},
 			}
-			inputValues = []btcutil.Amount{
-				btcutil.Amount(tx.TxOut[ourIndex].Value)}
-			scripts = [][]byte{tx.TxOut[ourIndex].PkScript}
-			err = nil
-			return
+			inputValues := []btcutil.Amount{
+				btcutil.Amount(tx.TxOut[ourIndex].Value),
+			}
+			scripts := [][]byte{tx.TxOut[ourIndex].PkScript}
+
+			return total, inputs, inputValues, scripts, nil
 		}
 	}
 
@@ -814,8 +816,8 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Rescan ended with error: %s", err)
 	}
 
-	// Immediately try to add a new update to to the rescan that was just
-	// shut down. This should fail as it is no longer running.
+	// Immediately try to add a new update to the rescan that was just shut
+	// down. This should fail as it is no longer running.
 	rescan.WaitForShutdown()
 	err = rescan.Update(neutrino.AddAddrs(addr2), neutrino.Rewind(1095))
 	if err == nil {
