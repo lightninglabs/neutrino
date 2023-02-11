@@ -10,7 +10,7 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.3.5
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.0
 	github.com/davecgh/go-spew v1.1.1
-	github.com/lightninglabs/neutrino/cache v0.0.0-00010101000000-000000000000
+	github.com/lightninglabs/neutrino/cache v1.0.0
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/stretchr/testify v1.7.0
 )
@@ -35,5 +35,3 @@ require (
 )
 
 go 1.18
-
-replace github.com/lightninglabs/neutrino/cache => ./cache
