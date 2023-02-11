@@ -1,4 +1,4 @@
-package cache_test
+package neutrino
 
 import (
 	"crypto/rand"
@@ -55,9 +55,9 @@ func TestBlockFilterCaches(t *testing.T) {
 		filters = append(filters, filter)
 
 		// Put the generated filter in the filter caches.
-		cacheKey := cache.FilterCacheKey{blockHash, filterType}
+		cacheKey := FilterCacheKey{blockHash, filterType}
 		for _, c := range filterCaches {
-			_, _ = c.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
+			_, _ = c.Put(cacheKey, &CacheableFilter{Filter: filter})
 		}
 
 		msgBlock := &wire.MsgBlock{}
@@ -70,7 +70,7 @@ func TestBlockFilterCaches(t *testing.T) {
 			wire.InvTypeWitnessBlock, &blockHash,
 		)
 		for _, c := range blockCaches {
-			_, _ = c.Put(*blockKey, &cache.CacheableBlock{block})
+			_, _ = c.Put(*blockKey, &CacheableBlock{block})
 		}
 	}
 
@@ -80,7 +80,7 @@ func TestBlockFilterCaches(t *testing.T) {
 		blockHash := blockHash
 
 		// Check filter caches.
-		cacheKey := cache.FilterCacheKey{blockHash, filterType}
+		cacheKey := FilterCacheKey{blockHash, filterType}
 		for _, c := range filterCaches {
 			e, err := c.Get(cacheKey)
 			if err != nil {
@@ -88,7 +88,7 @@ func TestBlockFilterCaches(t *testing.T) {
 			}
 
 			// Ensure we got the correct filter.
-			filter := e.(*cache.CacheableFilter).Filter
+			filter := e.(*CacheableFilter).Filter
 			if filter != filters[i] {
 				t.Fatalf("Filters not equal: %v vs %v ",
 					filter, filters[i])
@@ -106,7 +106,7 @@ func TestBlockFilterCaches(t *testing.T) {
 			}
 
 			// Ensure it is the same block.
-			block := b.(*cache.CacheableBlock).Block
+			block := b.(*CacheableBlock).Block
 			if block != blocks[i] {
 				t.Fatalf("Not equal: %v vs %v ",
 					block, blocks[i])

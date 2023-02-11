@@ -547,7 +547,7 @@ checkResponses:
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType) (*gcs.Filter, error) {
 
-	cacheKey := cache.FilterCacheKey{
+	cacheKey := FilterCacheKey{
 		BlockHash:  *blockHash,
 		FilterType: filterType,
 	}
@@ -557,18 +557,18 @@ func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
 		return nil, err
 	}
 
-	return filterValue.(*cache.CacheableFilter).Filter, nil
+	return filterValue.(*CacheableFilter).Filter, nil
 }
 
 // putFilterToCache inserts a given filter in ChainService's FilterCache.
 func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 	filterType filterdb.FilterType, filter *gcs.Filter) (bool, error) { // nolint:unparam
 
-	cacheKey := cache.FilterCacheKey{
+	cacheKey := FilterCacheKey{
 		BlockHash:  *blockHash,
 		FilterType: filterType,
 	}
-	return s.FilterCache.Put(cacheKey, &cache.CacheableFilter{Filter: filter})
+	return s.FilterCache.Put(cacheKey, &CacheableFilter{Filter: filter})
 }
 
 // cfiltersQuery is a struct that holds all the information necessary to
@@ -982,7 +982,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// If the block is already in the cache, we can return it immediately.
 	blockValue, err := s.BlockCache.Get(*inv)
 	if err == nil && blockValue != nil {
-		return blockValue.(*cache.CacheableBlock).Block, err
+		return blockValue.(*CacheableBlock).Block, err
 	}
 	if err != nil && err != cache.ErrElementNotFound {
 		return nil, err
@@ -1066,7 +1066,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &cache.CacheableBlock{Block: foundBlock})
+	_, err = s.BlockCache.Put(*inv, &CacheableBlock{Block: foundBlock})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
