@@ -166,3 +166,52 @@ func (c *Cache[K, V]) Len() int {
 
 	return c.ll.Len()
 }
+
+// Delete removes an item from the cache.
+func (c *Cache[K, V]) Delete(key K) {
+	c.LoadAndDelete(key)
+}
+
+// LoadAndDelete queries an item and deletes it from the cache using the
+// specified key.
+func (c *Cache[K, V]) LoadAndDelete(key K) (V, bool) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	var defaultVal V
+
+	// Noop if the element doesn't exist.
+	el, ok := c.cache[key]
+	if !ok {
+		return defaultVal, false
+	}
+
+	// Before we delete the element, we need to get its size.
+	vs, err := el.Value.value.Size()
+	if err != nil {
+		return defaultVal, false
+	}
+
+	// Remove the element from the list.
+	c.ll.Remove(el)
+
+	// Delete the element from the cache and update the cache's size.
+	delete(c.cache, key)
+	c.size -= vs
+
+	return el.Value.value, true
+}
+
+// Range iterates the cache.
+//
+// NOTE: the `visitor` is wrapped inside the Cache's mutex.
+func (c *Cache[K, V]) Range(visitor func(K, V) bool) {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+
+	for k, v := range c.cache {
+		if !visitor(k, v.Value.value) {
+			return
+		}
+	}
+}

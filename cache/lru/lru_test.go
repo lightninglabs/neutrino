@@ -296,3 +296,94 @@ func TestConcurrencyBigCache(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestLoadAndDelete checks the `LoadAndDelete` method.
+func TestLoadAndDelete(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](3)
+
+	// Create a test item.
+	item1 := &sizeable{value: 1, size: 1}
+
+	// Put the item.
+	_, err := c.Put(0, item1)
+	require.NoError(t, err)
+
+	// Load the item and check it's returned as expected.
+	loadedItem, loaded := c.LoadAndDelete(0)
+	require.True(t, loaded)
+	require.Equal(t, item1, loadedItem)
+
+	// Now check that the item has been deleted.
+	_, err = c.Get(0)
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
+
+	// Load the item again should give us a nil value and false.
+	loadedItem, loaded = c.LoadAndDelete(0)
+	require.False(t, loaded)
+	require.Nil(t, loadedItem)
+
+	// The length should be 0.
+	require.Zero(t, c.Len())
+	require.Zero(t, c.size)
+}
+
+// TestRangeIteration checks that the `Range` method works as expected.
+func TestRangeIteration(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](100)
+
+	// Create test items.
+	const numItems = 10
+	for i := 0; i < numItems; i++ {
+		_, err := c.Put(i, &sizeable{value: i, size: 1})
+		require.NoError(t, err)
+	}
+
+	// Create a dummy visitor that just counts the number of items visited.
+	visited := 0
+	testVisitor := func(key int, value *sizeable) bool {
+		visited++
+		return true
+	}
+
+	// Call the method.
+	c.Range(testVisitor)
+
+	// Check the number of items visited.
+	require.Equal(t, numItems, visited)
+}
+
+// TestRangeAbort checks that the `Range` will abort when the visitor returns
+// false.
+func TestRangeAbort(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](100)
+
+	// Create test items.
+	const numItems = 10
+	for i := 0; i < numItems; i++ {
+		_, err := c.Put(i, &sizeable{value: i, size: 1})
+		require.NoError(t, err)
+	}
+
+	// Create a visitor that counts the number of items visited and returns
+	// false when visited 5 times.
+	visited := 0
+	testVisitor := func(key int, value *sizeable) bool {
+		visited++
+		if visited >= numItems/2 {
+			return false
+		}
+		return true
+	}
+
+	// Call the method.
+	c.Range(testVisitor)
+
+	// Check the number of items visited.
+	require.Equal(t, numItems/2, visited)
+}
