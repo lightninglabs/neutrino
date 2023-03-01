@@ -97,7 +97,7 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	// Insert element with size=capacity of cache, should evict everything.
 	c.Put(4, &sizeable{value: 4, size: 3})
 	require.Equal(t, c.Len(), 1)
-	require.Equal(t, len(c.cache), 1)
+	require.Equal(t, c.cache.Len(), 1)
 	four := getSizeableValue(c.Get(4))
 	require.Equal(t, four, 4)
 
@@ -110,7 +110,7 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	// Insert element with size=capacity of cache.
 	c.Put(4, &sizeable{value: 4, size: 6})
 	require.Equal(t, c.Len(), 1)
-	require.Equal(t, len(c.cache), 1)
+	require.Equal(t, c.cache.Len(), 1)
 	four = getSizeableValue(c.Get(4))
 	require.Equal(t, four, 4)
 }
