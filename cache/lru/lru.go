@@ -7,9 +7,6 @@ import (
 	"github.com/lightninglabs/neutrino/cache"
 )
 
-// elementMap is an alias for a map from a generic interface to a list.Element.
-type elementMap[K comparable, V any] map[K]V
-
 // entry represents a (key,value) pair entry in the Cache. The Cache's list
 // stores entries which let us get the cache key when an entry is evicted.
 type entry[K comparable, V cache.Value] struct {
@@ -33,7 +30,7 @@ type Cache[K comparable, V cache.Value] struct {
 
 	// cache is a generic cache which allows us to find an elements position
 	// in the ll list from a given key.
-	cache elementMap[K, *Element[entry[K, V]]]
+	cache syncMap[K, *Element[entry[K, V]]]
 
 	// mtx is used to make sure the Cache is thread-safe.
 	mtx sync.RWMutex
@@ -45,7 +42,7 @@ func NewCache[K comparable, V cache.Value](capacity uint64) *Cache[K, V] {
 	return &Cache[K, V]{
 		capacity: capacity,
 		ll:       NewList[entry[K, V]](),
-		cache:    make(map[K]*Element[entry[K, V]]),
+		cache:    syncMap[K, *Element[entry[K, V]]]{},
 	}
 }
 
@@ -84,7 +81,7 @@ func (c *Cache[K, V]) evict(needed uint64) (bool, error) {
 
 			// Remove the element from the cache.
 			c.ll.Remove(elr)
-			delete(c.cache, ce.key)
+			c.cache.Delete(ce.key)
 			evicted = true
 		}
 	}
@@ -108,17 +105,22 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 			"cache with capacity %v", vs, c.capacity)
 	}
 
+	// Load the element.
+	el, ok := c.cache.Load(key)
+
+	// Update the internal list inside a lock.
 	c.mtx.Lock()
-	defer c.mtx.Unlock()
 
 	// If the element already exists, remove it and decrease cache's size.
-	el, ok := c.cache[key]
 	if ok {
 		es, err := el.Value.value.Size()
 		if err != nil {
+			c.mtx.Unlock()
+
 			return false, fmt.Errorf("couldn't determine size of "+
 				"existing cache value %v", err)
 		}
+
 		c.ll.Remove(el)
 		c.size -= es
 	}
@@ -132,8 +134,13 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 
 	// We have made enough space in the cache, so just insert it.
 	el = c.ll.PushFront(entry[K, V]{key, value})
-	c.cache[key] = el
 	c.size += vs
+
+	// Release the lock.
+	c.mtx.Unlock()
+
+	// Update the cache.
+	c.cache.Store(key, el)
 
 	return evicted, nil
 }
@@ -141,16 +148,16 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 // Get will return value for a given key, making the element the most recently
 // accessed item in the process. Will return nil if the key isn't found.
 func (c *Cache[K, V]) Get(key K) (V, error) {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
-
 	var defaultVal V
 
-	el, ok := c.cache[key]
+	el, ok := c.cache.Load(key)
 	if !ok {
 		// Element not found in the cache.
 		return defaultVal, cache.ErrElementNotFound
 	}
+
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 
 	// When the cache needs to evict a element to make space for another
 	// one, it starts eviction from the back, so by moving this element to
@@ -165,4 +172,46 @@ func (c *Cache[K, V]) Len() int {
 	defer c.mtx.RUnlock()
 
 	return c.ll.Len()
+}
+
+// Delete removes an item from the cache.
+func (c *Cache[K, V]) Delete(key K) {
+	c.LoadAndDelete(key)
+}
+
+// LoadAndDelete queries an item and deletes it from the cache using the
+// specified key.
+func (c *Cache[K, V]) LoadAndDelete(key K) (V, bool) {
+	var defaultVal V
+
+	// Noop if the element doesn't exist.
+	el, ok := c.cache.LoadAndDelete(key)
+	if !ok {
+		return defaultVal, false
+	}
+
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	// Get its size.
+	vs, err := el.Value.value.Size()
+	if err != nil {
+		return defaultVal, false
+	}
+
+	// Remove the element from the list and update the cache's size.
+	c.ll.Remove(el)
+	c.size -= vs
+
+	return el.Value.value, true
+}
+
+// Range iterates the cache.
+func (c *Cache[K, V]) Range(visitor func(K, V) bool) {
+	// valueVisitor is a closure to help unwrap the value from the cache.
+	valueVisitor := func(key K, value *Element[entry[K, V]]) bool {
+		return visitor(key, value.Value.value)
+	}
+
+	c.cache.Range(valueVisitor)
 }

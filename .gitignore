@@ -28,3 +28,6 @@ breakpoints.txt
 
 # coverage output
 coverage.txt
+
+# go workspace
+go.work
