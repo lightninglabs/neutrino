@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestBanStore creates a test Store backed by a boltdb instance.
@@ -123,4 +124,10 @@ func TestBanStore(t *testing.T) {
 	// We'll query for second IP network again as it should now be unknown
 	// to the BanStore. We should expect not to find anything regarding it.
 	checkBanStore(ipNet2, false, 0, 0)
+
+	// Test UnbanIPNet.
+	require.NoError(t, banStore.UnbanIPNet(ipNet1))
+
+	// We would now check that ipNet1 is indeed unbanned.
+	checkBanStore(ipNet1, false, 0, 0)
 }
