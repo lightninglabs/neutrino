@@ -37,6 +37,8 @@ const (
 // mockDispatcher implements the query.Dispatcher interface and allows us to
 // set up a custom Query method during tests.
 type mockDispatcher struct {
+	query.WorkManager
+
 	query func(requests []*query.Request,
 		options ...query.QueryOption) chan error
 }
