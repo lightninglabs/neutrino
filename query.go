@@ -895,7 +895,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 	// We didn't get the filter from the DB, so we'll try to get it from
 	// the network.
-	query, err := s.prepareCFiltersQuery(blockHash, filterType, options...)
+	filterQuery, err := s.prepareCFiltersQuery(
+		blockHash, filterType, options...,
+	)
 	if err != nil {
 		s.mtxCFilter.Unlock()
 		return nil, err
@@ -904,28 +906,37 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// With all the necessary items retrieved, we'll launch our concurrent
 	// query to the set of connected peers.
 	log.Debugf("Fetching filters for heights=[%v, %v], stophash=%v",
-		query.startHeight, query.stopHeight, query.stopHash)
+		filterQuery.startHeight, filterQuery.stopHeight,
+		filterQuery.stopHash)
 
 	go func() {
 		defer s.mtxCFilter.Unlock()
-		defer close(query.filterChan)
+		defer close(filterQuery.filterChan)
 
 		s.queryPeers(
 			// Send a wire.MsgGetCFilters.
-			query.queryMsg(),
+			filterQuery.queryMsg(),
 
 			// Check responses and if we get one that matches, end
 			// the query early.
-			func(_ *ServerPeer, resp wire.Message, quit chan<- struct{}) {
-				s.handleCFiltersResponse(query, resp, quit)
+			func(_ *ServerPeer, resp wire.Message,
+				quit chan<- struct{}) {
+
+				s.handleCFiltersResponse(
+					filterQuery, resp, quit,
+				)
 			},
-			query.options...,
+			filterQuery.options...,
 		)
 
 		// If there are elements left to receive, the query failed.
-		if len(query.headerIndex) > 0 {
-			numFilters := query.stopHeight - query.startHeight + 1
-			numRecv := numFilters - int64(len(query.headerIndex))
+		if len(filterQuery.headerIndex) > 0 {
+			numFilters := filterQuery.stopHeight -
+				filterQuery.startHeight + 1
+
+			numRecv := numFilters -
+				int64(len(filterQuery.headerIndex))
+
 			log.Errorf("Query failed with %d out of %d filters "+
 				"received", numRecv, numFilters)
 			return
@@ -939,7 +950,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// filter to the caller.
 	for {
 		select {
-		case filter, ok = <-query.filterChan:
+		case filter, ok = <-filterQuery.filterChan:
 			if !ok {
 				// Query has finished, if we have a result we'll
 				// return it.
