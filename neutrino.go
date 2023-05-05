@@ -25,6 +25,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
+	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
@@ -661,6 +662,7 @@ type ChainService struct { // nolint:maligned
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
 	workManager          query.WorkManager
+	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -746,6 +748,22 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
 	if err != nil {
 		return nil, err
+	}
+
+	if s.persistToDisk {
+		cfg := &chanutils.BatchWriterConfig[*filterdb.FilterData]{
+			QueueBufferSize:        chanutils.DefaultQueueSize,
+			MaxBatch:               1000,
+			DBWritesTickerDuration: time.Millisecond * 500,
+			Logger:                 log,
+			PutItems:               s.FilterDB.PutFilters,
+		}
+
+		batchWriter := chanutils.NewBatchWriter[*filterdb.FilterData](
+			cfg,
+		)
+
+		s.filterBatchWriter = batchWriter
 	}
 
 	filterCacheSize := DefaultFilterCacheSize
@@ -1606,6 +1624,10 @@ func (s *ChainService) Start() error {
 			err)
 	}
 
+	if s.persistToDisk {
+		s.filterBatchWriter.Start()
+	}
+
 	go s.connManager.Start()
 
 	// Start the peer handler which in turn starts the address and block
@@ -1643,6 +1665,10 @@ func (s *ChainService) Stop() error {
 	if err := s.addrManager.Stop(); err != nil {
 		log.Errorf("error stopping address manager: %v", err)
 		returnErr = err
+	}
+
+	if s.persistToDisk {
+		s.filterBatchWriter.Stop()
 	}
 
 	// Signal the remaining goroutines to quit.
