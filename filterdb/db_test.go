@@ -86,7 +86,13 @@ func TestFilterStorage(t *testing.T) {
 	// type for the block hash generate above.
 	regFilter := genRandFilter(t, 100)
 
-	err = database.PutFilter(&randHash, regFilter, RegularFilter)
+	filter := &FilterData{
+		Filter:    regFilter,
+		BlockHash: &randHash,
+		Type:      RegularFilter,
+	}
+
+	err = database.PutFilter(filter)
 	require.NoError(t, err)
 
 	// With the filter stored, we should be able to retrieve the filter

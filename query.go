@@ -534,9 +534,13 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	}
 
 	if q.cs.persistToDisk {
-		err = q.cs.FilterDB.PutFilter(
-			&response.BlockHash, filter, dbFilterType,
-		)
+		filterData := &filterdb.FilterData{
+			Filter:    filter,
+			BlockHash: &response.BlockHash,
+			Type:      dbFilterType,
+		}
+
+		err = q.cs.FilterDB.PutFilter(filterData)
 		if err != nil {
 			log.Warnf("Couldn't write filter to filterDB: %v", err)
 		}
