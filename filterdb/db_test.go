@@ -92,7 +92,7 @@ func TestFilterStorage(t *testing.T) {
 		Type:      RegularFilter,
 	}
 
-	err = database.PutFilter(filter)
+	err = database.PutFilters(filter)
 	require.NoError(t, err)
 
 	// With the filter stored, we should be able to retrieve the filter
