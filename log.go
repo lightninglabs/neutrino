@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
@@ -43,4 +44,5 @@ func UseLogger(logger btclog.Logger) {
 	connmgr.UseLogger(logger)
 	query.UseLogger(logger)
 	filterdb.UseLogger(logger)
+	chanutils.UseLogger(logger)
 }
