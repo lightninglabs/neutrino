@@ -619,9 +619,7 @@ func (rs *rescanState) rescan() error {
 			return errRetryBlock
 		}
 
-		err = notifyBlockWithFilter(
-			chain, ro, &header, &newStamp, blockFilter,
-		)
+		err = rs.notifyBlockWithFilter(&header, &newStamp, blockFilter)
 		if err != nil {
 			return err
 		}
@@ -1061,9 +1059,11 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 // notifyBlockWithFilter calls appropriate listeners based on the block filter.
 // This differs from notifyBlock in that is expects the caller to already have
 // obtained the target filter.
-func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
-	curHeader *wire.BlockHeader, curStamp *headerfs.BlockStamp,
-	filter *gcs.Filter) error {
+func (rs *rescanState) notifyBlockWithFilter(header *wire.BlockHeader,
+	stamp *headerfs.BlockStamp, filter *gcs.Filter) error {
+
+	chain := rs.chain
+	ro := rs.opts
 
 	// Based on what we find within the block or the filter, we'll be
 	// sending out a set of notifications with transactions that are
@@ -1074,14 +1074,14 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 	// match the items within the filter to ensure we create any relevant
 	// notifications.
 	if filter != nil {
-		matched, err := matchBlockFilter(ro, filter, &curStamp.Hash)
+		matched, err := matchBlockFilter(ro, filter, &stamp.Hash)
 		if err != nil {
 			return err
 		}
 
 		if matched {
 			relevantTxs, err = extractBlockMatches(
-				chain, ro, curStamp, filter,
+				chain, ro, stamp, filter,
 			)
 			if err != nil {
 				return err
@@ -1090,13 +1090,14 @@ func notifyBlockWithFilter(chain ChainSource, ro *rescanOptions,
 	}
 
 	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, curHeader,
+		ro.ntfn.OnFilteredBlockConnected(stamp.Height, header,
 			relevantTxs)
 	}
 
 	if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
-		ro.ntfn.OnBlockConnected(&curStamp.Hash, // nolint:staticcheck
-			curStamp.Height, curHeader.Timestamp)
+		ro.ntfn.OnBlockConnected( // nolint:staticcheck
+			&stamp.Hash, stamp.Height, header.Timestamp,
+		)
 	}
 
 	return nil
