@@ -34,15 +34,27 @@ const (
 	RegularFilter FilterType = iota
 )
 
+// FilterData holds all the info about a filter required to store it.
+type FilterData struct {
+	// Filter is the actual filter to be stored.
+	Filter *gcs.Filter
+
+	// BlockHash is the block header hash of the block associated with the
+	// Filter.
+	BlockHash *chainhash.Hash
+
+	// Type is the filter type.
+	Type FilterType
+}
+
 // FilterDatabase is an interface which represents an object that is capable of
 // storing and retrieving filters according to their corresponding block hash
 // and also their filter type.
 //
 // TODO(roasbeef): similar interface for headerfs?
 type FilterDatabase interface {
-	// PutFilter stores a filter with the given hash and type to persistent
-	// storage.
-	PutFilter(*chainhash.Hash, *gcs.Filter, FilterType) error
+	// PutFilter stores a filter to persistent storage.
+	PutFilter(*FilterData) error
 
 	// FetchFilter attempts to fetch a filter with the given hash and type
 	// from persistent storage. In the case that a filter matching the
@@ -155,30 +167,22 @@ func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
 // storage.
 //
 // NOTE: This method is a part of the FilterDatabase interface.
-func (f *FilterStore) PutFilter(hash *chainhash.Hash,
-	filter *gcs.Filter, fType FilterType) error {
-
+func (f *FilterStore) PutFilter(filterData *FilterData) error {
 	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
 		filters := tx.ReadWriteBucket(filterBucket)
 
 		var targetBucket walletdb.ReadWriteBucket
-		switch fType {
+		switch filterData.Type {
 		case RegularFilter:
 			targetBucket = filters.NestedReadWriteBucket(regBucket)
 		default:
-			return fmt.Errorf("unknown filter type: %v", fType)
+			return fmt.Errorf("unknown filter type: %v",
+				filterData.Type)
 		}
 
-		if filter == nil {
-			return targetBucket.Put(hash[:], nil)
-		}
-
-		bytes, err := filter.NBytes()
-		if err != nil {
-			return err
-		}
-
-		return targetBucket.Put(hash[:], bytes)
+		return putFilter(
+			targetBucket, filterData.BlockHash, filterData.Filter,
+		)
 	})
 }
 
