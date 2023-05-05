@@ -534,16 +534,11 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	}
 
 	if q.cs.persistToDisk {
-		filterData := &filterdb.FilterData{
+		q.cs.filterBatchWriter.AddItem(&filterdb.FilterData{
 			Filter:    filter,
 			BlockHash: &response.BlockHash,
 			Type:      dbFilterType,
-		}
-
-		err = q.cs.FilterDB.PutFilters(filterData)
-		if err != nil {
-			log.Warnf("Couldn't write filter to filterDB: %v", err)
-		}
+		})
 	}
 
 	// We delete the entry for this filter from the headerIndex to indicate
