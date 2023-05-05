@@ -446,6 +446,36 @@ func (rs *rescanState) rescan() error {
 		return err
 	}
 
+	// To ensure that we batch as many filter queries as possible, we also
+	// wait for the header chain to either be current or for it to at least
+	// have caught up with the specified end block.
+	log.Debugf("Waiting for the chain source to be current or for the " +
+		"rescan end height to be reached.")
+
+	if err := rs.waitForBlocks(func(hash chainhash.Hash,
+		height uint32) bool {
+
+		// If the header chain is current, then there is no need to
+		// wait.
+		if chain.IsCurrent() {
+			return true
+		}
+
+		// If an end height was specified then we wait until the
+		// notification corresponding to that block height.
+		if ro.endBlock.Height > 0 &&
+			height >= uint32(ro.endBlock.Height) {
+
+			return true
+		}
+
+		// If a block hash was specified, check if the notification is
+		// for that block.
+		return hash == ro.endBlock.Hash
+	}); err != nil {
+		return err
+	}
+
 	log.Debugf("Starting rescan from known block %d (%s)",
 		rs.curStamp.Height, rs.curStamp.Hash)
 
