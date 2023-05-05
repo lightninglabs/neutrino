@@ -925,10 +925,7 @@ rescanLoop:
 				)
 			}
 
-			err = notifyBlock(
-				chain, ro, rs.curHeader, rs.curStamp,
-				rs.scanning,
-			)
+			err = rs.notifyBlock()
 			if err != nil {
 				return err
 			}
@@ -937,19 +934,19 @@ rescanLoop:
 }
 
 // notifyBlock calls appropriate listeners based on the block filter.
-func notifyBlock(chain ChainSource, ro *rescanOptions,
-	curHeader wire.BlockHeader, curStamp headerfs.BlockStamp,
-	scanning bool) error {
+func (rs *rescanState) notifyBlock() error {
+	chain := rs.chain
+	ro := rs.opts
 
 	// Find relevant transactions based on watch list. If scanning is
 	// false, we can safely assume this block has no relevant transactions.
 	var relevantTxs []*btcutil.Tx
-	if len(ro.watchList) != 0 && scanning {
+	if len(ro.watchList) != 0 && rs.scanning {
 		// If we have a non-empty watch list, then we need to see if it
 		// matches the rescan's filters, so we get the basic filter
 		// from the DB or network.
 		matched, filter, err := blockFilterMatches(
-			chain, ro, &curStamp.Hash,
+			chain, ro, &rs.curStamp.Hash,
 		)
 		if err != nil {
 			return err
@@ -957,7 +954,7 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 
 		if matched {
 			relevantTxs, err = extractBlockMatches(
-				chain, ro, &curStamp, filter,
+				chain, ro, &rs.curStamp, filter,
 			)
 			if err != nil {
 				return err
@@ -966,13 +963,16 @@ func notifyBlock(chain ChainSource, ro *rescanOptions,
 	}
 
 	if ro.ntfn.OnFilteredBlockConnected != nil {
-		ro.ntfn.OnFilteredBlockConnected(curStamp.Height, &curHeader,
-			relevantTxs)
+		ro.ntfn.OnFilteredBlockConnected(
+			rs.curStamp.Height, &rs.curHeader, relevantTxs,
+		)
 	}
 
 	if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
-		ro.ntfn.OnBlockConnected(&curStamp.Hash, // nolint:staticcheck
-			curStamp.Height, curHeader.Timestamp)
+		ro.ntfn.OnBlockConnected( // nolint:staticcheck
+			&rs.curStamp.Hash, rs.curStamp.Height,
+			rs.curHeader.Timestamp,
+		)
 	}
 
 	return nil
