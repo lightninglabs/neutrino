@@ -540,13 +540,10 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 			Type:      dbFilterType,
 		}
 
-		err = q.cs.FilterDB.PutFilter(filterData)
+		err = q.cs.FilterDB.PutFilters(filterData)
 		if err != nil {
 			log.Warnf("Couldn't write filter to filterDB: %v", err)
 		}
-
-		log.Tracef("Wrote filter for block %s, type %d",
-			&response.BlockHash, dbFilterType)
 	}
 
 	// We delete the entry for this filter from the headerIndex to indicate
