@@ -540,98 +540,6 @@ func (rs *rescanState) rescan() error {
 		blockRetryQueue    = newBlockRetryQueue()
 	)
 
-	// handleBlockConnected is a closure that handles a new block connected
-	// notification.
-	//
-	// TODO(wilmer): refactor this and handleBlockDisconnected into their
-	// own methods.
-	handleBlockConnected := func(ntfn *blockntfns.Connected) error {
-		// If we've somehow missed a header in the range, then we'll
-		// mark ourselves as not current so we can walk down the chain
-		// and notify the callers of blocks we may have missed.
-		header := ntfn.Header()
-		if header.PrevBlock != rs.curStamp.Hash {
-			return fmt.Errorf("out of order block %v: expected "+
-				"PrevBlock %v, got %v", header.BlockHash(),
-				rs.curStamp.Hash, header.PrevBlock)
-		}
-
-		// Ensure the filter header still exists before attempting to
-		// fetch the filter. This should usually succeed since
-		// notifications are delivered once filter headers are synced.
-		nextBlockHeight := uint32(rs.curStamp.Height + 1)
-		_, err := chain.GetFilterHeaderByHeight(nextBlockHeight)
-		if err != nil {
-			return fmt.Errorf("unable to get filter header for "+
-				"new block with height %v: %v", nextBlockHeight,
-				err)
-		}
-
-		newStamp := headerfs.BlockStamp{
-			Hash:      header.BlockHash(),
-			Height:    int32(nextBlockHeight),
-			Timestamp: header.Timestamp,
-		}
-
-		log.Tracef("Rescan got block %d (%s)", newStamp.Height,
-			newStamp.Hash)
-
-		// We're only scanning if the header is beyond the horizon of
-		// our start time.
-		if !rs.scanning {
-			rs.scanning = ro.startTime.Before(header.Timestamp)
-		}
-
-		// If we're not scanning or our watch list is empty, then we can
-		// just notify the block without fetching any filters/blocks.
-		if !rs.scanning || len(ro.watchList) == 0 {
-			if ro.ntfn.OnFilteredBlockConnected != nil {
-				ro.ntfn.OnFilteredBlockConnected(
-					newStamp.Height, &header, nil,
-				)
-			}
-			if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
-				ro.ntfn.OnBlockConnected( // nolint:staticcheck
-					&newStamp.Hash, newStamp.Height,
-					header.Timestamp,
-				)
-			}
-
-			rs.curHeader = header
-			rs.curStamp = newStamp
-
-			return nil
-		}
-
-		// Otherwise, we'll attempt to fetch the filter to retrieve the
-		// relevant transactions and notify them.
-		queryOptions := NumRetries(0)
-		blockFilter, err := chain.GetCFilter(
-			newStamp.Hash, wire.GCSFilterRegular, queryOptions,
-		)
-		if err != nil {
-			// If the query failed, then this either means that we
-			// don't have any peers to fetch this filter from, or
-			// the peer(s) that we're trying to fetch from are in
-			// the progress of a re-org.
-			log.Errorf("unable to get filter for hash=%v, "+
-				"retrying: %v", rs.curStamp.Hash, err)
-			return errRetryBlock
-		}
-
-		err = rs.notifyBlockWithFilter(&header, &newStamp, blockFilter)
-		if err != nil {
-			return err
-		}
-
-		// With the block successfully notified, we'll advance our state
-		// to it.
-		rs.curHeader = header
-		rs.curStamp = newStamp
-
-		return nil
-	}
-
 	// We'll need to keep track of whether we are current with the chain in
 	// order to properly recover from a re-org. We'll start by assuming that
 	// we are not current in order to catch up from the starting point to
@@ -710,7 +618,7 @@ rescanLoop:
 						continue rescanLoop
 					}
 
-					err := handleBlockConnected(ntfn)
+					err := rs.handleBlockConnected(ntfn)
 					switch err {
 					case nil:
 
@@ -767,7 +675,9 @@ rescanLoop:
 						continue rescanLoop
 					}
 
-					err := handleBlockConnected(retryBlock)
+					err := rs.handleBlockConnected(
+						retryBlock,
+					)
 					switch err {
 					// We successfully notified the block
 					// this time, so we can remove it from
@@ -934,6 +844,94 @@ func (rs *rescanState) notifyBlock() error {
 			rs.curHeader.Timestamp,
 		)
 	}
+
+	return nil
+}
+
+// handleBlockConnected handles a new block connected notification.
+func (rs *rescanState) handleBlockConnected(ntfn *blockntfns.Connected) error {
+	chain := rs.chain
+	ro := rs.opts
+
+	// If we've somehow missed a header in the range, then we'll mark
+	// ourselves as not current so we can walk down the chain and notify the
+	// callers of blocks we may have missed.
+	header := ntfn.Header()
+	if header.PrevBlock != rs.curStamp.Hash {
+		return fmt.Errorf("out of order block %v: expected PrevBlock "+
+			"%v, got %v", header.BlockHash(), rs.curStamp.Hash,
+			header.PrevBlock)
+	}
+
+	// Ensure the filter header still exists before attempting to fetch the
+	// filter. This should usually succeed since notifications are delivered
+	// once filter headers are synced.
+	nextBlockHeight := uint32(rs.curStamp.Height + 1)
+	_, err := chain.GetFilterHeaderByHeight(nextBlockHeight)
+	if err != nil {
+		return fmt.Errorf("unable to get filter header for new block "+
+			"with height %v: %v", nextBlockHeight, err)
+	}
+
+	newStamp := headerfs.BlockStamp{
+		Hash:      header.BlockHash(),
+		Height:    int32(nextBlockHeight),
+		Timestamp: header.Timestamp,
+	}
+
+	log.Tracef("Rescan got block %d (%s)", newStamp.Height, newStamp.Hash)
+
+	// We're only scanning if the header is beyond the horizon of
+	// our start time.
+	if !rs.scanning {
+		rs.scanning = ro.startTime.Before(header.Timestamp)
+	}
+
+	// If we're not scanning or our watch list is empty, then we can just
+	// notify the block without fetching any filters/blocks.
+	if !rs.scanning || len(ro.watchList) == 0 {
+		if ro.ntfn.OnFilteredBlockConnected != nil {
+			ro.ntfn.OnFilteredBlockConnected(
+				newStamp.Height, &header, nil,
+			)
+		}
+		if ro.ntfn.OnBlockConnected != nil { // nolint:staticcheck
+			ro.ntfn.OnBlockConnected( // nolint:staticcheck
+				&newStamp.Hash, newStamp.Height,
+				header.Timestamp,
+			)
+		}
+
+		rs.curHeader = header
+		rs.curStamp = newStamp
+
+		return nil
+	}
+
+	// Otherwise, we'll attempt to fetch the filter to retrieve the relevant
+	// transactions and notify them.
+	queryOptions := NumRetries(0)
+	blockFilter, err := chain.GetCFilter(
+		newStamp.Hash, wire.GCSFilterRegular, queryOptions,
+	)
+	if err != nil {
+		// If the query failed, then this either means that we don't
+		// have any peers to fetch this filter from, or the peer(s) that
+		// we're trying to fetch from are in the progress of a re-org.
+		log.Errorf("unable to get filter for hash=%v, retrying: %v",
+			rs.curStamp.Hash, err)
+
+		return errRetryBlock
+	}
+
+	err = rs.notifyBlockWithFilter(&header, &newStamp, blockFilter)
+	if err != nil {
+		return err
+	}
+
+	// With the block successfully notified, we'll advance our state to it.
+	rs.curHeader = header
+	rs.curStamp = newStamp
 
 	return nil
 }
