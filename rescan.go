@@ -632,40 +632,6 @@ func (rs *rescanState) rescan() error {
 		return nil
 	}
 
-	// handleBlockDisconnected is a helper closure that handles a new block
-	// disconnected notification.
-	handleBlockDisconnected := func(ntfn *blockntfns.Disconnected) error { // nolint:unparam
-		blockDisconnected := ntfn.Header()
-		log.Debugf("Rescan got disconnected block %d (%s)",
-			ntfn.Height(), blockDisconnected.BlockHash())
-
-		// Only deal with it if it's the current block we know about.
-		// Otherwise, it's in the future.
-		if blockDisconnected.BlockHash() != rs.curStamp.Hash {
-			return nil
-		}
-
-		// Run through notifications. This is all single-threaded. We
-		// include deprecated calls as they're still used, for now.
-		if ro.ntfn.OnFilteredBlockDisconnected != nil {
-			ro.ntfn.OnFilteredBlockDisconnected(
-				rs.curStamp.Height, &rs.curHeader,
-			)
-		}
-		if ro.ntfn.OnBlockDisconnected != nil { // nolint:staticcheck
-			ro.ntfn.OnBlockDisconnected( // nolint:staticcheck
-				&rs.curStamp.Hash, rs.curStamp.Height,
-				rs.curHeader.Timestamp,
-			)
-		}
-
-		rs.curHeader = ntfn.ChainTip()
-		rs.curStamp.Hash = rs.curHeader.BlockHash()
-		rs.curStamp.Height--
-
-		return nil
-	}
-
 	// We'll need to keep track of whether we are current with the chain in
 	// order to properly recover from a re-org. We'll start by assuming that
 	// we are not current in order to catch up from the starting point to
@@ -780,11 +746,7 @@ rescanLoop:
 					// as they are now considered stale.
 					blockRetryQueue.remove(ntfn.Header())
 
-					err := handleBlockDisconnected(ntfn)
-					if err != nil {
-						log.Errorf("Unable to process "+
-							"%v: %v", ntfn, err)
-					}
+					rs.handleBlockDisconnected(ntfn)
 
 				default:
 					log.Warnf("Received unhandled block "+
@@ -1054,6 +1016,39 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 	}
 
 	return relevantTxs, nil
+}
+
+// handleBlockDisconnected handles a new block disconnected notification.
+func (rs *rescanState) handleBlockDisconnected(ntfn *blockntfns.Disconnected) {
+	ro := rs.opts
+
+	blockDisconnected := ntfn.Header()
+	log.Debugf("Rescan got disconnected block %d (%s)", ntfn.Height(),
+		blockDisconnected.BlockHash())
+
+	// Only deal with it if it's the current block we know about. Otherwise,
+	// it's in the future.
+	if blockDisconnected.BlockHash() != rs.curStamp.Hash {
+		return
+	}
+
+	// Run through notifications. This is all single-threaded. We include
+	// deprecated calls as they're still used, for now.
+	if ro.ntfn.OnFilteredBlockDisconnected != nil {
+		ro.ntfn.OnFilteredBlockDisconnected(
+			rs.curStamp.Height, &rs.curHeader,
+		)
+	}
+	if ro.ntfn.OnBlockDisconnected != nil { // nolint:staticcheck
+		ro.ntfn.OnBlockDisconnected( // nolint:staticcheck
+			&rs.curStamp.Hash, rs.curStamp.Height,
+			rs.curHeader.Timestamp,
+		)
+	}
+
+	rs.curHeader = ntfn.ChainTip()
+	rs.curStamp.Hash = rs.curHeader.BlockHash()
+	rs.curStamp.Height--
 }
 
 // notifyBlockWithFilter calls appropriate listeners based on the block filter.
