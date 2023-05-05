@@ -583,6 +583,7 @@ func (s *ChainService) putFilterToCache(blockHash *chainhash.Hash,
 // cfiltersQuery is a struct that holds all the information necessary to
 // perform batch GetCFilters request, and handle the responses.
 type cfiltersQuery struct {
+	cs            *ChainService
 	filterType    wire.FilterType
 	startHeight   int64
 	stopHeight    int64
@@ -590,22 +591,147 @@ type cfiltersQuery struct {
 	filterHeaders []chainhash.Hash
 	headerIndex   map[chainhash.Hash]int
 	targetHash    chainhash.Hash
-	filterChan    chan *gcs.Filter
-	options       []QueryOption
+	targetFilter  *gcs.Filter
 }
 
-// queryMsg returns the wire message to perform this query.
-func (q *cfiltersQuery) queryMsg() wire.Message {
-	return wire.NewMsgGetCFilters(
+// request couples a query message with the handler to be used for the response
+// in a query.Request struct.
+func (q *cfiltersQuery) request() *query.Request {
+	msg := wire.NewMsgGetCFilters(
 		q.filterType, uint32(q.startHeight), q.stopHash,
 	)
+
+	return &query.Request{
+		Req:        msg,
+		HandleResp: q.handleResponse,
+	}
+}
+
+// handleResponse validates that the cfilter response we get from a peer is
+// sane given the getcfilter query that we made.
+func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
+	_ string) query.Progress {
+
+	// The request must have been a "getcfilters" msg.
+	request, ok := req.(*wire.MsgGetCFilters)
+	if !ok {
+		return noProgress
+	}
+
+	// We're only interested in "cfilter" messages.
+	response, ok := resp.(*wire.MsgCFilter)
+	if !ok {
+		return noProgress
+	}
+
+	// If the request filter type doesn't match the type we were expecting,
+	// ignore this message.
+	if q.filterType != request.FilterType {
+		return noProgress
+	}
+
+	// If the response filter type doesn't match what we were expecting,
+	// ignore this message.
+	if q.filterType != response.FilterType {
+		return noProgress
+	}
+
+	// If this filter is for a block not in our index, we can ignore it, as
+	// we either already got it, or it is out of our queried range.
+	i, ok := q.headerIndex[response.BlockHash]
+	if !ok {
+		return noProgress
+	}
+
+	filter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, response.Data,
+	)
+	if err != nil {
+		// Malformed filter data. We can ignore this message.
+		return noProgress
+	}
+
+	// Now that we have a proper filter, ensure that re-calculating the
+	// filter header hash for the header _after_ the filter in the chain
+	// checks out. If not, we can ignore this response.
+	var (
+		curHeader  = q.filterHeaders[i]
+		prevHeader = q.filterHeaders[i-1]
+	)
+	filterHeader, err := builder.MakeHeaderForFilter(filter, prevHeader)
+	if err != nil {
+		return noProgress
+	}
+
+	if filterHeader != curHeader {
+		return noProgress
+	}
+
+	// At this point the filter matches what we know about it, and we
+	// declare it sane. If this is the filter requested initially, then
+	// store it for later.
+	if response.BlockHash == q.targetHash {
+		q.targetFilter = filter
+	}
+
+	// Put the filter in the cache and persistToDisk if the caller requested
+	// it.
+	// TODO(halseth): for an LRU we could take care to insert the next
+	//  height filter last.
+	dbFilterType := filterdb.RegularFilter
+	evict, err := q.cs.putFilterToCache(
+		&response.BlockHash, dbFilterType, filter,
+	)
+	if err != nil {
+		log.Warnf("Couldn't write filter to cache: %v", err)
+	}
+
+	// TODO(halseth): dynamically increase/decrease the batch size to match
+	//  our cache capacity.
+	numFilters := q.stopHeight - q.startHeight + 1
+	if evict && q.cs.FilterCache.Len() < int(numFilters) {
+		log.Debugf("Items evicted from the cache with less than %d "+
+			"elements. Consider increasing the cache size...",
+			numFilters)
+	}
+
+	if q.cs.persistToDisk {
+		err = q.cs.FilterDB.PutFilter(
+			&response.BlockHash, filter, dbFilterType,
+		)
+		if err != nil {
+			log.Warnf("Couldn't write filter to filterDB: %v", err)
+		}
+
+		log.Tracef("Wrote filter for block %s, type %d",
+			&response.BlockHash, dbFilterType)
+	}
+
+	// We delete the entry for this filter from the headerIndex to indicate
+	// that we have received it.
+	delete(q.headerIndex, response.BlockHash)
+
+	// If there are still entries left in the headerIndex then the query
+	// has made progress but has not yet completed.
+	if len(q.headerIndex) != 0 {
+		return query.Progress{
+			Finished:   false,
+			Progressed: true,
+		}
+	}
+
+	// The headerIndex is empty and so this query is complete.
+	return query.Progress{
+		Finished:   true,
+		Progressed: true,
+	}
 }
 
 // prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
 // CFilter fo the given block hash.
 func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
-	filterType wire.FilterType, options ...QueryOption) (
-	*cfiltersQuery, error) {
+	filterType wire.FilterType, batchType optimisticBatchType,
+	maxBatchSize int64) (*cfiltersQuery, error) {
 
 	_, height, err := s.BlockHeaders.FetchHeader(&blockHash)
 	if err != nil {
@@ -619,23 +745,20 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	}
 	bestHeight := int64(bestBlock.Height)
 
-	qo := defaultQueryOptions()
-	qo.applyQueryOptions(options...)
-
 	// If the query specifies an optimistic batch we will attempt to fetch
 	// the maximum number of filters, which is defaulted to
-	// wire.MaxGetCFiltersReqRange, in anticipation of calls for the following
-	// or preceding filters.
+	// wire.MaxGetCFiltersReqRange, in anticipation of calls for the
+	// following or preceding filters.
 	var startHeight, stopHeight int64
 	batchSize := int64(wire.MaxGetCFiltersReqRange)
 
-	// If the query specifies a maximum batch size, we will limit the number of
-	// requested filters accordingly.
-	if qo.maxBatchSize > 0 && qo.maxBatchSize < wire.MaxGetCFiltersReqRange {
-		batchSize = qo.maxBatchSize
+	// If the query specifies a maximum batch size, we will limit the number
+	// of requested filters accordingly.
+	if maxBatchSize > 0 && maxBatchSize < wire.MaxGetCFiltersReqRange {
+		batchSize = maxBatchSize
 	}
 
-	switch qo.optimisticBatch {
+	switch batchType {
 	// No batching, the start and stop height will be the same.
 	case noBatch:
 		startHeight = int64(height)
@@ -646,18 +769,13 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 		startHeight = int64(height)
 		stopHeight = startHeight + batchSize - 1
 
-		// We need a longer timeout, since we are going to receive more
-		// than a single response.
-		options = append(options, Timeout(QueryBatchTimeout))
-
 	// Reverse batch, fetch as many of the preceding filters as possible.
 	case reverseBatch:
 		stopHeight = int64(height)
 		startHeight = stopHeight - batchSize + 1
 
-		// We need a longer timeout, since we are going to receive more
-		// than a single response.
-		options = append(options, Timeout(QueryBatchTimeout))
+	default:
+		return nil, fmt.Errorf("unknown batch type: %v", batchType)
 	}
 
 	// Block 1 is the earliest one we can fetch.
@@ -722,12 +840,8 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 		headerIndex[block.BlockHash()] = i
 	}
 
-	// We'll immediately respond to the caller with the requested filter
-	// when it is received, so we make a channel to notify on when it's
-	// ready.
-	filterChan := make(chan *gcs.Filter, 1)
-
 	return &cfiltersQuery{
+		cs:            s,
 		filterType:    filterType,
 		startHeight:   startHeight,
 		stopHeight:    stopHeight,
@@ -735,117 +849,14 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 		filterHeaders: filterHeaders,
 		headerIndex:   headerIndex,
 		targetHash:    blockHash,
-		filterChan:    filterChan,
-		options:       options,
 	}, nil
 }
 
-// handleCFiltersRespons is called every time we receive a response for the
-// GetCFilters request.
-func (s *ChainService) handleCFiltersResponse(q *cfiltersQuery,
-	resp wire.Message, quit chan<- struct{}) {
-
-	// We're only interested in "cfilter" messages.
-	response, ok := resp.(*wire.MsgCFilter)
-	if !ok {
-		return
-	}
-
-	// If the response doesn't match our request, ignore this message.
-	if q.filterType != response.FilterType {
-		return
-	}
-
-	// If this filter is for a block not in our index, we can ignore it, as
-	// we either already got it, or it is out of our queried range.
-	i, ok := q.headerIndex[response.BlockHash]
-	if !ok {
-		return
-	}
-
-	gotFilter, err := gcs.FromNBytes(
-		builder.DefaultP, builder.DefaultM, response.Data,
-	)
-	if err != nil {
-		// Malformed filter data. We can ignore this message.
-		return
-	}
-
-	// Now that we have a proper filter, ensure that re-calculating the
-	// filter header hash for the header _after_ the filter in the chain
-	// checks out. If not, we can ignore this response.
-	curHeader := q.filterHeaders[i]
-	prevHeader := q.filterHeaders[i-1]
-	gotHeader, err := builder.MakeHeaderForFilter(
-		gotFilter, prevHeader,
-	)
-	if err != nil {
-		return
-	}
-
-	if gotHeader != curHeader {
-		return
-	}
-
-	// At this point, the filter matches what we know about it and we
-	// declare it sane. If this is the filter requested initially, send it
-	// to the caller immediately.
-	if response.BlockHash == q.targetHash {
-		q.filterChan <- gotFilter
-	}
-
-	// Put the filter in the cache and persistToDisk if the caller
-	// requested it.
-	// TODO(halseth): for an LRU we could take care to insert the next
-	// height filter last.
-	dbFilterType := filterdb.RegularFilter
-	evict, err := s.putFilterToCache(
-		&response.BlockHash, dbFilterType, gotFilter,
-	)
-	if err != nil {
-		log.Warnf("Couldn't write filter to cache: %v", err)
-	}
-
-	// TODO(halseth): dynamically increase/decrease the batch size to match
-	// our cache capacity.
-	numFilters := q.stopHeight - q.startHeight + 1
-	if evict && s.FilterCache.Len() < int(numFilters) {
-		log.Debugf("Items evicted from the cache with less "+
-			"than %d elements. Consider increasing the "+
-			"cache size...", numFilters)
-	}
-
-	qo := defaultQueryOptions()
-	qo.applyQueryOptions(q.options...)
-	if s.persistToDisk {
-		err = s.FilterDB.PutFilter(
-			&response.BlockHash, gotFilter, dbFilterType,
-		)
-		if err != nil {
-			log.Warnf("Couldn't write filter to filterDB: "+
-				"%v", err)
-		}
-
-		log.Tracef("Wrote filter for block %s, type %d",
-			&response.BlockHash, dbFilterType)
-	}
-
-	// Finally, we can delete it from the headerIndex.
-	delete(q.headerIndex, response.BlockHash)
-
-	// If the headerIndex is empty, we got everything we wanted, and can
-	// exit.
-	if len(q.headerIndex) == 0 {
-		close(quit)
-	}
-}
-
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
-// cfilter from the network and writes it to the database. If extended is true,
-// an extended filter will be queried for. Otherwise, we'll fetch the regular
-// filter.
+// cfilter from the network and writes it to the database.
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
-	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter, error) {
+	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter,
+	error) {
 
 	// The only supported filter atm is the regular filter, so we'll reject
 	// all other filters.
@@ -879,27 +890,28 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	// We acquire the mutex ensuring we don't have several redundant
 	// CFilter queries running in parallel.
 	s.mtxCFilter.Lock()
+	defer s.mtxCFilter.Unlock()
 
 	// Since another request might have added the filter to the cache while
 	// we were waiting for the mutex, we do a final lookup before starting
 	// our own query.
 	filter, err = s.getFilterFromCache(&blockHash, dbFilterType)
 	if err == nil && filter != nil {
-		s.mtxCFilter.Unlock()
 		return filter, nil
 	}
 	if err != nil && err != cache.ErrElementNotFound {
-		s.mtxCFilter.Unlock()
 		return nil, err
 	}
+
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
 
 	// We didn't get the filter from the DB, so we'll try to get it from
 	// the network.
 	filterQuery, err := s.prepareCFiltersQuery(
-		blockHash, filterType, options...,
+		blockHash, filterType, qo.optimisticBatch, qo.maxBatchSize,
 	)
 	if err != nil {
-		s.mtxCFilter.Unlock()
 		return nil, err
 	}
 
@@ -909,66 +921,42 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		filterQuery.startHeight, filterQuery.stopHeight,
 		filterQuery.stopHash)
 
-	go func() {
-		defer s.mtxCFilter.Unlock()
-		defer close(filterQuery.filterChan)
-
-		s.queryPeers(
-			// Send a wire.MsgGetCFilters.
-			filterQuery.queryMsg(),
-
-			// Check responses and if we get one that matches, end
-			// the query early.
-			func(_ *ServerPeer, resp wire.Message,
-				quit chan<- struct{}) {
-
-				s.handleCFiltersResponse(
-					filterQuery, resp, quit,
-				)
-			},
-			filterQuery.options...,
-		)
-
-		// If there are elements left to receive, the query failed.
-		if len(filterQuery.headerIndex) > 0 {
-			numFilters := filterQuery.stopHeight -
-				filterQuery.startHeight + 1
-
-			numRecv := numFilters -
-				int64(len(filterQuery.headerIndex))
-
-			log.Errorf("Query failed with %d out of %d filters "+
-				"received", numRecv, numFilters)
-			return
-		}
-	}()
-
-	var ok bool
-	var resultFilter *gcs.Filter
-
-	// We will wait for the query to finish before we return the requested
-	// filter to the caller.
-	for {
-		select {
-		case filter, ok = <-filterQuery.filterChan:
-			if !ok {
-				// Query has finished, if we have a result we'll
-				// return it.
-				if resultFilter == nil {
-					return nil, ErrFilterFetchFailed
-				}
-
-				return resultFilter, nil
-			}
-
-			// We'll store the filter so we can return it later to
-			// the caller.
-			resultFilter = filter
-
-		case <-s.quit:
-			return nil, ErrShuttingDown
-		}
+	opts := []query.QueryOption{
+		query.Cancel(s.quit),
+		query.Encoding(qo.encoding),
+		query.NumRetries(qo.numRetries),
 	}
+
+	errChan := s.workManager.Query(
+		[]*query.Request{filterQuery.request()}, opts...,
+	)
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return nil, err
+		}
+
+	case <-s.quit:
+		return nil, ErrShuttingDown
+	}
+
+	// If there are elements left to receive, the query failed.
+	if len(filterQuery.headerIndex) > 0 {
+		numFilters := filterQuery.stopHeight -
+			filterQuery.startHeight + 1
+
+		numRecv := numFilters - int64(len(filterQuery.headerIndex))
+		log.Errorf("Query failed with %d out of %d filters received",
+			numRecv, numFilters)
+	}
+
+	// Query has finished, if we have a result we'll return it.
+	if filterQuery.targetFilter == nil {
+		return nil, ErrFilterFetchFailed
+	}
+
+	return filterQuery.targetFilter, nil
 }
 
 // GetBlock gets a block by requesting it from the network, one peer at a
