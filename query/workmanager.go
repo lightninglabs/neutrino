@@ -96,10 +96,11 @@ type Config struct {
 	Ranking PeerRanking
 }
 
-// WorkManager is the main access point for outside callers, and satisfies the
-// QueryAccess API. It receives queries to pass to peers, and schedules them
-// among available workers, orchestrating where to send them.
-type WorkManager struct {
+// peerWorkManager is the main access point for outside callers, and satisfies
+// the QueryAccess API. It receives queries to pass to peers, and schedules them
+// among available workers, orchestrating where to send them. It implements the
+// WorkManager interface.
+type peerWorkManager struct {
 	cfg *Config
 
 	// newBatches is a channel where new batches of queries will be sent to
@@ -114,12 +115,13 @@ type WorkManager struct {
 	wg   sync.WaitGroup
 }
 
-// Compile time check to ensure WorkManager satisfies the Dispatcher interface.
-var _ Dispatcher = (*WorkManager)(nil)
+// Compile time check to ensure peerWorkManager satisfies the WorkManager interface.
+var _ WorkManager = (*peerWorkManager)(nil)
 
-// New returns a new WorkManager with the regular worker implementation.
-func New(cfg *Config) *WorkManager {
-	return &WorkManager{
+// NewWorkManager returns a new WorkManager with the regular worker
+// implementation.
+func NewWorkManager(cfg *Config) WorkManager {
+	return &peerWorkManager{
 		cfg:        cfg,
 		newBatches: make(chan *batch),
 		jobResults: make(chan *jobResult),
@@ -127,16 +129,20 @@ func New(cfg *Config) *WorkManager {
 	}
 }
 
-// Start starts the WorkManager.
-func (w *WorkManager) Start() error {
+// Start starts the peerWorkManager.
+//
+// NOTE: this is part of the WorkManager interface.
+func (w *peerWorkManager) Start() error {
 	w.wg.Add(1)
 	go w.workDispatcher()
 
 	return nil
 }
 
-// Stop stops the WorkManager and all underlying goroutines.
-func (w *WorkManager) Stop() error {
+// Stop stops the peerWorkManager and all underlying goroutines.
+//
+// NOTE: this is part of the WorkManager interface.
+func (w *peerWorkManager) Stop() error {
 	close(w.quit)
 	w.wg.Wait()
 
@@ -149,7 +155,7 @@ func (w *WorkManager) Stop() error {
 // will be attempted completed first.
 //
 // NOTE: MUST be run as a goroutine.
-func (w *WorkManager) workDispatcher() {
+func (w *peerWorkManager) workDispatcher() {
 	defer w.wg.Done()
 
 	// Get a peer subscription. We do it in this goroutine rather than
@@ -457,8 +463,8 @@ Loop:
 
 // Query distributes the slice of requests to the set of connected peers.
 //
-// NOTO: Part of the Dispatcher interface.
-func (w *WorkManager) Query(requests []*Request,
+// NOTE: this is part of the WorkManager interface.
+func (w *peerWorkManager) Query(requests []*Request,
 	options ...QueryOption) chan error {
 
 	qo := defaultQueryOptions()

@@ -141,6 +141,19 @@ type Request struct {
 	HandleResp func(req, resp wire.Message, peer string) Progress
 }
 
+// WorkManager defines an API for a manager that dispatches queries to bitcoin
+// peers that must be started and stopped in order to perform these queries.
+type WorkManager interface {
+	Dispatcher
+
+	// Start sets up any resources that the WorkManager requires. It must
+	// be called before any of the Dispatcher calls can be made.
+	Start() error
+
+	// Stop cleans up the resources held by the WorkManager.
+	Stop() error
+}
+
 // Dispatcher is an interface defining the API for dispatching queries to
 // bitcoin peers.
 type Dispatcher interface {

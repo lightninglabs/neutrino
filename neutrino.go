@@ -665,7 +665,7 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
-	workManager          *query.WorkManager
+	workManager          query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -741,7 +741,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
-	s.workManager = query.New(&query.Config{
+	s.workManager = query.NewWorkManager(&query.Config{
 		ConnectedPeers: s.ConnectedPeers,
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
