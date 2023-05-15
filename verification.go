@@ -141,7 +141,7 @@ func VerifyBasicBlockFilter(filter *gcs.Filter, block *btcutil.Block) (int,
 			}
 
 			if !match {
-				log.Errorf("filter for block %v might be "+
+				log.Debugf("filter for block %v might be "+
 					"invalid, input %d of tx %v spends "+
 					"pk script %x which wasn't matched by "+
 					"filter. The input likely spends a "+
