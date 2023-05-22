@@ -14,6 +14,10 @@ const (
 	// defaultQueryEncoding specifies the default encoding (witness or not)
 	// for `getdata` and other similar messages.
 	defaultQueryEncoding = wire.WitnessEncoding
+
+	// defaultNumRetries is the default number of times that a query job
+	// will be retried.
+	defaultNumRetries = 2
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -30,6 +34,15 @@ type queryOptions struct {
 	// cancelChan is an optional channel that can be closed to indicate
 	// that the query should be canceled.
 	cancelChan chan struct{}
+
+	// numRetries is the number of times that a query should be retried
+	// before failing.
+	numRetries uint8
+
+	// noRetryMax is set if no cap should be applied to the number of times
+	// that a query can be retried. If this is set then numRetries has no
+	// effect.
+	noRetryMax bool
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -43,7 +56,7 @@ func defaultQueryOptions() *queryOptions {
 	return &queryOptions{
 		timeout:    defaultQueryTimeout,
 		encoding:   defaultQueryEncoding,
-		cancelChan: nil,
+		numRetries: defaultNumRetries,
 	}
 }
 
@@ -51,6 +64,22 @@ func defaultQueryOptions() *queryOptions {
 func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	for _, option := range options {
 		option(qo)
+	}
+}
+
+// NumRetries is a query option that specifies the number of times a query
+// should be retried.
+func NumRetries(num uint8) QueryOption {
+	return func(qo *queryOptions) {
+		qo.numRetries = num
+	}
+}
+
+// NoRetryMax is a query option that can be used to disable the cap on the
+// number of retries. If this is set then NumRetries has no effect.
+func NoRetryMax() QueryOption {
+	return func(qo *queryOptions) {
+		qo.noRetryMax = true
 	}
 }
 
