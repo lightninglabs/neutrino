@@ -74,6 +74,10 @@ type ChainSource interface {
 	//
 	// TODO(wilmer): extend with best hash as well.
 	Subscribe(bestHeight uint32) (*blockntfns.Subscription, error)
+
+	// IsCurrent returns true if the backend chain thinks that its view of
+	// the network is current.
+	IsCurrent() bool
 }
 
 // ScanProgressHandler is used in rescanOptions to update the caller with the
