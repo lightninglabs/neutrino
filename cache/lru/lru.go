@@ -206,7 +206,7 @@ func (c *Cache[K, V]) LoadAndDelete(key K) (V, bool) {
 	return el.Value.value, true
 }
 
-// Range iterates the cache.
+// Range iterates the cache without any ordering.
 func (c *Cache[K, V]) Range(visitor func(K, V) bool) {
 	// valueVisitor is a closure to help unwrap the value from the cache.
 	valueVisitor := func(key K, value *Element[entry[K, V]]) bool {
@@ -214,4 +214,30 @@ func (c *Cache[K, V]) Range(visitor func(K, V) bool) {
 	}
 
 	c.cache.Range(valueVisitor)
+}
+
+// RangeFILO iterates the items with FILO order, behaving like a stack.
+func (c *Cache[K, V]) RangeFILO(visitor func(K, V) bool) {
+	for e := c.ll.Front(); e != nil; e = e.Next() {
+		next := visitor(e.Value.key, e.Value.value)
+
+		// Stops the iteration if the visitor returns false to mimick
+		// the same behavior of `Range`.
+		if !next {
+			return
+		}
+	}
+}
+
+// RangeFIFO iterates the items with FIFO order, behaving like a queue.
+func (c *Cache[K, V]) RangeFIFO(visitor func(K, V) bool) {
+	for e := c.ll.Back(); e != nil; e = e.Prev() {
+		next := visitor(e.Value.key, e.Value.value)
+
+		// Stops the iteration if the visitor returns false to mimick
+		// the same behavior of `Range`.
+		if !next {
+			return
+		}
+	}
 }
