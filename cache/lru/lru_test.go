@@ -387,3 +387,61 @@ func TestRangeAbort(t *testing.T) {
 	// Check the number of items visited.
 	require.Equal(t, numItems/2, visited)
 }
+
+// TestRangeFILO checks that the `RangeFILO` method works as expected.
+func TestRangeFILO(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](100)
+
+	// Create test items.
+	const numItems = 10
+	for i := 0; i < numItems; i++ {
+		_, err := c.Put(i, &sizeable{value: i, size: 1})
+		require.NoError(t, err)
+	}
+
+	// Create a visitor that checks the items are visited in reverse order.
+	visited := 0
+	testVisitor := func(key int, value *sizeable) bool {
+		visited++
+
+		require.Equal(t, numItems-visited, key)
+		return true
+	}
+
+	// Call the method.
+	c.RangeFILO(testVisitor)
+
+	// Check the number of items visited.
+	require.Equal(t, numItems, visited)
+}
+
+// TestRangeFIFO checks that the `RangeFIFO` method works as expected.
+func TestRangeFIFO(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](100)
+
+	// Create test items.
+	const numItems = 10
+	for i := 0; i < numItems; i++ {
+		_, err := c.Put(i, &sizeable{value: i, size: 1})
+		require.NoError(t, err)
+	}
+
+	// Create a visitor that checks the items are visited in order.
+	visited := 0
+	testVisitor := func(key int, value *sizeable) bool {
+		require.Equal(t, visited, key)
+		visited++
+
+		return true
+	}
+
+	// Call the method.
+	c.RangeFIFO(testVisitor)
+
+	// Check the number of items visited.
+	require.Equal(t, numItems, visited)
+}
