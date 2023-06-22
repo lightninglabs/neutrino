@@ -52,6 +52,12 @@ type Config struct {
 	// RebroadcastInterval is the interval that we'll continually try to
 	// re-broadcast transactions in-between new block arrival.
 	RebroadcastInterval time.Duration
+
+	// MapCustomBroadcastError allows the Rebroadcaster to map broadcast
+	// errors from other backends to the neutrino internal BroadcastError.
+	// This allows the Rebroadcaster to behave consistently over different
+	// backends.
+	MapCustomBroadcastError func(error) error
 }
 
 // Broadcaster is a subsystem responsible for reliably broadcasting transactions
@@ -171,10 +177,19 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 		// A new broadcast request was submitted by an external caller.
 		case req := <-b.broadcastReqs:
 			err := b.cfg.Broadcast(req.tx)
-			if err != nil && !IsBroadcastError(err, Mempool) {
-				log.Errorf("Broadcast attempt failed: %v", err)
-				req.errChan <- err
-				continue
+			if err != nil {
+				// We apply the custom err mapping function if
+				// it was supplied which allows to map other
+				// backend errors to the neutrino BroadcastError.
+				if b.cfg.MapCustomBroadcastError != nil {
+					err = b.cfg.MapCustomBroadcastError(err)
+				}
+				if !IsBroadcastError(err, Mempool) {
+					log.Errorf("Broadcast attempt "+
+						"failed: %v", err)
+					req.errChan <- err
+					continue
+				}
 			}
 
 			transactions[req.tx.TxHash()] = req.tx
@@ -231,6 +246,12 @@ func (b *Broadcaster) rebroadcast(txs map[chainhash.Hash]*wire.MsgTx,
 		}
 
 		err := b.cfg.Broadcast(tx)
+		// We apply the custom err mapping function if it was supplied
+		// which allows to map other backend errors to the neutrino
+		// BroadcastError.
+		if err != nil && b.cfg.MapCustomBroadcastError != nil {
+			err = b.cfg.MapCustomBroadcastError(err)
+		}
 		switch {
 		// If the transaction has already confirmed on-chain, we can
 		// stop broadcasting it further.
