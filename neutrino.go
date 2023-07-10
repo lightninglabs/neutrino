@@ -643,11 +643,6 @@ type ChainService struct { // nolint:maligned
 	FilterCache *lru.Cache[FilterCacheKey, *CacheableFilter]
 	BlockCache  *lru.Cache[wire.InvVect, *CacheableBlock]
 
-	// queryPeers will be called to send messages to one or more peers,
-	// expecting a response.
-	queryPeers func(wire.Message, func(*ServerPeer, wire.Message,
-		chan<- struct{}), ...QueryOption)
-
 	chainParams          chaincfg.Params
 	addrManager          *addrmgr.AddrManager
 	connManager          *connmgr.ConnManager
@@ -665,7 +660,7 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
-	workManager          *query.WorkManager
+	workManager          query.WorkManager
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -741,22 +736,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 	}
-	s.workManager = query.New(&query.Config{
+	s.workManager = query.NewWorkManager(&query.Config{
 		ConnectedPeers: s.ConnectedPeers,
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
 	})
 
-	// We set the queryPeers method to point to queryChainServicePeers,
-	// passing a reference to the newly created ChainService.
-	s.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
-
-		queryChainServicePeers(&s, msg, f, qo...)
-	}
-
 	var err error
-
 	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
 	if err != nil {
 		return nil, err

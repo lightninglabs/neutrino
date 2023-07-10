@@ -22,6 +22,8 @@ import (
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/query"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -286,57 +288,60 @@ func TestBlockCache(t *testing.T) {
 		chainParams: chaincfg.Params{
 			PowLimit: maxPowLimit,
 		},
-		timeSource: blockchain.NewMedianTime(),
+		timeSource:  blockchain.NewMedianTime(),
+		workManager: &mockDispatcher{},
 	}
 
 	// We'll set up the queryPeers method to make sure we are only querying
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.queryPeers = func(msg wire.Message, f func(*ServerPeer,
-		wire.Message, chan<- struct{}), qo ...QueryOption) {
+	cs.workManager.(*mockDispatcher).query = func(reqs []*query.Request,
+		opts ...query.QueryOption) chan error {
 
-		getData, ok := msg.(*wire.MsgGetData)
-		if !ok {
-			t.Fatalf("unexpected type: %T", msg)
-		}
+		errChan := make(chan error, 1)
+		defer close(errChan)
 
-		if len(getData.InvList) != 1 {
-			t.Fatalf("expected 1 element in inv list, found %v",
-				len(getData.InvList))
-		}
+		require.Len(t, reqs, 1)
+		require.IsType(t, &wire.MsgGetData{}, reqs[0].Req)
+
+		getData := reqs[0].Req.(*wire.MsgGetData)
+		require.Len(t, getData.InvList, 1)
 
 		inv := getData.InvList[0]
-		if inv.Type != wire.InvTypeWitnessBlock {
-			t.Fatalf("unexpected inv type: %v", inv.Type)
-		}
+		require.Equal(t, wire.InvTypeWitnessBlock, inv.Type)
 
 		// Serve the block that matches the requested block header.
 		for _, b := range blocks {
-			if *b.Hash() == inv.Hash {
-				// Execute the callback with the found block,
-				// and wait for the quit channel to be closed.
-				quit := make(chan struct{})
-				f(nil, b.MsgBlock(), quit)
-
-				select {
-				case <-quit:
-				case <-time.After(1 * time.Second):
-					t.Fatalf("channel not closed")
-				}
-
-				// Notify the test about the query.
-				select {
-				case queries <- inv.Hash:
-				case <-time.After(1 * time.Second):
-					t.Fatalf("query was not handled")
-				}
-
-				return
+			if *b.Hash() != inv.Hash {
+				continue
 			}
+
+			header, _, err := headers.FetchHeader(b.Hash())
+			require.NoError(t, err)
+
+			resp := &wire.MsgBlock{
+				Header:       *header,
+				Transactions: b.MsgBlock().Transactions,
+			}
+
+			progress := reqs[0].HandleResp(getData, resp, "")
+			require.True(t, progress.Progressed)
+			require.True(t, progress.Finished)
+
+			// Notify the test about the query.
+			select {
+			case queries <- inv.Hash:
+			case <-time.After(1 * time.Second):
+				t.Fatalf("query was not handled")
+			}
+
+			return errChan
 		}
 
 		t.Fatalf("queried for unknown block: %v", inv.Hash)
+
+		return errChan
 	}
 
 	// fetchAndAssertPeersQueried calls GetBlock and makes sure the block

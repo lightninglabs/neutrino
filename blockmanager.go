@@ -1048,7 +1048,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
 	errChan := b.cfg.QueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit),
+		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
