@@ -2380,8 +2380,17 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		Add(maxTimeOffset)
 
 	// We'll attempt to write the entire batch of validated headers
-	// atomically in order to improve peformance.
+	// atomically in order to improve performance.
 	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
+
+	// Explicitly check that each header in msg.Headers builds off of the
+	// previous one. This is a quick sanity check to avoid doing the more
+	// expensive checks below if we know the headers are invalid.
+	if !areHeadersConnected(msg.Headers) {
+		log.Warnf("Headers received from peer don't connect")
+		hmsg.peer.Disconnect()
+		return
+	}
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
@@ -2704,6 +2713,34 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	b.headerTipHash = *finalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
+}
+
+// areHeadersConnected returns true if the passed block headers are connected to
+// each other correctly.
+func areHeadersConnected(headers []*wire.BlockHeader) bool {
+	var (
+		lastHeader chainhash.Hash
+		emptyHash  chainhash.Hash
+	)
+	for _, blockHeader := range headers {
+		blockHash := blockHeader.BlockHash()
+
+		// If we haven't yet set lastHeader, set it now.
+		if lastHeader == emptyHash {
+			lastHeader = blockHash
+
+			continue
+		}
+
+		// Ensure that blockHeader.PrevBlock matches lastHeader.
+		if blockHeader.PrevBlock != lastHeader {
+			return false
+		}
+
+		lastHeader = blockHash
+	}
+
+	return true
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
