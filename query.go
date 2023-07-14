@@ -885,8 +885,20 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 			return noProgress
 		}
 
-		// TODO(roasbeef): modify CheckBlockSanity to also check witness
-		// commitment
+		if err := blockchain.ValidateWitnessCommitment(
+			block,
+		); err != nil {
+			log.Warnf("Invalid block for %s received from %s: %v "+
+				"-- disconnecting peer", blockHash, peer, err)
+
+			err = s.BanPeer(peer, banman.InvalidBlock)
+			if err != nil {
+				log.Errorf("Unable to ban peer %v: %v", peer,
+					err)
+			}
+
+			return noProgress
+		}
 
 		// At this point, the block matches what we know about it, and
 		// we declare it sane. We can kill the query and pass the
