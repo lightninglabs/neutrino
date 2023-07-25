@@ -18,9 +18,13 @@ var (
 
 	// regBucket is the bucket that stores the regular filters.
 	regBucket = []byte("regular")
+
+	// ErrFilterNotFound is returned when a filter for a target block hash
+	// is unable to be located.
+	ErrFilterNotFound = fmt.Errorf("unable to find filter")
 )
 
-// FilterType is a enum-like type that represents the various filter types
+// FilterType is an enum-like type that represents the various filter types
 // currently defined.
 type FilterType uint8
 
@@ -30,21 +34,27 @@ const (
 	RegularFilter FilterType = iota
 )
 
-var (
-	// ErrFilterNotFound is returned when a filter for a target block hash is
-	// unable to be located.
-	ErrFilterNotFound = fmt.Errorf("unable to find filter")
-)
+// FilterData holds all the info about a filter required to store it.
+type FilterData struct {
+	// Filter is the actual filter to be stored.
+	Filter *gcs.Filter
+
+	// BlockHash is the block header hash of the block associated with the
+	// Filter.
+	BlockHash *chainhash.Hash
+
+	// Type is the filter type.
+	Type FilterType
+}
 
 // FilterDatabase is an interface which represents an object that is capable of
-// storing and retrieving filters according to their corresponding block hash and
-// also their filter type.
+// storing and retrieving filters according to their corresponding block hash
+// and also their filter type.
 //
 // TODO(roasbeef): similar interface for headerfs?
 type FilterDatabase interface {
-	// PutFilter stores a filter with the given hash and type to persistent
-	// storage.
-	PutFilter(*chainhash.Hash, *gcs.Filter, FilterType) error
+	// PutFilters stores a set of filters to persistent storage.
+	PutFilters(...*FilterData) error
 
 	// FetchFilter attempts to fetch a filter with the given hash and type
 	// from persistent storage. In the case that a filter matching the
@@ -52,7 +62,8 @@ type FilterDatabase interface {
 	// returned.
 	FetchFilter(*chainhash.Hash, FilterType) (*gcs.Filter, error)
 
-	// PurgeFilters purge all filters with a given type from persistent storage.
+	// PurgeFilters purge all filters with a given type from persistent
+	// storage.
 	PurgeFilters(FilterType) error
 }
 
@@ -117,10 +128,13 @@ func (f *FilterStore) PurgeFilters(fType FilterType) error {
 
 		switch fType {
 		case RegularFilter:
-			if err := filters.DeleteNestedBucket(regBucket); err != nil {
+			err := filters.DeleteNestedBucket(regBucket)
+			if err != nil {
 				return err
 			}
-			if _, err := filters.CreateBucket(regBucket); err != nil {
+
+			_, err = filters.CreateBucket(regBucket)
+			if err != nil {
 				return err
 			}
 		default:
@@ -149,35 +163,46 @@ func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	return bucket.Put(hash[:], bytes)
 }
 
-// PutFilter stores a filter with the given hash and type to persistent
-// storage.
+// PutFilters stores a set of filters to persistent storage.
 //
 // NOTE: This method is a part of the FilterDatabase interface.
-func (f *FilterStore) PutFilter(hash *chainhash.Hash,
-	filter *gcs.Filter, fType FilterType) error {
-
-	return walletdb.Update(f.db, func(tx walletdb.ReadWriteTx) error {
+func (f *FilterStore) PutFilters(filterList ...*FilterData) error {
+	var updateErr error
+	err := walletdb.Batch(f.db, func(tx walletdb.ReadWriteTx) error {
 		filters := tx.ReadWriteBucket(filterBucket)
+		regularFilterBkt := filters.NestedReadWriteBucket(regBucket)
 
-		var targetBucket walletdb.ReadWriteBucket
-		switch fType {
-		case RegularFilter:
-			targetBucket = filters.NestedReadWriteBucket(regBucket)
-		default:
-			return fmt.Errorf("unknown filter type: %v", fType)
+		for _, filterData := range filterList {
+			var targetBucket walletdb.ReadWriteBucket
+			switch filterData.Type {
+			case RegularFilter:
+				targetBucket = regularFilterBkt
+			default:
+				updateErr = fmt.Errorf("unknown filter "+
+					"type: %v", filterData.Type)
+
+				return nil
+			}
+
+			err := putFilter(
+				targetBucket, filterData.BlockHash,
+				filterData.Filter,
+			)
+			if err != nil {
+				return err
+			}
+
+			log.Tracef("Wrote filter for block %s, type %d",
+				&filterData.BlockHash, filterData.Type)
 		}
 
-		if filter == nil {
-			return targetBucket.Put(hash[:], nil)
-		}
-
-		bytes, err := filter.NBytes()
-		if err != nil {
-			return err
-		}
-
-		return targetBucket.Put(hash[:], bytes)
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	return updateErr
 }
 
 // FetchFilter attempts to fetch a filter with the given hash and type from
