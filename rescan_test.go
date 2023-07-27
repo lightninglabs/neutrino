@@ -272,6 +272,12 @@ func (c *mockChainSource) setFailGetFilter(b bool) {
 	c.failGetFilter = b
 }
 
+// IsCurrent returns true if the backend chain thinks that its view of
+// the network is current.
+func (c *mockChainSource) IsCurrent() bool {
+	return true
+}
+
 // GetCFilter returns the filter of the given type for the block with the given
 // hash.
 func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
