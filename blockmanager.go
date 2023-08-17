@@ -28,10 +28,6 @@ import (
 )
 
 const (
-	// maxTimeOffset is the maximum duration a block time is allowed to be
-	// ahead of the current time. This is currently 2 hours.
-	maxTimeOffset = 2 * time.Hour
-
 	// numMaxMemHeaders is the max number of headers to store in memory for
 	// a particular peer. By bounding this value, we're able to closely
 	// control our effective memory usage during initial sync and re-org
@@ -2374,14 +2370,18 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		return
 	}
 
-	// For checking to make sure blocks aren't too far in the future as of
-	// the time we receive the headers message.
-	maxTimestamp := b.cfg.TimeSource.AdjustedTime().
-		Add(maxTimeOffset)
-
 	// We'll attempt to write the entire batch of validated headers
-	// atomically in order to improve peformance.
+	// atomically in order to improve performance.
 	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
+
+	// Explicitly check that each header in msg.Headers builds off of the
+	// previous one. This is a quick sanity check to avoid doing the more
+	// expensive checks below if we know the headers are invalid.
+	if !areHeadersConnected(msg.Headers) {
+		log.Warnf("Headers received from peer don't connect")
+		hmsg.peer.Disconnect()
+		return
+	}
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
@@ -2411,8 +2411,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		prevNode := prevNodeEl
 		prevHash := prevNode.Header.BlockHash()
 		if prevHash.IsEqual(&blockHeader.PrevBlock) {
-			err := b.checkHeaderSanity(blockHeader, maxTimestamp,
-				false)
+			prevNodeHeight := prevNode.Height
+			prevNodeHeader := prevNode.Header
+			err := b.checkHeaderSanity(
+				blockHeader, false, prevNodeHeight,
+				&prevNodeHeader,
+			)
 			if err != nil {
 				log.Warnf("Header doesn't pass sanity check: "+
 					"%s -- disconnecting peer", err)
@@ -2425,10 +2429,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 			// This header checks out, so we'll add it to our write
 			// batch.
-			headerWriteBatch = append(headerWriteBatch, headerfs.BlockHeader{
-				BlockHeader: blockHeader,
-				Height:      uint32(node.Height),
-			})
+			headerWriteBatch = append(
+				headerWriteBatch, headerfs.BlockHeader{
+					BlockHeader: blockHeader,
+					Height:      uint32(node.Height),
+				},
+			)
 
 			hmsg.peer.UpdateLastBlockHeight(node.Height)
 
@@ -2520,8 +2526,27 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			})
 			totalWork := big.NewInt(0)
 			for j, reorgHeader := range msg.Headers[i:] {
-				err = b.checkHeaderSanity(reorgHeader,
-					maxTimestamp, true)
+				// We have to get the parent's height and
+				// header to be able to contextually validate
+				// this header.
+				prevNodeHeight := backHeight + uint32(j)
+
+				var prevNodeHeader *wire.BlockHeader
+				if i+j == 0 {
+					// Use backHead if we are using the
+					// first header in the Headers slice.
+					prevNodeHeader = backHead
+				} else {
+					// We can find the parent in the
+					// Headers slice by getting the header
+					// at index i+j-1.
+					prevNodeHeader = msg.Headers[i+j-1]
+				}
+
+				err = b.checkHeaderSanity(
+					reorgHeader, true,
+					int32(prevNodeHeight), prevNodeHeader,
+				)
 				if err != nil {
 					log.Warnf("Header doesn't pass sanity"+
 						" check: %s -- disconnecting "+
@@ -2706,180 +2731,70 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	b.newHeadersSignal.Broadcast()
 }
 
-// checkHeaderSanity checks the PoW, and timestamp of a block header.
-func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
-	maxTimestamp time.Time, reorgAttempt bool) error {
+// areHeadersConnected returns true if the passed block headers are connected to
+// each other correctly.
+func areHeadersConnected(headers []*wire.BlockHeader) bool {
+	var (
+		lastHeader chainhash.Hash
+		emptyHash  chainhash.Hash
+	)
+	for _, blockHeader := range headers {
+		blockHash := blockHeader.BlockHash()
 
-	diff, err := b.calcNextRequiredDifficulty(
-		blockHeader.Timestamp, reorgAttempt)
-	if err != nil {
-		return err
+		// If we haven't yet set lastHeader, set it now.
+		if lastHeader == emptyHash {
+			lastHeader = blockHash
+
+			continue
+		}
+
+		// Ensure that blockHeader.PrevBlock matches lastHeader.
+		if blockHeader.PrevBlock != lastHeader {
+			return false
+		}
+
+		lastHeader = blockHash
 	}
-	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
-		Header: *blockHeader,
-	})
-	err = blockchain.CheckProofOfWork(stubBlock,
-		blockchain.CompactToBig(diff))
-	if err != nil {
-		return err
-	}
-	// Ensure the block time is not too far in the future.
-	if blockHeader.Timestamp.After(maxTimestamp) {
-		return fmt.Errorf("block timestamp of %v is too far in the "+
-			"future", blockHeader.Timestamp)
-	}
-	return nil
+
+	return true
 }
 
-// calcNextRequiredDifficulty calculates the required difficulty for the block
-// after the passed previous block node based on the difficulty retarget rules.
-func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
-	reorgAttempt bool) (uint32, error) {
+// checkHeaderSanity performs contextual and context-less checks on the passed
+// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
+// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
+// checks.
+func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
+	reorgAttempt bool, prevNodeHeight int32,
+	prevNodeHeader *wire.BlockHeader) error {
 
+	// Create the lightHeaderCtx for the blockHeader's parent.
 	hList := b.headerList
 	if reorgAttempt {
 		hList = b.reorgList
 	}
 
-	lastNode := hList.Back()
+	parentHeaderCtx := newLightHeaderCtx(
+		prevNodeHeight, prevNodeHeader, b.cfg.BlockHeaders, hList,
+	)
 
-	// Genesis block.
-	if lastNode == nil {
-		return b.cfg.ChainParams.PowLimitBits, nil
-	}
+	// Create a lightChainCtx as well.
+	chainCtx := newLightChainCtx(
+		&b.cfg.ChainParams, b.blocksPerRetarget, b.minRetargetTimespan,
+		b.maxRetargetTimespan,
+	)
 
-	// Return the previous block's difficulty requirements if this block
-	// is not at a difficulty retarget interval.
-	if (lastNode.Height+1)%b.blocksPerRetarget != 0 {
-		// For networks that support it, allow special reduction of the
-		// required difficulty once too much time has elapsed without
-		// mining a block.
-		if b.cfg.ChainParams.ReduceMinDifficulty {
-			// Return minimum difficulty when more than the desired
-			// amount of time has elapsed without mining a block.
-			reductionTime := int64(
-				b.cfg.ChainParams.MinDiffReductionTime /
-					time.Second)
-			allowMinTime := lastNode.Header.Timestamp.Unix() +
-				reductionTime
-			if newBlockTime.Unix() > allowMinTime {
-				return b.cfg.ChainParams.PowLimitBits, nil
-			}
-
-			// The block was mined within the desired timeframe, so
-			// return the difficulty for the last block which did
-			// not have the special minimum difficulty rule applied.
-			prevBits, err := b.findPrevTestNetDifficulty(hList)
-			if err != nil {
-				return 0, err
-			}
-			return prevBits, nil
-		}
-
-		// For the main network (or any unrecognized networks), simply
-		// return the previous block's difficulty requirements.
-		return lastNode.Header.Bits, nil
-	}
-
-	// Get the block node at the previous retarget (targetTimespan days
-	// worth of blocks).
-	firstNode, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
-		uint32(lastNode.Height + 1 - b.blocksPerRetarget),
+	var emptyFlags blockchain.BehaviorFlags
+	err := blockchain.CheckBlockHeaderContext(
+		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
 	)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	// Limit the amount of adjustment that can occur to the previous
-	// difficulty.
-	actualTimespan := lastNode.Header.Timestamp.Unix() -
-		firstNode.Timestamp.Unix()
-	adjustedTimespan := actualTimespan
-	if actualTimespan < b.minRetargetTimespan {
-		adjustedTimespan = b.minRetargetTimespan
-	} else if actualTimespan > b.maxRetargetTimespan {
-		adjustedTimespan = b.maxRetargetTimespan
-	}
-
-	// Calculate new target difficulty as:
-	//  currentDifficulty * (adjustedTimespan / targetTimespan)
-	// The result uses integer division which means it will be slightly
-	// rounded down.  Bitcoind also uses integer division to calculate this
-	// result.
-	oldTarget := blockchain.CompactToBig(lastNode.Header.Bits)
-	newTarget := new(big.Int).Mul(oldTarget, big.NewInt(adjustedTimespan))
-	targetTimeSpan := int64(b.cfg.ChainParams.TargetTimespan /
-		time.Second)
-	newTarget.Div(newTarget, big.NewInt(targetTimeSpan))
-
-	// Limit new value to the proof of work limit.
-	if newTarget.Cmp(b.cfg.ChainParams.PowLimit) > 0 {
-		newTarget.Set(b.cfg.ChainParams.PowLimit)
-	}
-
-	// Log new target difficulty and return it.  The new target logging is
-	// intentionally converting the bits back to a number instead of using
-	// newTarget since conversion to the compact representation loses
-	// precision.
-	newTargetBits := blockchain.BigToCompact(newTarget)
-	log.Debugf("Difficulty retarget at block height %d", lastNode.Height+1)
-	log.Debugf("Old target %08x (%064x)", lastNode.Header.Bits, oldTarget)
-	log.Debugf("New target %08x (%064x)", newTargetBits,
-		blockchain.CompactToBig(newTargetBits))
-	log.Debugf("Actual timespan %v, adjusted timespan %v, target timespan %v",
-		time.Duration(actualTimespan)*time.Second,
-		time.Duration(adjustedTimespan)*time.Second,
-		b.cfg.ChainParams.TargetTimespan)
-
-	return newTargetBits, nil
-}
-
-// findPrevTestNetDifficulty returns the difficulty of the previous block which
-// did not have the special testnet minimum difficulty rule applied.
-func (b *blockManager) findPrevTestNetDifficulty(hList headerlist.Chain) (uint32, error) {
-	startNode := hList.Back()
-
-	// Genesis block.
-	if startNode == nil {
-		return b.cfg.ChainParams.PowLimitBits, nil
-	}
-
-	// Search backwards through the chain for the last block without
-	// the special rule applied.
-	iterEl := startNode
-	iterNode := &startNode.Header
-	iterHeight := startNode.Height
-	for iterNode != nil && iterHeight%b.blocksPerRetarget != 0 &&
-		iterNode.Bits == b.cfg.ChainParams.PowLimitBits { // nolint
-
-		// Get the previous block node.  This function is used over
-		// simply accessing iterNode.parent directly as it will
-		// dynamically create previous block nodes as needed.  This
-		// helps allow only the pieces of the chain that are needed
-		// to remain in memory.
-		iterHeight--
-		el := iterEl.Prev()
-		if el != nil {
-			iterNode = &el.Header
-		} else {
-			node, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
-				uint32(iterHeight),
-			)
-			if err != nil {
-				log.Errorf("GetBlockByHeight: %s", err)
-				return 0, err
-			}
-			iterNode = node
-		}
-	}
-
-	// Return the found difficulty or the minimum difficulty if no
-	// appropriate block was found.
-	lastBits := b.cfg.ChainParams.PowLimitBits
-	if iterNode != nil {
-		lastBits = iterNode.Bits
-	}
-	return lastBits, nil
+	return blockchain.CheckBlockHeaderSanity(
+		blockHeader, b.cfg.ChainParams.PowLimit, b.cfg.TimeSource,
+		emptyFlags,
+	)
 }
 
 // onBlockConnected queues a block notification that extends the current chain.
@@ -2952,4 +2867,180 @@ func (b *blockManager) NotificationsSinceHeight(
 	}
 
 	return blocks, bestHeight, nil
+}
+
+// lightChainCtx is an implementation of the blockchain.ChainCtx interface and
+// gives a neutrino node the ability to contextually validate headers it
+// receives.
+type lightChainCtx struct {
+	params              *chaincfg.Params
+	blocksPerRetarget   int32
+	minRetargetTimespan int64
+	maxRetargetTimespan int64
+}
+
+// newLightChainCtx returns a new lightChainCtx instance from the passed
+// arguments.
+func newLightChainCtx(params *chaincfg.Params, blocksPerRetarget int32,
+	minRetargetTimespan, maxRetargetTimespan int64) *lightChainCtx {
+
+	return &lightChainCtx{
+		params:              params,
+		blocksPerRetarget:   blocksPerRetarget,
+		minRetargetTimespan: minRetargetTimespan,
+		maxRetargetTimespan: maxRetargetTimespan,
+	}
+}
+
+// ChainParams returns the configured chain parameters.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) ChainParams() *chaincfg.Params {
+	return l.params
+}
+
+// BlocksPerRetarget returns the number of blocks before retargeting occurs.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) BlocksPerRetarget() int32 {
+	return l.blocksPerRetarget
+}
+
+// MinRetargetTimespan returns the minimum amount of time used in the
+// difficulty calculation.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) MinRetargetTimespan() int64 {
+	return l.minRetargetTimespan
+}
+
+// MaxRetargetTimespan returns the maximum amount of time used in the
+// difficulty calculation.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) MaxRetargetTimespan() int64 {
+	return l.maxRetargetTimespan
+}
+
+// VerifyCheckpoint returns false as the lightChainCtx does not need to validate
+// checkpoints. This is already done inside the handleHeadersMsg function.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) VerifyCheckpoint(int32, *chainhash.Hash) bool {
+	return false
+}
+
+// FindPreviousCheckpoint returns nil values since the lightChainCtx does not
+// need to validate against checkpoints. This is already done inside the
+// handleHeadersMsg function.
+//
+// NOTE: Part of the blockchain.ChainCtx interface.
+func (l *lightChainCtx) FindPreviousCheckpoint() (blockchain.HeaderCtx, error) {
+	return nil, nil
+}
+
+// lightHeaderCtx is an implementation of the blockchain.HeaderCtx interface.
+// It is used so neutrino can perform contextual header validation checks.
+type lightHeaderCtx struct {
+	height    int32
+	bits      uint32
+	timestamp int64
+
+	store      headerfs.BlockHeaderStore
+	headerList headerlist.Chain
+}
+
+// newLightHeaderCtx returns an instance of a lightHeaderCtx to be used when
+// contextually validating headers.
+func newLightHeaderCtx(height int32, header *wire.BlockHeader,
+	store headerfs.BlockHeaderStore,
+	headerList headerlist.Chain) *lightHeaderCtx {
+
+	return &lightHeaderCtx{
+		height:     height,
+		bits:       header.Bits,
+		timestamp:  header.Timestamp.Unix(),
+		store:      store,
+		headerList: headerList,
+	}
+}
+
+// Height returns the height for the underlying header this context was created
+// from.
+//
+// NOTE: Part of the blockchain.HeaderCtx interface.
+func (l *lightHeaderCtx) Height() int32 {
+	return l.height
+}
+
+// Bits returns the difficulty bits for the underlying header this context was
+// created from.
+//
+// NOTE: Part of the blockchain.HeaderCtx interface.
+func (l *lightHeaderCtx) Bits() uint32 {
+	return l.bits
+}
+
+// Timestamp returns the timestamp for the underlying header this context was
+// created from.
+//
+// NOTE: Part of the blockchain.HeaderCtx interface.
+func (l *lightHeaderCtx) Timestamp() int64 {
+	return l.timestamp
+}
+
+// Parent returns the parent of the underlying header this context was created
+// from.
+//
+// NOTE: Part of the blockchain.HeaderCtx interface.
+func (l *lightHeaderCtx) Parent() blockchain.HeaderCtx {
+	// The parent is just an ancestor with distance 1.
+	return l.RelativeAncestorCtx(1)
+}
+
+// RelativeAncestorCtx returns the ancestor that is distance blocks before the
+// underlying header in the chain.
+//
+// NOTE: Part of the blockchain.HeaderCtx interface.
+func (l *lightHeaderCtx) RelativeAncestorCtx(
+	distance int32) blockchain.HeaderCtx {
+
+	ancestorHeight := l.height - distance
+
+	var (
+		ancestor *wire.BlockHeader
+		err      error
+	)
+
+	// We'll first consult the headerList to see if the ancestor can be
+	// found there. If that fails, we'll look up the header in the header
+	// store.
+	iterNode := l.headerList.Back()
+
+	// Keep looping until iterNode is nil or the ancestor height is
+	// encountered.
+	for iterNode != nil {
+		if iterNode.Height == ancestorHeight {
+			// We've found the ancestor.
+			ancestor = &iterNode.Header
+			break
+		}
+
+		// We haven't hit the ancestor header yet, so we'll go back one.
+		iterNode = iterNode.Prev()
+	}
+
+	if ancestor == nil {
+		// Lookup the ancestor in the header store.
+		ancestor, err = l.store.FetchHeaderByHeight(
+			uint32(ancestorHeight),
+		)
+		if err != nil {
+			return nil
+		}
+	}
+
+	return newLightHeaderCtx(
+		ancestorHeight, ancestor, l.store, l.headerList,
+	)
 }
