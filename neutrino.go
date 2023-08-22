@@ -6,6 +6,7 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
+	"github.com/lightninglabs/neutrino/chaindataloader"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -85,6 +87,19 @@ var (
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
+
+// SideLoadOpt defines the config required to sideload headers into the DB.
+type SideLoadOpt struct {
+	// SkipVerify indicates if we are to run verification on the headers from the
+	// blkHdrSideLoad source.
+	SkipVerify bool
+
+	// Reader is the sideload source.
+	Reader io.ReadSeeker
+
+	// SourceType indicates the format of a sideload source.
+	SourceType chaindataloader.SourceType
+}
 
 // isDevNetwork indicates if the chain is a private development network, namely
 // simnet or regtest/regnet.
@@ -618,6 +633,9 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// BlkHdrSideLoad is the config required for block header side loading.
+	BlkHdrSideLoad *SideLoadOpt
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -799,7 +817,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&blockManagerCfg{
+	blkMgrConfig := &blockManagerCfg{
 		ChainParams:      s.chainParams,
 		BlockHeaders:     s.BlockHeaders,
 		RegFilterHeaders: s.RegFilterHeaders,
@@ -809,7 +827,17 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
-	})
+	}
+
+	if cfg.BlkHdrSideLoad != nil {
+		blkMgrConfig.blkHdrSideLoad = &SideLoadOpt{
+			SkipVerify: cfg.BlkHdrSideLoad.SkipVerify,
+			Reader:     cfg.BlkHdrSideLoad.Reader,
+			SourceType: cfg.BlkHdrSideLoad.SourceType,
+		}
+	}
+
+	bm, err := newBlockManager(blkMgrConfig)
 	if err != nil {
 		return nil, err
 	}

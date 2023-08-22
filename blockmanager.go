@@ -109,6 +109,9 @@ type blockManagerCfg struct {
 		checkResponse func(sp *ServerPeer, resp wire.Message,
 			quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
+
+	// blkHdrSideLoad is the config required for block header side loading.
+	blkHdrSideLoad *SideLoadOpt
 }
 
 // blockManager provides a concurrency safe block manager for handling all
