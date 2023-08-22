@@ -123,4 +123,11 @@ func TestBanStore(t *testing.T) {
 	// We'll query for second IP network again as it should now be unknown
 	// to the BanStore. We should expect not to find anything regarding it.
 	checkBanStore(ipNet2, false, 0, 0)
+
+	//Unban ipNet1
+	err = banStore.UnbanIPNet(ipNet1)
+
+	//IpNet1 should be unknown to the BanStore
+	checkBanStore(ipNet1, false, 0, 0)
+
 }
