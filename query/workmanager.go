@@ -438,7 +438,6 @@ Loop:
 				heap.Push(work, &queryJob{
 					index:      queryIndex,
 					timeout:    minQueryTimeout,
-					encoding:   batch.options.encoding,
 					cancelChan: batch.options.cancelChan,
 					Request:    q,
 				})

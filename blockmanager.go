@@ -5,6 +5,7 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -808,10 +809,29 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 // handle a query for checkpointed filter headers.
 type checkpointedCFHeadersQuery struct {
 	blockMgr    *blockManager
-	msgs        []wire.Message
+	msgs        []*encodedQuery
 	checkpoints []*chainhash.Hash
 	stopHashes  map[chainhash.Hash]uint32
 	headerChan  chan *wire.MsgCFHeaders
+}
+
+// encodedQuery holds all the information needed to query a message that pushes requests
+// using the QueryMessagingWithEncoding method.
+type encodedQuery struct {
+	message       wire.Message
+	encoding      wire.MessageEncoding
+	priorityIndex uint64
+}
+
+// Message returns the wire.Message of encodedQuery's struct.
+func (e *encodedQuery) Message() wire.Message {
+	return e.message
+}
+
+// PriorityIndex returns the specified priority the caller wants
+// the request to take.
+func (e *encodedQuery) PriorityIndex() uint64 {
+	return e.priorityIndex
 }
 
 // requests creates the query.Requests for this CF headers query.
@@ -821,6 +841,7 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 		reqs[idx] = &query.Request{
 			Req:        m,
 			HandleResp: c.handleResponse,
+			SendQuery:  sendQueryMessageWithEncoding,
 		}
 	}
 	return reqs
@@ -924,6 +945,24 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	}
 }
 
+// sendQueryMessageWithEncoding sends a message to the peer with encoding.
+func sendQueryMessageWithEncoding(peer query.Peer, req query.ReqMessage) error {
+	sp, ok := peer.(*ServerPeer)
+	if !ok {
+		err := "peer is not of type ServerPeer"
+		log.Errorf(err)
+		return errors.New(err)
+	}
+	request, ok := req.(*encodedQuery)
+	if !ok {
+		return errors.New("invalid request type")
+	}
+
+	sp.QueueMessageWithEncoding(request.message, nil, request.encoding)
+
+	return nil
+}
+
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
 // matches the checkpoints up to the tip of the store.
@@ -959,7 +998,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// the remaining checkpoint intervals.
 	numCheckpts := uint32(len(checkpoints)) - startingInterval
 	numQueries := (numCheckpts + maxCFCheckptsPerQuery - 1) / maxCFCheckptsPerQuery
-	queryMsgs := make([]wire.Message, 0, numQueries)
+	queryMsgs := make([]*encodedQuery, 0, numQueries)
 
 	// We'll also create an additional set of maps that we'll use to
 	// re-order the responses as we get them in.
@@ -1004,9 +1043,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 		// Once we have the stop hash, we can construct the query
 		// message itself.
-		queryMsg := wire.NewMsgGetCFHeaders(
-			fType, startHeightRange, &stopHash,
-		)
+		queryMsg := &encodedQuery{
+			message: wire.NewMsgGetCFHeaders(
+				fType, startHeightRange, &stopHash,
+			),
+			encoding: wire.WitnessEncoding,
+		}
 
 		// We'll mark that the ith interval is queried by this message,
 		// and also map the stop hash back to the index of this message.

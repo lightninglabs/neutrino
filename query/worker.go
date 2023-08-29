@@ -3,8 +3,6 @@ package query
 import (
 	"errors"
 	"time"
-
-	"github.com/btcsuite/btcd/wire"
 )
 
 var (
@@ -27,7 +25,6 @@ type queryJob struct {
 	tries      uint8
 	index      uint64
 	timeout    time.Duration
-	encoding   wire.MessageEncoding
 	cancelChan <-chan struct{}
 	*Request
 }
@@ -89,6 +86,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	msgChan, cancel := peer.SubscribeRecvMsg()
 	defer cancel()
 
+nexJobLoop:
 	for {
 		log.Tracef("Worker %v waiting for more work", peer.Addr())
 
@@ -133,7 +131,22 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			log.Tracef("Worker %v queuing job %T with index %v",
 				peer.Addr(), job.Req, job.Index())
 
-			peer.QueueMessageWithEncoding(job.Req, nil, job.encoding)
+			err := job.SendQuery(peer, job.Req)
+
+			// If any error occurs while sending query, quickly send the result
+			// containing the error to the workmanager.
+			if err != nil {
+				select {
+				case results <- &jobResult{
+					job:  job,
+					peer: peer,
+					err:  err,
+				}:
+				case <-quit:
+					return
+				}
+				goto nexJobLoop
+			}
 		}
 
 		// Wait for the correct response to be received from the peer,
@@ -143,7 +156,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			timeout = time.NewTimer(job.timeout)
 		)
 
-	Loop:
+	feedbackLoop:
 		for {
 			select {
 			// A message was received from the peer, use the
@@ -151,7 +164,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// our request.
 			case resp := <-msgChan:
 				progress := job.HandleResp(
-					job.Req, resp, peer.Addr(),
+					job.Req.Message(), resp, peer.Addr(),
 				)
 
 				log.Tracef("Worker %v handled msg %T while "+
@@ -176,12 +189,12 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 							job.timeout,
 						)
 					}
-					continue Loop
+					continue feedbackLoop
 				}
 
 				// We did get a valid response, and can break
 				// the loop.
-				break Loop
+				break feedbackLoop
 
 			// If the timeout is reached before a valid response
 			// has been received, we exit with an error.
@@ -193,7 +206,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					"with job index %v", peer.Addr(),
 					job.Req, job.Index())
 
-				break Loop
+				break feedbackLoop
 
 			// If the peer disconnects before giving us a valid
 			// answer, we'll also exit with an error.
@@ -203,7 +216,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					job.Index())
 
 				jobErr = ErrPeerDisconnected
-				break Loop
+				break feedbackLoop
 
 			// If the job was canceled, we report this back to the
 			// work manager.
@@ -212,7 +225,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					peer.Addr(), job.Index())
 
 				jobErr = ErrJobCanceled
-				break Loop
+				break feedbackLoop
 
 			case <-quit:
 				return

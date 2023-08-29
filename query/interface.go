@@ -124,8 +124,8 @@ type Progress struct {
 // Request is the main struct that defines a bitcoin network query to be sent to
 // connected peers.
 type Request struct {
-	// Req is the message request to send.
-	Req wire.Message
+	// Req contains the message request to send.
+	Req ReqMessage
 
 	// HandleResp is a response handler that will be called for every
 	// message received from the peer that the request was made to. It
@@ -139,6 +139,22 @@ type Request struct {
 	// The response should be handed off to another goroutine for
 	// processing.
 	HandleResp func(req, resp wire.Message, peer string) Progress
+
+	// SendQuery handles sending request to the worker's peer. It returns an error,
+	// if one is encountered while sending the request.
+	SendQuery func(peer Peer, request ReqMessage) error
+}
+
+// ReqMessage is an interface which all structs containing information
+// required to process a message request must implement.
+type ReqMessage interface {
+
+	// Message returns the message request.
+	Message() wire.Message
+
+	// PriorityIndex returns the priority the caller prefers the request
+	// would take.
+	PriorityIndex() uint64
 }
 
 // WorkManager defines an API for a manager that dispatches queries to bitcoin

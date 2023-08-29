@@ -303,9 +303,9 @@ func TestBlockCache(t *testing.T) {
 		defer close(errChan)
 
 		require.Len(t, reqs, 1)
-		require.IsType(t, &wire.MsgGetData{}, reqs[0].Req)
+		require.IsType(t, &wire.MsgGetData{}, reqs[0].Req.Message())
 
-		getData := reqs[0].Req.(*wire.MsgGetData)
+		getData := reqs[0].Req.Message().(*wire.MsgGetData)
 		require.Len(t, getData.InvList, 1)
 
 		inv := getData.InvList[0]

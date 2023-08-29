@@ -1,6 +1,7 @@
 package query
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -8,8 +9,26 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
+type mockQueryEncoded struct {
+	message  *wire.MsgGetData
+	encoding wire.MessageEncoding
+	index    uint64
+}
+
+func (m *mockQueryEncoded) Message() wire.Message {
+	return m.message
+}
+
+func (m *mockQueryEncoded) PriorityIndex() uint64 {
+	return m.index
+}
+
 var (
-	req          = &wire.MsgGetData{}
+	msg = &wire.MsgGetData{}
+	req = &mockQueryEncoded{
+		message:  msg,
+		encoding: wire.WitnessEncoding,
+	}
 	progressResp = &wire.MsgTx{
 		Version: 111,
 	}
@@ -24,6 +43,7 @@ type mockPeer struct {
 	responses     chan<- wire.Message
 	subscriptions chan chan wire.Message
 	quit          chan struct{}
+	err           error
 }
 
 var _ Peer = (*mockPeer)(nil)
@@ -75,11 +95,21 @@ func makeJob() *queryJob {
 				Progressed: false,
 			}
 		},
+		SendQuery: func(peer Peer, req ReqMessage) error {
+			m := peer.(*mockPeer)
+
+			if m.err != nil {
+				return m.err
+			}
+
+			m.requests <- req.Message()
+			return nil
+		},
 	}
+
 	return &queryJob{
 		index:      123,
 		timeout:    30 * time.Second,
-		encoding:   defaultQueryEncoding,
 		cancelChan: nil,
 		Request:    q,
 	}
@@ -470,5 +500,73 @@ func TestWorkerJobCanceled(t *testing.T) {
 			t.Fatalf("expected peer to be %v, was %v",
 				ctx.peer.Addr(), result.peer)
 		}
+	}
+}
+
+// TestWorkerSendQueryErr will test if the result would return an error
+// that would be handled by the worker if there is an error returned while
+// sending a query.
+func TestWorkerSendQueryErr(t *testing.T) {
+	t.Parallel()
+
+	ctx, err := startWorker()
+	if err != nil {
+		t.Fatalf("unable to start worker: %v", err)
+	}
+
+	cancelChan := make(chan struct{})
+
+	// Give the worker a new job.
+	taskJob := makeJob()
+	taskJob.cancelChan = cancelChan
+
+	// Assign error to be returned while sending query.
+	ctx.peer.err = errors.New("query error")
+
+	// Send job to worker
+	select {
+	case ctx.nextJob <- taskJob:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("did not pick up job")
+	}
+
+	// Request should not be sent as there should be an error while
+	// querying.
+	select {
+	case <-ctx.peer.requests:
+		t.Fatalf("request sent when query failed")
+	case <-time.After(time.Second):
+	}
+
+	// jobResult should be sent by worker at this point.
+	var result *jobResult
+	select {
+	case result = <-ctx.jobResults:
+	case <-time.After(time.Second):
+		t.Fatalf("response not received")
+	}
+
+	// jobResult should contain error.
+	if result.err != ctx.peer.err {
+		t.Fatalf("expected result's error to be %v, was %v",
+			ctx.peer.err, result.err)
+	}
+
+	// Make sure the result was given for the intended task.
+	if result.job != taskJob {
+		t.Fatalf("got result for unexpected job")
+	}
+
+	// And the correct peer.
+	if result.peer != ctx.peer {
+		t.Fatalf("expected peer to be %v, was %v",
+			ctx.peer.Addr(), result.peer)
+	}
+
+	// The worker should be in the nextJob Loop.
+	select {
+	case ctx.nextJob <- taskJob:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("did not pick up job")
 	}
 }

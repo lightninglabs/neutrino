@@ -352,7 +352,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 			var msgs []wire.Message
 			for _, q := range requests {
-				msgs = append(msgs, q.Req)
+				msgs = append(msgs, q.Req.Message())
 			}
 
 			responses, err := generateResponses(msgs, headers)
@@ -582,7 +582,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 			var msgs []wire.Message
 			for _, q := range requests {
-				msgs = append(msgs, q.Req)
+				msgs = append(msgs, q.Req.Message())
 			}
 			responses, err := generateResponses(msgs, headers)
 			require.NoError(t, err)

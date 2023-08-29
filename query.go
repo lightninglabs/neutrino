@@ -435,13 +435,17 @@ type cfiltersQuery struct {
 // request couples a query message with the handler to be used for the response
 // in a query.Request struct.
 func (q *cfiltersQuery) request() *query.Request {
-	msg := wire.NewMsgGetCFilters(
-		q.filterType, uint32(q.startHeight), q.stopHash,
-	)
+	msg := &encodedQuery{
+		message: wire.NewMsgGetCFilters(
+			q.filterType, uint32(q.startHeight), q.stopHash,
+		),
+		encoding: wire.WitnessEncoding,
+	}
 
 	return &query.Request{
 		Req:        msg,
 		HandleResp: q.handleResponse,
+		SendQuery:  sendQueryMessageWithEncoding,
 	}
 }
 
@@ -833,6 +837,10 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
 	_ = getData.AddInvVect(inv)
+	msg := &encodedQuery{
+		message:  getData,
+		encoding: wire.WitnessEncoding,
+	}
 
 	var foundBlock *btcutil.Block
 
@@ -912,8 +920,9 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 
 	// Prepare the query request.
 	request := &query.Request{
-		Req:        getData,
+		Req:        msg,
 		HandleResp: handleResp,
+		SendQuery:  sendQueryMessageWithEncoding,
 	}
 
 	// Prepare the query options.
