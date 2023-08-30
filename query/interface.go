@@ -183,11 +183,6 @@ type Dispatcher interface {
 // Peer is the interface that defines the methods needed by the query package
 // to be able to make requests and receive responses from a network peer.
 type Peer interface {
-	// QueueMessageWithEncoding adds the passed bitcoin message to the peer
-	// send queue.
-	QueueMessageWithEncoding(msg wire.Message, doneChan chan<- struct{},
-		encoding wire.MessageEncoding)
-
 	// SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
 	// messages received from this peer will be sent on the returned
 	// channel. A closure is also returned, that should be called to cancel

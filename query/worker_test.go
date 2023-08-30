@@ -48,12 +48,6 @@ type mockPeer struct {
 
 var _ Peer = (*mockPeer)(nil)
 
-func (m *mockPeer) QueueMessageWithEncoding(msg wire.Message,
-	doneChan chan<- struct{}, encoding wire.MessageEncoding) {
-
-	m.requests <- msg
-}
-
 func (m *mockPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	msgChan := make(chan wire.Message)
 	m.subscriptions <- msgChan
