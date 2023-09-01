@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,8 +92,13 @@ type blockManagerCfg struct {
 	// the connected peers.
 	TimeSource blockchain.MedianTimeSource
 
-	// QueryDispatcher is used to make queries to connected Bitcoin peers.
-	QueryDispatcher query.Dispatcher
+	// cfHeaderQueryDispatcher is used to make queries to connected Bitcoin peers to fetch
+	// CFHeaders
+	cfHeaderQueryDispatcher query.Dispatcher
+
+	// cfHeaderQueryDispatcher is used to make queries to connected Bitcoin peers to fetch
+	// block Headers
+	blkHdrCheckptQueryDispatcher query.WorkManager
 
 	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
@@ -174,6 +180,10 @@ type blockManager struct { // nolint:maligned
 	// time, newHeadersMtx should always be acquired first.
 	newFilterHeadersMtx sync.RWMutex
 
+	// writeBatchMtx is the mutex used to hold reading and reading and writing into the
+	// hdrTipToResponse map.
+	writeBatchMtx sync.RWMutex
+
 	// newFilterHeadersSignal is condition variable which will be used to
 	// notify any waiting callers (via Broadcast()) that the tip of the
 	// current filter header chain has changed. This is useful when callers
@@ -207,6 +217,18 @@ type blockManager struct { // nolint:maligned
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
+
+	// hdrTipToResponse is a map that holds the response gotten from querying peers
+	// using the workmanager, to fetch headers within the chain's checkpointed region.
+	// It is a map of the request's startheight to the fetch response.
+	hdrTipToResponse map[int32]*headersMsg
+
+	// hdrTipSlice is a slice that holds request startHeight of the responses that have been
+	// fetched using the workmanager to fetch headers within the chain's checkpointed region.
+	// It is used to easily access this startheight in the case we have to delete these responses
+	// in the hdrTipResponse map during a reorg while fetching headers within the chain's checkpointed
+	// region.
+	hdrTipSlice []int32
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -236,6 +258,8 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		hdrTipToResponse:    make(map[int32]*headersMsg),
+		hdrTipSlice:         make([]int32, 0),
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -291,8 +315,21 @@ func (b *blockManager) Start() {
 	}
 
 	log.Trace("Starting block manager")
-	b.wg.Add(2)
+	b.wg.Add(3)
 	go b.blockHandler()
+	go func() {
+		wm := b.cfg.blkHdrCheckptQueryDispatcher
+
+		defer b.wg.Done()
+		defer func(wm query.WorkManager) {
+			err := wm.Stop()
+			if err != nil {
+				log.Errorf("Unable to stop block header workmanager: %v", err)
+			}
+		}(wm)
+
+		b.processBlKHeaderInCheckPtRegionInOrder()
+	}()
 	go func() {
 		defer b.wg.Done()
 
@@ -304,6 +341,12 @@ func (b *blockManager) Start() {
 		case <-b.cfg.firstPeerSignal:
 		case <-b.quit:
 			return
+		}
+
+		checkpoints := b.cfg.ChainParams.Checkpoints
+		numCheckpts := len(checkpoints)
+		if numCheckpts != 0 && b.nextCheckpoint != nil {
+			b.batchCheckpointedBlkHeaders()
 		}
 
 		log.Debug("Peer connected, starting cfHandler.")
@@ -361,6 +404,19 @@ func (b *blockManager) NewPeer(sp *ServerPeer) {
 	}
 }
 
+// addNewPeerToList adds the peer to the peers list.
+func (b *blockManager) addNewPeerToList(peers *list.List, sp *ServerPeer) {
+	// Ignore if in the process of shutting down.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	log.Infof("New valid peer %s (%s)", sp, sp.UserAgent())
+
+	// Add the peer as a candidate to sync from.
+	peers.PushBack(sp)
+}
+
 // handleNewPeerMsg deals with new peers that have signalled they may be
 // considered as a sync peer (they have already successfully negotiated).  It
 // also starts syncing if needed.  It is invoked from the syncHandler
@@ -374,12 +430,12 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	log.Infof("New valid peer %s (%s)", sp, sp.UserAgent())
 
 	// Ignore the peer if it's not a sync candidate.
-	if !b.isSyncCandidate(sp) {
+	if !sp.IsSyncCandidate() {
 		return
 	}
 
 	// Add the peer as a candidate to sync from.
-	peers.PushBack(sp)
+	b.addNewPeerToList(peers, sp)
 
 	// If we're current with our sync peer and the new peer is advertising
 	// a higher block than the newest one we know of, request headers from
@@ -419,11 +475,8 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 	}
 }
 
-// handleDonePeerMsg deals with peers that have signalled they are done.  It
-// removes the peer as a candidate for syncing and in the case where it was the
-// current sync peer, attempts to select a new best peer to sync from.  It is
-// invoked from the syncHandler goroutine.
-func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
+// removeDonePeerFromList removes the peer from the peers list.
+func (b *blockManager) removeDonePeerFromList(peers *list.List, sp *ServerPeer) {
 	// Remove the peer from the list of candidate peers.
 	for e := peers.Front(); e != nil; e = e.Next() {
 		if e.Value == sp {
@@ -431,6 +484,17 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 			break
 		}
 	}
+
+	log.Infof("Lost peer %s", sp)
+}
+
+// handleDonePeerMsg deals with peers that have signalled they are done.  It
+// removes the peer as a candidate for syncing and in the case where it was the
+// current sync peer, attempts to select a new best peer to sync from.  It is
+// invoked from the syncHandler goroutine.
+func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
+	// Remove the peer from the list of candidate peers.
+	b.removeDonePeerFromList(peers, sp)
 
 	log.Infof("Lost peer %s", sp)
 
@@ -1090,7 +1154,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
-	errChan := b.cfg.QueryDispatcher.Query(
+	errChan := b.cfg.cfHeaderQueryDispatcher.Query(
 		q.requests(), query.Cancel(b.quit), query.NoRetryMax(), query.ErrChan(make(chan error, 1)),
 	)
 
@@ -2029,7 +2093,38 @@ func (b *blockManager) blockHandler() {
 	defer b.wg.Done()
 
 	candidatePeers := list.New()
-out:
+	checkpoints := b.cfg.ChainParams.Checkpoints
+	if len(checkpoints) == 0 || b.nextCheckpoint == nil {
+		goto unCheckPtLoop
+	}
+
+	// Loop to fetch headers within the check pointed range
+	b.newHeadersMtx.RLock()
+	for b.headerTip <= uint32(checkpoints[len(checkpoints)-1].Height) {
+		b.newHeadersMtx.RUnlock()
+		select {
+		case m := <-b.peerChan:
+			switch msg := m.(type) {
+			case *newPeerMsg:
+				b.addNewPeerToList(candidatePeers, msg.peer)
+			case *donePeerMsg:
+				b.removeDonePeerFromList(candidatePeers, msg.peer)
+			default:
+				log.Tracef("Invalid message type in block "+
+					"handler: %T", msg)
+			}
+
+		case <-b.quit:
+			return
+		}
+		b.newHeadersMtx.RLock()
+	}
+	b.newHeadersMtx.RUnlock()
+
+	log.Infof("Fetching uncheckpointed block headers from %v", b.headerTip)
+	b.startSync(candidatePeers)
+
+unCheckPtLoop:
 	for {
 		// Now check peer messages and quit channels.
 		select {
@@ -2053,11 +2148,365 @@ out:
 			}
 
 		case <-b.quit:
-			break out
+			break unCheckPtLoop
 		}
 	}
 
 	log.Trace("Block handler done")
+}
+
+// processBlKHeaderInCheckPtRegionInOrder handles and writes the block headers received from querying the
+// workmanager while fetching headers within the block header checkpoint region. This process is carried out
+// in order.
+func (b *blockManager) processBlKHeaderInCheckPtRegionInOrder() {
+	lenCheckPts := len(b.cfg.ChainParams.Checkpoints)
+
+	// Loop should run as long as we are in the block header checkpointed region.
+	b.newHeadersMtx.RLock()
+	for int32(b.headerTip) <= b.cfg.ChainParams.Checkpoints[lenCheckPts-1].Height {
+		hdrTip := b.headerTip
+		b.newHeadersMtx.RUnlock()
+
+		select {
+		// return quickly if the blockmanager quits.
+		case <-b.quit:
+			return
+		default:
+		}
+
+		// do not go further if we have not received the response mapped to our header tip.
+		b.writeBatchMtx.RLock()
+		msg, ok := b.hdrTipToResponse[int32(hdrTip)]
+		b.writeBatchMtx.RUnlock()
+
+		if !ok {
+			b.newHeadersMtx.RLock()
+			continue
+		}
+
+		b.syncPeerMutex.Lock()
+		b.syncPeer = msg.peer
+		b.syncPeerMutex.Unlock()
+
+		b.handleHeadersMsg(msg)
+		err := b.resetHeaderListToChainTip()
+		if err != nil {
+			log.Errorf(err.Error())
+		}
+
+		finalNode := b.headerList.Back()
+		newHdrTip := finalNode.Height
+		newHdrTipHash := finalNode.Header.BlockHash()
+		prevCheckPt := b.findPreviousHeaderCheckpoint(newHdrTip)
+
+		log.Tracef("New headertip %v", newHdrTip)
+		log.Debugf("New headertip %v", newHdrTip)
+
+		// If our header tip has not increased, there is a problem with the headers we received and so we
+		// delete all the header response within our previous header tip and our new header tip, then send
+		// another query to the workmanager.
+		if uint32(newHdrTip) <= hdrTip {
+			b.deleteHeaderTipResp(newHdrTip, int32(hdrTip))
+
+			log.Tracef("while fetching checkpointed headers received invalid headers")
+
+			q := CheckpointedBlockHeadersQuery{
+				blockMgr: b,
+				msgs: []*headerQuery{
+
+					{
+						message: &wire.MsgGetHeaders{
+							BlockLocatorHashes: []*chainhash.Hash{&newHdrTipHash},
+							HashStop:           *b.nextCheckpoint.Hash,
+						},
+						startHeight:   newHdrTip,
+						initialHeight: prevCheckPt.Height,
+						startHash:     newHdrTipHash,
+						endHeight:     b.nextCheckpoint.Height,
+						initialHash:   newHdrTipHash,
+						// Set it as high priority so that workmanager can schedule before any other queries.
+						index: 0,
+					},
+				},
+			}
+
+			b.cfg.blkHdrCheckptQueryDispatcher.Query(
+				q.requests(), query.Cancel(b.quit), query.Timeout(1*time.Hour), query.NoRetryMax(),
+			)
+
+			log.Tracef("Sending query to workmanager from processBlKHeaderInCheckPtRegionInOrder loop")
+		}
+		b.newHeadersMtx.RLock()
+	}
+	b.newHeadersMtx.RUnlock()
+
+	b.syncPeerMutex.Lock()
+	b.syncPeer = nil
+	b.syncPeerMutex.Unlock()
+
+	log.Infof("Successfully completed fetching checkpointed block headers")
+}
+
+// batchCheckpointedBlkHeaders creates headerQuery to fetch block headers
+// within the chain's checkpointed region.
+func (b *blockManager) batchCheckpointedBlkHeaders() {
+	var queryMsgs []*headerQuery
+	curHeight := b.headerTip
+	curHash := b.headerTipHash
+	nextCheckpoint := b.nextCheckpoint
+	nextCheckptHash := nextCheckpoint.Hash
+	nextCheckptHeight := nextCheckpoint.Height
+
+	log.Infof("Fetching set of checkpointed blockheaders from "+
+		"height=%v, hash=%v\n", curHeight, curHash)
+
+	for nextCheckpoint != nil {
+		endHash := nextCheckptHash
+		endHeight := nextCheckptHeight
+		tmpCurHash := curHash
+
+		msg := &headerQuery{
+			message: &wire.MsgGetHeaders{
+				BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{&tmpCurHash}),
+				HashStop:           *endHash,
+			},
+			startHeight:   int32(curHeight),
+			initialHeight: int32(curHeight),
+			startHash:     curHash,
+			endHeight:     endHeight,
+			initialHash:   tmpCurHash,
+		}
+
+		log.Debugf("Fetching set of checkpointed blockheaders from "+
+			"start_height=%v to end-height=%v", curHeight, endHash)
+
+		queryMsgs = append(queryMsgs, msg)
+		curHeight = uint32(endHeight)
+		curHash = *endHash
+
+		nextCheckpoint := b.findNextHeaderCheckpoint(int32(curHeight))
+		if nextCheckpoint == nil {
+			break
+		}
+
+		nextCheckptHeight = nextCheckpoint.Height
+		nextCheckptHash = nextCheckpoint.Hash
+	}
+
+	msg := &headerQuery{
+		message: &wire.MsgGetHeaders{
+			BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{nextCheckptHash}),
+			HashStop:           zeroHash,
+		},
+		startHeight:   nextCheckptHeight,
+		initialHeight: nextCheckptHeight,
+		startHash:     *nextCheckptHash,
+		endHeight:     nextCheckptHeight + wire.MaxBlockHeadersPerMsg,
+		initialHash:   *nextCheckptHash,
+	}
+
+	log.Debugf("Fetching set of checkpointed blockheaders from "+
+		"start_height=%v to end-height=%v", curHeight, zeroHash)
+
+	queryMsgs = append(queryMsgs, msg)
+
+	log.Debugf("Attempting to query for %v blockheader batches", len(queryMsgs))
+
+	q := CheckpointedBlockHeadersQuery{
+		blockMgr: b,
+		msgs:     queryMsgs,
+	}
+
+	b.cfg.blkHdrCheckptQueryDispatcher.Query(
+		q.requests(), query.Cancel(b.quit), query.Timeout(1*time.Hour), query.NoRetryMax(),
+	)
+}
+
+// CheckpointedBlockHeadersQuery holds all information necessary to perform and
+// // handle a query for checkpointed block  headers.
+type CheckpointedBlockHeadersQuery struct {
+	blockMgr *blockManager
+	msgs     []*headerQuery
+}
+
+// requests creates the query.Requests for this block headers query.
+func (c *CheckpointedBlockHeadersQuery) requests() []*query.Request {
+	reqs := make([]*query.Request, len(c.msgs))
+	for idx, m := range c.msgs {
+		reqs[idx] = &query.Request{
+			Req:        m,
+			SendQuery:  c.PushHeadersMsg,
+			HandleResp: c.handleResponse,
+			CloneReq:   cloneHeaderQuery,
+		}
+	}
+
+	return reqs
+}
+
+// cloneHeaderQuery clones the query.ReqMessage containing the headerQuery Struct.
+func cloneHeaderQuery(req query.ReqMessage) query.ReqMessage {
+	oldReq, ok := req.(*headerQuery)
+	if !ok {
+		log.Errorf("request not of type *wire.MsgGetHeaders")
+	}
+	oldReqMessage := req.Message().(*wire.MsgGetHeaders)
+	message := &headerQuery{
+		message: &wire.MsgGetHeaders{
+			BlockLocatorHashes: oldReqMessage.BlockLocatorHashes,
+			HashStop:           oldReqMessage.HashStop,
+		},
+		startHeight:   oldReq.startHeight,
+		initialHeight: oldReq.initialHeight,
+		startHash:     oldReq.startHash,
+		endHeight:     oldReq.endHeight,
+	}
+
+	return message
+}
+
+// PushHeadersMsg is the internal response handler used for requests for this
+// block Headers query.
+func (c *CheckpointedBlockHeadersQuery) PushHeadersMsg(peer query.Peer,
+	task query.ReqMessage) error {
+
+	request, _ := task.Message().(*wire.MsgGetHeaders)
+
+	requestMsg := task.(*headerQuery)
+
+	// check if we have response for the query already. If we do return an error.
+	c.blockMgr.writeBatchMtx.RLock()
+	_, ok := c.blockMgr.hdrTipToResponse[requestMsg.startHeight]
+	c.blockMgr.writeBatchMtx.RUnlock()
+	if ok {
+		log.Debugf("Response already received, peer=%v, "+
+			"start_height=%v, end_height=%v, index=%v", peer.Addr(),
+			requestMsg.startHeight, requestMsg.endHeight)
+		return query.ErrIgnoreRequest
+	}
+
+	sp := peer.(*ServerPeer)
+	err := sp.PushGetHeadersMsg(request.BlockLocatorHashes, &request.HashStop)
+	if err != nil {
+		log.Errorf(err.Error())
+		return err
+	}
+
+	return nil
+}
+
+// handleResponse is the internal response handler used for requests for this
+// block header query.
+func (c *CheckpointedBlockHeadersQuery) handleResponse(req query.ReqMessage, resp wire.Message,
+	peer query.Peer) query.Progress {
+
+	sp := peer.(*ServerPeer)
+	if peer == nil {
+		return query.NoResponse
+	}
+
+	msg, ok := resp.(*wire.MsgHeaders)
+	if !ok {
+		// We are only looking for msgHeaders messages.
+		return query.NoResponse
+	}
+
+	request, ok := req.(*headerQuery)
+	if !ok {
+		// request should only be of type headerQuery.
+		return query.NoResponse
+	}
+
+	// Check if we already have a response for this request startHeight, if we do modify our jobErr variable
+	// so that worker can send appropriate error to workmanager.
+	c.blockMgr.writeBatchMtx.RLock()
+	_, ok = c.blockMgr.hdrTipToResponse[request.startHeight]
+	c.blockMgr.writeBatchMtx.RUnlock()
+	if ok {
+		return query.IgnoreRequest
+	}
+
+	// If we received an empty response from peer, return with an error to break worker's
+	// feed back loop.
+	hdrLength := len(msg.Headers)
+	if hdrLength == 0 {
+		return query.ResponseErr
+	}
+
+	// The initialHash represents the lower bound checkpoint for this checkpoint region.
+	// We verify, if the header received at that checkpoint height has the same hash as the
+	// checkpoint's hash. If it does not, mimicking the handleheaders function behaviour, we
+	// disconnect the peer and return a failed progress to reschedule the query.
+	if msg.Headers[0].PrevBlock != request.startHash &&
+		request.startHash == request.initialHash {
+
+		sp.Disconnect()
+
+		return query.ResponseErr
+	}
+
+	// If the peer sends us more headers than we need, it is probably not aligned with our chain, so we disconnect
+	// peer and return a failed progress.
+	reqMessage := request.Message().(*wire.MsgGetHeaders)
+
+	if hdrLength > int(request.endHeight-request.startHeight) {
+		sp.Disconnect()
+		return query.ResponseErr
+	}
+
+	// Write header into hdrTipResponse map, add the request's startHeight to the hdrTipSlice, for tracking
+	// and handling by the processBlKHeaderInCheckPtRegionInOrder loop.
+	c.blockMgr.writeBatchMtx.Lock()
+	c.blockMgr.hdrTipToResponse[request.startHeight] = &headersMsg{
+		headers: msg,
+		peer:    sp,
+	}
+	i := sort.Search(len(c.blockMgr.hdrTipSlice), func(i int) bool {
+		return c.blockMgr.hdrTipSlice[i] >= request.startHeight
+	})
+
+	c.blockMgr.hdrTipSlice = append(c.blockMgr.hdrTipSlice[:i], append([]int32{request.startHeight}, c.blockMgr.hdrTipSlice[i:]...)...)
+	c.blockMgr.writeBatchMtx.Unlock()
+
+	// Check if job is unfinished, if it is, we modify the job accordingly and send back to the workmanager to be rescheduled.
+	if msg.Headers[hdrLength-1].BlockHash() != reqMessage.HashStop && reqMessage.HashStop != zeroHash {
+		// set new startHash, startHeight and blocklocator to set the next set of header for this job.
+		newStartHash := msg.Headers[hdrLength-1].BlockHash()
+		request.startHeight += int32(hdrLength)
+		request.startHash = newStartHash
+		reqMessage.BlockLocatorHashes = []*chainhash.Hash{&newStartHash}
+
+		// Incase there is a rollback after handling reqMessage
+		// This ensures the job created by writecheckpt does not exceed that which we have fetched already.
+		c.blockMgr.writeBatchMtx.RLock()
+		_, ok = c.blockMgr.hdrTipToResponse[request.startHeight]
+		c.blockMgr.writeBatchMtx.RUnlock()
+
+		if !ok {
+			return query.UnFinishedRequest
+		}
+	}
+
+	return query.Finished
+}
+
+// headerQuery implements ReqMessage interface for fetching block headers.
+type headerQuery struct {
+	message       wire.Message
+	startHeight   int32
+	initialHeight int32
+	startHash     chainhash.Hash
+	endHeight     int32
+	initialHash   chainhash.Hash
+	index         float64
+}
+
+func (h *headerQuery) Message() wire.Message {
+	return h.message
+}
+
+func (h *headerQuery) PriorityIndex() float64 {
+	return h.index
 }
 
 // SyncPeer returns the current sync peer.
@@ -2068,11 +2517,48 @@ func (b *blockManager) SyncPeer() *ServerPeer {
 	return b.syncPeer
 }
 
-// isSyncCandidate returns whether or not the peer is a candidate to consider
-// syncing from.
-func (b *blockManager) isSyncCandidate(sp *ServerPeer) bool {
-	// The peer is not a candidate for sync if it's not a full node.
-	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
+// deleteHeaderTipResp deletes all responses from newTip to prevTip.
+func (b *blockManager) deleteHeaderTipResp(newTip, prevTip int32) {
+	b.writeBatchMtx.Lock()
+	defer b.writeBatchMtx.Unlock()
+
+	var (
+		finalIdx   int
+		initialIdx int
+	)
+
+	for i := 0; i < len(b.hdrTipSlice) && b.hdrTipSlice[i] <= newTip; i++ {
+		if b.hdrTipSlice[i] < prevTip {
+			continue
+		}
+
+		if b.hdrTipSlice[i] == prevTip {
+			initialIdx = i
+		}
+
+		tip := b.hdrTipSlice[i]
+
+		delete(b.hdrTipToResponse, tip)
+
+		finalIdx = i
+	}
+
+	b.hdrTipSlice = append(b.hdrTipSlice[:initialIdx], b.hdrTipSlice[finalIdx+1:]...)
+}
+
+// resetHeaderListToChainTip resets the headerList to the chain tip.
+func (b *blockManager) resetHeaderListToChainTip() error {
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return err
+	}
+	b.headerList.ResetHeaderState(headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	})
+	log.Debugf("Resetting header list to chain tip %v ", b.headerTip)
+
+	return nil
 }
 
 // findNextHeaderCheckpoint returns the next checkpoint after the passed height.
@@ -2747,25 +3233,26 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		}
 	}
 
-	// When this header is a checkpoint, find the next checkpoint.
-	if receivedCheckpoint {
-		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
-	}
-
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
+	// Note this must come before reassigning a new b.nextCheckpoint, so that we push headers
+	// only when the current headers before this takes us past the checkpointed region.
+	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() &&
+		b.nextCheckpoint == nil {
+
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
-		nextHash := zeroHash
-		if b.nextCheckpoint != nil {
-			nextHash = *b.nextCheckpoint.Hash
-		}
-		err := hmsg.peer.PushGetHeadersMsg(locator, &nextHash)
+
+		err := hmsg.peer.PushGetHeadersMsg(locator, &zeroHash)
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.peer.Addr(), err)
 			return
 		}
+	}
+
+	// When this header is a checkpoint, find the next checkpoint.
+	if receivedCheckpoint {
+		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
 	}
 
 	// Since we have a new set of headers written to disk, we'll send out a

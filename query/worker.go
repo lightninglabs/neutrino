@@ -95,7 +95,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 	msgChan, cancel := peer.SubscribeRecvMsg()
 	defer cancel()
 
-nexJobLoop:
+nextJobLoop:
 	for {
 		log.Tracef("Worker %v waiting for more work", peer.Addr())
 
@@ -154,7 +154,7 @@ nexJobLoop:
 				case <-quit:
 					return
 				}
-				goto nexJobLoop
+				goto nextJobLoop
 			}
 		}
 
@@ -306,6 +306,28 @@ nexJobLoop:
 			return
 		}
 	}
+}
+
+func (w *worker) IsSyncCandidate() bool {
+	return w.peer.IsSyncCandidate()
+}
+
+func (w *worker) IsPeerBehindStartHeight(req ReqMessage) bool {
+	return w.peer.IsPeerBehindStartHeight(req)
+}
+
+// IsWorkerEligibleForBlkHdrFetch is the eligibility function used for the BlockHdrWorkManager to determine workers
+// eligible to receive jobs (the job is to fetch headers). If the peer is not a sync candidate or if its last known
+// block height is behind the job query's start height, it returns false. Otherwise, it returns true.
+func IsWorkerEligibleForBlkHdrFetch(r *activeWorker, next *queryJob) bool {
+	if !r.w.IsSyncCandidate() {
+		return false
+	}
+
+	if r.w.IsPeerBehindStartHeight(next.Req) {
+		return false
+	}
+	return true
 }
 
 // NewJob returns a channel where work that is to be handled by the worker can

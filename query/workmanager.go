@@ -46,6 +46,13 @@ type Worker interface {
 	// delivered on the results channel (except when the quit channel has
 	// been closed).
 	NewJob() chan<- *queryJob
+
+	// IsPeerBehindStartHeight returns a boolean indicating if the peer's known last height is behind
+	// the request's start Height which it receives as an argument.
+	IsPeerBehindStartHeight(req ReqMessage) bool
+
+	// IsSyncCandidate returns if the peer is a sync candidate.
+	IsSyncCandidate() bool
 }
 
 // PeerRanking is an interface that must be satisfied by the underlying module

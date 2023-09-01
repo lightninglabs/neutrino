@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -89,11 +90,12 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 
 	// Set up a blockManager with the chain service we defined.
 	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      chaincfg.SimNetParams,
-		BlockHeaders:     hdrStore,
-		RegFilterHeaders: cfStore,
-		QueryDispatcher:  &mockDispatcher{},
-		TimeSource:       blockchain.NewMedianTime(),
+		ChainParams:                  chaincfg.SimNetParams,
+		BlockHeaders:                 hdrStore,
+		RegFilterHeaders:             cfStore,
+		cfHeaderQueryDispatcher:      &mockDispatcher{},
+		blkHdrCheckptQueryDispatcher: &mockDispatcher{},
+		TimeSource:                   blockchain.NewMedianTime(),
 		BanPeer: func(string, banman.Reason) error {
 			return nil
 		},
@@ -346,7 +348,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// We set up a custom query batch method for this test, as we
 		// will use this to feed the blockmanager with our crafted
 		// responses.
-		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+		bm.cfg.cfHeaderQueryDispatcher.(*mockDispatcher).query = func(
 			requests []*query.Request,
 			options ...query.QueryOption) chan error {
 
@@ -576,7 +578,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+		bm.cfg.cfHeaderQueryDispatcher.(*mockDispatcher).query = func(
 			requests []*query.Request,
 			options ...query.QueryOption) chan error {
 
@@ -884,20 +886,6 @@ func TestHandleHeaders(t *testing.T) {
 	fakePeer, err := peer.NewOutboundPeer(&peer.Config{}, "fake:123")
 	require.NoError(t, err)
 
-	assertPeerDisconnected := func(shouldBeDisconnected bool) {
-		// This is quite hacky but works: We expect the peer to be
-		// disconnected, which sets the unexported "disconnected" field
-		// to 1.
-		refValue := reflect.ValueOf(fakePeer).Elem()
-		foo := refValue.FieldByName("disconnect").Int()
-
-		if shouldBeDisconnected {
-			require.EqualValues(t, 1, foo)
-		} else {
-			require.EqualValues(t, 0, foo)
-		}
-	}
-
 	// We'll want to use actual, real blocks, so we take a miner harness
 	// that we can use to generate some.
 	harness, err := rpctest.New(
@@ -934,7 +922,7 @@ func TestHandleHeaders(t *testing.T) {
 	// Let's feed in the correct headers. This should work fine and the peer
 	// should not be disconnected.
 	bm.handleHeadersMsg(hmsg)
-	assertPeerDisconnected(false)
+	assertPeerDisconnected(false, fakePeer, t)
 
 	// Now scramble the headers and feed them in again. This should cause
 	// the peer to be disconnected.
@@ -943,5 +931,884 @@ func TestHandleHeaders(t *testing.T) {
 			hmsg.headers.Headers[j], hmsg.headers.Headers[i]
 	})
 	bm.handleHeadersMsg(hmsg)
-	assertPeerDisconnected(true)
+	assertPeerDisconnected(true, fakePeer, t)
+}
+
+// assertPeerDisconnected asserts that the peer supplied as an argument is disconnected.
+func assertPeerDisconnected(shouldBeDisconnected bool, sp *peer.Peer, t *testing.T) {
+	// This is quite hacky but works: We expect the peer to be
+	// disconnected, which sets the unexported "disconnected" field
+	// to 1.
+	refValue := reflect.ValueOf(sp).Elem()
+	foo := refValue.FieldByName("disconnect").Int()
+
+	if shouldBeDisconnected {
+		require.EqualValues(t, 1, foo)
+	} else {
+		require.EqualValues(t, 0, foo)
+	}
+}
+
+// TestBatchCheckpointedBlkHeaders tests the batch checkpointed headers function.
+func TestBatchCheckpointedBlkHeaders(t *testing.T) {
+	t.Parallel()
+
+	// First, we set up a block manager and a fake peer that will act as the
+	// test's remote peer.
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	// Created checkpoints for our simulated network.
+	checkpoints := []chaincfg.Checkpoint{
+
+		{
+			Hash:   &chainhash.Hash{1},
+			Height: int32(1),
+		},
+
+		{
+			Hash:   &chainhash.Hash{2},
+			Height: int32(2),
+		},
+
+		{
+			Hash:   &chainhash.Hash{3},
+			Height: int32(3),
+		},
+	}
+
+	modParams := chaincfg.SimNetParams
+	modParams.Checkpoints = append(modParams.Checkpoints, checkpoints...)
+	bm.cfg.ChainParams = modParams
+
+	// set checkpoint and header tip.
+	bm.nextCheckpoint = &checkpoints[0]
+
+	bm.newHeadersMtx.Lock()
+	bm.headerTip = 0
+	bm.headerTipHash = chainhash.Hash{0}
+	bm.newHeadersMtx.Unlock()
+
+	// This is the query we assert to obtain if the function works accordingly.
+	expectedQuery := CheckpointedBlockHeadersQuery{
+		blockMgr: bm,
+		msgs: []*headerQuery{
+
+			{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{{0}}),
+					HashStop:           *checkpoints[0].Hash,
+				},
+				startHeight:   int32(0),
+				initialHeight: int32(0),
+				startHash:     chainhash.Hash{0},
+				endHeight:     checkpoints[0].Height,
+				initialHash:   chainhash.Hash{0},
+			},
+
+			{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{checkpoints[0].Hash}),
+					HashStop:           *checkpoints[1].Hash,
+				},
+				startHeight:   checkpoints[0].Height,
+				initialHeight: checkpoints[0].Height,
+				startHash:     *checkpoints[0].Hash,
+				endHeight:     checkpoints[1].Height,
+				initialHash:   *checkpoints[0].Hash,
+			},
+
+			{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{checkpoints[1].Hash}),
+					HashStop:           *checkpoints[2].Hash,
+				},
+				startHeight:   checkpoints[1].Height,
+				initialHeight: checkpoints[1].Height,
+				startHash:     *checkpoints[1].Hash,
+				endHeight:     checkpoints[2].Height,
+				initialHash:   *checkpoints[1].Hash,
+			},
+
+			{
+
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: blockchain.BlockLocator([]*chainhash.Hash{checkpoints[2].Hash}),
+					HashStop:           zeroHash,
+				},
+				startHeight:   checkpoints[2].Height,
+				initialHeight: checkpoints[2].Height,
+				startHash:     *checkpoints[2].Hash,
+				endHeight:     checkpoints[2].Height + wire.MaxBlockHeadersPerMsg,
+				initialHash:   *checkpoints[2].Hash,
+			},
+		},
+	}
+
+	// create request.
+	expectedRequest := expectedQuery.requests()
+
+	bm.cfg.blkHdrCheckptQueryDispatcher.(*mockDispatcher).query = func(requests []*query.Request,
+		options ...query.QueryOption) chan error {
+
+		// assert that the requests obtained has same length as that of our expected query.
+		if len(requests) != len(expectedRequest) {
+			t.Fatalf("unequal length")
+		}
+
+		for i, req := range requests {
+			testEqualReqMessage(req, expectedRequest[i], t)
+		}
+
+		// Ensure the query options sent by query is four. This is the number of query option supplied as args while
+		// querying the workmanager.
+		if len(options) != 3 {
+			t.Fatalf("expected five option parameter for query but got, %v\n", len(options))
+		}
+		return nil
+	}
+
+	// call the function that we are testing.
+	bm.batchCheckpointedBlkHeaders()
+}
+
+// This function tests the ProcessBlKHeaderInCheckPtRegionInOrder function.
+func TestProcessBlKHeaderInCheckPtRegionInOrder(t *testing.T) {
+	t.Parallel()
+
+	// First, we set up a block manager and a fake peer that will act as the
+	// test's remote peer.
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	fakePeer, err := peer.NewOutboundPeer(&peer.Config{}, "fake:123")
+	require.NoError(t, err)
+
+	// We'll want to use actual, real blocks, so we take a miner harness
+	// that we can use to generate some.
+	harness, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, harness.TearDown())
+	})
+
+	err = harness.SetUp(false, 0)
+	require.NoError(t, err)
+
+	// Generate 30 valid blocks that we then feed to the block manager.
+	blockHashes, err := harness.Client.Generate(30)
+	require.NoError(t, err)
+
+	// This is the headerMessage containing 10 headers starting at height 0.
+	hmsgTip0 := &headersMsg{
+		headers: &wire.MsgHeaders{
+			Headers: make([]*wire.BlockHeader, 10),
+		},
+		peer: &ServerPeer{
+			Peer: fakePeer,
+		},
+	}
+
+	// This is the headerMessage containing 10 headers starting at height 10.
+	hmsgTip10 := &headersMsg{
+		headers: &wire.MsgHeaders{
+			Headers: make([]*wire.BlockHeader, 10),
+		},
+		peer: &ServerPeer{
+			Peer: fakePeer,
+		},
+	}
+
+	// This is the headerMessage containing 10 headers starting at height 20.
+	hmsgTip20 := &headersMsg{
+		headers: &wire.MsgHeaders{
+			Headers: make([]*wire.BlockHeader, 10),
+		},
+		peer: &ServerPeer{
+			Peer: fakePeer,
+		},
+	}
+
+	// Loop through the generated blockHashes and add headers to their appropriate slices.
+	for i := range blockHashes {
+		header, err := harness.Client.GetBlockHeader(blockHashes[i])
+		require.NoError(t, err)
+
+		if i < 10 {
+			hmsgTip0.headers.Headers[i] = header
+		}
+
+		if i >= 10 && i < 20 {
+			hmsgTip10.headers.Headers[i-10] = header
+		}
+
+		if i >= 20 {
+			hmsgTip20.headers.Headers[i-20] = header
+		}
+	}
+
+	// initialize the hdrTipSlice.
+	bm.hdrTipSlice = make([]int32, 0)
+
+	// Create checkpoint for our test chain.
+	checkpoint := chaincfg.Checkpoint{
+		Hash:   blockHashes[29],
+		Height: int32(30),
+	}
+	bm.cfg.ChainParams.Checkpoints = append(bm.cfg.ChainParams.Checkpoints, []chaincfg.Checkpoint{
+		checkpoint,
+	}...)
+	bm.nextCheckpoint = &checkpoint
+
+	// If ProcessBlKHeaderInCheckPtRegionInOrder loop receives invalid headers assert the query parameters being sent
+	// to the workmanager is expected.
+	bm.cfg.blkHdrCheckptQueryDispatcher.(*mockDispatcher).query = func(requests []*query.Request,
+		options ...query.QueryOption) chan error {
+
+		// The function should send only one request.
+		if len(requests) != 1 {
+			t.Fatalf("expected only one request")
+		}
+
+		finalNode := bm.headerList.Back()
+		newHdrTip := finalNode.Height
+		newHdrTipHash := finalNode.Header.BlockHash()
+		prevCheckPt := bm.findPreviousHeaderCheckpoint(newHdrTip)
+
+		testEqualReqMessage(requests[0], &query.Request{
+
+			Req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{&newHdrTipHash},
+					HashStop:           *bm.nextCheckpoint.Hash,
+				},
+				startHeight:   newHdrTip,
+				initialHeight: prevCheckPt.Height,
+				startHash:     newHdrTipHash,
+				endHeight:     bm.nextCheckpoint.Height,
+				initialHash:   newHdrTipHash,
+				index:         0,
+			},
+		}, t)
+
+		// The function should include only four query options while querying.
+		if len(options) != 3 {
+			t.Fatalf("expected three option parameter for query but got, %v\n", len(options))
+		}
+		return nil
+	}
+
+	// Call the function in a goroutine.
+	go bm.processBlKHeaderInCheckPtRegionInOrder()
+
+	// At this point syncPeer should be nil.
+	bm.syncPeerMutex.RLock()
+	if bm.syncPeer != nil {
+		bm.syncPeerMutex.RUnlock()
+		t.Fatalf("syncPeer should be nil initially")
+	}
+	bm.syncPeerMutex.RUnlock()
+
+	// Set header tip to zero and write a response at height 10, ensure the ProcessBlKHeaderInCheckPtRegionInOrder loop
+	// does not handle the response as it does not correspond to the current header tip.
+	bm.newHeadersMtx.Lock()
+	bm.headerTip = 0
+	bm.newHeadersMtx.Unlock()
+
+	bm.writeBatchMtx.Lock()
+	newTipWrite := int32(10)
+	bm.hdrTipToResponse[newTipWrite] = hmsgTip10
+	i := sort.Search(len(bm.hdrTipSlice), func(i int) bool {
+		return bm.hdrTipSlice[i] >= newTipWrite
+	})
+
+	bm.hdrTipSlice = append(bm.hdrTipSlice[:i], append([]int32{newTipWrite}, bm.hdrTipSlice[i:]...)...)
+	bm.writeBatchMtx.Unlock()
+
+	// SyncPeer should still be nil to indicate that the loop did not handle the response.
+	bm.syncPeerMutex.RLock()
+	if bm.syncPeer != nil {
+		bm.syncPeerMutex.RUnlock()
+		t.Fatalf("syncPeer should be nil")
+	}
+	bm.syncPeerMutex.RUnlock()
+
+	// Set header tip to 20 to indicate that even when the chain's tip is higher that the available tips in the
+	// hdrTipToResponse map, the loop does not still handle it.
+	bm.newHeadersMtx.Lock()
+	bm.headerTip = 20
+	bm.newHeadersMtx.Unlock()
+
+	// SyncPeer should still be nil to indicate that the loop did not handle the response.
+	bm.syncPeerMutex.RLock()
+	if bm.syncPeer != nil {
+		bm.syncPeerMutex.RUnlock()
+		t.Fatalf("syncPeer should be nil")
+	}
+	bm.syncPeerMutex.RUnlock()
+
+	// Set headerTip to zero and write a response at height 0 to the hdrTipToResponse map. The loop should handle this
+	// response now and the following response that would correspond to its new tip after this.
+	bm.newHeadersMtx.Lock()
+	bm.headerTip = 0
+	bm.newHeadersMtx.Unlock()
+
+	bm.writeBatchMtx.Lock()
+	newTipWrite = int32(0)
+	i = sort.Search(len(bm.hdrTipSlice), func(i int) bool {
+		return bm.hdrTipSlice[i] >= newTipWrite
+	})
+
+	bm.hdrTipSlice = append(bm.hdrTipSlice[:i], append([]int32{newTipWrite}, bm.hdrTipSlice[i:]...)...)
+
+	bm.hdrTipToResponse[newTipWrite] = hmsgTip0
+	bm.writeBatchMtx.Unlock()
+
+	// Allow time for handling the response.
+	time.Sleep(1 * time.Second)
+	bm.syncPeerMutex.RLock()
+	if bm.syncPeer == nil {
+		bm.syncPeerMutex.RUnlock()
+		t.Fatalf("syncPeer should not be nil")
+	}
+	bm.syncPeerMutex.RUnlock()
+
+	// Header tip should be 20 as th the loop would handle response at height 0 then the previously written
+	// height 10.
+	bm.newHeadersMtx.RLock()
+	if bm.headerTip != 20 {
+		hdrTip := bm.headerTip
+		bm.newHeadersMtx.RUnlock()
+		t.Fatalf("expected header tip at 10 but got %v\n", hdrTip)
+	}
+	bm.newHeadersMtx.RUnlock()
+
+	// Now scramble the headers and feed them in again. This should cause
+	// the loop to delete this response from the map and re-request for this header from
+	// the workmanager.
+	rand.Shuffle(len(hmsgTip20.headers.Headers), func(i, j int) {
+		hmsgTip20.headers.Headers[i], hmsgTip20.headers.Headers[j] =
+			hmsgTip20.headers.Headers[j], hmsgTip20.headers.Headers[i]
+	})
+
+	// Write this header at height 20, this would cause the loop to handle it.
+	bm.writeBatchMtx.Lock()
+	newTipWrite = int32(20)
+	bm.hdrTipToResponse[newTipWrite] = hmsgTip20
+	i = sort.Search(len(bm.hdrTipSlice), func(i int) bool {
+		return bm.hdrTipSlice[i] >= newTipWrite
+	})
+
+	bm.hdrTipSlice = append(bm.hdrTipSlice[:i], append([]int32{newTipWrite}, bm.hdrTipSlice[i:]...)...)
+
+	bm.writeBatchMtx.Unlock()
+
+	// Allow time for handling.
+	time.Sleep(1 * time.Second)
+
+	// HeadrTip should not advance as headers are invalid.
+	bm.newHeadersMtx.RLock()
+	if bm.headerTip != 20 {
+		hdrTip := bm.headerTip
+		bm.newHeadersMtx.RUnlock()
+		t.Fatalf("expected header tip at 20 but got %v\n", hdrTip)
+	}
+	bm.newHeadersMtx.RUnlock()
+
+	// Syncpeer should not be nil as we are still in the loop.
+	bm.syncPeerMutex.RLock()
+	if bm.syncPeer == nil {
+		bm.syncPeerMutex.RUnlock()
+		t.Fatalf("syncPeer should not be nil")
+	}
+	bm.syncPeerMutex.RUnlock()
+
+	// The response at header tip 20 should be deleted.
+	bm.writeBatchMtx.RLock()
+	_, ok := bm.hdrTipToResponse[int32(20)]
+	bm.writeBatchMtx.RUnlock()
+
+	if ok {
+		t.Fatalf("expected response to header tip deleted")
+	}
+}
+
+// TestCheckpointedBlockHeadersQuery_handleResponse tests the handleResponse method
+// of the CheckpointedBlockHeadersQuery.
+func TestCheckpointedBlockHeadersQuery_handleResponse(t *testing.T) {
+	t.Parallel()
+
+	// handleRespTestCase holds all the information required to test different scenarios while
+	// using the function.
+	type handleRespTestCase struct {
+
+		// name of the testcase.
+		name string
+
+		// resp is the response argument to be sent to the handleResp method as an arg.
+		resp wire.Message
+
+		// req is the request method to be sent to the handleResp method as an arg.
+		req query.ReqMessage
+
+		// progress is the expected progress to be returned by the handleResp method.
+		progress query.Progress
+
+		// lastblock is the block with which we obtain its hash to be used as the request's hashStop.
+		lastBlock wire.BlockHeader
+
+		// peerDisconnected indicates if the peer would be disconnected after the handleResp method is done.
+		peerDisconnected bool
+	}
+
+	testCases := []handleRespTestCase{
+
+		{
+			// Scenario in which we have a request type that is not the same as the expected headerQuery type.It should
+			// return no error and NoProgressNoFinalResp query.Progress.
+			name: "invalid request type",
+			resp: &wire.MsgHeaders{
+				Headers: make([]*wire.BlockHeader, 0, 5),
+			},
+			req:      &encodedQuery{},
+			progress: query.NoResponse,
+		},
+
+		{
+			// Scenario in which we have a response type that is not same as the expected wire.MsgHeaders. It should
+			// return no error and NoProgressNoFinalResp query.Progress.
+			name: "invalid response type",
+			resp: &wire.MsgCFHeaders{},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     6,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.NoResponse,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{5},
+			},
+		},
+
+		{
+			// Scenario in which we have the response in the hdrTipResponseMap. While calling these testcases, we
+			// initialize the hdrTipToResponse map to contain a response at height 0 and 6. Since this request ahs a
+			// startheight of 0, its response would be in the map already, aligning with this scenario. This scenario
+			// should return query.IgnoreRequest,
+			name: "response start Height in hdrTipResponse map",
+			resp: &wire.MsgHeaders{
+				Headers: make([]*wire.BlockHeader, 0, 4),
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{0},
+					},
+				},
+				startHeight:   0,
+				initialHeight: 0,
+				startHash:     chainhash.Hash{0},
+				endHeight:     5,
+				initialHash:   chainhash.Hash{0},
+			},
+			progress: query.IgnoreRequest,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{4},
+			},
+		},
+
+		{
+			// Scenario in which the valid response we receive is of length, zero. We should return
+			// query.ResponseErr.
+			name: "response header length 0",
+			resp: &wire.MsgHeaders{
+				Headers: make([]*wire.BlockHeader, 0),
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     5,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.ResponseErr,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{4},
+			},
+		},
+
+		{
+			// Scenario in which the  response received is at the request's initialHeight (lower bound height in
+			// checkpoint request) but its first block's previous hash is not same as the checkpoint hash. It
+			// should return query.ResponseErr.
+			name: "response at initialHash has disconnected start Hash",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+					{
+						PrevBlock: chainhash.Hash{4},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     5,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.ResponseErr,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{4},
+			},
+			peerDisconnected: true,
+		},
+
+		{
+			// Scenario in which the response is not at the initial Hash (lower bound hash in the
+			// checkpoint request)  but the response is complete and valid. It should return query.Finished.
+			name: "response not at initialHash, valid complete headers",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+					{
+						PrevBlock: chainhash.Hash{4},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{2},
+					},
+				},
+				startHeight:   2,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{2},
+				endHeight:     5,
+				initialHash:   chainhash.Hash{2},
+			},
+			progress: query.Finished,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{4},
+			},
+		},
+
+		{
+			// Scenario in which the response is not at initial hash (lower bound height in
+			// checkpoint request) and the response is unfinished. The jobErr should be nil and return
+			// finalRespNoProgress query.progress.
+			name: "response not at initial Hash, unfinished response",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+					{
+						PrevBlock: chainhash.Hash{4},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{2},
+					},
+				},
+				startHeight:   2,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{2},
+				endHeight:     6,
+				initialHash:   chainhash.Hash{2},
+			},
+			progress: query.UnFinishedRequest,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{5},
+			},
+		},
+
+		{
+			// Scenario in which the response length is greater than expected. Peer should be
+			// disconnected and the method should return query.ResponseErr.
+			name: "response header length more than expected",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{1},
+					},
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+					{
+						PrevBlock: chainhash.Hash{4},
+					},
+					{
+						PrevBlock: chainhash.Hash{5},
+					},
+					{
+						PrevBlock: chainhash.Hash{6},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     6,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.ResponseErr,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{5},
+			},
+			peerDisconnected: true,
+		},
+
+		{
+			// Scenario in which response is complete and a valid header. Its start height is at the initial height.
+			// progress should be query.Finished.
+			name: "complete response valid headers",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{1},
+					},
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     4,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.Finished,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{3},
+			},
+		},
+
+		{
+			// Scenario in which response is at initialHash and the response is incomplete.
+			// It should return query.UnFinishedRequest.
+			name: "response at initial hash, incomplete response, valid headers",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{1},
+					},
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     6,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.UnFinishedRequest,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{5},
+			},
+		},
+
+		{
+			// Scenario in which response is incomplete but valid. The new response's start height created in this
+			// scenario is present in the hdrTipResponseMap. The startHeight is 6 and response at height 6 has been
+			// preveiously written in to the hdrTipResponse map for the sake of this test.
+			name: "incomplete response, valid headers, new resp in hdrTipToResponse map",
+			resp: &wire.MsgHeaders{
+				Headers: []*wire.BlockHeader{
+					{
+						PrevBlock: chainhash.Hash{1},
+					},
+					{
+						PrevBlock: chainhash.Hash{2},
+					},
+					{
+						PrevBlock: chainhash.Hash{3},
+					},
+					{
+						PrevBlock: chainhash.Hash{4},
+					},
+					{
+						PrevBlock: chainhash.Hash{5},
+					},
+				},
+			},
+			req: &headerQuery{
+				message: &wire.MsgGetHeaders{
+					BlockLocatorHashes: []*chainhash.Hash{
+						{1},
+					},
+				},
+				startHeight:   1,
+				initialHeight: 1,
+				startHash:     chainhash.Hash{1},
+				endHeight:     10,
+				initialHash:   chainhash.Hash{1},
+			},
+			progress: query.Finished,
+			lastBlock: wire.BlockHeader{
+				PrevBlock: chainhash.Hash{9},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// set up block manager.
+			bm, _, _, err := setupBlockManager(t)
+			require.NoError(t, err)
+
+			var oldReqStartHeight int32
+
+			bm.hdrTipToResponse[0] = &headersMsg{
+				headers: &wire.MsgHeaders{},
+			}
+			bm.hdrTipToResponse[6] = &headersMsg{
+				headers: &wire.MsgHeaders{},
+			}
+
+			fakePeer, err := peer.NewOutboundPeer(&peer.Config{}, "fake:123")
+			require.NoError(t, err)
+
+			blkHdrquery := &CheckpointedBlockHeadersQuery{
+				blockMgr: bm,
+			}
+			req := tc.req
+			r, ok := tc.req.(*headerQuery)
+			if ok {
+				reqMessage, ok := req.Message().(*wire.MsgGetHeaders)
+				if !ok {
+					t.Fatalf("request message not of type wire.MsgGetHeaders")
+				}
+				reqMessage.HashStop = tc.lastBlock.BlockHash()
+				req = r
+				oldReqStartHeight = r.startHeight
+			}
+			actualProgress := blkHdrquery.handleResponse(req, tc.resp, &ServerPeer{
+				Peer: fakePeer,
+			})
+
+			if tc.progress != actualProgress {
+				t.Fatalf("unexpected progress.Expected: %v but got: %v", tc.progress, actualProgress)
+			}
+
+			if actualProgress == query.UnFinishedRequest {
+				resp := tc.resp.(*wire.MsgHeaders)
+				request := req.(*headerQuery)
+				if request.startHash != resp.Headers[len(resp.Headers)-1].BlockHash() {
+					t.Fatalf("unexpected new startHash")
+				}
+
+				if request.startHeight != oldReqStartHeight+int32(len(resp.Headers)) {
+					t.Fatalf("unexpected new start height")
+				}
+
+				requestMessage := req.Message().(*wire.MsgGetHeaders)
+
+				if *requestMessage.BlockLocatorHashes[0] != request.startHash {
+					t.Fatalf("unexpected new blockLocator")
+				}
+			}
+
+			assertPeerDisconnected(tc.peerDisconnected, fakePeer, t)
+		})
+	}
+}
+
+// testEqualReqMessage tests if two query.Request are same.
+func testEqualReqMessage(a, b *query.Request, t *testing.T) {
+	aMessage := a.Req.(*headerQuery)
+	bMessage := b.Req.(*headerQuery)
+
+	if aMessage.startHeight != bMessage.startHeight {
+		t.Fatalf("dissimilar startHeight")
+	}
+	if aMessage.startHash != bMessage.startHash {
+		t.Fatalf("dissimilar startHash")
+	}
+	if aMessage.endHeight != bMessage.endHeight {
+		t.Fatalf("dissimilar endHash")
+	}
+	if aMessage.initialHash != bMessage.initialHash {
+		t.Fatalf("dissimilar initialHash")
+	}
+
+	aMessageGetHeaders := aMessage.Message().(*wire.MsgGetHeaders)
+	bMessageGetHeaders := bMessage.Message().(*wire.MsgGetHeaders)
+
+	if !reflect.DeepEqual(aMessageGetHeaders.BlockLocatorHashes, bMessageGetHeaders.BlockLocatorHashes) {
+		t.Fatalf("dissimilar blocklocator hash")
+	}
+
+	if aMessageGetHeaders.HashStop != bMessageGetHeaders.HashStop {
+		t.Fatalf("dissimilar hashstop")
+	}
+	if a.Req.PriorityIndex() != b.Req.PriorityIndex() {
+		t.Fatalf("dissimilar priority index")
+	}
 }

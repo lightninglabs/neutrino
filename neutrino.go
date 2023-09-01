@@ -195,6 +195,31 @@ func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	}
 }
 
+// IsSyncCandidate returns whether or not the peer is a candidate to consider
+// syncing from.
+func (sp *ServerPeer) IsSyncCandidate() bool {
+	// The peer is not a candidate for sync if it's not a full node.
+	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
+}
+
+// IsPeerBehindStartHeight returns a boolean indicating if the peer's last block height
+// is behind the start height of the request. If the peer is not behind the request start
+// height false is returned, otherwise, true is.
+func (sp *ServerPeer) IsPeerBehindStartHeight(req query.ReqMessage) bool {
+	queryGetHeaders, ok := req.(*headerQuery)
+
+	if !ok {
+		log.Debugf("request is not type headerQuery")
+
+		return true
+	}
+
+	if sp.LastBlock() < queryGetHeaders.startHeight {
+		return true
+	}
+	return false
+}
+
 // newestBlock returns the current best block hash and height using the format
 // required by the configuration for the peer package.
 func (sp *ServerPeer) newestBlock() (*chainhash.Hash, int32, error) {
@@ -800,15 +825,21 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
-		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
-		QueryDispatcher:  s.workManager,
-		BanPeer:          s.BanPeer,
-		GetBlock:         s.GetBlock,
-		firstPeerSignal:  s.firstPeerConnect,
-		queryAllPeers:    s.queryAllPeers,
+		ChainParams:             s.chainParams,
+		BlockHeaders:            s.BlockHeaders,
+		RegFilterHeaders:        s.RegFilterHeaders,
+		TimeSource:              s.timeSource,
+		cfHeaderQueryDispatcher: s.workManager,
+		BanPeer:                 s.BanPeer,
+		GetBlock:                s.GetBlock,
+		firstPeerSignal:         s.firstPeerConnect,
+		queryAllPeers:           s.queryAllPeers,
+		blkHdrCheckptQueryDispatcher: query.NewWorkManager(&query.Config{
+			ConnectedPeers:       s.ConnectedPeers,
+			NewWorker:            query.NewWorker,
+			Ranking:              query.NewPeerRanking(),
+			IsEligibleWorkerFunc: query.IsWorkerEligibleForBlkHdrFetch,
+		}),
 	})
 	if err != nil {
 		return nil, err
@@ -1610,6 +1641,9 @@ func (s *ChainService) Start() error {
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
+	if err := s.blockManager.cfg.blkHdrCheckptQueryDispatcher.Start(); err != nil {
+		return fmt.Errorf("unable to start block header work manager: %v", err)
+	}
 	if err := s.workManager.Start(); err != nil {
 		return fmt.Errorf("unable to start work manager: %v", err)
 	}

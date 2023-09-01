@@ -15,6 +15,14 @@ type mockWorker struct {
 	results chan *jobResult
 }
 
+func (m *mockWorker) IsPeerBehindStartHeight(req ReqMessage) bool {
+	return m.peer.IsPeerBehindStartHeight(req)
+}
+
+func (m *mockWorker) IsSyncCandidate() bool {
+	return m.peer.IsSyncCandidate()
+}
+
 var _ Worker = (*mockWorker)(nil)
 
 func (m *mockWorker) NewJob() chan<- *queryJob {
@@ -983,5 +991,107 @@ func TestWorkManagerResultUnfinished(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("nothing received on errChan")
+	}
+}
+
+// TestIsWorkerEligibleForBlkHdrFetch tests the IsWorkerEligibleForBlkHdrFetch function.
+func TestIsWorkerEligibleForBlkHdrFetch(t *testing.T) {
+	type testArgs struct {
+		name                string
+		activeWorker        *activeWorker
+		job                 *queryJob
+		expectedEligibility bool
+	}
+
+	testCases := []testArgs{
+		{
+			name: "peer sync candidate, best height behind job start Height",
+			activeWorker: &activeWorker{
+				w: &mockWorker{
+					peer: &mockPeer{
+						bestHeight: 5,
+						fullNode:   true,
+					},
+				},
+			},
+			job: &queryJob{
+				Request: &Request{
+					Req: &mockQueryEncoded{
+						startHeight: 10,
+					},
+				},
+			},
+			expectedEligibility: false,
+		},
+
+		{
+			name: "peer sync candidate, best height ahead job start Height",
+			activeWorker: &activeWorker{
+				w: &mockWorker{
+					peer: &mockPeer{
+						bestHeight: 10,
+						fullNode:   true,
+					},
+				},
+			},
+			job: &queryJob{
+				Request: &Request{
+					Req: &mockQueryEncoded{
+						startHeight: 5,
+					},
+				},
+			},
+			expectedEligibility: true,
+		},
+
+		{
+			name: "peer not sync candidate, best height behind job start Height",
+			activeWorker: &activeWorker{
+				w: &mockWorker{
+					peer: &mockPeer{
+						bestHeight: 5,
+						fullNode:   false,
+					},
+				},
+			},
+			job: &queryJob{
+				Request: &Request{
+					Req: &mockQueryEncoded{
+						startHeight: 10,
+					},
+				},
+			},
+			expectedEligibility: false,
+		},
+
+		{
+			name: "peer not sync candidate, best height ahead job start Height",
+			activeWorker: &activeWorker{
+				w: &mockWorker{
+					peer: &mockPeer{
+						bestHeight: 10,
+						fullNode:   false,
+					},
+				},
+			},
+			job: &queryJob{
+				Request: &Request{
+					Req: &mockQueryEncoded{
+						startHeight: 5,
+					},
+				},
+			},
+			expectedEligibility: false,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			isEligible := IsWorkerEligibleForBlkHdrFetch(test.activeWorker, test.job)
+			if isEligible != test.expectedEligibility {
+				t.Fatalf("Expected '%v'for eligibility check but got"+
+					"'%v'\n", test.expectedEligibility, isEligible)
+			}
+		})
 	}
 }

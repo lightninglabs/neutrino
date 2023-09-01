@@ -10,9 +10,10 @@ import (
 )
 
 type mockQueryEncoded struct {
-	message  *wire.MsgGetData
-	encoding wire.MessageEncoding
-	index    float64
+	message     *wire.MsgGetData
+	encoding    wire.MessageEncoding
+	index       float64
+	startHeight int
 }
 
 func (m *mockQueryEncoded) Message() wire.Message {
@@ -52,6 +53,8 @@ type mockPeer struct {
 	responses     chan<- wire.Message
 	subscriptions chan chan wire.Message
 	quit          chan struct{}
+	bestHeight    int
+	fullNode      bool
 	err           error
 }
 
@@ -70,6 +73,15 @@ func (m *mockPeer) OnDisconnect() <-chan struct{} {
 
 func (m *mockPeer) Addr() string {
 	return m.addr
+}
+
+func (m *mockPeer) IsPeerBehindStartHeight(request ReqMessage) bool {
+	r := request.(*mockQueryEncoded)
+	return m.bestHeight < r.startHeight
+}
+
+func (m *mockPeer) IsSyncCandidate() bool {
+	return m.fullNode
 }
 
 // makeJob returns a new query job that will be done when it is given the

@@ -224,4 +224,11 @@ type Peer interface {
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
 	OnDisconnect() <-chan struct{}
+
+	// IsPeerBehindStartHeight returns a boolean indicating if the peer's known last height is behind
+	// the request's start Height which it receives as an argument.
+	IsPeerBehindStartHeight(req ReqMessage) bool
+
+	// IsSyncCandidate returns true if the peer is a sync candidate.
+	IsSyncCandidate() bool
 }
