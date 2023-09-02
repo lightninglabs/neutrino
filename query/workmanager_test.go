@@ -63,6 +63,9 @@ func (p *mockPeerRanking) Punish(peer string) {
 func (p *mockPeerRanking) Reward(peer string) {
 }
 
+func (p *mockPeerRanking) ResetRanking(peer string) {
+}
+
 // startWorkManager starts a new workmanager with the given number of mock
 // workers.
 func startWorkManager(t *testing.T, numWorkers int) (WorkManager,

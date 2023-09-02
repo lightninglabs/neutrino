@@ -46,14 +46,35 @@ func TestPeerRank(t *testing.T) {
 		}
 	}
 
-	// Lastly, reward the lowest scored one a bunch, which should move it
+	// This is the lowest scored peer after punishment.
+	const lowestScoredPeer = "peer0"
+
+	// Reward the lowest scored one a bunch, which should move it
 	// to the front.
 	for i := 0; i < 10; i++ {
-		ranking.Reward("peer0")
+		ranking.Reward(lowestScoredPeer)
 	}
 
 	ranking.Order(peers)
-	if peers[0] != "peer0" {
+	if peers[0] != lowestScoredPeer {
 		t.Fatalf("peer0 was not first")
+	}
+
+	// Punish the peer a bunch to make it the lowest scored one.
+	for i := 0; i < 10; i++ {
+		ranking.Punish(lowestScoredPeer)
+	}
+
+	ranking.Order(peers)
+	if peers[len(peers)-1] != lowestScoredPeer {
+		t.Fatalf("peer0 should be last")
+	}
+
+	// Reset its ranking. It should have the default score now
+	// and should not be the lowest ranked peer.
+	ranking.ResetRanking(lowestScoredPeer)
+	ranking.Order(peers)
+	if peers[len(peers)-1] == lowestScoredPeer {
+		t.Fatalf("peer0 should not be last.")
 	}
 }
