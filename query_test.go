@@ -324,10 +324,10 @@ func TestBlockCache(t *testing.T) {
 				Header:       *header,
 				Transactions: b.MsgBlock().Transactions,
 			}
-
-			progress := reqs[0].HandleResp(getData, resp, "")
-			require.True(t, progress.Progressed)
-			require.True(t, progress.Finished)
+			progress := reqs[0].HandleResp(&encodedQuery{
+				message: getData,
+			}, resp, nil)
+			require.Equal(t, query.Finished, progress)
 
 			// Notify the test about the query.
 			select {

@@ -63,9 +63,14 @@ func (p *mockPeerRanking) Punish(peer string) {
 func (p *mockPeerRanking) Reward(peer string) {
 }
 
+type ctx struct {
+	wm       WorkManager
+	peerChan chan Peer
+}
+
 // startWorkManager starts a new workmanager with the given number of mock
 // workers.
-func startWorkManager(t *testing.T, numWorkers int) (WorkManager,
+func startWorkManager(t *testing.T, numWorkers int) (ctx,
 	[]*mockWorker) {
 
 	// We set up a custom NewWorker closure for the WorkManager, such that
@@ -116,7 +121,10 @@ func startWorkManager(t *testing.T, numWorkers int) (WorkManager,
 		workers[i] = w
 	}
 
-	return wm, workers
+	return ctx{
+		wm:       wm,
+		peerChan: peerChan,
+	}, workers
 }
 
 // TestWorkManagerWorkDispatcherSingleWorker tests that the workDispatcher
@@ -126,8 +134,8 @@ func TestWorkManagerWorkDispatcherSingleWorker(t *testing.T) {
 	const numQueries = 100
 
 	// Start work manager with a sinlge worker.
-	wm, workers := startWorkManager(t, 1)
-
+	c, workers := startWorkManager(t, 1)
+	wm := c.wm
 	// Schedule a batch of queries.
 	var queries []*Request
 	for i := 0; i < numQueries; i++ {
@@ -138,7 +146,7 @@ func TestWorkManagerWorkDispatcherSingleWorker(t *testing.T) {
 		queries = append(queries, q)
 	}
 
-	errChan := wm.Query(queries)
+	errChan := wm.Query(queries, ErrChan(make(chan error, 1)))
 
 	wk := workers[0]
 
@@ -189,7 +197,8 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 	// Start work manager with as many workers as queries. This is not very
 	// realistic, but makes the work manager able to schedule all queries
 	// concurrently.
-	wm, workers := startWorkManager(t, numQueries)
+	c, workers := startWorkManager(t, numQueries)
+	wm := c.wm
 
 	// When the jobs gets scheduled, keep track of which worker was
 	// assigned the job.
@@ -226,7 +235,7 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 	}
 
 	// Send the batch, and Retrieve all jobs immediately.
-	errChan := wm.Query(queries[:])
+	errChan := wm.Query(queries[:], ErrChan(make(chan error, 1)))
 
 	var jobs [numQueries]sched
 	for i := 0; i < numQueries; i++ {
@@ -305,11 +314,12 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 // TestWorkManagerErrQueryTimeout tests that the workers that return query
 // timeout are not sent jobs until they return a different error.
 func TestWorkManagerErrQueryTimeout(t *testing.T) {
-	const numQueries = 2
+	const numQueries = 1
 	const numWorkers = 1
 
 	// Start work manager.
-	wm, workers := startWorkManager(t, numWorkers)
+	c, workers := startWorkManager(t, numWorkers)
+	wm := c.wm
 
 	// When the jobs gets scheduled, keep track of which worker was
 	// assigned the job.
@@ -329,46 +339,38 @@ func TestWorkManagerErrQueryTimeout(t *testing.T) {
 		scheduledJobs[i] = make(chan sched)
 	}
 
-	// Fot each worker, spin up a goroutine that will forward the job it
-	// got to our slice of scheduled jobs, such that we can handle them in
+	// Spin up goroutine for only one worker. Forward gotten jobs
+	// to our slice of scheduled jobs, such that we can handle them in
 	// order.
-	for i := 0; i < len(workers); i++ {
-		wk := workers[i]
-		go func() {
-			for {
-				job := <-wk.nextJob
-				scheduledJobs[int(job.index)] <- sched{
-					wk:  wk,
-					job: job,
-				}
-			}
-		}()
-	}
-
-	// Send the batch, and Retrieve all jobs immediately.
-	errChan := wm.Query(queries[:])
-
-	var iter int
-	var s sched
-	for i := 0; i < numQueries; i++ {
-		select {
-		case s = <-scheduledJobs[i]:
-			if s.job.index != float64(i) {
-				t.Fatalf("wrong index")
-			}
-			if iter == 1 {
-				t.Fatalf("Expected only one scheduled job")
-			}
-			iter++
-		case <-errChan:
-			t.Fatalf("did not expect on errChan")
-		case <-time.After(time.Second):
-			if iter < 1 {
-				t.Fatalf("next job not received")
+	wk := workers[0]
+	go func() {
+		for {
+			job := <-wk.nextJob
+			scheduledJobs[int(job.index)] <- sched{
+				wk:  wk,
+				job: job,
 			}
 		}
+	}()
+
+	// Send the batch, and Retrieve all jobs immediately.
+	errChan := wm.Query(queries[:], ErrChan(make(chan error, 1)))
+
+	var s sched
+
+	// Ensure job is sent to the worker.
+	select {
+	case s = <-scheduledJobs[0]:
+		if s.job.index != float64(0) {
+			t.Fatalf("wrong index")
+		}
+	case <-errChan:
+		t.Fatalf("did not expect on errChan")
+	case <-time.After(time.Second):
+		t.Fatalf("next job not received")
 	}
 
+	// Return jobResult with an ErrQueryTimeout.
 	select {
 	case s.wk.results <- &jobResult{
 		job: s.job,
@@ -380,9 +382,9 @@ func TestWorkManagerErrQueryTimeout(t *testing.T) {
 		t.Fatalf("result not handled")
 	}
 
-	// Finally, make sure the job is not retried as there are no available
-	// peer to retry it.
-
+	// Make sure the job is not retried as there are no available
+	// peer to retry it. The only available worker should be waiting in the
+	// worker feedback loop.
 	select {
 	case <-scheduledJobs[0]:
 		t.Fatalf("did not expect job rescheduled")
@@ -408,7 +410,8 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 	const numQueries = 100
 
 	// Start the workDispatcher goroutine.
-	wm, workers := startWorkManager(t, 1)
+	c, workers := startWorkManager(t, 1)
+	wm := c.wm
 	wk := workers[0]
 
 	// Schedule a batch of queries.
@@ -422,7 +425,7 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 
 	// Send the query, and include a channel to cancel the batch.
 	cancelChan := make(chan struct{})
-	errChan := wm.Query(queries, Cancel(cancelChan))
+	errChan := wm.Query(queries, Cancel(cancelChan), ErrChan(make(chan error, 1)))
 
 	// Respond with a result to half of the queries.
 	for i := 0; i < numQueries/2; i++ {
@@ -493,7 +496,8 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 	const numQueries = 4
 	const numWorkers = 8
 
-	workMgr, workers := startWorkManager(t, numWorkers)
+	c, workers := startWorkManager(t, numWorkers)
+	workMgr := c.wm
 
 	require.IsType(t, workMgr, &peerWorkManager{})
 	wm := workMgr.(*peerWorkManager) //nolint:forcetypeassert
@@ -513,7 +517,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 	}
 
 	// Send the batch, and Retrieve all jobs immediately.
-	errChan := wm.Query(queries)
+	errChan := wm.Query(queries, ErrChan(make(chan error, 1)))
 
 	// The 4 first workers should get the job.
 	var jobs []*queryJob
@@ -576,7 +580,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 		}
 		queries = append(queries, q)
 	}
-	_ = wm.Query(queries)
+	_ = wm.Query(queries, ErrChan(make(chan error, 1)))
 
 	// The new jobs should be scheduled on the even numbered workers.
 	for i := 0; i < len(workers); i += 2 {
@@ -596,7 +600,8 @@ func TestWorkManagerSchedulePriorityIndex(t *testing.T) {
 	// Start work manager with as many workers as queries. This is not very
 	// realistic, but makes the work manager able to schedule all queries
 	// concurrently.
-	wm, workers := startWorkManager(t, numQueries)
+	c, workers := startWorkManager(t, numQueries)
+	wm := c.wm
 
 	// When the jobs gets scheduled, keep track of which worker was
 	// assigned the job.
@@ -645,7 +650,7 @@ func TestWorkManagerSchedulePriorityIndex(t *testing.T) {
 	}
 
 	// Send the batch, and Retrieve all jobs immediately.
-	errChan := wm.Query(queries[:])
+	errChan := wm.Query(queries[:], ErrChan(make(chan error, 1)))
 
 	var jobs [numQueries]sched
 	for i := uint64(0); i < numQueries; i++ {
@@ -692,6 +697,281 @@ func TestWorkManagerSchedulePriorityIndex(t *testing.T) {
 		case <-scheduledJobs[i]:
 			t.Fatalf("did not expect a retried job")
 		case <-time.After(time.Second):
+		}
+	}
+
+	// The query should ultimately succeed.
+	select {
+	case err := <-errChan:
+		if err != nil {
+			t.Fatalf("got error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("nothing received on errChan")
+	}
+}
+
+// TestPeerWorkManager_Stop tests the workmanager shutdown.
+func TestPeerWorkManager_Stop(t *testing.T) {
+	const numQueries = 5
+
+	c, _ := startWorkManager(t, 0)
+	wm := c.wm
+
+	createRequest := func(numQuery int) []*Request {
+		var queries []*Request
+		for i := 0; i < numQuery; i++ {
+			q := &Request{
+				Req: &mockQueryEncoded{},
+			}
+			queries = append(queries, q)
+		}
+
+		return queries
+	}
+
+	// Send the batch, and Retrieve all jobs immediately.
+	errChan := wm.Query(createRequest(numQueries), ErrChan(make(chan error, 1)))
+	errChan2 := wm.Query(createRequest(numQueries))
+
+	if errChan2 != nil {
+		t.Fatalf("expected Query call without ErrChan option func to return" +
+			"niil errChan")
+	}
+
+	errChan3 := make(chan error, 1)
+	go func() {
+		err := wm.Stop()
+
+		errChan3 <- err
+	}()
+
+	select {
+	case <-errChan:
+	case <-time.After(time.Second):
+		t.Fatalf("expected error workmanager shutting down")
+	}
+
+	select {
+	case err := <-errChan3:
+		if err != nil {
+			t.Fatalf("unexpected error while stopping workmanager: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("workmanager stop functunction should return error")
+	}
+}
+
+// TestWorkManagerErrResponseExistForQuery tests a scenario in which a workmanager handles
+// an ErrIgnoreRequest.
+func TestWorkManagerErrResponseExistForQuery(t *testing.T) {
+	const numQueries = 5
+
+	// Start work manager with as many workers as queries. This is not very
+	// realistic, but makes the work manager able to schedule all queries
+	// concurrently.
+	c, workers := startWorkManager(t, numQueries)
+	wm := c.wm
+
+	// When the jobs gets scheduled, keep track of which worker was
+	// assigned the job.
+	type sched struct {
+		wk  *mockWorker
+		job *queryJob
+	}
+
+	// Schedule a batch of queries.
+	var (
+		queries       [numQueries]*Request
+		scheduledJobs [numQueries]chan sched
+	)
+	for i := 0; i < numQueries; i++ {
+		q := &Request{
+			Req: &mockQueryEncoded{},
+		}
+		queries[i] = q
+		scheduledJobs[i] = make(chan sched)
+	}
+
+	// Fot each worker, spin up a goroutine that will forward the job it
+	// got to our slice of scheduled jobs, such that we can handle them in
+	// order.
+	for i := 0; i < len(workers); i++ {
+		wk := workers[i]
+		go func() {
+			for {
+				job := <-wk.nextJob
+				scheduledJobs[int(job.index)] <- sched{
+					wk:  wk,
+					job: job,
+				}
+			}
+		}()
+	}
+
+	// Send the batch, and Retrieve all jobs immediately.
+	errChan := wm.Query(queries[:], ErrChan(make(chan error, 1)))
+	var jobs [numQueries]sched
+	for i := 0; i < numQueries; i++ {
+		var s sched
+		select {
+		case s = <-scheduledJobs[i]:
+			if s.job.index != float64(i) {
+				t.Fatalf("wrong index")
+			}
+
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+
+		jobs[int(s.job.index)] = s
+	}
+
+	// Go backwards, and make half of it return with an ErrIgnoreRequest.
+	for i := numQueries - 1; i >= 0; i-- {
+		select {
+		case jobs[i].wk.results <- &jobResult{
+			job: jobs[i].job,
+			err: ErrIgnoreRequest,
+		}:
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("result not handled")
+		}
+	}
+
+	// Finally, make sure the failed jobs are not retried.
+	for i := 0; i < numQueries; i++ {
+		var s sched
+		select {
+		case s = <-scheduledJobs[i]:
+			t.Fatalf("did not expect any retried job but job"+
+				"%v\n retried", s.job.index)
+		case <-errChan:
+			t.Fatalf("did not expect an errChan")
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// TestWorkManagerResultUnfinished tests the workmanager handling a result with an unfinished boolean set
+// to true.
+func TestWorkManagerResultUnfinished(t *testing.T) {
+	const numQueries = 10
+
+	// Start work manager with as many workers as queries. This is not very
+	// realistic, but makes the work manager able to schedule all queries
+	// concurrently.
+	c, workers := startWorkManager(t, numQueries)
+	wm := c.wm
+
+	// When the jobs gets scheduled, keep track of which worker was
+	// assigned the job.
+	type sched struct {
+		wk  *mockWorker
+		job *queryJob
+	}
+
+	// Schedule a batch of queries.
+	var (
+		queries       [numQueries]*Request
+		scheduledJobs [numQueries]chan sched
+	)
+	for i := 0; i < numQueries; i++ {
+		q := &Request{
+			Req: &mockQueryEncoded{},
+		}
+		queries[i] = q
+		scheduledJobs[i] = make(chan sched)
+	}
+
+	// Fot each worker, spin up a goroutine that will forward the job it
+	// got to our slice of scheduled jobs, such that we can handle them in
+	// order.
+	for i := 0; i < len(workers); i++ {
+		wk := workers[i]
+		go func() {
+			for {
+				job := <-wk.nextJob
+				scheduledJobs[int(job.index)] <- sched{
+					wk:  wk,
+					job: job,
+				}
+			}
+		}()
+	}
+
+	// Send the batch, and Retrieve all jobs immediately.
+	errChan := wm.Query(queries[:], ErrChan(make(chan error, 1)))
+	var jobs [numQueries]sched
+	for i := 0; i < numQueries; i++ {
+		var s sched
+		select {
+		case s = <-scheduledJobs[i]:
+			if s.job.index != float64(i) {
+				t.Fatalf("wrong index")
+			}
+
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+
+		jobs[int(s.job.index)] = s
+	}
+
+	// Go backwards, and make half of it unfinished.
+	for i := numQueries - 1; i >= 0; i-- {
+		var (
+			unfinished bool
+		)
+		if i%2 == 0 {
+			unfinished = true
+		}
+
+		select {
+		case jobs[i].wk.results <- &jobResult{
+			job:        jobs[i].job,
+			unfinished: unfinished,
+		}:
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("result not handled")
+		}
+	}
+
+	// Finally, make sure the failed jobs are being retried, in the same
+	// order as they were originally scheduled.
+	for i := 0; i < numQueries; i += 2 {
+		var s sched
+		select {
+		case s = <-scheduledJobs[i]:
+
+			// The new tindex the job should have.
+			idx := float64(i) + 0.0005
+			if idx != s.job.index {
+				t.Fatalf("expected index %v for job"+
+					"but got, %v\n", idx, s.job.index)
+			}
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+		select {
+		case s.wk.results <- &jobResult{
+			job: s.job,
+			err: nil,
+		}:
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			t.Fatalf("result not handled")
 		}
 	}
 

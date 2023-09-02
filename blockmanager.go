@@ -850,43 +850,37 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
-func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peerAddr string) query.Progress {
+func (c *checkpointedCFHeadersQuery) handleResponse(request query.ReqMessage, resp wire.Message,
+	peer query.Peer) query.Progress {
+
+	peerAddr := ""
+	if peer != nil {
+		peerAddr = peer.Addr()
+	}
+	req := request.Message()
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
 		// We are only looking for cfheaders messages.
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
 	q, ok := req.(*wire.MsgGetCFHeaders)
 	if !ok {
 		// We sent a getcfheaders message, so that's what we should be
 		// comparing against.
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
 	// The response doesn't match the query.
 	if q.FilterType != r.FilterType || q.StopHash != r.StopHash {
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
 	checkPointIndex, ok := c.stopHashes[r.StopHash]
 	if !ok {
 		// We never requested a matching stop hash.
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
 	// Use either the genesis header or the previous checkpoint index as
@@ -920,10 +914,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
 
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
 	// At this point, the response matches the query, and the relevant
@@ -934,16 +925,10 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	select {
 	case c.headerChan <- r:
 	case <-c.blockMgr.quit:
-		return query.Progress{
-			Finished:   false,
-			Progressed: false,
-		}
+		return query.NoResponse
 	}
 
-	return query.Progress{
-		Finished:   true,
-		Progressed: true,
-	}
+	return query.Finished
 }
 
 // sendQueryMessageWithEncoding sends a message to the peer with encoding.
@@ -1106,7 +1091,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
 	errChan := b.cfg.QueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
+		q.requests(), query.Cancel(b.quit), query.NoRetryMax(), query.ErrChan(make(chan error, 1)),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an

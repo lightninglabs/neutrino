@@ -17,6 +17,14 @@ var (
 	// ErrJobCanceled is returned if the job is canceled before the query
 	// has been answered.
 	ErrJobCanceled = errors.New("job canceled")
+
+	// ErrIgnoreRequest is returned if we want to ignore the request after getting
+	// a response.
+	ErrIgnoreRequest = errors.New("ignore request")
+
+	// ErrResponseErr is returned if we received a compatible response for the query but, it did not pass
+	// preliminary verification.
+	ErrResponseErr = errors.New("received response with error")
 )
 
 // queryJob is the internal struct that wraps the Query to work on, in
@@ -42,9 +50,10 @@ func (q *queryJob) Index() float64 {
 
 // jobResult is the final result of the worker's handling of the queryJob.
 type jobResult struct {
-	job  *queryJob
-	peer Peer
-	err  error
+	job        *queryJob
+	peer       Peer
+	err        error
+	unfinished bool
 }
 
 // worker is responsible for polling work from its work queue, and handing it
@@ -152,8 +161,9 @@ nexJobLoop:
 		// Wait for the correct response to be received from the peer,
 		// or an error happening.
 		var (
-			jobErr  error
-			timeout = time.NewTimer(job.timeout)
+			jobErr        error
+			jobUnfinished bool
+			timeout       = time.NewTimer(job.timeout)
 		)
 
 	feedbackLoop:
@@ -164,36 +174,49 @@ nexJobLoop:
 			// our request.
 			case resp := <-msgChan:
 				progress := job.HandleResp(
-					job.Req.Message(), resp, peer.Addr(),
+					job.Req, resp, peer,
 				)
 
 				log.Tracef("Worker %v handled msg %T while "+
-					"waiting for response to %T (job=%v). "+
-					"Finished=%v, progressed=%v",
-					peer.Addr(), resp, job.Req, job.Index(),
-					progress.Finished, progress.Progressed)
+					"waiting for response to %T (job=%v). ",
+					peer.Addr(), resp, job.Req, job.Index())
 
-				// If the response did not answer our query, we
-				// check whether it did progress it.
-				if !progress.Finished {
-					// If it did make progress we reset the
-					// timeout. This ensures that the
-					// queries with multiple responses
-					// expected won't timeout before all
-					// responses have been handled.
-					// TODO(halseth): separate progress
-					// timeout value.
-					if progress.Progressed {
-						timeout.Stop()
-						timeout = time.NewTimer(
-							job.timeout,
-						)
-					}
+				switch {
+				case progress == Finished:
+
+				//	Wait for valid response if we have not gotten any one yet.
+				case progress == NoResponse:
+
 					continue feedbackLoop
+
+				//	Increase job's timeout if valid response has been received, and we
+				// are awaiting more to prevent premature timeout.
+				case progress == Progressed:
+
+					timeout.Stop()
+					timeout = time.NewTimer(
+						job.timeout,
+					)
+
+					continue feedbackLoop
+
+				//	Assign true to jobUnfinished to indicate that we need to reschedule job to complete request.
+				case progress == UnFinishedRequest:
+
+					jobUnfinished = true
+
+				//	Assign ErrIgnoreRequest to indicate that workmanager should take no action on receipt of
+				// this request.
+				case progress == IgnoreRequest:
+
+					jobErr = ErrIgnoreRequest
+
+				//	Assign ErrResponseErr to jobErr if we received a valid response that did not pass checks.
+				case progress == ResponseErr:
+
+					jobErr = ErrResponseErr
 				}
 
-				// We did get a valid response, and can break
-				// the loop.
 				break feedbackLoop
 
 			// If the timeout is reached before a valid response
@@ -259,9 +282,10 @@ nexJobLoop:
 		// getting a new job.
 		select {
 		case results <- &jobResult{
-			job:  resultJob,
-			peer: peer,
-			err:  jobErr,
+			job:        resultJob,
+			peer:       peer,
+			err:        jobErr,
+			unfinished: jobUnfinished,
 		}:
 		case <-quit:
 			return

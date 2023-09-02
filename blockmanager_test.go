@@ -214,14 +214,14 @@ func generateHeaders(genesisBlockHeader *wire.BlockHeader,
 
 // generateResponses generates the MsgCFHeaders messages from the given queries
 // and headers.
-func generateResponses(msgs []wire.Message,
+func generateResponses(msgs []query.ReqMessage,
 	headers *headers) ([]*wire.MsgCFHeaders, error) {
 
 	// Craft a response for each message.
 	var responses []*wire.MsgCFHeaders
 	for _, msg := range msgs {
 		// Only GetCFHeaders expected.
-		q, ok := msg.(*wire.MsgGetCFHeaders)
+		q, ok := msg.Message().(*wire.MsgGetCFHeaders)
 		if !ok {
 			return nil, fmt.Errorf("got unexpected message %T",
 				msg)
@@ -350,9 +350,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			requests []*query.Request,
 			options ...query.QueryOption) chan error {
 
-			var msgs []wire.Message
+			var msgs []query.ReqMessage
 			for _, q := range requests {
-				msgs = append(msgs, q.Req.Message())
+				msgs = append(msgs, q.Req)
 			}
 
 			responses, err := generateResponses(msgs, headers)
@@ -379,13 +379,13 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Let the blockmanager handle the
 					// message.
 					progress := requests[index].HandleResp(
-						msgs[index], &resp, "",
+						msgs[index], &resp, nil,
 					)
 
-					if !progress.Finished {
+					if progress != query.Finished {
 						errChan <- fmt.Errorf("got "+
-							"response false on "+
-							"send of index %d: %v",
+							" %v on "+
+							"send of index %d: %v", progress,
 							index, testDesc)
 						return
 					}
@@ -400,13 +400,13 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Otherwise resend the response we
 					// just sent.
 					progress = requests[index].HandleResp(
-						msgs[index], &resp2, "",
+						msgs[index], &resp2, nil,
 					)
-					if !progress.Finished {
+					if progress != query.Finished {
 						errChan <- fmt.Errorf("got "+
-							"response false on "+
-							"resend of index %d: "+
-							"%v", index, testDesc)
+							" %v on "+
+							"send of index %d: %v", progress,
+							index, testDesc)
 						return
 					}
 				}
@@ -580,9 +580,9 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			requests []*query.Request,
 			options ...query.QueryOption) chan error {
 
-			var msgs []wire.Message
+			var msgs []query.ReqMessage
 			for _, q := range requests {
-				msgs = append(msgs, q.Req.Message())
+				msgs = append(msgs, q.Req)
 			}
 			responses, err := generateResponses(msgs, headers)
 			require.NoError(t, err)
@@ -619,10 +619,10 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				// expect.
 				for i := range responses {
 					progress := requests[i].HandleResp(
-						msgs[i], responses[i], "",
+						msgs[i], responses[i], nil,
 					)
 					if i == test.firstInvalid {
-						if progress.Finished {
+						if progress == query.Finished {
 							t.Errorf("expected interval "+
 								"%d to be invalid", i)
 							return
@@ -631,7 +631,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 						break
 					}
 
-					if !progress.Finished {
+					if progress != query.Finished {
 						t.Errorf("expected interval %d to be "+
 							"valid", i)
 						return

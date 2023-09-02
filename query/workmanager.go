@@ -26,7 +26,6 @@ var (
 type batch struct {
 	requests []*Request
 	options  *queryOptions
-	errChan  chan error
 }
 
 // Worker is the interface that must be satisfied by workers managed by the
@@ -94,6 +93,9 @@ type Config struct {
 	// Ranking is used to rank the connected peers when determining who to
 	// give work to.
 	Ranking PeerRanking
+
+	// IsEligibleWorkerFunc determines which peer is eligible to receive a job.
+	IsEligibleWorkerFunc func(r *activeWorker, next *queryJob) bool
 }
 
 // peerWorkManager is the main access point for outside callers, and satisfies
@@ -192,7 +194,9 @@ func (w *peerWorkManager) workDispatcher() {
 	// batches and send on their error channel.
 	defer func() {
 		for _, b := range currentBatches {
-			b.errChan <- ErrWorkManagerShuttingDown
+			if b.errChan != nil {
+				b.errChan <- ErrWorkManagerShuttingDown
+			}
 		}
 	}()
 
@@ -212,7 +216,7 @@ Loop:
 			next := work.Peek().(*queryJob)
 
 			// Find the peers with free work slots available.
-			var freeWorkers []string
+			var freeEligibleWorkers []string
 			for p, r := range workers {
 				// Only one active job at a time is currently
 				// supported.
@@ -220,15 +224,24 @@ Loop:
 					continue
 				}
 
-				freeWorkers = append(freeWorkers, p)
+				// If there is a specified eligibilty function for
+				// the peer, use it to determine which peers we can
+				// send jobs to.
+				if w.cfg.IsEligibleWorkerFunc != nil {
+					if !w.cfg.IsEligibleWorkerFunc(r, next) {
+						continue
+					}
+				}
+
+				freeEligibleWorkers = append(freeEligibleWorkers, p)
 			}
 
 			// Use the historical data to rank them.
-			w.cfg.Ranking.Order(freeWorkers)
+			w.cfg.Ranking.Order(freeEligibleWorkers)
 
 			// Give the job to the highest ranked peer with free
 			// slots available.
-			for _, p := range freeWorkers {
+			for _, p := range freeEligibleWorkers {
 				r := workers[p]
 
 				// The worker has free work slots, it should
@@ -322,13 +335,19 @@ Loop:
 				// batch's error channel.  We do this since a
 				// cancellation applies to the whole batch.
 				if batch != nil {
-					batch.errChan <- result.err
+					if batch.errChan != nil {
+						batch.errChan <- result.err
+					}
 					delete(currentBatches, batchNum)
 
 					log.Debugf("Canceled batch %v",
 						batchNum)
 					continue Loop
 				}
+				//	Take no action if we are to ignore request.
+			case result.err == ErrIgnoreRequest:
+				log.Debugf("received ignore request")
+				continue Loop
 
 			// If the query ended with any other error, put it back
 			// into the work queue if it has not reached the
@@ -356,7 +375,9 @@ Loop:
 
 					// Return the error and cancel the
 					// batch.
-					batch.errChan <- result.err
+					if batch.errChan != nil {
+						batch.errChan <- result.err
+					}
 					delete(currentBatches, batchNum)
 
 					log.Debugf("Canceled batch %v",
@@ -388,6 +409,19 @@ Loop:
 				// Reward the peer for the successful query.
 				w.cfg.Ranking.Reward(result.peer.Addr())
 
+				// If the result is unfinished add 0.0005 to the job index to maintain the
+				// required priority then push to work queue
+				if result.unfinished {
+					result.job.index = result.job.Index() + 0.0005
+					log.Debugf("job %v is unfinished, creating new index", result.job.Index())
+
+					heap.Push(work, result.job)
+					batch.rem++
+					currentQueries[result.job.Index()] = batchNum
+				} else {
+					log.Debugf("job %v is Finished", result.job.Index())
+				}
+
 				// Decrement the number of queries remaining in
 				// the batch.
 				if batch != nil {
@@ -399,7 +433,9 @@ Loop:
 					// for this batch, we can notify that
 					// it finished, and delete it.
 					if batch.rem == 0 {
-						batch.errChan <- nil
+						if batch.errChan != nil {
+							batch.errChan <- nil
+						}
 						delete(currentBatches, batchNum)
 
 						log.Tracef("Batch %v done",
@@ -414,7 +450,9 @@ Loop:
 			if batch != nil {
 				select {
 				case <-batch.timeout:
-					batch.errChan <- ErrQueryTimeout
+					if batch.errChan != nil {
+						batch.errChan <- ErrQueryTimeout
+					}
 					delete(currentBatches, batchNum)
 
 					log.Warnf("Query(%d) failed with "+
@@ -463,7 +501,7 @@ Loop:
 				maxRetries: batch.options.numRetries,
 				timeout:    time.After(batch.options.timeout),
 				rem:        len(batch.requests),
-				errChan:    batch.errChan,
+				errChan:    batch.options.errChan,
 			}
 			batchIndex++
 
@@ -482,18 +520,19 @@ func (w *peerWorkManager) Query(requests []*Request,
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
 
-	errChan := make(chan error, 1)
+	newBatch := &batch{
+		requests: requests,
+		options:  qo,
+	}
 
 	// Add query messages to the queue of batches to handle.
 	select {
-	case w.newBatches <- &batch{
-		requests: requests,
-		options:  qo,
-		errChan:  errChan,
-	}:
+	case w.newBatches <- newBatch:
 	case <-w.quit:
-		errChan <- ErrWorkManagerShuttingDown
+		if newBatch.options.errChan != nil {
+			newBatch.options.errChan <- ErrWorkManagerShuttingDown
+		}
 	}
 
-	return errChan
+	return newBatch.options.errChan
 }

@@ -35,6 +35,15 @@ var (
 	finalResp = &wire.MsgTx{
 		Version: 222,
 	}
+	UnfinishedRequestResp = &wire.MsgTx{
+		Version: 333,
+	}
+	finalRespWithErr = &wire.MsgTx{
+		Version: 444,
+	}
+	IgnoreRequestResp = &wire.MsgTx{
+		Version: 444,
+	}
 )
 
 type mockPeer struct {
@@ -69,25 +78,26 @@ func (m *mockPeer) Addr() string {
 func makeJob() *queryJob {
 	q := &Request{
 		Req: req,
-		HandleResp: func(req, resp wire.Message, _ string) Progress {
+		HandleResp: func(req ReqMessage, resp wire.Message, peer Peer) Progress {
 			if resp == finalResp {
-				return Progress{
-					Finished:   true,
-					Progressed: true,
-				}
+				return Finished
 			}
 
 			if resp == progressResp {
-				return Progress{
-					Finished:   false,
-					Progressed: true,
-				}
+				return Progressed
 			}
 
-			return Progress{
-				Finished:   false,
-				Progressed: false,
+			if resp == UnfinishedRequestResp {
+				return UnFinishedRequest
 			}
+
+			if resp == finalRespWithErr {
+				return ResponseErr
+			}
+			if resp == IgnoreRequestResp {
+				return IgnoreRequest
+			}
+			return NoResponse
 		},
 		SendQuery: func(peer Peer, req ReqMessage) error {
 			m := peer.(*mockPeer)
@@ -233,6 +243,11 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 		t.Fatalf("result's job index should not be different from task's")
 	}
 
+	// Make sure job does not return as unfinished.
+	if result.unfinished {
+		t.Fatalf("got unfinished job")
+	}
+
 	// And the correct peer.
 	if result.peer != ctx.peer {
 		t.Fatalf("expected peer to be %v, was %v",
@@ -300,6 +315,11 @@ func TestWorkerTimeout(t *testing.T) {
 			ctx.peer.Addr(), result.peer)
 	}
 
+	// Make sure job does not return as unfinished.
+	if result.unfinished {
+		t.Fatalf("got unfinished job")
+	}
+
 	// It will immediately attempt to fetch another task.
 	select {
 	case ctx.nextJob <- task:
@@ -365,6 +385,11 @@ func TestWorkerDisconnect(t *testing.T) {
 			ctx.peer.Addr(), result.peer)
 	}
 
+	// Make sure job does not return as unfinished.
+	if result.unfinished {
+		t.Fatalf("got unfinished job")
+	}
+
 	// No more jobs should be accepted by the worker after it has exited.
 	select {
 	case ctx.nextJob <- task:
@@ -393,70 +418,121 @@ func TestWorkerProgress(t *testing.T) {
 	}
 
 	// Create a task with a small timeout, and give it to the worker.
-	task := makeJob()
-	task.timeout = taskTimeout
-
-	select {
-	case ctx.nextJob <- task:
-	case <-time.After(1 * time.Second):
-		t.Fatalf("did not pick up job")
+	type testResp struct {
+		name       string
+		response   *wire.MsgTx
+		err        *error
+		unfinished bool
 	}
 
-	// The request should be given to the peer.
-	select {
-	case <-ctx.peer.requests:
-	case <-time.After(time.Second):
-		t.Fatalf("request not sent")
+	testCases := []testResp{
+
+		{
+			name:     "final response.",
+			response: finalResp,
+		},
+
+		{
+			name:       "Unfinished request response.",
+			response:   UnfinishedRequestResp,
+			unfinished: true,
+		},
+
+		{
+			name:     "ignore request",
+			response: IgnoreRequestResp,
+			err:      &ErrIgnoreRequest,
+		},
+
+		{
+			name:     "final response, with err",
+			response: finalRespWithErr,
+			err:      &ErrResponseErr,
+		},
 	}
 
-	// Send a few other responses that indicates progress, but not success.
-	// We add a small delay between each time we send a response. In total
-	// the delay will be larger than the query timeout, but since we are
-	// making progress, the timeout won't trigger.
-	for i := 0; i < 5; i++ {
-		select {
-		case ctx.peer.responses <- progressResp:
-		case <-time.After(time.Second):
-			t.Fatalf("resp not received")
-		}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := makeJob()
+			task.timeout = taskTimeout
 
-		time.Sleep(taskTimeout / 2)
-	}
+			select {
+			case ctx.nextJob <- task:
+			case <-time.After(1 * time.Second):
+				t.Fatalf("did not pick up job")
+			}
 
-	// Finally send the final response.
-	select {
-	case ctx.peer.responses <- finalResp:
-	case <-time.After(time.Second):
-		t.Fatalf("resp not received")
-	}
+			// The request should be given to the peer.
+			select {
+			case <-ctx.peer.requests:
+			case <-time.After(time.Second):
+				t.Fatalf("request not sent")
+			}
 
-	// The worker should respond with a job finised.
-	var result *jobResult
-	select {
-	case result = <-ctx.jobResults:
-	case <-time.After(time.Second):
-		t.Fatalf("response not received")
-	}
+			// Send a few other responses that indicates progress, but not success.
+			// We add a small delay between each time we send a response. In total
+			// the delay will be larger than the query timeout, but since we are
+			// making progress, the timeout won't trigger.
+			for i := 0; i < 5; i++ {
+				select {
+				case ctx.peer.responses <- progressResp:
+				case <-time.After(time.Second):
+					t.Fatalf("resp not received")
+				}
 
-	if result.err != nil {
-		t.Fatalf("expected no error, got: %v", result.err)
-	}
+				time.Sleep(taskTimeout / 2)
+			}
 
-	// Make sure the QueryJob instance in the result is different from the initial one
-	// supplied to the worker
-	if result.job == task {
-		t.Fatalf("result's job should be different from the task's")
-	}
+			// Finally send the final response.
+			select {
+			case ctx.peer.responses <- tc.response:
+			case <-time.After(time.Second):
+				t.Fatalf("resp not received")
+			}
 
-	// Make sure we are receiving the corresponding result for the given task.
-	if result.job.Index() != task.Index() {
-		t.Fatalf("result's job index should not be different from task's")
-	}
+			// The worker should respond with a job finished.
+			var result *jobResult
+			select {
+			case result = <-ctx.jobResults:
+			case <-time.After(time.Second):
+				t.Fatalf("response not received")
+			}
 
-	// And the correct peer.
-	if result.peer != ctx.peer {
-		t.Fatalf("expected peer to be %v, was %v",
-			ctx.peer.Addr(), result.peer)
+			if tc.err == nil && result.err != nil {
+				t.Fatalf("expected no error, got: %v", result.err)
+			}
+
+			if tc.err != nil && result.err != *tc.err {
+				t.Fatalf("expected error, %v but got: %v", *tc.err,
+					result.err)
+			}
+
+			// Make sure the QueryJob instance in the result is different from the initial one
+			// supplied to the worker
+			if result.job == task {
+				t.Fatalf("result's job should be different from task's")
+			}
+
+			// Make sure we are receiving the corresponding result for the given task.
+			if result.job.Index() != task.Index() {
+				t.Fatalf("result's job index should not be different from task's")
+			}
+
+			// And the correct peer.
+			if result.peer != ctx.peer {
+				t.Fatalf("expected peer to be %v, was %v",
+					ctx.peer.Addr(), result.peer)
+			}
+
+			// Make sure job does not return as unfinished.
+			if tc.unfinished && !result.unfinished {
+				t.Fatalf("expected job unfinished but got job finished")
+			}
+
+			if !tc.unfinished && result.unfinished {
+				t.Fatalf("expected job finished but got unfinished job")
+			}
+		})
 	}
 }
 
@@ -530,6 +606,11 @@ func TestWorkerJobCanceled(t *testing.T) {
 		// Make sure we are receiving the corresponding result for the given task.
 		if result.job.Index() != task.Index() {
 			t.Fatalf("result's job index should not be different from task's")
+		}
+
+		// Make sure job does not return as unfinished.
+		if result.unfinished {
+			t.Fatalf("got unfinished job")
 		}
 
 		// And the correct peer.

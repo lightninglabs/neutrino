@@ -43,6 +43,9 @@ type queryOptions struct {
 	// that a query can be retried. If this is set then numRetries has no
 	// effect.
 	noRetryMax bool
+
+	// errChan error channel with which the workmananger sends error.
+	errChan chan error
 }
 
 // QueryOption is a functional option argument to any of the network query
@@ -64,6 +67,14 @@ func defaultQueryOptions() *queryOptions {
 func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	for _, option := range options {
 		option(qo)
+	}
+}
+
+// ErrChan is a query option that specifies the error channel which the workmanager
+// sends any error to.
+func ErrChan(err chan error) QueryOption {
+	return func(qo *queryOptions) {
+		qo.errChan = err
 	}
 }
 
@@ -107,19 +118,34 @@ func Cancel(cancel chan struct{}) QueryOption {
 	}
 }
 
-// Progress encloses the result of handling a response for a given Request,
-// determining whether the response did progress the query.
-type Progress struct {
-	// Finished is true if the query was finished as a result of the
-	// received response.
-	Finished bool
+// Progress encloses the result of handling a response for a given Request.
+type Progress string
 
-	// Progressed is true if the query made progress towards fully
-	// answering the request as a result of the received response. This is
-	// used for the requests types where more than one response is
-	// expected.
-	Progressed bool
-}
+var (
+
+	// Finished indicates we have received the complete, valid response for this request,
+	// and so we are done with it.
+	Finished Progress = "Received complete  and valid response for request."
+
+	// Progressed indicates that we have received a valid response, but we are expecting more.
+	Progressed Progress = "Received valid response, expecting more response for query."
+
+	// UnFinishedRequest indicates that we have received some response, but we need to rescheule the job
+	// to completely fetch all the response required for this request.
+	UnFinishedRequest Progress = "Received valid response, reschedule to complete request"
+
+	// ResponseErr indicates we obtained a valid response but response fails checks and needs to
+	// be rescheduled.
+	ResponseErr Progress = "Received valid response but fails checks "
+
+	// IgnoreRequest indicates that we have received a valid response but the workmanager need take
+	// no action on the result of this job.
+	IgnoreRequest Progress = "Received response but ignoring"
+
+	// NoResponse indicates that we have received an invalid response for this request, and we need
+	// to wait for a valid one.
+	NoResponse Progress = "Received invalid response"
+)
 
 // Request is the main struct that defines a bitcoin network query to be sent to
 // connected peers.
@@ -138,7 +164,7 @@ type Request struct {
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peer string) Progress
+	HandleResp func(req ReqMessage, resp wire.Message, peer Peer) Progress
 
 	// SendQuery handles sending request to the worker's peer. It returns an error,
 	// if one is encountered while sending the request.

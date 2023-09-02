@@ -66,10 +66,7 @@ var (
 
 	// noProgress will be used to indicate to a query.WorkManager that a
 	// response makes no progress towards the completion of the query.
-	noProgress = query.Progress{
-		Finished:   false,
-		Progressed: false,
-	}
+	noProgress = query.NoResponse
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -470,9 +467,10 @@ func (q *cfiltersQuery) request() *query.Request {
 
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
-func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+func (q *cfiltersQuery) handleResponse(r query.ReqMessage, resp wire.Message,
+	peer query.Peer) query.Progress {
 
+	req := r.Message()
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
 	if !ok {
@@ -573,17 +571,11 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	// If there are still entries left in the headerIndex then the query
 	// has made progress but has not yet completed.
 	if len(q.headerIndex) != 0 {
-		return query.Progress{
-			Finished:   false,
-			Progressed: true,
-		}
+		return query.Progressed
 	}
 
 	// The headerIndex is empty and so this query is complete.
-	return query.Progress{
-		Finished:   true,
-		Progressed: true,
-	}
+	return query.Finished
 }
 
 // prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
@@ -784,6 +776,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		query.Cancel(s.quit),
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	errChan := s.workManager.Query(
@@ -868,7 +861,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(request query.ReqMessage, resp wire.Message, sp query.Peer) query.Progress {
+		req := request.Message()
+		peer := ""
+		if sp != nil {
+			peer = sp.Addr()
+		}
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {
@@ -933,10 +931,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		// we declare it sane. We can kill the query and pass the
 		// response back to the caller.
 		foundBlock = block
-		return query.Progress{
-			Finished:   true,
-			Progressed: true,
-		}
+		return query.Finished
 	}
 
 	// Prepare the query request.
@@ -968,6 +963,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
 		query.Cancel(s.quit),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	// Send the request to the work manager and await a response.
