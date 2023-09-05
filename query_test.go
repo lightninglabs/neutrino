@@ -303,9 +303,9 @@ func TestBlockCache(t *testing.T) {
 		defer close(errChan)
 
 		require.Len(t, reqs, 1)
-		require.IsType(t, &wire.MsgGetData{}, reqs[0].Req)
+		require.IsType(t, &wire.MsgGetData{}, reqs[0].Req.Message())
 
-		getData := reqs[0].Req.(*wire.MsgGetData)
+		getData := reqs[0].Req.Message().(*wire.MsgGetData)
 		require.Len(t, getData.InvList, 1)
 
 		inv := getData.InvList[0]
@@ -324,10 +324,10 @@ func TestBlockCache(t *testing.T) {
 				Header:       *header,
 				Transactions: b.MsgBlock().Transactions,
 			}
-
-			progress := reqs[0].HandleResp(getData, resp, "")
-			require.True(t, progress.Progressed)
-			require.True(t, progress.Finished)
+			progress := reqs[0].HandleResp(&encodedQuery{
+				message: getData,
+			}, resp, nil)
+			require.Equal(t, query.Finished, progress)
 
 			// Notify the test about the query.
 			select {

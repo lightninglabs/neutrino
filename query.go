@@ -66,10 +66,7 @@ var (
 
 	// noProgress will be used to indicate to a query.WorkManager that a
 	// response makes no progress towards the completion of the query.
-	noProgress = query.Progress{
-		Finished:   false,
-		Progressed: false,
-	}
+	noProgress = query.NoResponse
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -430,26 +427,50 @@ type cfiltersQuery struct {
 	headerIndex   map[chainhash.Hash]int
 	targetHash    chainhash.Hash
 	targetFilter  *gcs.Filter
+	mtx           sync.Mutex
 }
 
 // request couples a query message with the handler to be used for the response
 // in a query.Request struct.
 func (q *cfiltersQuery) request() *query.Request {
-	msg := wire.NewMsgGetCFilters(
-		q.filterType, uint32(q.startHeight), q.stopHash,
-	)
+	msg := &encodedQuery{
+		message: wire.NewMsgGetCFilters(
+			q.filterType, uint32(q.startHeight), q.stopHash,
+		),
+		encoding: wire.WitnessEncoding,
+	}
 
 	return &query.Request{
 		Req:        msg,
 		HandleResp: q.handleResponse,
+		SendQuery:  sendQueryMessageWithEncoding,
+		CloneReq: func(req query.ReqMessage) query.ReqMessage {
+			oldReq, ok := req.(*encodedQuery)
+			if !ok {
+				log.Errorf("request not of type *encodedQuery")
+			}
+			oldReqMessage, ok := oldReq.message.(*wire.MsgGetCFilters)
+			if !ok {
+				log.Errorf("request not of type *wire.MsgGetCFilters")
+			}
+			newReq := &encodedQuery{
+				message: wire.NewMsgGetCFilters(
+					oldReqMessage.FilterType, oldReqMessage.StartHeight, &oldReqMessage.StopHash,
+				),
+				encoding:      oldReq.encoding,
+				priorityIndex: oldReq.priorityIndex,
+			}
+			return newReq
+		},
 	}
 }
 
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
-func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+func (q *cfiltersQuery) handleResponse(r query.ReqMessage, resp wire.Message,
+	peer query.Peer) query.Progress {
 
+	req := r.Message()
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
 	if !ok {
@@ -476,6 +497,8 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 
 	// If this filter is for a block not in our index, we can ignore it, as
 	// we either already got it, or it is out of our queried range.
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	i, ok := q.headerIndex[response.BlockHash]
 	if !ok {
 		return noProgress
@@ -548,17 +571,11 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	// If there are still entries left in the headerIndex then the query
 	// has made progress but has not yet completed.
 	if len(q.headerIndex) != 0 {
-		return query.Progress{
-			Finished:   false,
-			Progressed: true,
-		}
+		return query.Progressed
 	}
 
 	// The headerIndex is empty and so this query is complete.
-	return query.Progress{
-		Finished:   true,
-		Progressed: true,
-	}
+	return query.Finished
 }
 
 // prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
@@ -759,6 +776,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		query.Cancel(s.quit),
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	errChan := s.workManager.Query(
@@ -833,13 +851,22 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
 	_ = getData.AddInvVect(inv)
+	msg := &encodedQuery{
+		message:  getData,
+		encoding: wire.WitnessEncoding,
+	}
 
 	var foundBlock *btcutil.Block
 
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(request query.ReqMessage, resp wire.Message, sp query.Peer) query.Progress {
+		req := request.Message()
+		peer := ""
+		if sp != nil {
+			peer = sp.Addr()
+		}
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {
@@ -904,16 +931,31 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		// we declare it sane. We can kill the query and pass the
 		// response back to the caller.
 		foundBlock = block
-		return query.Progress{
-			Finished:   true,
-			Progressed: true,
-		}
+		return query.Finished
 	}
 
 	// Prepare the query request.
 	request := &query.Request{
-		Req:        getData,
+		Req:        msg,
 		HandleResp: handleResp,
+		SendQuery:  sendQueryMessageWithEncoding,
+		CloneReq: func(req query.ReqMessage) query.ReqMessage {
+			newMsg := wire.NewMsgGetData()
+			_ = newMsg.AddInvVect(inv)
+
+			oldReq, ok := req.(*encodedQuery)
+			if !ok {
+				log.Errorf("request not of type *encodedQuery")
+			}
+
+			newReq := &encodedQuery{
+				message:       newMsg,
+				encoding:      oldReq.encoding,
+				priorityIndex: oldReq.priorityIndex,
+			}
+
+			return newReq
+		},
 	}
 
 	// Prepare the query options.
@@ -921,6 +963,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		query.Encoding(qo.encoding),
 		query.NumRetries(qo.numRetries),
 		query.Cancel(s.quit),
+		query.ErrChan(make(chan error, 1)),
 	}
 
 	// Send the request to the work manager and await a response.
