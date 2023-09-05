@@ -235,11 +235,31 @@ nexJobLoop:
 		// Stop to allow garbage collection.
 		timeout.Stop()
 
+		// This is necessary to avoid a situation where future changes to the job's request affect the current job.
+		// For example: suppose we want to fetch headers between checkpoints 0 and 20,000. The maximum number of headers
+		// that a peer can send in one message is 2000. When we receive 2000 headers for one request,
+		// we update the job's request, changing its startheight and blocklocator to match the next batch of headers
+		// that we want to fetch. Since we are not done with fetching our target of 20,000 headers,
+		// we will have to make more changes to the job's request in the future. This could alter previous requests,
+		// resulting in unwanted behaviour.
+		resultJob := &queryJob{
+			index: job.Index(),
+			Request: &Request{
+				Req:        job.CloneReq(job.Req),
+				HandleResp: job.Request.HandleResp,
+				CloneReq:   job.Request.CloneReq,
+				SendQuery:  job.Request.SendQuery,
+			},
+			cancelChan: job.cancelChan,
+			tries:      job.tries,
+			timeout:    job.timeout,
+		}
+
 		// We have a result ready for the query, hand it off before
 		// getting a new job.
 		select {
 		case results <- &jobResult{
-			job:  job,
+			job:  resultJob,
 			peer: peer,
 			err:  jobErr,
 		}:

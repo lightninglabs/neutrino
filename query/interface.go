@@ -143,6 +143,9 @@ type Request struct {
 	// SendQuery handles sending request to the worker's peer. It returns an error,
 	// if one is encountered while sending the request.
 	SendQuery func(peer Peer, request ReqMessage) error
+
+	// CloneReq clones the message.
+	CloneReq func(message ReqMessage) ReqMessage
 }
 
 // ReqMessage is an interface which all structs containing information

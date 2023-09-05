@@ -447,6 +447,24 @@ func (q *cfiltersQuery) request() *query.Request {
 		Req:        msg,
 		HandleResp: q.handleResponse,
 		SendQuery:  sendQueryMessageWithEncoding,
+		CloneReq: func(req query.ReqMessage) query.ReqMessage {
+			oldReq, ok := req.(*encodedQuery)
+			if !ok {
+				log.Errorf("request not of type *encodedQuery")
+			}
+			oldReqMessage, ok := oldReq.message.(*wire.MsgGetCFilters)
+			if !ok {
+				log.Errorf("request not of type *wire.MsgGetCFilters")
+			}
+			newReq := &encodedQuery{
+				message: wire.NewMsgGetCFilters(
+					oldReqMessage.FilterType, oldReqMessage.StartHeight, &oldReqMessage.StopHash,
+				),
+				encoding:      oldReq.encoding,
+				priorityIndex: oldReq.priorityIndex,
+			}
+			return newReq
+		},
 	}
 }
 
@@ -926,6 +944,23 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		Req:        msg,
 		HandleResp: handleResp,
 		SendQuery:  sendQueryMessageWithEncoding,
+		CloneReq: func(req query.ReqMessage) query.ReqMessage {
+			newMsg := wire.NewMsgGetData()
+			_ = newMsg.AddInvVect(inv)
+
+			oldReq, ok := req.(*encodedQuery)
+			if !ok {
+				log.Errorf("request not of type *encodedQuery")
+			}
+
+			newReq := &encodedQuery{
+				message:       newMsg,
+				encoding:      oldReq.encoding,
+				priorityIndex: oldReq.priorityIndex,
+			}
+
+			return newReq
+		},
 	}
 
 	// Prepare the query options.

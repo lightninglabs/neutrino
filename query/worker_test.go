@@ -99,6 +99,19 @@ func makeJob() *queryJob {
 			m.requests <- req.Message()
 			return nil
 		},
+		CloneReq: func(req ReqMessage) ReqMessage {
+			oldReq := req.(*mockQueryEncoded)
+
+			newMsg := &wire.MsgGetData{
+				InvList: oldReq.message.InvList,
+			}
+
+			clone := &mockQueryEncoded{
+				message: newMsg,
+			}
+
+			return clone
+		},
 	}
 
 	return &queryJob{
@@ -209,9 +222,15 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 		t.Fatalf("response error: %v", result.err)
 	}
 
-	// Make sure the result was given for the intended job.
-	if result.job != task {
-		t.Fatalf("got result for unexpected job")
+	// Make sure the QueryJob instance in the result is different from the initial one
+	// supplied to the worker
+	if result.job == task {
+		t.Fatalf("result's job should be different from the task's")
+	}
+
+	// Make sure we are receiving the corresponding result for the given task.
+	if result.job.Index() != task.Index() {
+		t.Fatalf("result's job index should not be different from task's")
 	}
 
 	// And the correct peer.
@@ -264,9 +283,15 @@ func TestWorkerTimeout(t *testing.T) {
 		t.Fatalf("expected timeout, got: %v", result.err)
 	}
 
-	// Make sure the result was given for the intended job.
-	if result.job != task {
-		t.Fatalf("got result for unexpected job")
+	// Make sure the QueryJob instance in the result is different from the initial one
+	// supplied to the worker
+	if result.job == task {
+		t.Fatalf("result's job should be different from the task's")
+	}
+
+	// Make sure we are receiving the corresponding result for the given task.
+	if result.job.Index() != task.Index() {
+		t.Fatalf("result's job index should not be different from task's")
 	}
 
 	// And the correct peer.
@@ -323,9 +348,15 @@ func TestWorkerDisconnect(t *testing.T) {
 		t.Fatalf("expected peer disconnect, got: %v", result.err)
 	}
 
-	// Make sure the result was given for the intended job.
-	if result.job != task {
-		t.Fatalf("got result for unexpected job")
+	// Make sure the QueryJob instance in the result is different from the initial one
+	// supplied to the worker
+	if result.job == task {
+		t.Fatalf("result's job should be different from the task's")
+	}
+
+	// Make sure we are receiving the corresponding result for the given task.
+	if result.job.Index() != task.Index() {
+		t.Fatalf("result's job index should not be different from task's")
 	}
 
 	// And the correct peer.
@@ -411,9 +442,15 @@ func TestWorkerProgress(t *testing.T) {
 		t.Fatalf("expected no error, got: %v", result.err)
 	}
 
-	// Make sure the result was given for the intended task.
-	if result.job != task {
-		t.Fatalf("got result for unexpected job")
+	// Make sure the QueryJob instance in the result is different from the initial one
+	// supplied to the worker
+	if result.job == task {
+		t.Fatalf("result's job should be different from the task's")
+	}
+
+	// Make sure we are receiving the corresponding result for the given task.
+	if result.job.Index() != task.Index() {
+		t.Fatalf("result's job index should not be different from task's")
 	}
 
 	// And the correct peer.
@@ -484,9 +521,15 @@ func TestWorkerJobCanceled(t *testing.T) {
 			t.Fatalf("expected job canceled, got: %v", result.err)
 		}
 
-		// Make sure the result was given for the intended task.
-		if result.job != task {
-			t.Fatalf("got result for unexpected job")
+		// Make sure the QueryJob instance in the result is different from the initial one
+		// supplied to the worker
+		if result.job == task {
+			t.Fatalf("result's job should be different from the task's")
+		}
+
+		// Make sure we are receiving the corresponding result for the given task.
+		if result.job.Index() != task.Index() {
+			t.Fatalf("result's job index should not be different from task's")
 		}
 
 		// And the correct peer.
@@ -546,9 +589,9 @@ func TestWorkerSendQueryErr(t *testing.T) {
 			ctx.peer.err, result.err)
 	}
 
-	// Make sure the result was given for the intended task.
+	// Make sure the QueryJob instance in the result is same as the taskJob's.
 	if result.job != taskJob {
-		t.Fatalf("got result for unexpected job")
+		t.Fatalf("result's job should be same as the taskJob's")
 	}
 
 	// And the correct peer.

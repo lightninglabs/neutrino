@@ -842,6 +842,7 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 			Req:        m,
 			HandleResp: c.handleResponse,
 			SendQuery:  sendQueryMessageWithEncoding,
+			CloneReq:   cloneMsgCFHeaders,
 		}
 	}
 	return reqs
@@ -957,10 +958,29 @@ func sendQueryMessageWithEncoding(peer query.Peer, req query.ReqMessage) error {
 	if !ok {
 		return errors.New("invalid request type")
 	}
-
 	sp.QueueMessageWithEncoding(request.message, nil, request.encoding)
 
 	return nil
+}
+
+// cloneMsgCFHeaders clones query.ReqMessage that contains the MsgGetCFHeaders message.
+func cloneMsgCFHeaders(req query.ReqMessage) query.ReqMessage {
+	oldReq, ok := req.(*encodedQuery)
+	if !ok {
+		log.Errorf("request not of type *encodedQuery")
+	}
+	oldReqMessage, ok := oldReq.message.(*wire.MsgGetCFHeaders)
+	if !ok {
+		log.Errorf("request not of type *wire.MsgGetCFHeaders")
+	}
+	newReq := &encodedQuery{
+		message: wire.NewMsgGetCFHeaders(
+			oldReqMessage.FilterType, oldReqMessage.StartHeight, &oldReqMessage.StopHash,
+		),
+		encoding:      oldReq.encoding,
+		priorityIndex: oldReq.priorityIndex,
+	}
+	return newReq
 }
 
 // getCheckpointedCFHeaders catches a filter header store up with the
