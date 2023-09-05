@@ -154,7 +154,7 @@ type ReqMessage interface {
 
 	// PriorityIndex returns the priority the caller prefers the request
 	// would take.
-	PriorityIndex() uint64
+	PriorityIndex() float64
 }
 
 // WorkManager defines an API for a manager that dispatches queries to bitcoin

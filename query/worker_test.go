@@ -12,14 +12,14 @@ import (
 type mockQueryEncoded struct {
 	message  *wire.MsgGetData
 	encoding wire.MessageEncoding
-	index    uint64
+	index    float64
 }
 
 func (m *mockQueryEncoded) Message() wire.Message {
 	return m.message
 }
 
-func (m *mockQueryEncoded) PriorityIndex() uint64 {
+func (m *mockQueryEncoded) PriorityIndex() float64 {
 	return m.index
 }
 

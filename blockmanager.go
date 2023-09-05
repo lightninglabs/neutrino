@@ -820,7 +820,7 @@ type checkpointedCFHeadersQuery struct {
 type encodedQuery struct {
 	message       wire.Message
 	encoding      wire.MessageEncoding
-	priorityIndex uint64
+	priorityIndex float64
 }
 
 // Message returns the wire.Message of encodedQuery's struct.
@@ -830,7 +830,7 @@ func (e *encodedQuery) Message() wire.Message {
 
 // PriorityIndex returns the specified priority the caller wants
 // the request to take.
-func (e *encodedQuery) PriorityIndex() uint64 {
+func (e *encodedQuery) PriorityIndex() float64 {
 	return e.priorityIndex
 }
 

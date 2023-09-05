@@ -6,12 +6,12 @@ import (
 )
 
 type task struct {
-	index uint64
+	index float64
 }
 
 var _ Task = (*task)(nil)
 
-func (t *task) Index() uint64 {
+func (t *task) Index() float64 {
 	return t.index
 }
 
@@ -27,7 +27,7 @@ func TestWorkQueue(t *testing.T) {
 
 	// Create a simple list of tasks and add them all to the queue.
 	var tasks []*task
-	for i := uint64(0); i < numTasks; i++ {
+	for i := float64(0); i < numTasks; i++ {
 		tasks = append(tasks, &task{
 			index: i,
 		})
@@ -40,11 +40,11 @@ func TestWorkQueue(t *testing.T) {
 	// Check that it reports the expected number of elements.
 	l := q.Len()
 	if l != numTasks {
-		t.Fatalf("expected %d length, was %d", numTasks, l)
+		t.Fatalf("expected %v length, was %v", numTasks, l)
 	}
 
 	// Pop half, and make sure they arrive in the right order.
-	for i := uint64(0); i < numTasks/2; i++ {
+	for i := float64(0); i < numTasks/2; i++ {
 		peek := q.Peek().(*task)
 		pop := heap.Pop(q)
 
@@ -54,7 +54,7 @@ func TestWorkQueue(t *testing.T) {
 		}
 
 		if peek.index != i {
-			t.Fatalf("wrong index: %d", peek.index)
+			t.Fatalf("wrong index: %v", peek.index)
 		}
 	}
 
@@ -63,7 +63,7 @@ func TestWorkQueue(t *testing.T) {
 		heap.Push(q, tasks[0])
 	}
 
-	for i := uint64(numTasks/2 - 3); i < numTasks; i++ {
+	for i := float64(numTasks/2 - 3); i < numTasks; i++ {
 		peek := q.Peek().(*task)
 		pop := heap.Pop(q)
 
@@ -80,13 +80,13 @@ func TestWorkQueue(t *testing.T) {
 		}
 
 		if peek.index != exp {
-			t.Fatalf("wrong index: %d", peek.index)
+			t.Fatalf("wrong index: %v", peek.index)
 		}
 	}
 
 	// Finally, the queue should be empty.
 	l = q.Len()
 	if l != 0 {
-		t.Fatalf("expected %d length, was %d", 0, l)
+		t.Fatalf("expected %v length, was %v", 0, l)
 	}
 }

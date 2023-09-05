@@ -4,7 +4,7 @@ package query
 // work queue.
 type Task interface {
 	// Index returns this Task's index in the work queue.
-	Index() uint64
+	Index() float64
 }
 
 // workQueue is struct implementing the heap interface, and is used to keep a

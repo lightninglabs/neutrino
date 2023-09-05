@@ -199,8 +199,8 @@ func (w *peerWorkManager) workDispatcher() {
 	// We set up a counter that we'll increase with each incoming query,
 	// and will serve as the priority of each. In addition we map each
 	// query to the batch they are part of.
-	queryIndex := uint64(0)
-	currentQueries := make(map[uint64]uint64)
+	queryIndex := float64(0)
+	currentQueries := make(map[float64]uint64)
 
 	workers := make(map[string]*activeWorker)
 
@@ -437,14 +437,25 @@ Loop:
 				"work queue", batchIndex, len(batch.requests))
 
 			for _, q := range batch.requests {
+				idx := queryIndex
+
+				// If priority index is set, use that index.
+				if q.Req.PriorityIndex() != 0 {
+					idx = q.Req.PriorityIndex()
+				}
 				heap.Push(work, &queryJob{
-					index:      queryIndex,
+					index:      idx,
 					timeout:    minQueryTimeout,
 					cancelChan: batch.options.cancelChan,
 					Request:    q,
 				})
-				currentQueries[queryIndex] = batchIndex
-				queryIndex++
+				currentQueries[idx] = batchIndex
+
+				// Only increment queryIndex if it was
+				// assigned to this job.
+				if q.Req.PriorityIndex() == 0 {
+					queryIndex++
+				}
 			}
 
 			currentBatches[batchIndex] = &batchProgress{

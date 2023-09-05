@@ -23,7 +23,7 @@ var (
 // addition to some information about the query.
 type queryJob struct {
 	tries      uint8
-	index      uint64
+	index      float64
 	timeout    time.Duration
 	cancelChan <-chan struct{}
 	*Request
@@ -36,7 +36,7 @@ var _ Task = (*queryJob)(nil)
 // Index returns the queryJob's index within the work queue.
 //
 // NOTE: Part of the Task interface.
-func (q *queryJob) Index() uint64 {
+func (q *queryJob) Index() float64 {
 	return q.index
 }
 
