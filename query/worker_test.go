@@ -278,8 +278,8 @@ func TestWorkerTimeout(t *testing.T) {
 	// It will immediately attempt to fetch another task.
 	select {
 	case ctx.nextJob <- task:
+		t.Fatalf("worker still in feedback loop picked up job")
 	case <-time.After(1 * time.Second):
-		t.Fatalf("did not pick up job")
 	}
 }
 

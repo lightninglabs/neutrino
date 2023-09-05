@@ -297,6 +297,106 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 	}
 }
 
+// TestWorkManagerErrQueryTimeout tests that the workers that return query
+// timeout are not sent jobs until they return a different error.
+func TestWorkManagerErrQueryTimeout(t *testing.T) {
+	const numQueries = 2
+	const numWorkers = 1
+
+	// Start work manager.
+	wm, workers := startWorkManager(t, numWorkers)
+
+	// When the jobs gets scheduled, keep track of which worker was
+	// assigned the job.
+	type sched struct {
+		wk  *mockWorker
+		job *queryJob
+	}
+
+	// Schedule a batch of queries.
+	var scheduledJobs [numQueries]chan sched
+	var queries [numQueries]*Request
+	for i := 0; i < numQueries; i++ {
+		q := &Request{
+			Req: &mockQueryEncoded{},
+		}
+		queries[i] = q
+		scheduledJobs[i] = make(chan sched)
+	}
+
+	// Fot each worker, spin up a goroutine that will forward the job it
+	// got to our slice of scheduled jobs, such that we can handle them in
+	// order.
+	for i := 0; i < len(workers); i++ {
+		wk := workers[i]
+		go func() {
+			for {
+				job := <-wk.nextJob
+				scheduledJobs[int(job.index)] <- sched{
+					wk:  wk,
+					job: job,
+				}
+			}
+		}()
+	}
+
+	// Send the batch, and Retrieve all jobs immediately.
+	errChan := wm.Query(queries[:])
+
+	var iter int
+	var s sched
+	for i := 0; i < numQueries; i++ {
+		select {
+		case s = <-scheduledJobs[i]:
+			if s.job.index != uint64(i) {
+				t.Fatalf("wrong index")
+			}
+			if iter == 1 {
+				t.Fatalf("Expected only one scheduled job")
+			}
+			iter++
+		case <-errChan:
+			t.Fatalf("did not expect on errChan")
+		case <-time.After(time.Second):
+			if iter < 1 {
+				t.Fatalf("next job not received")
+			}
+		}
+	}
+
+	select {
+	case s.wk.results <- &jobResult{
+		job: s.job,
+		err: ErrQueryTimeout,
+	}:
+	case <-errChan:
+		t.Fatalf("did not expect on errChan")
+	case <-time.After(time.Second):
+		t.Fatalf("result not handled")
+	}
+
+	// Finally, make sure the job is not retried as there are no available
+	// peer to retry it.
+
+	select {
+	case <-scheduledJobs[0]:
+		t.Fatalf("did not expect job rescheduled")
+	case <-errChan:
+		t.Fatalf("did not expect on errChan")
+	case <-time.After(time.Second):
+	}
+
+	// There should be no errChan message as query is still incomplete.
+	select {
+	case err := <-errChan:
+		if err != nil {
+			t.Fatalf("got error: %v", err)
+		}
+		t.Fatalf("expected no errChan message")
+	case <-time.After(time.Second):
+	}
+}
+
 // TestWorkManagerCancelBatch checks that we can cancel a batch query midway,
 // and that the jobs it contains are canceled.
 func TestWorkManagerCancelBatch(t *testing.T) {

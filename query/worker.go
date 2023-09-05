@@ -247,6 +247,16 @@ nexJobLoop:
 			return
 		}
 
+		// If the error is a timeout still wait for the response as we are assured a response as long as there was a
+		// request but reschedule on another worker to quickly fetch a response so as not to be slowed down by this
+		// worker. We either get a response or the peer stalls (i.e. disconnects due to an elongated time without
+		// a response)
+		if jobErr == ErrQueryTimeout {
+			jobErr = nil
+
+			goto feedbackLoop
+		}
+
 		// If the peer disconnected, we can exit immediately.
 		if jobErr == ErrPeerDisconnected {
 			return

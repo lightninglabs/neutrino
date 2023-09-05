@@ -430,6 +430,7 @@ type cfiltersQuery struct {
 	headerIndex   map[chainhash.Hash]int
 	targetHash    chainhash.Hash
 	targetFilter  *gcs.Filter
+	mtx           sync.Mutex
 }
 
 // request couples a query message with the handler to be used for the response
@@ -480,6 +481,8 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 
 	// If this filter is for a block not in our index, we can ignore it, as
 	// we either already got it, or it is out of our queried range.
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	i, ok := q.headerIndex[response.BlockHash]
 	if !ok {
 		return noProgress

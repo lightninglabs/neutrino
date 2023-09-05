@@ -298,7 +298,9 @@ Loop:
 			// Delete the job from the worker's active job, such
 			// that the slot gets opened for more work.
 			r := workers[result.peer.Addr()]
-			r.activeJob = nil
+			if result.err != ErrQueryTimeout {
+				r.activeJob = nil
+			}
 
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have
