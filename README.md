@@ -3,6 +3,8 @@
 [![Build Status](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml/badge.svg)](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml)
 [![Godoc](https://godoc.org/github.com/lightninglabs/neutrino?status.svg)](https://godoc.org/github.com/lightninglabs/neutrino)
 [![Coverage Status](https://coveralls.io/repos/github/lightninglabs/neutrino/badge.svg?branch=master)](https://coveralls.io/github/lightninglabs/neutrino?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lightninglabs/neutrino)](https://goreportcard.com/report/github.com/lightninglabs/neutrino)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Neutrino is a Bitcoin light client written in Go and designed with mobile
 Lightning Network clients in mind. It uses a
