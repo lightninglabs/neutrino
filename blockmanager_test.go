@@ -916,9 +916,7 @@ func TestHandleHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	hmsg := &headersMsg{
-		headers: &wire.MsgHeaders{
-			Headers: make([]*wire.BlockHeader, len(blockHashes)),
-		},
+		headers: make([]*wire.BlockHeader, len(blockHashes)),
 		peer: &ServerPeer{
 			Peer: fakePeer,
 		},
@@ -928,7 +926,7 @@ func TestHandleHeaders(t *testing.T) {
 		header, err := harness.Client.GetBlockHeader(blockHashes[i])
 		require.NoError(t, err)
 
-		hmsg.headers.Headers[i] = header
+		hmsg.headers[i] = header
 	}
 
 	// Let's feed in the correct headers. This should work fine and the peer
@@ -938,9 +936,9 @@ func TestHandleHeaders(t *testing.T) {
 
 	// Now scramble the headers and feed them in again. This should cause
 	// the peer to be disconnected.
-	rand.Shuffle(len(hmsg.headers.Headers), func(i, j int) {
-		hmsg.headers.Headers[i], hmsg.headers.Headers[j] =
-			hmsg.headers.Headers[j], hmsg.headers.Headers[i]
+	rand.Shuffle(len(hmsg.headers), func(i, j int) {
+		hmsg.headers[i], hmsg.headers[j] =
+			hmsg.headers[j], hmsg.headers[i]
 	})
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)

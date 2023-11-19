@@ -63,7 +63,7 @@ type invMsg struct {
 // headersMsg packages a bitcoin headers message and the peer it came from
 // together so the block handler has access to that information.
 type headersMsg struct {
-	headers *wire.MsgHeaders
+	headers []*wire.BlockHeader
 	peer    *ServerPeer
 }
 
@@ -2357,7 +2357,7 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 	}
 
 	select {
-	case b.peerChan <- &headersMsg{headers: headers, peer: sp}:
+	case b.peerChan <- &headersMsg{headers: headers.Headers, peer: sp}:
 	case <-b.quit:
 		return
 	}
@@ -2365,8 +2365,7 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 
 // handleHeadersMsg handles headers messages from all peers.
 func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
-	msg := hmsg.headers
-	numHeaders := len(msg.Headers)
+	numHeaders := len(hmsg.headers)
 
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
@@ -2375,13 +2374,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// We'll attempt to write the entire batch of validated headers
 	// atomically in order to improve performance.
-	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(msg.Headers))
+	headerWriteBatch := make([]headerfs.BlockHeader, 0, numHeaders)
 
 	// Explicitly check that each header in msg.Headers builds off of the
 	// previous one. This is a quick sanity check to avoid doing the more
 	// expensive checks below if we know the headers are invalid.
-	if !areHeadersConnected(msg.Headers) {
-		log.Warnf("Headers received from peer don't connect")
+	if !areHeadersConnected(hmsg.headers) {
+		log.Warnf("Headers received don't connect")
 		hmsg.peer.Disconnect()
 		return
 	}
@@ -2393,7 +2392,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		finalHash   *chainhash.Hash
 		finalHeight int32
 	)
-	for i, blockHeader := range msg.Headers {
+	for i, blockHeader := range hmsg.headers {
 		blockHash := blockHeader.BlockHash()
 		finalHash = &blockHash
 
@@ -2528,7 +2527,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				Height: int32(backHeight),
 			})
 			totalWork := big.NewInt(0)
-			for j, reorgHeader := range msg.Headers[i:] {
+			for j, reorgHeader := range hmsg.headers[i:] {
 				// We have to get the parent's height and
 				// header to be able to contextually validate
 				// this header.
@@ -2543,7 +2542,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					// We can find the parent in the
 					// Headers slice by getting the header
 					// at index i+j-1.
-					prevNodeHeader = msg.Headers[i+j-1]
+					prevNodeHeader = hmsg.headers[i+j-1]
 				}
 
 				err = b.checkHeaderSanity(
