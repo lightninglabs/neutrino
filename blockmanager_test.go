@@ -36,6 +36,61 @@ const (
 	dbOpenTimeout = time.Second * 10
 )
 
+type mockBlkHdrReader struct {
+	endHeight   uint32
+	startHeight uint32
+	chain       wire.BitcoinNet
+}
+
+func (m *mockBlkHdrReader) NextBlockHeaders(n uint32) ([]*wire.BlockHeader, error) {
+	harness, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"},
+		"",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = harness.SetUp(false, 0)
+	if err != nil {
+		return nil, err
+	}
+	// Generate blocks.
+	blockHashes, err := harness.Client.Generate(n)
+	if err != nil {
+		return nil, err
+	}
+
+	h := make([]*wire.BlockHeader, len(blockHashes))
+
+	for i := range blockHashes {
+		header, err := harness.Client.GetBlockHeader(blockHashes[i])
+		if err != nil {
+			return nil, err
+		}
+
+		h[i] = header
+	}
+
+	return h, nil
+}
+
+func (m *mockBlkHdrReader) EndHeight() uint32 {
+	return m.endHeight
+}
+
+func (m *mockBlkHdrReader) StartHeight() uint32 {
+	return m.startHeight
+}
+
+func (m *mockBlkHdrReader) SetHeight(height uint32) error {
+	return nil
+}
+
+func (m *mockBlkHdrReader) HeadersChain() wire.BitcoinNet {
+	return m.chain
+}
+
 // mockDispatcher implements the query.Dispatcher interface and allows us to
 // set up a custom Query method during tests.
 type mockDispatcher struct {
@@ -98,6 +153,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 			return nil
 		},
 	})
+
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
@@ -942,4 +998,84 @@ func TestHandleHeaders(t *testing.T) {
 	})
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
+}
+
+// TestSideLoadBlkHeaders tests side loading block headers.
+func TestSideLoadBlkHeaders(t *testing.T) {
+	t.Parallel()
+
+	type sideLoadCases struct {
+		name          string
+		setChain      func(b *blockManager)
+		setMockReader func(m *mockBlkHdrReader)
+		tipChange     bool
+	}
+
+	var testCases = []sideLoadCases{
+		{
+			name: "valid side load",
+			setChain: func(b *blockManager) {
+			},
+			setMockReader: func(m *mockBlkHdrReader) {
+				m.startHeight = 0
+				m.endHeight = 10
+				m.chain = wire.SimNet
+			},
+			tipChange: true,
+		},
+		{
+			name: "chain and sideload different network",
+			setChain: func(b *blockManager) {
+
+			},
+			setMockReader: func(m *mockBlkHdrReader) {
+				m.startHeight = 0
+				m.endHeight = 10
+				m.chain = wire.MainNet
+			},
+			tipChange: false,
+		},
+		{
+			name: "skip verify false",
+			setChain: func(b *blockManager) {
+				b.cfg.blkHdrSideLoad.SkipVerify = false
+			},
+			setMockReader: func(m *mockBlkHdrReader) {
+				m.startHeight = 0
+				m.endHeight = 10
+				m.chain = wire.SimNet
+			},
+			tipChange: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// First, we set up a block manager.
+			bm, _, _, err := setupBlockManager(t)
+			require.NoError(t, err)
+			_, _, _ = bm.cfg.BlockHeaders.ChainTip()
+
+			bm.cfg.blkHdrSideLoad = &SideLoadOpt{
+				SkipVerify: true,
+			}
+			m := &mockBlkHdrReader{}
+			tc.setChain(bm)
+			tc.setMockReader(m)
+			bm.sideLoadBlkHdrReader = m
+			bm.sideLoadBlockHeaders()
+
+			if tc.tipChange {
+				if bm.headerTip != m.endHeight {
+					t.Fatalf("expected header tip at %v but got %v",
+						m.endHeight, bm.headerTip)
+				}
+			} else {
+				if bm.headerTip == m.endHeight {
+					t.Fatalf("expected header tip at %v but got %v",
+						m.endHeight, bm.headerTip)
+				}
+			}
+		})
+	}
 }

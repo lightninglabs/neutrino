@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chaindataloader"
 	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
@@ -209,6 +210,10 @@ type blockManager struct { // nolint:maligned
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
+
+	// sideLoadBlkHdrReader is the reader used for a non p2p fetching of
+	// headers.
+	sideLoadBlkHdrReader chaindataloader.BlockHeaderReader
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
@@ -280,6 +285,25 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		return nil, err
 	}
 	bm.filterHeaderTipHash = fh.BlockHash()
+
+	// If sideload is enabled initialize reader and assign to blockmanager.
+	if bm.cfg.blkHdrSideLoad != nil {
+		log.Infof("Side loading enabled")
+
+		reader, err := chaindataloader.NewBlockHeaderReader(&chaindataloader.
+			ReaderConfig{
+
+			SourceType: bm.cfg.blkHdrSideLoad.SourceType,
+			Reader:     bm.cfg.blkHdrSideLoad.Reader,
+		})
+
+		if err == nil {
+			bm.sideLoadBlkHdrReader = reader
+		} else {
+			bm.cfg.blkHdrSideLoad = nil
+			log.Warnf("Side loading disabled: %v", err)
+		}
+	}
 
 	return &bm, nil
 }
@@ -1983,6 +2007,12 @@ func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
 func (b *blockManager) blockHandler() {
 	defer b.wg.Done()
 
+	// Attempt to sideLoad headers. If sideLoading is not enabled the function
+	// returns quickly.
+	b.sideLoadBlockHeaders()
+	// TODO(Maureen): update candidate peers while sideloading so that we
+	// can quickly begin p2p sync as soon as we are done sideloading.
+
 	candidatePeers := list.New()
 out:
 	for {
@@ -3080,4 +3110,62 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 	return newLightHeaderCtx(
 		ancestorHeight, ancestor, l.store, l.headerList,
 	)
+}
+
+// sideloadBlockHeaders fetches block headers from the chain data loader.
+func (b *blockManager) sideLoadBlockHeaders() {
+	// If sideloading is not enabled on this chain
+	// return quickly.
+	if b.cfg.blkHdrSideLoad == nil {
+		return
+	}
+
+	// If headers contained in the side load source are for a different chain
+	// network return immediately.
+	if b.sideLoadBlkHdrReader.HeadersChain() != b.cfg.ChainParams.Net {
+		log.Error("headers from side load file are of network %v "+
+			"and so incompatible with neutrino's current bitcoin network "+
+			"-- skipping side loading", b.sideLoadBlkHdrReader.HeadersChain())
+
+		return
+	}
+
+	// Set headerTip to enable reader supply header, node needs
+	err := b.sideLoadBlkHdrReader.SetHeight(b.headerTip)
+	if err != nil {
+		log.Errorf("error while setting height for sideload--- skipping "+
+			"sideloading: %v", err)
+
+		return
+	}
+
+	nextHeight := b.headerTip
+	for b.headerTip == nextHeight && b.headerTip != b.sideLoadBlkHdrReader.
+		EndHeight() {
+		nextHeight = b.sideLoadBlkHdrReader.EndHeight()
+
+		if b.nextCheckpoint != nil && nextHeight >= uint32(b.nextCheckpoint.
+			Height) {
+
+			nextHeight = uint32(b.nextCheckpoint.Height)
+		}
+
+		numberOfHeaders := nextHeight - b.headerTip
+
+		headers, err := b.sideLoadBlkHdrReader.NextBlockHeaders(numberOfHeaders)
+
+		if err != nil {
+			log.Errorf("error while fetching sideload block headers "+
+				"at height %v -- skipping sideloading: %v", b.headerTip, err)
+		}
+
+		log.Infof("Side loading %v headers from %v to %v", len(headers),
+			b.headerTip, nextHeight)
+
+		b.handleHeadersMsg(&headersMsg{
+			headers: headers,
+		})
+	}
+
+	log.Infof("Completed sideloading")
 }
