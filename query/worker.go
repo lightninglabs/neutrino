@@ -2,6 +2,7 @@ package query
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/wire"
@@ -41,6 +42,12 @@ var _ Task = (*queryJob)(nil)
 // NOTE: Part of the Task interface.
 func (q *queryJob) Index() uint64 {
 	return q.index
+}
+
+// String returns the string representation of the queryJob code.
+func (q *queryJob) String() string {
+	return fmt.Sprintf("QueryJob(index=%v): tries=%v, timeout=%v, +"+
+		"request_msg: %v", q.index, q.tries, q.timeout, q.Req)
 }
 
 // jobResult is the final result of the worker's handling of the queryJob.
@@ -96,7 +103,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 		select {
 		// Poll a new job from the nextJob channel.
 		case job = <-w.nextJob:
-			log.Tracef("Worker %v picked up job with index %v",
+			log.Infof("Worker %v picked up job with index %v",
 				peer.Addr(), job.Index())
 
 		// Ignore any message received while not working on anything.
@@ -154,7 +161,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					job.Req, resp, peer.Addr(),
 				)
 
-				log.Tracef("Worker %v handled msg %T while "+
+				log.Infof("Worker %v handled msg %T while "+
 					"waiting for response to %T (job=%v). "+
 					"Finished=%v, progressed=%v",
 					peer.Addr(), resp, job.Req, job.Index(),
@@ -189,7 +196,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 				// The query did experience a timeout and will
 				// be given to someone else.
 				jobErr = ErrQueryTimeout
-				log.Tracef("Worker %v timeout for request %T "+
+				log.Infof("Worker %v timeout for request %T "+
 					"with job index %v", peer.Addr(),
 					job.Req, job.Index())
 
