@@ -92,7 +92,7 @@ func (h *blockHeaderStore) readHeaderRange(startHeight uint32,
 }
 
 // readHeader reads a full block header from the flat-file. The header read is
-// determined by the hight value.
+// determined by the height value.
 func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 	var header wire.BlockHeader
 

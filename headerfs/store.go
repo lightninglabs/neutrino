@@ -836,7 +836,7 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 
 // WriteHeaders writes a batch of filter headers to persistent storage. The
 // headers themselves are appended to the flat file, and then the index updated
-// to reflect the new entires.
+// to reflect the new entries.
 func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// Lock store for write.
 	f.mtx.Lock()
