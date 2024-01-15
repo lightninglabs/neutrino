@@ -541,7 +541,7 @@ rescanLoop:
 			case <-ro.quit:
 				return ErrRescanExit
 
-			// An update mesage has just come across, if it points
+			// An update message has just come across, if it points
 			// to a prior point in the chain, then we may need to
 			// rewind a bit in order to provide the client all its
 			// requested client.
@@ -1514,7 +1514,7 @@ type SpendReport struct {
 	// been spent.
 	SpendingInputIndex uint32
 
-	// SpendingTxHeight is the hight of the block that included the
+	// SpendingTxHeight is the height of the block that included the
 	// transaction  above which spent the target output.
 	//
 	// NOTE: This field will only be populated if the target output has
