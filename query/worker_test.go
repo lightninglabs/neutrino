@@ -50,7 +50,7 @@ func (m *mockPeer) Addr() string {
 }
 
 // makeJob returns a new query job that will be done when it is given the
-// finalResp message. Similarly ot will progress on being given the
+// finalResp message. Similarly it will progress on being given the
 // progressResp message, while any other message will be ignored.
 func makeJob() *queryJob {
 	q := &Request{
@@ -375,7 +375,7 @@ func TestWorkerProgress(t *testing.T) {
 		t.Fatalf("resp not received")
 	}
 
-	// The worker should respond with a job finised.
+	// The worker should respond with a job finished.
 	var result *jobResult
 	select {
 	case result = <-ctx.jobResults:

@@ -33,7 +33,7 @@ func (w *workQueue) Swap(i, j int) {
 	w.tasks[i], w.tasks[j] = w.tasks[j], w.tasks[i]
 }
 
-// Push add x as elemement Len().
+// Push add x as element Len().
 //
 // NOTE: This is part of the heap.Interface implementation.
 func (w *workQueue) Push(x interface{}) {

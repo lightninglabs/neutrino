@@ -128,7 +128,7 @@ func startWorkManager(t *testing.T, numWorkers int) (WorkManager,
 func TestWorkManagerWorkDispatcherSingleWorker(t *testing.T) {
 	const numQueries = 100
 
-	// Start work manager with a sinlge worker.
+	// Start work manager with a single worker.
 	wm, workers := startWorkManager(t, 1)
 
 	// Schedule a batch of queries.
