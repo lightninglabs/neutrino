@@ -435,7 +435,7 @@ var (
 			badPeers:     []string{},
 		},
 		{
-			// One peer is serving a filter tha lacks an element,
+			// One peer is serving a filter that lacks an element,
 			// we should immediately notice this and ban it.
 			name: "filter missing element",
 			peerFilters: map[string]*gcs.Filter{
@@ -498,7 +498,7 @@ var (
 		},
 		{
 			// If we need at least 3 peers to consider a filter
-			// consistent, we shuold fail.
+			// consistent, we should fail.
 			name: "majority filter 3",
 			peerFilters: map[string]*gcs.Filter{
 				"a": correctFilter,
