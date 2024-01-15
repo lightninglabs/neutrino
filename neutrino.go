@@ -1439,7 +1439,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 }
 
-// disconnectPeer attempts to drop the connection of a tageted peer in the
+// disconnectPeer attempts to drop the connection of a targeted peer in the
 // passed peer list. Targets are identified via usage of the passed
 // `compareFunc`, which should return `true` if the passed peer is the target
 // peer. This function returns true on success and false if the peer is unable
@@ -1557,7 +1557,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	go s.peerDoneHandler(sp)
 }
 
-// peerDoneHandler handles peer disconnects by notifiying the server that it's
+// peerDoneHandler handles peer disconnects by notifying the server that it's
 // done along with other performing other desirable cleanup.
 func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 	sp.WaitForDisconnect()
