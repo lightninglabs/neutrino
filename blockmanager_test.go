@@ -229,7 +229,7 @@ func generateResponses(msgs []wire.Message,
 
 		// The start height must be set to a checkpoint height+1.
 		if q.StartHeight%wire.CFCheckptInterval != 1 {
-			return nil, fmt.Errorf("unexpexted start height %v",
+			return nil, fmt.Errorf("unexpected start height %v",
 				q.StartHeight)
 		}
 
