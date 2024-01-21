@@ -562,7 +562,7 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 }
 
 // prepareCFiltersQuery creates a cfiltersQuery that can be used to fetch a
-// CFilter fo the given block hash.
+// CFilter for the given block hash.
 func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 	filterType wire.FilterType, batchType optimisticBatchType,
 	maxBatchSize int64) (*cfiltersQuery, error) {
