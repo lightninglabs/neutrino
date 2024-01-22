@@ -207,7 +207,7 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 		scheduledJobs[i] = make(chan sched)
 	}
 
-	// Fot each worker, spin up a goroutine that will forward the job it
+	// For each worker, spin up a goroutine that will forward the job it
 	// got to our slice of scheduled jobs, such that we can handle them in
 	// order.
 	for i := 0; i < len(workers); i++ {
