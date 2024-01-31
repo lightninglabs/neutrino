@@ -311,6 +311,15 @@ Loop:
 			delete(currentQueries, result.job.index)
 			batch := currentBatches[batchNum]
 
+			log.Infof("Job(%v) received a result=%v, "+
+				"batchNum=%v, batch=%v, pendingQueries=%v, "+
+				"pendingBatches=%v", result.job, result,
+				batchNum, batch, len(currentQueries),
+				len(currentBatches))
+
+			log.Infof("Batch info: %v,%v,%v", batch.maxRetries,
+				batch.timeout, batch.noRetryMax)
+
 			switch {
 			// If the query ended because it was canceled, drop it.
 			case result.err == ErrJobCanceled:
@@ -439,8 +448,14 @@ Loop:
 			// Add all new queries in the batch to our work queue,
 			// with priority given by the order they were
 			// scheduled.
-			log.Debugf("Adding new batch(%d) of %d queries to "+
+			log.Infof("Adding new batch(%d) of %d queries to "+
 				"work queue", batchIndex, len(batch.requests))
+
+			log.Infof("Current queries to manage %d: %v",
+				len(currentQueries), currentQueries)
+
+			log.Infof("Current batches to manage %d: %v",
+				len(currentBatches), currentBatches)
 
 			for _, q := range batch.requests {
 				heap.Push(work, &queryJob{
