@@ -1081,6 +1081,33 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
 }
 
+// UnbanPeer connects and unbans a previously banned peer.
+func (s *ChainService) UnbanPeer(addr string) error {
+	log.Warnf("UnBanning peer %v", addr)
+
+	defer func() error {
+		if sp := s.PeerByAddr(addr); sp != nil {
+			tcpAddr, err := s.addrStringToNetAddr(addr)
+			if err != nil {
+				return err
+			}
+			s.connManager.Connect(&connmgr.ConnReq{
+				Addr:      tcpAddr,
+				Permanent: true,
+			})
+			return nil
+		}
+		return errors.New("Peer is nil")
+	}()
+
+	ipNet, err := banman.ParseIPNet(addr, nil)
+	if err != nil {
+		return fmt.Errorf("unable to parse IP network for peer %v: %v",
+			addr, err)
+	}
+	return s.banStore.UnbanIPNet(ipNet)
+}
+
 // IsBanned returns true if the peer is banned, and false otherwise.
 func (s *ChainService) IsBanned(addr string) bool {
 	ipNet, err := banman.ParseIPNet(addr, nil)

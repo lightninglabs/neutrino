@@ -66,6 +66,9 @@ type Store interface {
 
 	// Status returns the ban status for a given IP network.
 	Status(*net.IPNet) (Status, error)
+
+	// UnbanIPNet unbans previously banned peer
+	UnbanIPNet(ipNet *net.IPNet) error
 }
 
 // NewStore returns a Store backed by a database.
@@ -134,6 +137,34 @@ func (s *banStore) BanIPNet(ipNet *net.IPNet, reason Reason, duration time.Durat
 
 		return addBannedIPNet(banIndex, reasonIndex, k, reason, duration)
 	})
+}
+
+// UnbanIPNet removes a ban record for the IP network within the store.
+func (s *banStore) UnbanIPNet(ipNet *net.IPNet) error {
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		banStore := tx.ReadWriteBucket(banStoreBucket)
+		if banStore == nil {
+			return ErrCorruptedStore
+		}
+		banIndex := banStore.NestedReadWriteBucket(banBucket)
+		if banIndex == nil {
+			return ErrCorruptedStore
+		}
+		reasonIndex := banStore.NestedReadWriteBucket(reasonBucket)
+		if reasonIndex == nil {
+			return ErrCorruptedStore
+		}
+
+		var ipNetBuf bytes.Buffer
+		if err := encodeIPNet(&ipNetBuf, ipNet); err != nil {
+			return fmt.Errorf("unable to encode %v: %v", ipNet, err)
+		}
+		k := ipNetBuf.Bytes()
+
+		return removeBannedIPNet(banIndex, reasonIndex, k)
+	})
+
+	return err
 }
 
 // addBannedIPNet adds an entry to the ban store for the given IP network.
