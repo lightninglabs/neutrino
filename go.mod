@@ -12,7 +12,8 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightninglabs/neutrino/cache v1.1.0
 	github.com/lightningnetwork/lnd/queue v1.0.1
-	github.com/stretchr/testify v1.8.1
+	github.com/lightningnetwork/lnd/tlv v1.2.1
+	github.com/stretchr/testify v1.8.2
 )
 
 require (
@@ -26,11 +27,13 @@ require (
 	github.com/decred/dcrd/lru v1.0.0 // indirect
 	github.com/kkdai/bstream v0.0.0-20161212061736-f391b8402d23 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
+	github.com/lightningnetwork/lnd/fn v1.0.0 // indirect
 	github.com/lightningnetwork/lnd/ticker v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.5-0.20200615073812-232d8fc87f50 // indirect
-	golang.org/x/crypto v0.1.0 // indirect
-	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/crypto v0.7.0 // indirect
+	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
+	golang.org/x/sys v0.13.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
