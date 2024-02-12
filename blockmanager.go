@@ -96,7 +96,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
+		quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 
 	// blkHdrProcessor has the functions and fields required to verify and store
@@ -1147,23 +1147,69 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	}
 }
 
-// writeCFHeadersMsg writes a cfheaders message to the specified store. It
-// assumes that everything is being written in order. The hints are required to
-// store the correct block heights for the filters. We also return final
-// constructed cfheader in this range as this lets callers populate the prev
-// filter header field in the next message range before writing to disk, and
-// the current height after writing the headers.
+// writeCFHeadersMsg writes the cfheaders into the passed store. We also
+// return the final constructed cfheader in this range as this lets callers
+// populate the prev filter header field in the next message range before
+// writing to disk, and the current height after writing the headers. Then
+// notifies subscribers of connected blocks.
 func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	store *headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
 
-	// Check that the PrevFilterHeader is the same as the last stored so we
-	// can prevent misalignment.
-	tip, tipHeight, err := store.ChainTip()
+	numHeaders := len(msg.FilterHashes)
+
+	lastHeader, startHeight, matchingBlockHeaders, err := writeCfHeaders(msg,
+		store, b.cfg.blkHdrProcessor.store)
+
 	if err != nil {
 		return nil, 0, err
 	}
+
+	// The final height in our range will be offset to the end of this
+	// particular checkpoint interval.
+	lastHeight := startHeight + uint32(numHeaders) - 1
+	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
+	lastHash := lastBlockHeader.BlockHash()
+
+	// We'll also set the new header tip and notify any peers that the tip
+	// has changed as well. Unlike the set of notifications below, this is
+	// for sub-system that only need to know the height has changed rather
+	// than know each new header that's been added to the tip.
+	b.newFilterHeadersMtx.Lock()
+	b.filterHeaderTip = lastHeight
+	b.filterHeaderTipHash = lastHash
+	b.newFilterHeadersMtx.Unlock()
+	b.newFilterHeadersSignal.Broadcast()
+
+	// Notify subscribers, and also update the filter header progress
+	// logger at the same time.
+	for i, header := range matchingBlockHeaders {
+		header := header
+
+		headerHeight := startHeight + uint32(i)
+		b.fltrHeaderProgessLogger.LogBlockHeight(
+			header.Timestamp, int32(headerHeight),
+		)
+
+		b.onBlockConnected(header, headerHeight)
+	}
+
+	return lastHeader, lastHeight, nil
+}
+
+// writeCFHeaders writes a cfheaders message to the specified store. It
+// assumes that everything is being written in order. The hints are required to
+// store the correct block heights for the filters.
+func writeCfHeaders(msg *wire.MsgCFHeaders, filterHdrStore *headerfs.
+FilterHeaderStore, blkHdrStore headerfs.BlockHeaderStore) (*chainhash.Hash,
+	uint32, []wire.BlockHeader, error) {
+	// Check that the PrevFilterHeader is the same as the last stored so we
+	// can prevent misalignment.
+	tip, tipHeight, err := filterHdrStore.ChainTip()
+	if err != nil {
+		return nil, 0, nil, err
+	}
 	if *tip != msg.PrevFilterHeader {
-		return nil, 0, fmt.Errorf("attempt to write cfheaders out of "+
+		return nil, 0, nil, fmt.Errorf("attempt to write cfheaders out of "+
 			"order, tip=%v (height=%v), prev_hash=%v", *tip,
 			tipHeight, msg.PrevFilterHeader)
 	}
@@ -1189,12 +1235,11 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// these filters headers in their corresponding chains. Our query will
 	// return the headers for the entire checkpoint interval ending at the
 	// designated stop hash.
-	blockHeaders := b.cfg.blkHdrProcessor.store
-	matchingBlockHeaders, startHeight, err := blockHeaders.FetchHeaderAncestors(
+	matchingBlockHeaders, startHeight, err := blkHdrStore.FetchHeaderAncestors(
 		uint32(numHeaders-1), &msg.StopHash,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	// The final height in our range will be offset to the end of this
@@ -1213,35 +1258,12 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 		"new_tip=%v", lastHeight, lastHash, lastHeader)
 
 	// Write the header batch.
-	err = store.WriteHeaders(headerBatch...)
+	err = filterHdrStore.WriteHeaders(headerBatch...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
-	// We'll also set the new header tip and notify any peers that the tip
-	// has changed as well. Unlike the set of notifications below, this is
-	// for sub-system that only need to know the height has changed rather
-	// than know each new header that's been added to the tip.
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = lastHash
-	b.newFilterHeadersMtx.Unlock()
-	b.newFilterHeadersSignal.Broadcast()
-
-	// Notify subscribers, and also update the filter header progress
-	// logger at the same time.
-	for i, header := range matchingBlockHeaders {
-		header := header
-
-		headerHeight := startHeight + uint32(i)
-		b.fltrHeaderProgessLogger.LogBlockHeight(
-			header.Timestamp, int32(headerHeight),
-		)
-
-		b.onBlockConnected(header, headerHeight)
-	}
-
-	return &lastHeader, lastHeight, nil
+	return &lastHeader, startHeight, matchingBlockHeaders, nil
 }
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
