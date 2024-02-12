@@ -75,20 +75,9 @@ type donePeerMsg struct {
 // blockManagerCfg holds options and dependencies needed by the blockManager
 // during operation.
 type blockManagerCfg struct {
-	// ChainParams is the chain that we're running on.
-	ChainParams chaincfg.Params
-
-	// BlockHeaders is the store where blockheaders are persistently
-	// stored.
-	BlockHeaders headerfs.BlockHeaderStore
-
 	// RegFilterHeaders is the store where filter headers for the regular
 	// compact filters are persistently stored.
 	RegFilterHeaders *headerfs.FilterHeaderStore
-
-	// TimeSource is used to access a time estimate based on the clocks of
-	// the connected peers.
-	TimeSource blockchain.MedianTimeSource
 
 	// QueryDispatcher is used to make queries to connected Bitcoin peers.
 	QueryDispatcher query.Dispatcher
@@ -107,8 +96,12 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
+			quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
+
+	// blkHdrProcessor has the functions and fields required to verify and store
+	// block headers.
+	blkHdrProcessor *blkHdrProcessor
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -197,24 +190,14 @@ type blockManager struct { // nolint:maligned
 	wg   sync.WaitGroup
 	quit chan struct{}
 
-	headerList     headerlist.Chain
-	reorgList      headerlist.Chain
-	startHeader    *headerlist.Node
-	nextCheckpoint *chaincfg.Checkpoint
-	lastRequested  chainhash.Hash
-
-	minRetargetTimespan int64 // target timespan / adjustment factor
-	maxRetargetTimespan int64 // target timespan * adjustment factor
-	blocksPerRetarget   int32 // target timespan / target time per block
+	reorgList     headerlist.Chain
+	startHeader   *headerlist.Node
+	lastRequested chainhash.Hash
 }
 
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
 // processing asynchronous block and inv updates.
 func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
-	targetTimespan := int64(cfg.ChainParams.TargetTimespan / time.Second)
-	targetTimePerBlock := int64(cfg.ChainParams.TargetTimePerBlock / time.Second)
-	adjustmentFactor := cfg.ChainParams.RetargetAdjustmentFactor
-
 	bm := blockManager{
 		cfg:           cfg,
 		peerChan:      make(chan interface{}, MaxPeers*3),
@@ -225,16 +208,10 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		fltrHeaderProgessLogger: newBlockProgressLogger(
 			"Verified", "filter header", log,
 		),
-		headerList: headerlist.NewBoundedMemoryChain(
-			numMaxMemHeaders,
-		),
 		reorgList: headerlist.NewBoundedMemoryChain(
 			numMaxMemHeaders,
 		),
-		quit:                make(chan struct{}),
-		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
-		minRetargetTimespan: targetTimespan / adjustmentFactor,
-		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		quit: make(chan struct{}),
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait
@@ -251,13 +228,15 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	}
 	bm.genesisHeader = *genesisHeader
 
+	bhdrProcessor := cfg.blkHdrProcessor
 	// Initialize the next checkpoint based on the current height.
-	header, height, err := cfg.BlockHeaders.ChainTip()
+	header, height, err := bhdrProcessor.store.ChainTip()
 	if err != nil {
 		return nil, err
 	}
-	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.headerList.ResetHeaderState(headerlist.Node{
+	bhdrProcessor.nextCheckpt = bhdrProcessor.findNextHeaderCheckpoint(
+		int32(height))
+	bhdrProcessor.headerList.ResetHeaderState(headerlist.Node{
 		Header: *header,
 		Height: int32(height),
 	})
@@ -273,7 +252,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 
 	// We must also ensure the filter header tip hash is set to the block
 	// hash at the filter tip height.
-	fh, err := cfg.BlockHeaders.FetchHeaderByHeight(bm.filterHeaderTip)
+	fh, err := bhdrProcessor.store.FetchHeaderByHeight(bm.filterHeaderTip)
 	if err != nil {
 		return nil, err
 	}
@@ -380,17 +359,18 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	// Add the peer as a candidate to sync from.
 	peers.PushBack(sp)
 
+	bhdrProcessor := b.cfg.blkHdrProcessor
 	// If we're current with our sync peer and the new peer is advertising
 	// a higher block than the newest one we know of, request headers from
 	// the new peer.
-	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	_, height, err := bhdrProcessor.store.ChainTip()
 	if err != nil {
 		log.Criticalf("Couldn't retrieve block header chain tip: %s",
 			err)
 		return
 	}
 	if height < uint32(sp.StartingHeight()) && b.BlockHeadersSynced() {
-		locator, err := b.cfg.BlockHeaders.LatestBlockLocator()
+		locator, err := bhdrProcessor.store.LatestBlockLocator()
 		if err != nil {
 			log.Criticalf("Couldn't retrieve latest block "+
 				"locator: %s", err)
@@ -433,17 +413,18 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 
 	log.Infof("Lost peer %s", sp)
 
+	bhdrProcessor := b.cfg.blkHdrProcessor
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer.  Also, reset the header state.
 	if b.SyncPeer() != nil && b.SyncPeer() == sp {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
-		header, height, err := b.cfg.BlockHeaders.ChainTip()
+		header, height, err := bhdrProcessor.store.ChainTip()
 		if err != nil {
 			return
 		}
-		b.headerList.ResetHeaderState(headerlist.Node{
+		bhdrProcessor.headerList.ResetHeaderState(headerlist.Node{
 			Header: *header,
 			Height: int32(height),
 		})
@@ -471,7 +452,7 @@ func (b *blockManager) cfHandler() {
 
 		// blockCheckpoints is the list of block checkpoints for the
 		// active chain.
-		blockCheckpoints = b.cfg.ChainParams.Checkpoints
+		blockCheckpoints = b.cfg.blkHdrProcessor.chainParams.Checkpoints
 	)
 
 	// Set the variable to the latest block checkpoint if we have any for
@@ -518,7 +499,7 @@ waitForHeaders:
 	// Now that the block headers are finished or ahead of the filter
 	// headers, we'll grab the current chain tip so we can base our filter
 	// header sync off of that.
-	lastHeader, lastHeight, err := b.cfg.BlockHeaders.ChainTip()
+	lastHeader, lastHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		log.Critical(err)
 		return
@@ -709,7 +690,7 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	if err != nil {
 		return fmt.Errorf("error getting filter chain tip: %v", err)
 	}
-	blockHeader, blockHeight, err := b.cfg.BlockHeaders.ChainTip()
+	blockHeader, blockHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		return fmt.Errorf("error getting block chain tip: %v", err)
 	}
@@ -993,9 +974,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 		// In order to fetch the range, we'll need the block header for
 		// the end of the height range.
-		stopHeader, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
-			endHeightRange,
-		)
+		stopHeader, err := b.cfg.blkHdrProcessor.store.FetchHeaderByHeight(
+			endHeightRange)
 		if err != nil {
 			panic(fmt.Sprintf("failed getting block header at "+
 				"height %v: %v", endHeightRange, err))
@@ -1209,7 +1189,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// these filters headers in their corresponding chains. Our query will
 	// return the headers for the entire checkpoint interval ending at the
 	// designated stop hash.
-	blockHeaders := b.cfg.BlockHeaders
+	blockHeaders := b.cfg.blkHdrProcessor.store
 	matchingBlockHeaders, startHeight, err := blockHeaders.FetchHeaderAncestors(
 		uint32(numHeaders-1), &msg.StopHash,
 	)
@@ -1267,7 +1247,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 // rollBackToHeight rolls back all blocks until it hits the specified height.
 // It sends notifications along the way.
 func (b *blockManager) rollBackToHeight(height uint32) error {
-	header, headerHeight, err := b.cfg.BlockHeaders.ChainTip()
+	header, headerHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		return err
 	}
@@ -1283,7 +1263,8 @@ func (b *blockManager) rollBackToHeight(height uint32) error {
 	}
 
 	for uint32(bs.Height) > height {
-		header, headerHeight, err := b.cfg.BlockHeaders.FetchHeader(&bs.Hash)
+		header, headerHeight, err := b.cfg.blkHdrProcessor.store.
+			FetchHeader(&bs.Hash)
 		if err != nil {
 			return err
 		}
@@ -1299,7 +1280,7 @@ func (b *blockManager) rollBackToHeight(height uint32) error {
 			regHeight = uint32(newFilterTip.Height)
 		}
 
-		bs, err = b.cfg.BlockHeaders.RollbackLastBlock()
+		bs, err = b.cfg.blkHdrProcessor.store.RollbackLastBlock()
 		if err != nil {
 			return err
 		}
@@ -1308,7 +1289,7 @@ func (b *blockManager) rollBackToHeight(height uint32) error {
 		// header in the disconnected notification in case we're rolling
 		// back farther and the notification subscriber needs it but
 		// can't read it before it's deleted from the store.
-		prevHeader, _, err := b.cfg.BlockHeaders.FetchHeader(newTip)
+		prevHeader, _, err := b.cfg.blkHdrProcessor.store.FetchHeader(newTip)
 		if err != nil {
 			return err
 		}
@@ -1374,7 +1355,7 @@ func (b *blockManager) resolveConflict(
 		for i, header := range cp {
 			height := uint32((i + 1) * wire.CFCheckptInterval)
 			err := chainsync.ControlCFHeader(
-				b.cfg.ChainParams, fType, height, header,
+				b.cfg.blkHdrProcessor.chainParams, fType, height, header,
 			)
 			if err == chainsync.ErrCheckpointMismatch {
 				log.Warnf("Banning peer=%v since served "+
@@ -1553,7 +1534,7 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	log.Warnf("Detected cfheader mismatch at height=%v!!!", targetHeight)
 
 	// Get the block header for this height.
-	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(targetHeight)
+	header, err := b.cfg.blkHdrProcessor.store.FetchHeaderByHeight(targetHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -1779,12 +1760,12 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	// Get the header we expect at either the tip of the block header store
 	// or at the end of the maximum-size response message, whichever is
 	// larger.
-	stopHeader, stopHeight, err := b.cfg.BlockHeaders.ChainTip()
+	stopHeader, stopHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		return nil, 0
 	}
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
-		stopHeader, err = b.cfg.BlockHeaders.FetchHeaderByHeight(
+		stopHeader, err = b.cfg.blkHdrProcessor.store.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
 		)
 		if err != nil {
@@ -2028,35 +2009,6 @@ func (b *blockManager) isSyncCandidate(sp *ServerPeer) bool {
 	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
 }
 
-// findNextHeaderCheckpoint returns the next checkpoint after the passed height.
-// It returns nil when there is not one either because the height is already
-// later than the final checkpoint or there are none for the current network.
-func (b *blockManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoint {
-	// There is no next checkpoint if there are none for this current
-	// network.
-	checkpoints := b.cfg.ChainParams.Checkpoints
-	if len(checkpoints) == 0 {
-		return nil
-	}
-
-	// There is no next checkpoint if the height is already after the final
-	// checkpoint.
-	finalCheckpoint := &checkpoints[len(checkpoints)-1]
-	if height >= finalCheckpoint.Height {
-		return nil
-	}
-
-	// Find the next checkpoint.
-	nextCheckpoint := finalCheckpoint
-	for i := len(checkpoints) - 2; i >= 0; i-- {
-		if height >= checkpoints[i].Height {
-			break
-		}
-		nextCheckpoint = &checkpoints[i]
-	}
-	return nextCheckpoint
-}
-
 // findPreviousHeaderCheckpoint returns the last checkpoint before the passed
 // height. It returns a checkpoint matching the genesis block when the height
 // is earlier than the first checkpoint or there are no checkpoints for the
@@ -2067,12 +2019,12 @@ func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Chec
 	// will want to reset
 	prevCheckpoint := &chaincfg.Checkpoint{
 		Height: 0,
-		Hash:   b.cfg.ChainParams.GenesisHash,
+		Hash:   b.cfg.blkHdrProcessor.chainParams.GenesisHash,
 	}
 
 	// Find the latest checkpoint lower than height or return genesis block
 	// if there are none.
-	checkpoints := b.cfg.ChainParams.Checkpoints
+	checkpoints := b.cfg.blkHdrProcessor.chainParams.Checkpoints
 	for i := 0; i < len(checkpoints); i++ {
 		if height <= checkpoints[i].Height {
 			break
@@ -2093,7 +2045,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		return
 	}
 
-	_, bestHeight, err := b.cfg.BlockHeaders.ChainTip()
+	_, bestHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		log.Errorf("Failed to get hash and height for the "+
 			"latest block: %s", err)
@@ -2128,7 +2080,7 @@ func (b *blockManager) startSync(peers *list.List) {
 
 	// Start syncing from the best peer if one was selected.
 	if bestPeer != nil {
-		locator, err := b.cfg.BlockHeaders.LatestBlockLocator()
+		locator, err := b.cfg.blkHdrProcessor.store.LatestBlockLocator()
 		if err != nil {
 			log.Errorf("Failed to get block locator for the "+
 				"latest block: %s", err)
@@ -2152,12 +2104,13 @@ func (b *blockManager) startSync(peers *list.List) {
 		// If we're still within the range of the set checkpoints, then
 		// we'll use the next checkpoint to guide the set of headers we
 		// fetch, setting our stop hash to the next checkpoint hash.
-		if b.nextCheckpoint != nil && int32(bestHeight) < b.nextCheckpoint.Height {
+		if b.cfg.blkHdrProcessor.nextCheckpt != nil && int32(bestHeight) < b.
+			cfg.blkHdrProcessor.nextCheckpt.Height {
 			log.Infof("Downloading headers for blocks %d to "+
 				"%d from peer %s", bestHeight+1,
-				b.nextCheckpoint.Height, bestPeer.Addr())
+				b.cfg.blkHdrProcessor.nextCheckpt.Height, bestPeer.Addr())
 
-			stopHash = b.nextCheckpoint.Hash
+			stopHash = b.cfg.blkHdrProcessor.nextCheckpt.Hash
 		} else {
 			log.Infof("Fetching set of headers from tip "+
 				"(height=%v) from peer %s", bestHeight,
@@ -2176,7 +2129,7 @@ func (b *blockManager) startSync(peers *list.List) {
 // synced to the connected peers, meaning both block headers and filter headers
 // are current.
 func (b *blockManager) IsFullySynced() bool {
-	_, blockHeaderHeight, err := b.cfg.BlockHeaders.ChainTip()
+	_, blockHeaderHeight, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		return false
 	}
@@ -2204,14 +2157,14 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	defer b.syncPeerMutex.RUnlock()
 
 	// Figure out the latest block we know.
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
+	header, height, err := b.cfg.blkHdrProcessor.store.ChainTip()
 	if err != nil {
 		return false
 	}
 
 	// There is no last checkpoint if checkpoints are disabled or there are
 	// none for this current network.
-	checkpoints := b.cfg.ChainParams.Checkpoints
+	checkpoints := b.cfg.blkHdrProcessor.chainParams.Checkpoints
 	if len(checkpoints) != 0 {
 		// We aren't current if the newest block we know of isn't ahead
 		// of all checkpoints.
@@ -2228,7 +2181,8 @@ func (b *blockManager) BlockHeadersSynced() bool {
 
 	// If our time source (median times of all the connected peers) is at
 	// least 24 hours ahead of our best known block, we aren't current.
-	minus24Hours := b.cfg.TimeSource.AdjustedTime().Add(-24 * time.Hour)
+	minus24Hours := b.cfg.blkHdrProcessor.timeSource.AdjustedTime().Add(
+		-24 * time.Hour)
 	if header.Timestamp.Before(minus24Hours) {
 		return false
 	}
@@ -2292,7 +2246,8 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	// If our chain is current and a peer announces a block we already
 	// know of, then update their current block height.
 	if lastBlock != -1 && b.BlockHeadersSynced() {
-		height, err := b.cfg.BlockHeaders.HeightFromHash(&invVects[lastBlock].Hash)
+		height, err := b.cfg.blkHdrProcessor.store.HeightFromHash(
+			&invVects[lastBlock].Hash)
 		if err == nil {
 			imsg.peer.UpdateLastBlockHeight(int32(height))
 		}
@@ -2308,7 +2263,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	// If this is the sync peer or we're current, get the headers for the
 	// announced blocks and update the last announced block.
 	if lastBlock != -1 && (imsg.peer == b.SyncPeer() || b.BlockHeadersSynced()) {
-		lastEl := b.headerList.Back()
+		lastEl := b.cfg.blkHdrProcessor.headerList.Back()
 		var lastHash chainhash.Hash
 		if lastEl != nil {
 			lastHash = lastEl.Header.BlockHash()
@@ -2326,7 +2281,8 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 			locator = append(locator, &lastHash)
 
 			// Add locator from the database as backup.
-			knownLocator, err := b.cfg.BlockHeaders.LatestBlockLocator()
+			knownLocator, err := b.cfg.blkHdrProcessor.store.
+				LatestBlockLocator()
 			if err == nil {
 				locator = append(locator, knownLocator...)
 			}
@@ -2395,7 +2351,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		finalHash = &blockHash
 
 		// Ensure there is a previous header to compare against.
-		prevNodeEl := b.headerList.Back()
+		prevNodeEl := b.cfg.blkHdrProcessor.headerList.Back()
 		if prevNodeEl == nil {
 			log.Warnf("Header list does not contain a previous" +
 				"element as expected -- disconnecting peer")
@@ -2410,7 +2366,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		node := headerlist.Node{Header: *blockHeader}
 		prevNode := prevNodeEl
 		prevHash := prevNode.Header.BlockHash()
-		valid, err := b.verifyBlockHeader(blockHeader, *prevNode)
+		valid, err := b.cfg.blkHdrProcessor.verifyBlockHeader(blockHeader,
+			*prevNode)
 		if valid {
 			if err != nil {
 				log.Warnf("Header doesn't pass sanity check: "+
@@ -2440,7 +2397,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// Finally initialize the header ->
 			// map[filterHash]*peer map for filter header
 			// validation purposes later.
-			e := b.headerList.PushBack(node)
+			e := b.cfg.blkHdrProcessor.headerList.PushBack(node)
 			if b.startHeader == nil {
 				b.startHeader = e
 			}
@@ -2470,7 +2427,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 			// Check if this block is known. If so, we continue to
 			// the next one.
-			_, _, err := b.cfg.BlockHeaders.FetchHeader(&blockHash)
+			_, _, err := b.cfg.blkHdrProcessor.store.FetchHeader(&blockHash)
 			if err == nil {
 				continue
 			}
@@ -2482,9 +2439,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// these headers. Otherwise, the headers don't connect
 			// to anything we know and we should disconnect the
 			// peer.
-			backHead, backHeight, err := b.cfg.BlockHeaders.FetchHeader(
-				&blockHeader.PrevBlock,
-			)
+			backHead, backHeight, err := b.cfg.blkHdrProcessor.store.
+				FetchHeader(&blockHeader.PrevBlock)
 			if err != nil {
 				log.Warnf("Received block header that does not"+
 					" properly connect to the chain from"+
@@ -2537,11 +2493,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					// at index i+j-1.
 					prevNodeHeader = msg.Headers[i+j-1]
 				}
-
-				err = b.checkHeaderSanity(
-					reorgHeader, b.reorgList,
-					int32(prevNodeHeight), prevNodeHeader,
-				)
+				err = b.cfg.blkHdrProcessor.checkHeaderSanity(
+					reorgHeader, int32(prevNodeHeight), prevNodeHeader,
+					b.reorgList)
 				if err != nil {
 					log.Warnf("Header doesn't pass sanity"+
 						" check: %s -- disconnecting "+
@@ -2565,14 +2519,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 			// This should NEVER be nil because the most recent
 			// block is always pushed back by resetHeaderState
-			knownEl := b.headerList.Back()
+			knownEl := b.cfg.blkHdrProcessor.headerList.Back()
 			var knownHead *wire.BlockHeader
 			for j := uint32(prevNode.Height); j > backHeight; j-- {
 				if knownEl != nil {
 					knownHead = &knownEl.Header
 					knownEl = knownEl.Prev()
 				} else {
-					knownHead, _, err = b.cfg.BlockHeaders.FetchHeader(
+					knownHead, _, err = b.cfg.blkHdrProcessor.store.FetchHeader(
 						&knownHead.PrevBlock)
 					if err != nil {
 						log.Criticalf("Can't get block"+
@@ -2623,27 +2577,28 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				BlockHeader: blockHeader,
 				Height:      backHeight + 1,
 			}
-			err = b.cfg.BlockHeaders.WriteHeaders(hdrs)
+			err = b.cfg.blkHdrProcessor.store.WriteHeaders(hdrs)
 			if err != nil {
 				log.Criticalf("Couldn't write block to "+
 					"database: %s", err)
 				// Should we panic here?
 			}
 
-			b.headerList.ResetHeaderState(headerlist.Node{
+			b.cfg.blkHdrProcessor.headerList.ResetHeaderState(headerlist.Node{
 				Header: *backHead,
 				Height: int32(backHeight),
 			})
-			b.headerList.PushBack(headerlist.Node{
+			b.cfg.blkHdrProcessor.headerList.PushBack(headerlist.Node{
 				Header: *blockHeader,
 				Height: int32(backHeight + 1),
 			})
 		}
 
 		// Verify the header at the next checkpoint height matches.
-		if b.nextCheckpoint != nil && node.Height == b.nextCheckpoint.Height {
+		if b.cfg.blkHdrProcessor.nextCheckpt != nil && node.Height == b.cfg.
+			blkHdrProcessor.nextCheckpt.Height {
 			nodeHash := node.Header.BlockHash()
-			if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
+			if nodeHash.IsEqual(b.cfg.blkHdrProcessor.nextCheckpt.Hash) {
 				receivedCheckpoint = true
 				log.Infof("Verified downloaded block "+
 					"header against checkpoint at height "+
@@ -2654,7 +2609,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"expected checkpoint hash of %s -- "+
 					"disconnecting", node.Height,
 					nodeHash, hmsg.peer.Addr(),
-					b.nextCheckpoint.Hash)
+					b.cfg.blkHdrProcessor.nextCheckpt.Hash)
 
 				prevCheckpoint := b.findPreviousHeaderCheckpoint(
 					node.Height,
@@ -2688,7 +2643,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// With all the headers in this batch validated, we'll write
 		// them all in a single transaction such that this entire batch
 		// is atomic.
-		err := b.cfg.BlockHeaders.WriteHeaders(headerWriteBatch...)
+		err := b.cfg.blkHdrProcessor.store.WriteHeaders(headerWriteBatch...)
 		if err != nil {
 			log.Errorf("Unable to write block headers: %v", err)
 			return
@@ -2697,16 +2652,19 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// When this header is a checkpoint, find the next checkpoint.
 	if receivedCheckpoint {
-		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
+		b.cfg.blkHdrProcessor.nextCheckpt = b.cfg.blkHdrProcessor.
+			findNextHeaderCheckpoint(
+				finalHeight)
 	}
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
+	if b.cfg.blkHdrProcessor.chainParams.Net == chaincfg.SimNetParams.Net || !b.
+		BlockHeadersSynced() {
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
-		if b.nextCheckpoint != nil {
-			nextHash = *b.nextCheckpoint.Hash
+		if b.cfg.blkHdrProcessor.nextCheckpt != nil {
+			nextHash = *b.cfg.blkHdrProcessor.nextCheckpt.Hash
 		}
 		err := hmsg.peer.PushGetHeadersMsg(locator, &nextHash)
 		if err != nil {
@@ -2752,38 +2710,6 @@ func areHeadersConnected(headers []*wire.BlockHeader) bool {
 	}
 
 	return true
-}
-
-// checkHeaderSanity performs contextual and context-less checks on the passed
-// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
-// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
-// checks.
-func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
-	hList headerlist.Chain, prevNodeHeight int32,
-	prevNodeHeader *wire.BlockHeader) error {
-
-	parentHeaderCtx := newLightHeaderCtx(
-		prevNodeHeight, prevNodeHeader, b.cfg.BlockHeaders, hList,
-	)
-
-	// Create a lightChainCtx as well.
-	chainCtx := newLightChainCtx(
-		&b.cfg.ChainParams, b.blocksPerRetarget, b.minRetargetTimespan,
-		b.maxRetargetTimespan,
-	)
-
-	var emptyFlags blockchain.BehaviorFlags
-	err := blockchain.CheckBlockHeaderContext(
-		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
-	)
-	if err != nil {
-		return err
-	}
-
-	return blockchain.CheckBlockHeaderSanity(
-		blockHeader, b.cfg.ChainParams.PowLimit, b.cfg.TimeSource,
-		emptyFlags,
-	)
 }
 
 // onBlockConnected queues a block notification that extends the current chain.
@@ -2847,7 +2773,7 @@ func (b *blockManager) NotificationsSinceHeight(
 	// backlog to the caller before we proceed.
 	blocks := make([]blockntfns.BlockNtfn, 0, bestHeight-height)
 	for i := height + 1; i <= bestHeight; i++ {
-		header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(i)
+		header, err := b.cfg.blkHdrProcessor.store.FetchHeaderByHeight(i)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -2856,27 +2782,6 @@ func (b *blockManager) NotificationsSinceHeight(
 	}
 
 	return blocks, bestHeight, nil
-}
-
-// verifyBlockHeader verifies blockheader by checking if it connects to the
-// previous block and its block header sanity.
-func (b *blockManager) verifyBlockHeader(blockHeader *wire.BlockHeader,
-	prevNode headerlist.Node) (bool, error) {
-
-	prevNodeHeader := prevNode.Header
-	prevHash := prevNode.Header.BlockHash()
-	prevNodeHeight := prevNode.Height
-
-	if prevHash.IsEqual(&blockHeader.PrevBlock) {
-		err := b.checkHeaderSanity(blockHeader, b.headerList,
-			prevNodeHeight, &prevNodeHeader)
-
-		if err != nil {
-			return true, fmt.Errorf("did not pass sanity check: %w", err)
-		}
-		return true, nil
-	}
-	return false, nil
 }
 
 // lightChainCtx is an implementation of the blockchain.ChainCtx interface and

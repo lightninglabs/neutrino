@@ -6,6 +6,7 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"github.com/lightninglabs/neutrino/headerlist"
 	"net"
 	"strconv"
 	"strings"
@@ -680,6 +681,113 @@ type ChainService struct { // nolint:maligned
 	broadcastTimeout time.Duration
 }
 
+// blkHdrProcessor contains the dependencies required to verify and store
+// block headers.
+type blkHdrProcessor struct {
+	minRetargetTimespan int64 // target timespan / adjustment factor
+	maxRetargetTimespan int64 // target timespan * adjustment factor
+	blocksPerRetarget   int32 // target timespan / target time per block
+
+	// timeSource is used to access a time estimate based on the clocks of
+	// the connected peers.
+	timeSource blockchain.MedianTimeSource
+
+	// chainParams is the chain that we're running on.
+	chainParams chaincfg.Params
+
+	// nextCheckpt is the next block header checkpoint at any point.
+	nextCheckpt *chaincfg.Checkpoint
+
+	// store is where the block headers are persisted.
+	store headerfs.BlockHeaderStore
+
+	// headerList is a data structure that facilitates linking block headers
+	// with previous block headers.
+	headerList headerlist.Chain
+}
+
+// checkHeaderSanity performs contextual and context-less checks on the passed
+// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
+// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
+// checks.
+func (h *blkHdrProcessor) checkHeaderSanity(blockHeader *wire.
+	BlockHeader, prevNodeHeight int32,
+	prevNodeHeader *wire.BlockHeader, hList headerlist.Chain) error {
+
+	parentHeaderCtx := newLightHeaderCtx(
+		prevNodeHeight, prevNodeHeader, h.store, hList,
+	)
+
+	// Create a lightChainCtx as well.
+	chainCtx := newLightChainCtx(
+		&h.chainParams, h.blocksPerRetarget, h.minRetargetTimespan,
+		h.maxRetargetTimespan,
+	)
+
+	var emptyFlags blockchain.BehaviorFlags
+	err := blockchain.CheckBlockHeaderContext(
+		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	return blockchain.CheckBlockHeaderSanity(
+		blockHeader, h.chainParams.PowLimit, h.timeSource,
+		emptyFlags,
+	)
+}
+
+// verifyBlockHeader verifies blockheader by checking if it connects to the
+// previous block and its block header sanity.
+func (h *blkHdrProcessor) verifyBlockHeader(blockHeader *wire.BlockHeader,
+	prevNode headerlist.Node) (bool, error) {
+	prevNodeHeader := prevNode.Header
+	prevHash := prevNode.Header.BlockHash()
+	prevNodeHeight := prevNode.Height
+
+	if prevHash.IsEqual(&blockHeader.PrevBlock) {
+		err := h.checkHeaderSanity(blockHeader,
+			prevNodeHeight, &prevNodeHeader, h.headerList)
+
+		if err != nil {
+			return true, fmt.Errorf("did not pass sanity check: %w", err)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// findNextHeaderCheckpoint returns the next checkpoint after the passed height.
+// It returns nil when there is not one either because the height is already
+// later than the final checkpoint or there are none for the current network.
+func (h *blkHdrProcessor) findNextHeaderCheckpoint(height int32) *chaincfg.
+	Checkpoint {
+	// There is no next checkpoint if there are none for this current
+	// network.
+	checkpoints := h.chainParams.Checkpoints
+	if len(checkpoints) == 0 {
+		return nil
+	}
+
+	// There is no next checkpoint if the height is already after the final
+	// checkpoint.
+	finalCheckpoint := &checkpoints[len(checkpoints)-1]
+	if height >= finalCheckpoint.Height {
+		return nil
+	}
+
+	// Find the next checkpoint.
+	nextCheckpoint := finalCheckpoint
+	for i := len(checkpoints) - 2; i >= 0; i-- {
+		if height >= checkpoints[i].Height {
+			break
+		}
+		nextCheckpoint = &checkpoints[i]
+	}
+	return nextCheckpoint
+}
+
 // NewChainService returns a new chain service configured to connect to the
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
@@ -799,16 +907,30 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
+	targetTimespan := int64(s.chainParams.TargetTimespan / time.Second)
+	targetTimePerBlock := int64(s.chainParams.TargetTimePerBlock / time.Second)
+	adjustmentFactor := s.chainParams.RetargetAdjustmentFactor
+
+	hdrProcessor := &blkHdrProcessor{
+		store:               s.BlockHeaders,
+		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
+		minRetargetTimespan: targetTimespan / adjustmentFactor,
+		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		timeSource:          s.timeSource,
+		chainParams:         s.chainParams,
+		headerList: headerlist.NewBoundedMemoryChain(
+			numMaxMemHeaders,
+		),
+	}
+
 	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
 		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
+		blkHdrProcessor:  hdrProcessor,
 	})
 	if err != nil {
 		return nil, err
