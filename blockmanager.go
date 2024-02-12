@@ -2539,7 +2539,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				}
 
 				err = b.checkHeaderSanity(
-					reorgHeader, true,
+					reorgHeader, b.reorgList,
 					int32(prevNodeHeight), prevNodeHeader,
 				)
 				if err != nil {
@@ -2759,14 +2759,8 @@ func areHeadersConnected(headers []*wire.BlockHeader) bool {
 // the contextual check and blockchain.CheckBlockHeaderSanity for context-less
 // checks.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
-	reorgAttempt bool, prevNodeHeight int32,
+	hList headerlist.Chain, prevNodeHeight int32,
 	prevNodeHeader *wire.BlockHeader) error {
-
-	// Create the lightHeaderCtx for the blockHeader's parent.
-	hList := b.headerList
-	if reorgAttempt {
-		hList = b.reorgList
-	}
 
 	parentHeaderCtx := newLightHeaderCtx(
 		prevNodeHeight, prevNodeHeader, b.cfg.BlockHeaders, hList,
@@ -2874,7 +2868,7 @@ func (b *blockManager) verifyBlockHeader(blockHeader *wire.BlockHeader,
 	prevNodeHeight := prevNode.Height
 
 	if prevHash.IsEqual(&blockHeader.PrevBlock) {
-		err := b.checkHeaderSanity(blockHeader, false,
+		err := b.checkHeaderSanity(blockHeader, b.headerList,
 			prevNodeHeight, &prevNodeHeader)
 
 		if err != nil {
