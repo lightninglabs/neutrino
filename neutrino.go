@@ -6,7 +6,9 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"github.com/lightninglabs/neutrino/chaindataloader"
 	"github.com/lightninglabs/neutrino/headerlist"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -86,6 +88,19 @@ var (
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
 )
+
+// SideLoadOpt defines the config required to sideload headers into the DB.
+type SideLoadOpt struct {
+	// SkipVerify indicates if we are to run verification on the headers from the
+	// blkHdrSideLoad source.
+	SkipVerify bool
+
+	// Reader is the sideload source.
+	Reader io.ReadSeeker
+
+	// SourceType indicates the format of a sideload source.
+	SourceType chaindataloader.SourceType
+}
 
 // isDevNetwork indicates if the chain is a private development network, namely
 // simnet or regtest/regnet.
@@ -619,6 +634,14 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// BlkHdrSideloader is the config required to sideload block header in the
+	// chainservice.
+	BlkHdrSideloader *SideLoadOpt
+
+	// CfHdrSideloader is the config required to sideload filter header in the
+	// chainservice.
+	CfHdrSideloader *SideLoadOpt
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -679,6 +702,12 @@ type ChainService struct { // nolint:maligned
 	dialer       func(net.Addr) (net.Conn, error)
 
 	broadcastTimeout time.Duration
+
+	// blkHdrSideloader is used to sideload block headers.
+	blkHdrSideloader *sideloader
+
+	// cfHdrSideloader is used to sideload cfHeaders.
+	cfHdrSideloader *sideloader
 }
 
 // blkHdrProcessor contains the dependencies required to verify and store
@@ -711,7 +740,7 @@ type blkHdrProcessor struct {
 // the contextual check and blockchain.CheckBlockHeaderSanity for context-less
 // checks.
 func (h *blkHdrProcessor) checkHeaderSanity(blockHeader *wire.
-	BlockHeader, prevNodeHeight int32,
+BlockHeader, prevNodeHeight int32,
 	prevNodeHeader *wire.BlockHeader, hList headerlist.Chain) error {
 
 	parentHeaderCtx := newLightHeaderCtx(
@@ -762,7 +791,7 @@ func (h *blkHdrProcessor) verifyBlockHeader(blockHeader *wire.BlockHeader,
 // It returns nil when there is not one either because the height is already
 // later than the final checkpoint or there are none for the current network.
 func (h *blkHdrProcessor) findNextHeaderCheckpoint(height int32) *chaincfg.
-	Checkpoint {
+Checkpoint {
 	// There is no next checkpoint if there are none for this current
 	// network.
 	checkpoints := h.chainParams.Checkpoints
@@ -934,6 +963,33 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	sideload := &sideloader{}
+	if cfg.BlkHdrSideloader != nil {
+		sd, err := prepBlkHdrSideload(cfg.BlkHdrSideloader, hdrProcessor,
+			sideload)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if sd != nil {
+			s.blkHdrSideloader = sideload
+		}
+	}
+
+	if cfg.CfHdrSideloader != nil {
+		sideload.fHdrStore = s.RegFilterHeaders
+		sd, err := prepFilterHdrSideload(cfg.CfHdrSideloader, sideload)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if sd != nil {
+			s.cfHdrSideloader = sideload
+		}
 	}
 	s.blockManager = bm
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
@@ -1725,6 +1781,70 @@ func (s *ChainService) Start() error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
 		return nil
+	}
+
+	// Preload headers before starting any subsystem. Block headers should be
+	// sideloaded first as the amount of filter headers to be sideloaded
+	//// depends on it.
+	if s.blkHdrSideloader != nil {
+		log.Debugf("Sideloading block headers")
+		err := s.blkHdrSideloader.sideLoadHeaders(s.blkHdrSideloader.
+			blkHdrCurHeight,
+			s.blkHdrSideloader.blkHdrProcessor.nextCheckpt.Height, true)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	if s.cfHdrSideloader != nil {
+		_, blkTip, err := s.BlockHeaders.ChainTip()
+		if err != nil {
+			return err
+		}
+
+		s.cfHdrSideloader.fHdrLastHeight = blkTip
+		var doNotSideloadCfheaders bool
+		if s.cfHdrSideloader.fHdrSkipVerify {
+			var finalNextCheckptHeight uint32
+			for i := 0; i < len(s.cfHdrSideloader.filterCheckptHeights); i++ {
+
+				if s.cfHdrSideloader.filterCheckptHeights[i] > blkTip {
+					break
+				}
+				finalNextCheckptHeight = s.cfHdrSideloader.
+					filterCheckptHeights[i]
+
+			}
+
+			s.cfHdrSideloader.fHdrLastHeight = finalNextCheckptHeight
+
+			if finalNextCheckptHeight == 0 {
+				log.Debug("block header tip less than the least filter header" +
+					"check point tip, cannot sideload filter header")
+				doNotSideloadCfheaders = true
+			}
+
+			if s.cfHdrSideloader.fHdrCurHeight >= int32(s.cfHdrSideloader.
+				fHdrLastHeight) {
+				log.Debug("filter tip is greater than or equal to the last header " +
+					"tip for fetch no need to update filter header store -- skipping" +
+					" sideload")
+				doNotSideloadCfheaders = true
+			}
+
+		}
+
+		if !doNotSideloadCfheaders {
+			log.Debugf("Sideloading filter headers")
+			err := s.cfHdrSideloader.sideLoadHeaders(s.cfHdrSideloader.
+				fHdrCurHeight, s.cfHdrSideloader.fHdrNextCheckptHeight,
+				false)
+			if err != nil {
+				return err
+			}
+		}
+
 	}
 
 	// Start the address manager and block manager, both of which are
