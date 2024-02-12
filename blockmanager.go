@@ -43,6 +43,10 @@ const (
 	// maxCFCheckptsPerQuery is the maximum number of filter header
 	// checkpoints we can query for within a single message over the wire.
 	maxCFCheckptsPerQuery = wire.MaxCFHeadersPerMsg / wire.CFCheckptInterval
+
+	// fType is the filter type used.
+	// TODO(Maureen): Make this a field in blockmanager instead?
+	fType = wire.GCSFilterRegular
 )
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
@@ -513,7 +517,6 @@ waitForHeaders:
 		lastHeader.BlockHash())
 	b.newFilterHeadersMtx.RUnlock()
 
-	fType := wire.GCSFilterRegular
 	store := b.cfg.RegFilterHeaders
 
 	log.Infof("Starting cfheaders sync for filter_type=%v", fType)
