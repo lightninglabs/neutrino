@@ -2,6 +2,7 @@ package chainsync
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -67,6 +68,28 @@ func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
 	}
 
 	return nil
+}
+
+// FetchHardCodedFilterHeaderCheckpts fetches the hardcoded filter header
+// checkpoint for the passed bitcoin netwwork.
+func FetchHardCodedFilterHeaderCheckpts(net wire.BitcoinNet) map[uint32]*chainhash.Hash {
+
+	return filterHeaderCheckpoints[net]
+}
+
+// FetchHardCodedFilterHeaderCheckHeight fetches the hardcoded filter header
+// checkpoint heights for the passed bitcoin netwwork.
+func FetchHardCodedFilterHdrCheckptHeight(net wire.BitcoinNet) []uint32 {
+	heights := make([]uint32, 0, len(filterHeaderCheckpoints[net]))
+
+	for height, _ := range filterHeaderCheckpoints[net] {
+		heights = append(heights, height)
+	}
+	sort.Slice(heights, func(i, j int) bool {
+		return heights[j] > heights[i]
+	})
+
+	return heights
 }
 
 // hashFromStr makes a chainhash.Hash from a valid hex string. If the string is
