@@ -107,7 +107,7 @@ type blockManagerCfg struct {
 	queryAllPeers func(
 		queryMsg wire.Message,
 		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
+		quit chan<- struct{}, peerQuit chan<- struct{}),
 		options ...QueryOption)
 }
 
@@ -2410,13 +2410,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		node := headerlist.Node{Header: *blockHeader}
 		prevNode := prevNodeEl
 		prevHash := prevNode.Header.BlockHash()
-		if prevHash.IsEqual(&blockHeader.PrevBlock) {
-			prevNodeHeight := prevNode.Height
-			prevNodeHeader := prevNode.Header
-			err := b.checkHeaderSanity(
-				blockHeader, false, prevNodeHeight,
-				&prevNodeHeader,
-			)
+		valid, err := b.verifyBlockHeader(blockHeader, *prevNode)
+		if valid {
 			if err != nil {
 				log.Warnf("Header doesn't pass sanity check: "+
 					"%s -- disconnecting peer", err)
@@ -2867,6 +2862,27 @@ func (b *blockManager) NotificationsSinceHeight(
 	}
 
 	return blocks, bestHeight, nil
+}
+
+// verifyBlockHeader verifies blockheader by checking if it connects to the
+// previous block and its block header sanity.
+func (b *blockManager) verifyBlockHeader(blockHeader *wire.BlockHeader,
+	prevNode headerlist.Node) (bool, error) {
+
+	prevNodeHeader := prevNode.Header
+	prevHash := prevNode.Header.BlockHash()
+	prevNodeHeight := prevNode.Height
+
+	if prevHash.IsEqual(&blockHeader.PrevBlock) {
+		err := b.checkHeaderSanity(blockHeader, false,
+			prevNodeHeight, &prevNodeHeader)
+
+		if err != nil {
+			return true, fmt.Errorf("did not pass sanity check: %w", err)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // lightChainCtx is an implementation of the blockchain.ChainCtx interface and
