@@ -12,6 +12,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightninglabs/neutrino/cache v1.1.0
 	github.com/lightningnetwork/lnd/queue v1.0.1
+	github.com/linden/indexeddb v0.0.0-20240218035359-81389d584a5e
 	github.com/linden/tempdb v0.0.0-20240218031655-83bc03e79f51
 	github.com/stretchr/testify v1.8.1
 )

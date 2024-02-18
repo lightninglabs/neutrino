@@ -84,8 +84,8 @@ github.com/lightningnetwork/lnd/queue v1.0.1 h1:jzJKcTy3Nj5lQrooJ3aaw9Lau3I0IwvQ
 github.com/lightningnetwork/lnd/queue v1.0.1/go.mod h1:vaQwexir73flPW43Mrm7JOgJHmcEFBWWSl9HlyASoms=
 github.com/lightningnetwork/lnd/ticker v1.0.0 h1:S1b60TEGoTtCe2A0yeB+ecoj/kkS4qpwh6l+AkQEZwU=
 github.com/lightningnetwork/lnd/ticker v1.0.0/go.mod h1:iaLXJiVgI1sPANIF2qYYUJXjoksPNvGNYowB8aRbpX0=
-github.com/linden/tempdb v0.0.0-20231124230014-42fe18a60308 h1:3J67IzgcvBcl1UyzMuExSPmq7hejA1Vr1E7ixKqAUds=
-github.com/linden/tempdb v0.0.0-20231124230014-42fe18a60308/go.mod h1:xR9HUmc4girdp/lNzw1jOt53GaCSmctyB8t+Q6EkWp8=
+github.com/linden/indexeddb v0.0.0-20240218035359-81389d584a5e h1:6FTMUiW0wI+my/+7w4CEEYt5zvGmbAjugt2q/fCUyBM=
+github.com/linden/indexeddb v0.0.0-20240218035359-81389d584a5e/go.mod h1:2AP38q2ks+pRwMc2EhmCexlyri456KCewavN30MZQ8Y=
 github.com/linden/tempdb v0.0.0-20240218031655-83bc03e79f51 h1:RfZREkHD3XpItaIN2I1/tb2hCzE2TN5e14OkTH6Sv74=
 github.com/linden/tempdb v0.0.0-20240218031655-83bc03e79f51/go.mod h1:xR9HUmc4girdp/lNzw1jOt53GaCSmctyB8t+Q6EkWp8=
 github.com/nxadm/tail v1.4.4/go.mod h1:kenIhsEOeOJmVchQTgglprH7qJGnHDVpk1VPCcaMI8A=
