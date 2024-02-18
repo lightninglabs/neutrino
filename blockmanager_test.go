@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -873,6 +874,12 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 // each other properly).
 func TestHandleHeaders(t *testing.T) {
 	t.Parallel()
+
+	// skip this test because we can't spawn a process in the browser.
+	// https://github.com/linden/wasmexec/issues/2.
+	if runtime.GOOS == "js" {
+		t.Skip("start process is unsupported in the browser, skipping test.")
+	}
 
 	// First, we set up a block manager and a fake peer that will act as the
 	// test's remote peer.

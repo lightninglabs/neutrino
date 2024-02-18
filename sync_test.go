@@ -1035,6 +1035,12 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 }
 
 func TestNeutrinoSync(t *testing.T) {
+	// skip this test because we can't spawn a process in the browser.
+	// https://github.com/linden/wasmexec/issues/2.
+	if runtime.GOOS == "js" {
+		t.Skip("start process is unsupported in the browser, skipping test.")
+	}
+
 	// Set up logging.
 	logger := btclog.NewBackend(os.Stdout)
 	chainLogger := logger.Logger("CHAIN")
