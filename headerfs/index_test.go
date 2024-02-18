@@ -5,47 +5,29 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	mathRand "math/rand"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	_ "github.com/linden/tempdb"
 )
 
-func createTestIndex(t testing.TB) (func(), *headerIndex, error) {
-	tempDir, err := ioutil.TempDir("", "neutrino")
+func createTestIndex(t testing.TB) (*headerIndex, error) {
+	db, err := walletdb.Create("tempdb", "test.db")
 	if err != nil {
-		return nil, nil, err
-	}
-
-	db, err := walletdb.Create(
-		"bdb", tempDir+"/test.db", true, time.Second*10,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cleanUp := func() {
-		_ = db.Close()
-		fi, _ := os.Stat(tempDir + "/test.db")
-		t.Logf("DB file size at cleanup: %d bytes\n", fi.Size())
-		_ = os.RemoveAll(tempDir)
+		return nil, err
 	}
 
 	filterDB, err := newHeaderIndex(db, Block)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	return cleanUp, filterDB, nil
+	return filterDB, nil
 }
 
 func TestAddHeadersIndexRetrieve(t *testing.T) {
-	cleanUp, hIndex, err := createTestIndex(t)
-	defer cleanUp()
+	hIndex, err := createTestIndex(t)
 	if err != nil {
 		t.Fatalf("unable to create test db: %v", err)
 	}
@@ -115,11 +97,10 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 // location in the bbolt database for reduced memory consumption don't impact
 // existing users that already have entries in their database.
 func TestHeaderStorageFallback(t *testing.T) {
-	cleanUp, hIndex, err := createTestIndex(t)
+	hIndex, err := createTestIndex(t)
 	if err != nil {
 		t.Fatalf("unable to create test db: %v", err)
 	}
-	defer cleanUp()
 
 	// First, write some headers directly to the root index bucket manually
 	// to simulate users with the old database format.
@@ -192,12 +173,18 @@ func TestHeaderStorageFallback(t *testing.T) {
 		t.Fatalf("error setting new tip: %v", err)
 	}
 	for _, header := range newHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+		// Copy the header hash so we can create a iteration-specific pointer.
+		// https://github.com/golang/go/discussions/56010#discussion-4441437.
+		hash := header.hash
+
+		if err := hIndex.truncateIndex(&hash, true); err != nil {
 			t.Fatalf("error truncating tip: %v", err)
 		}
 	}
 	for _, header := range oldHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+		hash := header.hash
+
+		if err := hIndex.truncateIndex(&hash, true); err != nil {
 			t.Fatalf("error truncating tip: %v", err)
 		}
 	}
@@ -238,7 +225,7 @@ func BenchmarkWriteHeadersSmallBatch(b *testing.B) {
 		numBatches = 5000
 	)
 	for n := 0; n < b.N; n++ {
-		cleanUp, hIndex, err := createTestIndex(b)
+		hIndex, err := createTestIndex(b)
 		if err != nil {
 			b.Fatalf("unable to create test db: %v", err)
 		}
@@ -249,8 +236,6 @@ func BenchmarkWriteHeadersSmallBatch(b *testing.B) {
 				b.Fatalf("error writing random batch: %v", err)
 			}
 		}
-
-		cleanUp()
 	}
 }
 
@@ -262,7 +247,7 @@ func BenchmarkWriteHeadersMediumBatch(b *testing.B) {
 		numBatches = 250
 	)
 	for n := 0; n < b.N; n++ {
-		cleanUp, hIndex, err := createTestIndex(b)
+		hIndex, err := createTestIndex(b)
 		if err != nil {
 			b.Fatalf("unable to create test db: %v", err)
 		}
@@ -273,8 +258,6 @@ func BenchmarkWriteHeadersMediumBatch(b *testing.B) {
 				b.Fatalf("error writing random batch: %v", err)
 			}
 		}
-
-		cleanUp()
 	}
 }
 
@@ -286,7 +269,7 @@ func BenchmarkWriteHeadersLargeBatch(b *testing.B) {
 		numBatches = 50
 	)
 	for n := 0; n < b.N; n++ {
-		cleanUp, hIndex, err := createTestIndex(b)
+		hIndex, err := createTestIndex(b)
 		if err != nil {
 			b.Fatalf("unable to create test db: %v", err)
 		}
@@ -297,8 +280,6 @@ func BenchmarkWriteHeadersLargeBatch(b *testing.B) {
 				b.Fatalf("error writing random batch: %v", err)
 			}
 		}
-
-		cleanUp()
 	}
 }
 
@@ -306,7 +287,7 @@ func BenchmarkWriteHeadersLargeBatch(b *testing.B) {
 // index with a hash.
 func BenchmarkHeightLookupLatency(b *testing.B) {
 	// Start by creating an index with 10k headers.
-	cleanUp, hIndex, err := createTestIndex(b)
+	hIndex, err := createTestIndex(b)
 	if err != nil {
 		b.Fatalf("unable to create test db: %v", err)
 	}
@@ -328,8 +309,6 @@ func BenchmarkHeightLookupLatency(b *testing.B) {
 			b.Fatalf("error fetching height: %v", err)
 		}
 	}
-
-	cleanUp()
 }
 
 // writeRandomBatch creates a random batch with numHeaders headers and writes it

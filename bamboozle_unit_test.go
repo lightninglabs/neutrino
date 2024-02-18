@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	_ "github.com/linden/tempdb"
 )
 
 func decodeHashNoError(str string) *chainhash.Hash {
@@ -525,9 +526,7 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 	}
 	defer os.RemoveAll(tempDir)
 
-	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
-	)
+	db, err := walletdb.Create("tempdb", "weks.db")
 	if err != nil {
 		t.Fatalf("Error opening DB: %s", err)
 	}

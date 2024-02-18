@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,9 +60,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 
 	// Set up the block and filter header stores.
 	tempDir := t.TempDir()
-	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
-	)
+	db, err := walletdb.Create("tempdb", "weks.db")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error opening DB: %s", err)
 	}
@@ -875,6 +874,12 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 // each other properly).
 func TestHandleHeaders(t *testing.T) {
 	t.Parallel()
+
+	// skip this test because we can't spawn a process in the browser.
+	// https://github.com/linden/wasmexec/issues/2.
+	if runtime.GOOS == "js" {
+		t.Skip("start process is unsupported in the browser, skipping test.")
+	}
 
 	// First, we set up a block manager and a fake peer that will act as the
 	// test's remote peer.
