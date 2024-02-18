@@ -173,12 +173,18 @@ func TestHeaderStorageFallback(t *testing.T) {
 		t.Fatalf("error setting new tip: %v", err)
 	}
 	for _, header := range newHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+		// Copy the header hash so we can create a iteration-specific pointer.
+		// https://github.com/golang/go/discussions/56010#discussion-4441437.
+		hash := header.hash
+
+		if err := hIndex.truncateIndex(&hash, true); err != nil {
 			t.Fatalf("error truncating tip: %v", err)
 		}
 	}
 	for _, header := range oldHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
+		hash := header.hash
+
+		if err := hIndex.truncateIndex(&hash, true); err != nil {
 			t.Fatalf("error truncating tip: %v", err)
 		}
 	}
