@@ -12,6 +12,7 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/sideload"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -45,4 +46,5 @@ func UseLogger(logger btclog.Logger) {
 	query.UseLogger(logger)
 	filterdb.UseLogger(logger)
 	chanutils.UseLogger(logger)
+	sideload.UseLogger(logger)
 }
