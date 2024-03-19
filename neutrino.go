@@ -28,6 +28,7 @@ import (
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
 )
@@ -1763,3 +1764,103 @@ func (o *onionAddr) Network() string {
 
 // Ensure onionAddr implements the net.Addr interface.
 var _ net.Addr = (*onionAddr)(nil)
+
+type blockHeaderValidator struct {
+	*BlockHeaderCheckpoints
+	headerList          headerlist.Chain
+	minRetargetTimespan int64 // target timespan / adjustment factor
+	maxRetargetTimespan int64 // target timespan * adjustment factor
+	blocksPerRetarget   int32 // target timespan / target time per block
+	// ChainParams is the chain that we're running on.
+	ChainParams chaincfg.Params
+	// TimeSource is used to access a time estimate based on the clocks of
+	// the connected peers.
+	TimeSource     blockchain.MedianTimeSource
+	nextCheckpoint *chaincfg.Checkpoint
+	store          headerfs.BlockHeaderStore
+}
+
+func (b *blockHeaderValidator) Verify(headers []*wire.BlockHeader) bool {
+	if !areHeadersConnected(headers) {
+		log.Debug("headers do not connect")
+
+		return false
+	}
+
+	var node headerlist.Node
+	for _, header := range headers {
+		prevNode := b.headerList.Back()
+		prevHash := prevNode.Header.BlockHash()
+		if prevHash.IsEqual(&header.PrevBlock) {
+			err := b.checkHeaderSanity(
+				header, b.headerList, prevNode.Height,
+				&prevNode.Header,
+			)
+
+			if err != nil {
+				log.Debugf("failed sanity check: %v", err)
+
+				return false
+			}
+
+			node = headerlist.Node{
+				Header: *header,
+				Height: prevNode.Height + 1,
+			}
+			b.headerList.PushBack(node)
+		}
+	}
+
+	// Verify the header at the next checkpoint height matches.
+	if b.nextCheckpoint != nil && node.Height == b.nextCheckpoint.Height {
+		nodeHash := node.Header.BlockHash()
+		if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
+			log.Infof("Verified downloaded block "+
+				"header against checkpoint at height "+
+				"%d/hash %s", node.Height, nodeHash)
+		} else {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (b *blockHeaderValidator) VerifyCheckpoint(
+	nextcheckpt *chainhash.Hash, headers []*wire.BlockHeader,
+	prevCheckpt *chainhash.Hash) bool {
+
+	return true
+}
+
+// checkHeaderSanity performs contextual and context-less checks on the passed
+// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
+// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
+// checks. Copied from the blockamanager, line 2738.
+func (b *blockHeaderValidator) checkHeaderSanity(blockHeader *wire.BlockHeader,
+	hList headerlist.Chain, prevNodeHeight int32,
+	prevNodeHeader *wire.BlockHeader) error {
+
+	parentHeaderCtx := newLightHeaderCtx(
+		prevNodeHeight, prevNodeHeader, b.store, hList,
+	)
+
+	// Create a lightChainCtx as well.
+	chainCtx := newLightChainCtx(
+		&b.ChainParams, b.blocksPerRetarget, b.minRetargetTimespan,
+		b.maxRetargetTimespan,
+	)
+
+	var emptyFlags blockchain.BehaviorFlags
+	err := blockchain.CheckBlockHeaderContext(
+		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	return blockchain.CheckBlockHeaderSanity(
+		blockHeader, b.ChainParams.PowLimit, b.TimeSource,
+		emptyFlags,
+	)
+}
