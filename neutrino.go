@@ -1864,3 +1864,40 @@ func (b *blockHeaderValidator) checkHeaderSanity(blockHeader *wire.BlockHeader,
 		emptyFlags,
 	)
 }
+
+type blkHeaderWriter struct {
+	store     headerfs.BlockHeaderStore
+	tipHeight uint32
+}
+
+func (b *blkHeaderWriter) ChainTip() (*chainhash.Hash, uint32, error) {
+	header, height, err := b.store.ChainTip()
+
+	hash := header.BlockHash()
+
+	return &hash, height, err
+}
+
+func (b *blkHeaderWriter) Write(headers []*wire.BlockHeader) error {
+	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(headers))
+
+	tipHeight := b.tipHeight
+	for _, header := range headers {
+		tipHeight++
+		headerWriteBatch = append(
+			headerWriteBatch, headerfs.BlockHeader{
+				BlockHeader: header,
+				Height:      tipHeight,
+			},
+		)
+	}
+
+	err := b.store.WriteHeaders(headerWriteBatch...)
+	if err != nil {
+		return err
+	}
+
+	b.tipHeight = tipHeight
+
+	return nil
+}
