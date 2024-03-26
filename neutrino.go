@@ -6,6 +6,7 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -28,8 +29,10 @@ import (
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/sideload"
 )
 
 // These are exported variables so they can be changed by users.
@@ -84,6 +87,8 @@ var (
 	// DefaultBlockCacheSize is the size (in bytes) of blocks neutrino will
 	// keep in memory if no size is specified in the neutrino.Config.
 	DefaultBlockCacheSize uint64 = 4096 * 10 * 1000 // 40 MB
+
+	SideloadRange uint32 = 2000
 )
 
 // isDevNetwork indicates if the chain is a private development network, namely
@@ -111,6 +116,18 @@ type peerState struct {
 	outboundPeers   map[int32]*ServerPeer
 	persistentPeers map[int32]*ServerPeer
 	outboundGroups  map[string]int
+}
+
+type SideloadOpt struct {
+	// SourceType is the format type of the sideload source.
+	SourceType sideload.SourceType
+
+	// Reader is the sideload's source.
+	Reader io.ReadSeeker
+
+	SkipVerify bool
+
+	SideloadRange uint32
 }
 
 // Count returns the count of all known peers.
@@ -618,6 +635,8 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	BlkHdrSideload *SideloadOpt
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -678,6 +697,8 @@ type ChainService struct { // nolint:maligned
 	dialer       func(net.Addr) (net.Conn, error)
 
 	broadcastTimeout time.Duration
+
+	BlockHeaderSideloader *sideload.SideLoader[*wire.BlockHeader]
 }
 
 // NewChainService returns a new chain service configured to connect to the
@@ -814,6 +835,46 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 	s.blockManager = bm
+
+	if cfg.BlkHdrSideload != nil {
+		blockHdrChkptMgr := NewblockHeaderCheckpoints(s.chainParams)
+		blockHeaderWriter := &blkHeaderWriter{
+			store:     s.BlockHeaders,
+			tipHeight: s.blockManager.headerTip,
+		}
+
+		loader := sideload.LoaderInternal[*wire.BlockHeader]{
+			HeaderWriter: blockHeaderWriter,
+			HeaderValidator: &blockHeaderValidator{
+				BlockHeaderCheckpoints: blockHdrChkptMgr,
+				headerList:             bm.headerList,
+				minRetargetTimespan:    bm.minRetargetTimespan,
+				maxRetargetTimespan:    bm.maxRetargetTimespan,
+				blocksPerRetarget:      bm.blocksPerRetarget,
+				ChainParams:            s.chainParams,
+				TimeSource:             s.timeSource,
+				nextCheckpoint:         bm.nextCheckpoint,
+				store:                  s.BlockHeaders,
+			},
+			SkipVerify:    cfg.BlkHdrSideload.SkipVerify,
+			Chkpt:         blockHdrChkptMgr,
+			SideloadRange: SideloadRange,
+		}
+
+		blkHdrSideload, err := sideload.NewBlockHeaderLoader(
+			&sideload.LoaderConfig[*wire.BlockHeader]{
+				LoaderInternal: loader,
+				SourceType:     cfg.BlkHdrSideload.SourceType,
+				Reader:         cfg.BlkHdrSideload.Reader,
+				Chain:          s.chainParams.Net,
+			})
+		if err != nil {
+			return nil, err
+		}
+
+		s.BlockHeaderSideloader = blkHdrSideload
+	}
+
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
 
 	// Only setup a function to return new addresses to connect to when not
@@ -1605,8 +1666,13 @@ func (s *ChainService) Start() error {
 		return nil
 	}
 
-	// Start the address manager and block manager, both of which are
-	// needed by peers.
+	if s.BlockHeaderSideloader != nil {
+		err := s.BlockHeaderSideloader.Load()
+		if err != nil {
+			log.Warnf("error while sideloading: %v", err)
+		}
+	}
+
 	s.addrManager.Start()
 	s.blockManager.Start()
 	s.blockSubscriptionMgr.Start()
@@ -1763,3 +1829,140 @@ func (o *onionAddr) Network() string {
 
 // Ensure onionAddr implements the net.Addr interface.
 var _ net.Addr = (*onionAddr)(nil)
+
+type blockHeaderValidator struct {
+	*BlockHeaderCheckpoints
+	headerList          headerlist.Chain
+	minRetargetTimespan int64 // target timespan / adjustment factor
+	maxRetargetTimespan int64 // target timespan * adjustment factor
+	blocksPerRetarget   int32 // target timespan / target time per block
+	// ChainParams is the chain that we're running on.
+	ChainParams chaincfg.Params
+	// TimeSource is used to access a time estimate based on the clocks of
+	// the connected peers.
+	TimeSource     blockchain.MedianTimeSource
+	nextCheckpoint *chaincfg.Checkpoint
+	store          headerfs.BlockHeaderStore
+}
+
+func (b *blockHeaderValidator) Verify(headers []*wire.BlockHeader) bool {
+	if !areHeadersConnected(headers) {
+		log.Debug("headers do not connect")
+
+		return false
+	}
+
+	var node headerlist.Node
+	for _, header := range headers {
+		prevNode := b.headerList.Back()
+		prevHash := prevNode.Header.BlockHash()
+		if prevHash.IsEqual(&header.PrevBlock) {
+			err := b.checkHeaderSanity(
+				header, b.headerList, prevNode.Height,
+				&prevNode.Header,
+			)
+
+			if err != nil {
+				log.Debugf("failed sanity check: %v", err)
+
+				return false
+			}
+
+			node = headerlist.Node{
+				Header: *header,
+				Height: prevNode.Height + 1,
+			}
+			b.headerList.PushBack(node)
+		}
+	}
+
+	// Verify the header at the next checkpoint height matches.
+	if b.nextCheckpoint != nil && node.Height == b.nextCheckpoint.Height {
+		nodeHash := node.Header.BlockHash()
+		if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
+			log.Infof("Verified downloaded block "+
+				"header against checkpoint at height "+
+				"%d/hash %s", node.Height, nodeHash)
+		} else {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (b *blockHeaderValidator) VerifyCheckpoint(
+	nextcheckpt *chainhash.Hash, headers []*wire.BlockHeader,
+	prevCheckpt *chainhash.Hash) bool {
+
+	return true
+}
+
+// checkHeaderSanity performs contextual and context-less checks on the passed
+// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
+// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
+// checks. Copied from the blockamanager, line 2738.
+func (b *blockHeaderValidator) checkHeaderSanity(blockHeader *wire.BlockHeader,
+	hList headerlist.Chain, prevNodeHeight int32,
+	prevNodeHeader *wire.BlockHeader) error {
+
+	parentHeaderCtx := newLightHeaderCtx(
+		prevNodeHeight, prevNodeHeader, b.store, hList,
+	)
+
+	// Create a lightChainCtx as well.
+	chainCtx := newLightChainCtx(
+		&b.ChainParams, b.blocksPerRetarget, b.minRetargetTimespan,
+		b.maxRetargetTimespan,
+	)
+
+	var emptyFlags blockchain.BehaviorFlags
+	err := blockchain.CheckBlockHeaderContext(
+		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
+	)
+	if err != nil {
+		return err
+	}
+
+	return blockchain.CheckBlockHeaderSanity(
+		blockHeader, b.ChainParams.PowLimit, b.TimeSource,
+		emptyFlags,
+	)
+}
+
+type blkHeaderWriter struct {
+	store     headerfs.BlockHeaderStore
+	tipHeight uint32
+}
+
+func (b *blkHeaderWriter) ChainTip() (*chainhash.Hash, uint32, error) {
+	header, height, err := b.store.ChainTip()
+
+	hash := header.BlockHash()
+
+	return &hash, height, err
+}
+
+func (b *blkHeaderWriter) Write(headers []*wire.BlockHeader) error {
+	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(headers))
+
+	tipHeight := b.tipHeight
+	for _, header := range headers {
+		tipHeight++
+		headerWriteBatch = append(
+			headerWriteBatch, headerfs.BlockHeader{
+				BlockHeader: header,
+				Height:      tipHeight,
+			},
+		)
+	}
+
+	err := b.store.WriteHeaders(headerWriteBatch...)
+	if err != nil {
+		return err
+	}
+
+	b.tipHeight = tipHeight
+
+	return nil
+}
