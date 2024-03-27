@@ -335,8 +335,27 @@ Loop:
 			// into the work queue if it has not reached the
 			// maximum number of retries.
 			case result.err != nil:
-				// Punish the peer for the failed query.
-				w.cfg.Ranking.Punish(result.peer.Addr())
+				// Refresh peer rank on disconnect.
+				if result.err == ErrPeerDisconnected {
+					w.cfg.Ranking.ResetRanking(
+						result.peer.Addr(),
+					)
+				} else {
+					// Punish the peer for the failed query.
+					w.cfg.Ranking.Punish(result.peer.Addr())
+				}
+
+				if batch == nil {
+					log.Warnf("Query(%d) from peer %v "+
+						"failed with retries %d, NOT "+
+						"rescheduling batch already"+
+						"canceled: %v",
+						result.job.index,
+						result.peer.Addr(),
+						result.job.tries, result.err)
+
+					continue Loop
+				}
 
 				if batch != nil && !batch.noRetryMax {
 					result.job.tries++
@@ -380,11 +399,6 @@ Loop:
 					result.job.timeout = newTimeout
 				}
 
-				// Refresh peer rank on disconnect.
-				if result.err == ErrPeerDisconnected {
-					w.cfg.Ranking.ResetRanking(result.peer.Addr())
-				}
-
 				heap.Push(work, result.job)
 				currentQueries[result.job.index] = batchNum
 
@@ -423,11 +437,32 @@ Loop:
 					batch.errChan <- ErrQueryTimeout
 					delete(currentBatches, batchNum)
 
+					// When deleting the particular batch
+					// number we need to make sure we delete
+					// all the ongoing queryJobs in queue.
+					// Otherwise these queries might never
+					// be removed (in case they fail because
+					// of a timeout for example).
+					//
+					// NOTE: We do NOT cancel ongoing
+					// queries with the workers because it's
+					// easier to let them timeout and just
+					// be dropped because their
+					// corresponding batch is already
+					// removed.
+					for job, batch := range currentQueries {
+						if batch == batchNum {
+							heap.Remove(
+								work, int(job),
+							)
+						}
+					}
+
 					log.Warnf("Query(%d) failed with "+
 						"error: %v. Timing out.",
 						result.job.index, result.err)
 
-					log.Debugf("Batch %v timed out",
+					log.Warnf("Batch %v timed out",
 						batchNum)
 
 				default:
