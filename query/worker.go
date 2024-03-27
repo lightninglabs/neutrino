@@ -24,11 +24,12 @@ var (
 // queryJob is the internal struct that wraps the Query to work on, in
 // addition to some information about the query.
 type queryJob struct {
-	tries      uint8
-	index      uint64
-	timeout    time.Duration
-	encoding   wire.MessageEncoding
-	cancelChan <-chan struct{}
+	tries              uint8
+	index              uint64
+	timeout            time.Duration
+	encoding           wire.MessageEncoding
+	cancelChan         <-chan struct{}
+	internalCancelChan <-chan struct{}
 	*Request
 }
 
@@ -128,6 +129,16 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// result will be sent back.
 			break
 
+		case <-job.internalCancelChan:
+			log.Tracef("Worker %v found job with index %v "+
+				"already internally canceled (batch timed out)",
+				peer.Addr(), job.Index())
+
+			// We break to the below loop, where we'll check the
+			// internal cancel channel again and the ErrJobCanceled
+			// result will be sent back.
+			break
+
 		// We received a non-canceled query job, send it to the peer.
 		default:
 			log.Tracef("Worker %v queuing job %T with index %v",
@@ -210,6 +221,13 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			case <-job.cancelChan:
 				log.Tracef("Worker %v job %v canceled",
 					peer.Addr(), job.Index())
+
+				jobErr = ErrJobCanceled
+				break Loop
+
+			case <-job.internalCancelChan:
+				log.Tracef("Worker %v job %v internally "+
+					"canceled", peer.Addr(), job.Index())
 
 				jobErr = ErrJobCanceled
 				break Loop
