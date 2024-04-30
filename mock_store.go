@@ -82,3 +82,7 @@ func (m *mockBlockHeaderStore) WriteHeaders(headers ...headerfs.BlockHeader) err
 
 	return nil
 }
+
+func (m *mockBlockHeaderStore) Remove() error {
+	return nil
+}

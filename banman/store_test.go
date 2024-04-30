@@ -1,46 +1,30 @@
 package banman_test
 
 import (
-	"io/ioutil"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/banman"
+	_ "github.com/linden/tempdb"
 )
 
 // createTestBanStore creates a test Store backed by a boltdb instance.
-func createTestBanStore(t *testing.T) (banman.Store, func()) {
+func createTestBanStore(t *testing.T) banman.Store {
 	t.Helper()
 
-	dbDir, err := ioutil.TempDir("", "")
+	db, err := walletdb.Create("tempdb", "test.db")
 	if err != nil {
-		t.Fatalf("unable to create db dir: %v", err)
-	}
-	dbPath := filepath.Join(dbDir, "test.db")
-
-	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10)
-	if err != nil {
-		os.RemoveAll(dbDir)
 		t.Fatalf("unable to create db: %v", err)
-	}
-
-	cleanUp := func() {
-		db.Close()
-		os.RemoveAll(dbDir)
 	}
 
 	banStore, err := banman.NewStore(db)
 	if err != nil {
-		cleanUp()
 		t.Fatalf("unable to create ban store: %v", err)
 	}
 
-	return banStore, cleanUp
+	return banStore
 }
 
 // TestBanStore ensures that the BanStore's state correctly reflects the
@@ -50,8 +34,7 @@ func TestBanStore(t *testing.T) {
 
 	// We'll start by creating our test BanStore backed by a boltdb
 	// instance.
-	banStore, cleanUp := createTestBanStore(t)
-	defer cleanUp()
+	banStore := createTestBanStore(t)
 
 	// checkBanStore is a helper closure to ensure to the IP network's ban
 	// status is correctly reflected within the BanStore.

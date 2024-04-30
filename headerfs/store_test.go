@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	_ "github.com/linden/tempdb"
 )
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
@@ -26,10 +26,7 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 		return nil, nil, "", nil, err
 	}
 
-	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create(
-		"bdb", dbPath, true, time.Second*10,
-	)
+	db, err := walletdb.Create("tempdb", "test.db")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -41,7 +38,6 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 
 	cleanUp := func() {
 		os.RemoveAll(tempDir)
-		db.Close()
 	}
 
 	return cleanUp, db, tempDir, hStore.(*blockHeaderStore), nil
@@ -231,8 +227,7 @@ func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderSt
 		return nil, nil, "", nil, err
 	}
 
-	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10)
+	db, err := walletdb.Create("tempdb", "test.db")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
