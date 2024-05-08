@@ -874,6 +874,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
+				// Don't hammer.
+				if time.Since(addr.LastAttempt()) < ConnectionRetryInterval {
+					continue
+				}
+
 				// only allow recent nodes (10mins) after we failed 30
 				// times
 				if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute {
