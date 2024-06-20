@@ -956,7 +956,7 @@ func (rs *rescanState) handleBlockConnected(ntfn *blockntfns.Connected) error {
 
 	// Otherwise, we'll attempt to fetch the filter to retrieve the relevant
 	// transactions and notify them.
-	queryOptions := NumRetries(0)
+	queryOptions := NumRetries(2)
 	blockFilter, err := chain.GetCFilter(
 		newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 	)

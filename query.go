@@ -49,7 +49,7 @@ var (
 	// each peer before we've concluded we aren't going to get a valid
 	// response. This allows to make up for missed messages in some
 	// instances.
-	QueryNumRetries = 2
+	QueryNumRetries = 8
 
 	// QueryPeerConnectTimeout specifies how long to wait for the
 	// underlying chain service to connect to a peer before giving up
