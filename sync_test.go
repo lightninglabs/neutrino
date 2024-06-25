@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -31,6 +32,8 @@ import (
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/sideload"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -39,7 +42,7 @@ var (
 	// btclog.LevelOff turns on log messages from the tests themselves as
 	// well. Keep in mind some log messages may not appear in order due to
 	// use of multiple query goroutines in the tests.
-	logLevel    = btclog.LevelOff
+	logLevel    = btclog.LevelInfo
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 
@@ -188,6 +191,17 @@ var (
 	// OnFilteredBlockDisconnected.
 	ourKnownTxsByFilteredBlock = make(map[chainhash.Hash][]*btcutil.Tx)
 )
+
+func init() {
+	// Set up logging.
+	logger := btclog.NewBackend(os.Stdout)
+	chainLogger := logger.Logger("CHAIN")
+	chainLogger.SetLevel(logLevel)
+	neutrino.UseLogger(chainLogger)
+	rpcLogger := logger.Logger("RPCC")
+	rpcLogger.SetLevel(logLevel)
+	rpcclient.UseLogger(rpcLogger)
+}
 
 // secSource is an implementation of btcwallet/txauthor/SecretsSource that
 // stores WitnessPubKeyHash addresses.
@@ -1035,14 +1049,7 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 }
 
 func TestNeutrinoSync(t *testing.T) {
-	// Set up logging.
-	logger := btclog.NewBackend(os.Stdout)
-	chainLogger := logger.Logger("CHAIN")
-	chainLogger.SetLevel(logLevel)
-	neutrino.UseLogger(chainLogger)
-	rpcLogger := logger.Logger("RPCC")
-	rpcLogger.SetLevel(logLevel)
-	rpcclient.UseLogger(rpcLogger)
+	// setUpLog()
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
@@ -1120,18 +1127,10 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Copy parameters and insert checkpoints
 	modParams := chaincfg.SimNetParams
-	for _, height := range []int64{111, 333, 555, 777, 999} {
-		hash, err := h1.Client.GetBlockHash(height)
-		if err != nil {
-			t.Fatalf("Couldn't get block hash for height %d: %s",
-				height, err)
-		}
-		modParams.Checkpoints = append(modParams.Checkpoints,
-			chaincfg.Checkpoint{
-				Hash:   hash,
-				Height: int32(height),
-			})
-	}
+	checkptHeights := []int64{111, 333, 555, 777, 999}
+	checkpoints := createCheckpoints(checkptHeights, h1, t)
+
+	modParams.Checkpoints = checkpoints
 
 	// Create a temporary directory, initialize an empty walletdb with an
 	// SPV chain namespace, and create a configuration for the ChainService.
@@ -1179,6 +1178,300 @@ func TestNeutrinoSync(t *testing.T) {
 			break
 		}
 	}
+}
+
+func TestNeutrinoBlkHdrSideload(t *testing.T) {
+	// setUpLog()
+
+	// Setup harness for testing.
+	harness, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+
+	err = harness.SetUp(false, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, harness.TearDown())
+	})
+
+	// Create DB.
+	tempDir, err := os.MkdirTemp("", "neutrino")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, os.RemoveAll(tempDir))
+	})
+
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	// Create function to clean up DB.
+	cleanUpDB := func() {
+		require.NoError(t, removeAllFilesInDir(tempDir))
+	}
+
+	// Create function to set up neutrino and confirm header store is at
+	// the specified height.
+	startNeutrinoCheckHeight := func(config neutrino.Config, height int32,
+		t *testing.T) {
+
+		svc, err := neutrino.NewChainService(config)
+		require.NoError(t, err)
+
+		err = svc.Start()
+		require.NoError(t, err)
+
+		defer func() {
+			err = svc.Stop()
+			require.NoError(t, err)
+		}()
+
+		_, tipHeight, err := svc.BlockHeaders.ChainTip()
+		require.NoError(t, err)
+
+		require.Equal(t, height, int32(tipHeight))
+	}
+
+	_, err = harness.Client.Generate(1000)
+	require.NoError(t, err)
+
+	// Set up bitcoin network and checkpoint for testing.
+	// Using a dev network and not connecting with any peers ensures that
+	// we fetch headers only from the sideleoad.
+	modParams := chaincfg.SimNetParams
+
+	chkptHeights := []int64{111, 333, 555, 777, 999}
+	checkpoints := createCheckpoints(chkptHeights, harness, t)
+
+	modParams.Checkpoints = checkpoints
+
+	neutrinoConfig := neutrino.Config{
+		DataDir:     tempDir,
+		Database:    db,
+		ChainParams: modParams,
+	}
+
+	testCfg := &sideload.TestCfg{
+		StartHeight: 0,
+		EndHeight:   556,
+		Net:         modParams.Net,
+		DataType:    sideload.BlockHeaders,
+	}
+
+	type readerFunction func(*testing.T, *sideload.TestCfg,
+		[]byte) io.ReadSeeker
+
+	readerFuncsList := map[sideload.SourceType]readerFunction{
+		sideload.Binary: sideload.GenerateEncodedBinaryReader,
+	}
+
+	for sourceType, readerFunc := range readerFuncsList {
+		// Verify sideloading reaches source's end height while not
+		// verifying headers.
+		t.Run(
+			"Test preloading headers to source's last height "+
+				" while skipVerify is true.",
+			func(t *testing.T) {
+				headers := sideload.GenerateValidBlockHeaders(
+					uint32(
+						testCfg.EndHeight-testCfg.
+							StartHeight,
+					), harness, t,
+				)
+				bLoader := readerFunc(t, testCfg, headers)
+
+				neutrinoConfig.BlkHdrSideload = &neutrino.
+					SideloadOpt{
+					SourceType: sourceType,
+					Reader:     bLoader,
+					SkipVerify: true,
+				}
+
+				startNeutrinoCheckHeight(neutrinoConfig,
+					int32(testCfg.EndHeight), t)
+
+				// Database remains uncleared; header store
+				// should stay at `testCfg.EndHeight`. This test
+				// checks that sideloading from a source that
+				// has nothing to offer does not change the
+				// store's height.
+				startNeutrinoCheckHeight(
+					neutrinoConfig, int32(
+						testCfg.EndHeight,
+					), t,
+				)
+			})
+
+		// Clean up DB for next test.
+		cleanUpDB()
+
+		chkptMgr := neutrino.NewBlockHeaderCheckpoints(
+			modParams,
+		)
+
+		// Verify sideloading stops at a checkpoint height ≤ source's
+		// last height when SkipVerify is false.
+		t.Run(
+			"Ensure sideloading halts at checkpoint ≤ source's "+
+				"final height with verification",
+			func(t *testing.T) {
+				headers := sideload.GenerateValidBlockHeaders(
+					uint32(
+						testCfg.EndHeight-testCfg.
+							StartHeight,
+					), harness, t,
+				)
+				bLoader := readerFunc(t, testCfg, headers)
+
+				neutrinoConfig.BlkHdrSideload = &neutrino.
+					SideloadOpt{
+					SourceType: sourceType,
+					Reader:     bLoader,
+				}
+
+				// Fetch the closest checkpoint to height.
+				_, height, _ := chkptMgr.
+					FindPreviousHeaderCheckpoint(
+						uint32(testCfg.EndHeight),
+					)
+				require.Equal(t, int(height), 555)
+
+				startNeutrinoCheckHeight(
+					neutrinoConfig, int32(height), t,
+				)
+
+				// Database intact; expect no change in header
+				// store's height. This test verifies sideloading
+				// from a source lacking a full checkpoint range
+				// doesn't alter the store's height during
+				// verification.
+				startNeutrinoCheckHeight(
+					neutrinoConfig, int32(height), t,
+				)
+			})
+
+		// Cleanup db.
+		cleanUpDB()
+
+		// Verify stopping at the latest verified checkpoint when
+		// sideloading invalid headers with verification enabled.
+		t.Run(
+			"sideloading invalid headers, skipVerify false",
+			func(t *testing.T) {
+				lastValidHeaderHeight := uint32(230)
+				headers := sideload.GenerateInValidBlockHeaders(
+					uint32(testCfg.StartHeight),
+					uint32(testCfg.EndHeight),
+					lastValidHeaderHeight, harness, t,
+				)
+				bLoader := readerFunc(t, testCfg, headers)
+
+				neutrinoConfig.BlkHdrSideload = &neutrino.
+					SideloadOpt{
+					SourceType: sourceType,
+					Reader:     bLoader,
+				}
+
+				_, height, _ := chkptMgr.
+					FindPreviousHeaderCheckpoint(
+						lastValidHeaderHeight,
+					)
+
+				startNeutrinoCheckHeight(
+					neutrinoConfig,
+					int32(height), t,
+				)
+
+				// Database remains uncleared; header store
+				// should stay the same. This test checks that
+				// sideloading from a source that has nothing to
+				// offer does not change the store's height.
+				startNeutrinoCheckHeight(
+					neutrinoConfig,
+					int32(height), t,
+				)
+			})
+
+		// Cleanup db.
+		cleanUpDB()
+
+		// Test that sideloading does not occur if there is a
+		// mistmatch in bitcoin network between the source and
+		// chainService.
+		t.Run("chain mismatch test", func(t *testing.T) {
+			testCfg.Net = wire.MainNet
+			headers := sideload.GenerateValidBlockHeaders(
+				uint32(testCfg.EndHeight-testCfg.StartHeight),
+				harness, t,
+			)
+			bLoader := sideload.GenerateEncodedBinaryReader(
+				t, testCfg, headers,
+			)
+
+			neutrinoConfig.BlkHdrSideload = &neutrino.SideloadOpt{
+				SourceType: sourceType,
+				Reader:     bLoader,
+			}
+
+			_, err := neutrino.NewChainService(neutrinoConfig)
+			require.Equal(
+				t, err.Error(),
+				sideload.ErrBitcoinNetworkMismatchFmt(
+					neutrinoConfig.ChainParams.Net,
+					testCfg.Net,
+				).Error(),
+			)
+		})
+
+		// Cleanup db.
+		cleanUpDB()
+	}
+}
+
+// removeAllFilesInDir removes all files within the specified directory
+// but leaves the directory itself intact.
+func removeAllFilesInDir(dirPath string) error {
+	// Walk the directory.
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo,
+		err error) error {
+
+		if err != nil {
+			return err // Return any encountered error.
+		}
+		if !info.IsDir() {
+			// If the file is not a directory, remove it.
+			err := os.Remove(path)
+			if err != nil {
+				return err // Return any error encountered while
+				// removing.
+			}
+		}
+		return nil
+	})
+	return err
+}
+
+func createCheckpoints(heights []int64, harness *rpctest.Harness,
+	t *testing.T) []chaincfg.Checkpoint {
+
+	checkpoints := make([]chaincfg.Checkpoint, 0, len(heights))
+	for _, height := range heights {
+		hash, err := harness.Client.GetBlockHash(height)
+		require.NoError(t, err)
+
+		checkpoints = append(checkpoints,
+			chaincfg.Checkpoint{
+				Hash:   hash,
+				Height: int32(height),
+			})
+	}
+
+	return checkpoints
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
