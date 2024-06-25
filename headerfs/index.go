@@ -266,6 +266,12 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 	// fetch the hash for this tip, then using that we'll fetch the height
 	// that corresponds to that hash.
 	tipHashBytes := rootBucket.Get(tipKey)
+	if tipHashBytes == nil {
+		return nil, 0, fmt.Errorf(
+			"the key %s does not exist in bucket %s",
+			tipKey, indexBucket,
+		)
+	}
 	tipHeight, err := getHeaderEntry(rootBucket, tipHashBytes)
 	if err != nil {
 		return nil, 0, ErrHeightNotFound
