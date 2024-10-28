@@ -15,6 +15,9 @@ const (
 
 	// maxQueryTimeout is the maximum timeout given to a single query.
 	maxQueryTimeout = 32 * time.Second
+
+	// maxJobs is the maximum amount of jobs a single worker can have.
+	maxJobs = 32
 )
 
 var (
@@ -74,11 +77,10 @@ type PeerRanking interface {
 
 // activeWorker wraps a Worker that is currently running, together with the job
 // we have given to it.
-// TODO(halseth): support more than one active job at a time.
 type activeWorker struct {
-	w         Worker
+	w          Worker
 	activeJobs map[uint64]*queryJob
-	onExit    chan struct{}
+	onExit     chan struct{}
 }
 
 // Config holds the configuration options for a new WorkManager.
@@ -126,8 +128,8 @@ var _ WorkManager = (*peerWorkManager)(nil)
 func NewWorkManager(cfg *Config) WorkManager {
 	return &peerWorkManager{
 		cfg:        cfg,
-		newBatches: make(chan *batch),
-		jobResults: make(chan *jobResult),
+		newBatches: make(chan *batch, maxJobs),
+		jobResults: make(chan *jobResult, maxJobs),
 		quit:       make(chan struct{}),
 	}
 }
@@ -220,7 +222,7 @@ Loop:
 			for p, r := range workers {
 				// Only one active job at a time is currently
 				// supported.
-				if len(r.activeJobs) >= 1 {
+				if len(r.activeJobs) >= maxJobs {
 					continue
 				}
 
