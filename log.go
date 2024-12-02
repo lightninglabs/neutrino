@@ -14,6 +14,8 @@ import (
 	"github.com/lightninglabs/neutrino/query"
 )
 
+// Are the tests failing?
+
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
 // requests it.
