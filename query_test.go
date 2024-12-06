@@ -325,7 +325,7 @@ func TestBlockCache(t *testing.T) {
 				Transactions: b.MsgBlock().Transactions,
 			}
 
-			progress := reqs[0].HandleResp(getData, resp, "")
+			progress := reqs[0].HandleResp(getData, resp, "", nil)
 			require.True(t, progress.Progressed)
 			require.True(t, progress.Finished)
 

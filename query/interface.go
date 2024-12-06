@@ -131,14 +131,15 @@ type Request struct {
 	// message received from the peer that the request was made to. It
 	// should validate the response against the request made, and return a
 	// Progress indicating whether the request was answered by this
-	// particular response.
+	// particular response. The quit chan signals that the peer has already
+	// been disconnected.
 	//
 	// NOTE: Since the worker's job queue will be stalled while this method
 	// is running, it should not be doing any expensive operations. It
 	// should validate the response and immediately return the progress.
 	// The response should be handed off to another goroutine for
 	// processing.
-	HandleResp func(req, resp wire.Message, peer string) Progress
+	HandleResp func(req, resp wire.Message, peer string, quit <-chan struct{}) Progress
 }
 
 // WorkManager defines an API for a manager that dispatches queries to bitcoin
