@@ -161,6 +161,18 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// response handler to check whether it was answering
 			// our request.
 			case resp := <-msgChan:
+				select {
+				// If the peer disconnects before giving us a valid
+				// answer, we'll also exit with an error.
+				case <-peer.OnDisconnect():
+					log.Debugf("Peer %v for worker disconnected, "+
+						"cancelling job %v", peer.Addr(),
+						job.Index())
+
+					jobErr = ErrPeerDisconnected
+					break Loop
+				default:
+				}
 				progress := job.HandleResp(
 					job.Req, resp, peer.Addr(),
 				)
