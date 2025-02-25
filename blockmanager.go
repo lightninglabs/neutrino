@@ -1840,9 +1840,9 @@ func (b *blockManager) fetchFilterFromAllPeers(
 
 	// We'll now request the target filter from each peer, using a stop
 	// hash at the target block hash to ensure we only get a single filter.
-	fitlerReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
+	filterReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
 	b.cfg.queryAllPeers(
-		fitlerReqMsg,
+		filterReqMsg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
 			peerQuit chan<- struct{}) {
 
