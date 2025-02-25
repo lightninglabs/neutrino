@@ -397,7 +397,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("UTXO's block height field not set")
 	}
 	if spendReport.BlockIndex < 1 || spendReport.BlockIndex > 2 {
-		t.Fatalf("UTXO at unexpeced block index %d", spendReport.BlockIndex)
+		t.Fatalf("UTXO at unexpected block index %d", spendReport.BlockIndex)
 	}
 }
 
