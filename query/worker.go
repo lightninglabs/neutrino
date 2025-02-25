@@ -261,7 +261,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 
 // NewJob returns a channel where work that is to be handled by the worker can
 // be sent. If the worker reads a queryJob from this channel, it is guaranteed
-// that a response will eventually be deliverd on the results channel (except
+// that a response will eventually be delivered on the results channel (except
 // when the quit channel has been closed).
 //
 // NOTE: Part of the Worker interface.
