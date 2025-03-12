@@ -40,6 +40,12 @@ var filterHeaderCheckpoints = map[wire.BitcoinNet]map[uint32]*chainhash.Hash{
 		1800000: hashFromStr("67083b2d5dfc9ca1415bffa14e43a5bbe595e2e8b7ffbcc7a4ea78fa069a9c8d"),
 		1900000: hashFromStr("96a31467f9edcaa3297770bc6cdf66926d5d17dfad70cb0cac285bfe9075c494"),
 	},
+
+	// Testnet4 filter header checkpoints.
+	chaincfg.TestNet4Params.Net: {
+		10000: hashFromStr("5bf92ba99cc9e4971e705ab3c4a2a78ef0ea40986ab20f2c06ebfe7751e3fbb8"),
+		50000: hashFromStr("66592214f388e315256e5c6362750b858d580dec269500ecca7a4fbb8042b8e3"),
+	},
 }
 
 // ControlCFHeader controls the given filter header against our list of
