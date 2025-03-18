@@ -953,8 +953,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 
 	for _, addr := range permanentPeers {
-		addr := addr
-
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()

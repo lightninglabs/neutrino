@@ -392,7 +392,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 
 	workMgr, workers := startWorkManager(t, numWorkers)
 
-	require.IsType(t, workMgr, &peerWorkManager{})
+	require.IsType(t, &peerWorkManager{}, workMgr)
 	wm := workMgr.(*peerWorkManager) //nolint:forcetypeassert
 
 	// Set up the ranking to prioritize lower numbered workers.

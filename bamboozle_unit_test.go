@@ -631,7 +631,6 @@ func TestCheckCFCheckptSanity(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range cfCheckptTestCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			runCheckCFCheckptSanityTestCase(t, testCase)
 		})
@@ -642,7 +641,6 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 	t.Parallel()
 
 	for _, testCase := range checkCFHTestCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			mismatch := checkForCFHeaderMismatch(
 				testCase.headers, testCase.idx,
@@ -679,7 +677,6 @@ func TestResolveFilterMismatchFromBlock(t *testing.T) {
 	}
 
 	for _, testCase := range resolveFilterTestCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			badPeers, err := resolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,

@@ -81,8 +81,6 @@ func TestBlockFilterCaches(t *testing.T) {
 	// Now go through the list of block hashes, and make sure we can
 	// retrieve all elements from the caches.
 	for i, blockHash := range blockHashes {
-		blockHash := blockHash
-
 		// Check filter caches.
 		cacheKey := FilterCacheKey{blockHash, filterType}
 		for _, c := range filterCaches {

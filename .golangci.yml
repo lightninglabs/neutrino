@@ -1,17 +1,20 @@
 run:
   # timeout for analysis
-  deadline: 10m
+  timeout: 10m
 
 linters-settings:
   govet:
     # Don't report about shadowed variables
-    check-shadowing: false
+    shadow: false
   gofmt:
     # simplify code: gofmt with `-s` option, true by default
     simplify: true
   whitespace:
     multi-func: true
     multi-if: true
+  gosec:
+    excludes:
+      - G115 # Integer overflow conversion.
 
 linters:
   enable-all: true
@@ -51,12 +54,6 @@ linters:
     # Causes stack overflow, see https://github.com/polyfloyd/go-errorlint/issues/19.
     - errorlint
 
-    # Deprecated linters. See https://golangci-lint.run/usage/linters/.
-    - interfacer
-    - golint
-    - maligned
-    - scopelint
-
     # New linters that need a code adjustment first.
     - wrapcheck
     - nolintlint
@@ -73,10 +70,8 @@ linters:
     - containedctx
     - contextcheck
     - errname
-    - exhaustivestruct
-    - goerr113
-    - gomnd
-    - ifshort
+    - err113
+    - mnd
     - noctx
     - nestif
     - wsl
@@ -87,7 +82,12 @@ linters:
     - stylecheck
     - thelper
     - exhaustruct
-    - nosnakecase
+    - intrange
+    - inamedparam
+    - depguard
+    - recvcheck
+    - perfsprint
+    - revive
 
 issues:
   exclude-rules:
@@ -98,6 +98,7 @@ issues:
         - gosec
         - errcheck
         - dupl
+        - staticcheck
 
         # Instances of table driven tests that don't pre-allocate shouldn't
         # trigger the linter.
