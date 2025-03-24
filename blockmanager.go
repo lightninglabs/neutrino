@@ -1251,8 +1251,6 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
 	for i, header := range matchingBlockHeaders {
-		header := header
-
 		headerHeight := startHeight + uint32(i)
 		b.fltrHeaderProgessLogger.LogBlockHeight(
 			header.Timestamp, int32(headerHeight),

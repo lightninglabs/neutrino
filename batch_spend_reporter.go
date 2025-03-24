@@ -77,7 +77,8 @@ func (b *batchSpendReporter) NotifyUnspentAndUnfound() {
 // FailRemaining will return an error to all remaining requests in the event we
 // experience a critical rescan error. The error is threaded through to allow
 // the syntax:
-//     return reporter.FailRemaining(err)
+//
+//	return reporter.FailRemaining(err)
 func (b *batchSpendReporter) FailRemaining(err error) error {
 	for outpoint, requests := range b.requests {
 		op := outpoint

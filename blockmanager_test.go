@@ -306,7 +306,6 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		test := test
 		testDesc := fmt.Sprintf("permute=%v, partial=%v, repeat=%v",
 			test.permute, test.partialInterval, test.repeat)
 
@@ -520,7 +519,6 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		test := test
 		bm, hdrStore, cfStore, err := setupBlockManager(t)
 		require.NoError(t, err)
 

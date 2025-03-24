@@ -1172,7 +1172,6 @@ func TestNeutrinoSync(t *testing.T) {
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		if ok := t.Run(testCase.name, func(t *testing.T) {
 			testCase.test(testHarness, t)
 		}); !ok {
