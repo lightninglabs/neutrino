@@ -584,12 +584,12 @@ func (h *blockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 
 	_, tipHeight, err := h.chainTip()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("unable to fetch chain tip: %v", err)
 	}
 
 	latestHeader, err := h.readHeader(tipHeight)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("unable to read block header: %v", err)
 	}
 
 	return &latestHeader, tipHeight, nil
@@ -890,7 +890,7 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 
 	latestHeader, err := f.readHeader(tipHeight)
 	if err != nil {
-		return nil, 0, fmt.Errorf("unable to read header: %v", err)
+		return nil, 0, fmt.Errorf("unable to read filter header: %v", err)
 	}
 
 	return latestHeader, tipHeight, nil
