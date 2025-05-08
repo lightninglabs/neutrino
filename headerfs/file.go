@@ -3,7 +3,6 @@ package headerfs
 import (
 	"bytes"
 	"fmt"
-	"os"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -166,7 +165,7 @@ func (f *FilterHeaderStore) readHeaderRange(startHeight uint32,
 
 // readHeadersFromFile reads a chunk of headers, each of size headerSize, from
 // the given file, from startHeight to endHeight.
-func readHeadersFromFile(f *os.File, headerSize, startHeight,
+func readHeadersFromFile(f File, headerSize, startHeight,
 	endHeight uint32) (*bytes.Reader, error) {
 
 	// Each header is headerSize bytes, so using this information, we'll
