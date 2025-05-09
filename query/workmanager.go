@@ -94,6 +94,10 @@ type Config struct {
 	// make this configurable to easily mock the worker used during tests.
 	NewWorker func(Peer) Worker
 
+	// OnMaxTries is function closure that's called on max retries on
+	// workers.
+	OnMaxTries func(string)
+
 	// Ranking is used to rank the connected peers when determining who to
 	// give work to.
 	Ranking PeerRanking
@@ -380,6 +384,10 @@ Loop:
 
 					log.Debugf("Canceled batch %v",
 						batchNum)
+
+					if w.cfg.OnMaxTries != nil {
+						w.cfg.OnMaxTries(result.peer.Addr())
+					}
 
 					continue Loop
 				}
