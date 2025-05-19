@@ -4,13 +4,17 @@
 package neutrino
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/btcsuite/btcd/addrmgr"
@@ -25,6 +29,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
+	"github.com/lightninglabs/neutrino/chainimport"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -618,6 +623,31 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// HeadersImport contains configuration options for importing headers from
+	// external sources. When these options are set, neutrino will attempt to
+	// import headers from file before falling back to P2P synchronization.
+	HeadersImport *HeadersImportConfig
+}
+
+// HeadersImportConfig contains configuration options for importing headers
+// from external sources.
+type HeadersImportConfig struct {
+	// BlockHeadersSource specifies where to obtain block headers from.
+	// This could be a file path, URL, or other source identifier.
+	BlockHeadersSource string
+
+	// FilterHeadersSource specifies where to obtain filter headers from.
+	// This could be a file path, URL, or other source identifier.
+	FilterHeadersSource string
+
+	// WriteBatchSize defines the number of headers to write in a
+	// single batch during import.
+	// Default value is 10,000 entries. Since the upper bound for header entry
+	// size is the block header and it is 80 bytes, this results in
+	// (10,000 * 80) / (2^10) = 781KB per batch, which provides good performance
+	// without excessive memory overhead.
+	WriteBatchSize int
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -678,6 +708,10 @@ type ChainService struct { // nolint:maligned
 	dialer       func(net.Addr) (net.Conn, error)
 
 	broadcastTimeout time.Duration
+
+	// Context-related fields for managing service lifecycle
+	ctx    context.Context    // Service ctx that will be cancelled on shutdown
+	cancel context.CancelFunc // Function to cancel the context
 }
 
 // NewChainService returns a new chain service configured to connect to the
@@ -743,6 +777,45 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
 	})
+
+	// Create a derived context with cancellation that we can use to shut down
+	// long-running operations when the service is stopped.
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
+	// Set up signal handling for graceful shutdown.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		signalChan := make(chan os.Signal, 1)
+		signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+
+		select {
+		case sig := <-signalChan:
+			log.Infof("Shutdown signal (%v) received, cancelling "+
+				"operations...", sig)
+
+			// Cancel context to signal all operations to stop.
+			s.cancel()
+
+			// Allow up to 30 seconds for clean shutdown before forcing exit.
+			shutdownTimer := time.NewTimer(30 * time.Second)
+			defer shutdownTimer.Stop()
+
+			select {
+			case <-shutdownTimer.C:
+				log.Warn("Shutdown grace period elapsed, force quitting")
+				os.Exit(1)
+			case <-s.quit:
+				log.Info("Clean shutdown completed")
+			}
+
+		case <-s.quit:
+			// Service was explicitly stopped, no need for signal handling.
+			signal.Stop(signalChan)
+			return
+		}
+	}()
 
 	var err error
 	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
@@ -815,6 +888,25 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.blockManager = bm
 	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
+
+	// Import headers if configured.
+	if cfg.HeadersImport != nil {
+		options := chainimport.ImportOptions{
+			BlockHeadersSource:  cfg.HeadersImport.BlockHeadersSource,
+			FilterHeadersSource: cfg.HeadersImport.FilterHeadersSource,
+			TargetChainParams: chaincfg.Params{
+				Net:      cfg.ChainParams.Net,
+				PowLimit: cfg.ChainParams.PowLimit,
+			},
+			TargetBlockHeaderStore:  bm.cfg.BlockHeaders,
+			TargetFilterHeaderStore: *bm.cfg.RegFilterHeaders,
+			WriteBatchSize:          cfg.HeadersImport.WriteBatchSize,
+			Logger:                  log,
+		}
+		if _, err := options.Import(s.ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	// Only setup a function to return new addresses to connect to when not
 	// running in connect-only mode.  Private development networks are always in
@@ -1656,6 +1748,9 @@ func (s *ChainService) Start() error {
 // Stop gracefully shuts down the server by stopping and disconnecting all
 // peers and the main listener.
 func (s *ChainService) Stop() error {
+	// Cancel the context to signal operations to stop.
+	s.cancel()
+
 	// Make sure this only happens once.
 	if atomic.AddInt32(&s.shutdown, 1) != 1 {
 		return nil
