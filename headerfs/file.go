@@ -3,6 +3,7 @@ package headerfs
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -16,8 +17,30 @@ type ErrHeaderNotFound struct {
 
 // appendRaw appends a new raw header to the end of the flat file.
 func (h *headerStore) appendRaw(header []byte) error {
-	if _, err := h.file.Write(header); err != nil {
+	// Get current file position before writing. We'll use this position to
+	// revert to if the write fails partially.
+	currentPos, err := h.file.Seek(0, io.SeekCurrent)
+	if err != nil {
 		return err
+	}
+
+	n, err := h.file.Write(header)
+	if err != nil {
+		// If we wrote some bytes but not all (partial write),
+		// truncate the file back to its original size to maintain
+		// consistency. This removes the partial/corrupt header.
+		if n > 0 {
+			truncErr := h.file.Truncate(currentPos)
+			if truncErr != nil {
+				return fmt.Errorf("failed to write header "+
+					"type %s: partial write (%d bytes), "+
+					"write error: %w, truncate error: %v",
+					h.indexType, n, err, truncErr)
+			}
+		}
+
+		return fmt.Errorf("failed to write header type %s: write "+
+			"error: %w", h.indexType, err)
 	}
 
 	return nil
