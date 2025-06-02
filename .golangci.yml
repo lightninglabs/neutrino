@@ -15,16 +15,17 @@ linters-settings:
   gosec:
     excludes:
       - G115 # Integer overflow conversion.
+  lll:
+    # Max line length, lines longer will be reported.
+    line-length: 80
+    # Tab width in spaces.
+    tab-width: 8
 
 linters:
   enable-all: true
   disable:
     # Global variables are used in many places throughout the code base.
     - gochecknoglobals
-
-    # Some lines are over 80 characters on purpose and we don't want to make them
-    # even longer by marking them as 'nolint'.
-    - lll
 
     # We want to allow short variable names.
     - varnamelen
@@ -90,6 +91,9 @@ linters:
     - revive
 
 issues:
+  # Only show newly introduced problems.
+  new-from-rev: c932ae495eeedc20f58a521d0b3e08889348b06c
+
   exclude-rules:
     # Exclude gosec from running for tests so that tests with weak randomness
     # (math/rand) will pass the linter.
