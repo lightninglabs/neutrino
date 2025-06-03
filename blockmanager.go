@@ -829,7 +829,13 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peerAddr string) query.Progress {
+	peerAddr string, quit <-chan struct{}) query.Progress {
+
+	select {
+	case <-quit:
+		return noProgress
+	default:
+	}
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
