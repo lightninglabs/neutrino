@@ -12,102 +12,40 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"golang.org/x/exp/mmap"
 )
 
-var log btclog.Logger
-
-// BitcoinChainNetType is a compact uint8 identifier for different Bitcoin
-// chain networks.
-type BitcoinChainType uint8
-
 const (
-	MainNetID  BitcoinChainType = 0x00
-	TestNetID  BitcoinChainType = 0x01
-	TestNet3ID BitcoinChainType = 0x02
-	TestNet4ID BitcoinChainType = 0x03
-	SigNetID   BitcoinChainType = 0x04
-	SimNetID   BitcoinChainType = 0x05
-)
+	// Bitcoin Chain Type: 4 bytes.
+	BitcoinChainTypeSize = 4
 
-// HeaderType represents the type of Bitcoin headers being processed.
-type HeaderType uint8
+	// Header Type: 1 byte.
+	HeaderTypeSize = 1
 
-const (
-	// Header Type.
-	BlockHeader HeaderType = iota
-	FilterHeader
-	UnknownHeader HeaderType = 255
-)
+	// Start Header Height: 4 bytes.
+	StartHeaderHeightSize = 4
 
-const (
-	// Header Metadata size in bytes.
-	HeaderMetadataSize = 6
+	// Header Metadata size in bytes (sum of all above): 9 bytes.
+	//
+	//nolint:lll
+	HeaderMetadataSize = BitcoinChainTypeSize + HeaderTypeSize + StartHeaderHeightSize
 
 	// Unknown HeaderSize.
 	UnknownHeaderSize = 0
 )
 
-// String returns a human-readable representation of the Bitcoin chain type.
-func (c BitcoinChainType) String() string {
-	switch c {
-	case MainNetID:
-		return "MainNet"
-	case TestNetID:
-		return "TestNet"
-	case TestNet3ID:
-		return "TestNet3"
-	case TestNet4ID:
-		return "TestNet4"
-	case SigNetID:
-		return "SigNet"
-	case SimNetID:
-		return "SimNet"
-	default:
-		return fmt.Sprintf("UnknownChain(%d)", c)
-	}
+// HeaderMetadata contains the metadata about the header source.
+type HeaderMetadata struct {
+	BitcoinChainType wire.BitcoinNet
+	HeaderType       headerfs.HeaderType
+	StartHeight      uint32
+	EndHeight        uint32
 }
 
-// String returns a human-readable representation of the header type.
-func (h HeaderType) String() string {
-	switch h {
-	case BlockHeader:
-		return "BlockHeader"
-	case FilterHeader:
-		return "FilterHeader"
-	case UnknownHeader:
-		return "UnknownHeader"
-	default:
-		return fmt.Sprintf("HeaderType(%d)", h)
-	}
-}
-
-// BitcoinNetToChainType converts a wire.BitcoinNet value to the
-// corresponding BitcoinChainType value.
-func BitcoinNetToChainType(n wire.BitcoinNet) (BitcoinChainType, error) {
-	switch n {
-	case wire.MainNet:
-		return MainNetID, nil
-	case wire.TestNet:
-		return TestNetID, nil
-	case wire.TestNet3:
-		return TestNet3ID, nil
-	case wire.TestNet4:
-		return TestNet4ID, nil
-	case wire.SigNet:
-		return SigNetID, nil
-	case wire.SimNet:
-		return SimNetID, nil
-	default:
-		return 0, fmt.Errorf("unknown bitcoin network: %#x", uint32(n))
-	}
-}
-
-// ChainImportHeader defines the common interface for both block and filter
+// Header defines the common interface for both block and filter
 // headers that can be processed during chain import operations.
-type ChainImportHeader interface {
+type Header interface {
 	// Deserialize reconstructs the header from binary data at the specified
 	// height.
 	Deserialize(io.Reader, uint32) error
@@ -117,88 +55,76 @@ type ChainImportHeader interface {
 	ValidateMetadata(*HeaderMetadata) error
 }
 
-// ChainImportBlockHeader represents a block header that can be imported into
+// BlockHeader represents a block header that can be imported into
 // the chain store. It wraps a headerfs.BlockHeader with additional
 // functionality needed for the import process.
-type ChainImportBlockHeader struct {
-	*headerfs.BlockHeader
+type BlockHeader struct {
+	headerfs.BlockHeader
 }
 
-// ChainImportFilterHeader represents a filter header that can be imported into
-// the chain store. It wraps a headerfs.FilterHeader with additional
-// functionality needed for the import process.
-type ChainImportFilterHeader struct {
-	*headerfs.FilterHeader
-}
+// Compile-time assertion to ensure BlockHeader implements Header interface.
+var _ Header = (*BlockHeader)(nil)
 
 // Deserialize reconstructs a block header from binary data at the specified
-// height. It handles nil internal fields by properly initializing them before
-// deserialization.
-func (h *ChainImportBlockHeader) Deserialize(r io.Reader,
-	height uint32) error {
-
-	// Initialize if nil.
-	if h.BlockHeader == nil {
-		h.BlockHeader = &headerfs.BlockHeader{
-			BlockHeader: &wire.BlockHeader{},
-		}
-	} else if h.BlockHeader.BlockHeader == nil {
-		// Also ensure the wire.BlockHeader is initialized.
-		h.BlockHeader.BlockHeader = &wire.BlockHeader{}
-	}
-
+// height.
+func (b *BlockHeader) Deserialize(r io.Reader, height uint32) error {
 	// Deserialize the wire.BlockHeader portion.
-	if err := h.BlockHeader.BlockHeader.Deserialize(r); err != nil {
+	if err := b.BlockHeader.BlockHeader.Deserialize(r); err != nil {
 		return fmt.Errorf("failed to deserialize "+
 			"wire.BlockHeader: %w", err)
 	}
 
-	h.BlockHeader.Height = height
+	// Set block header height.
+	b.BlockHeader.Height = height
 
 	return nil
 }
 
-// Deserialize reconstructs a filter header from binary data at the specified
-// height. It ensures the FilterHeader field is properly initialized before
-// reading data.
-func (f *ChainImportFilterHeader) Deserialize(r io.Reader,
-	height uint32) error {
-
-	// Initialize if nil
-	if f.FilterHeader == nil {
-		f.FilterHeader = &headerfs.FilterHeader{}
-	}
-
-	// Read the filter hash (32 bytes).
-	if _, err := io.ReadFull(r, f.FilterHash[:]); err != nil {
-		return fmt.Errorf("failed to read filter hash: %w", err)
-	}
-
-	// Set the height.
-	f.FilterHeader.Height = height
-
-	return nil
-}
-
-func (h *ChainImportBlockHeader) ValidateMetadata(m *HeaderMetadata) error {
-	if m.HeaderType != BlockHeader {
+// ValidateMetadata checks if the provided HeaderMetadata is of the correct type
+// for block headers. It returns an error if the header type is not
+// headerfs.Block.
+func (b *BlockHeader) ValidateMetadata(m *HeaderMetadata) error {
+	if m.HeaderType != headerfs.Block {
 		return fmt.Errorf("type mismatch: file contains %v headers, "+
 			"but expected block headers", m.HeaderType)
 	}
 	return nil
 }
 
-func (h *ChainImportFilterHeader) ValidateMetadata(m *HeaderMetadata) error {
-	if m.HeaderType != FilterHeader {
+// FilterHeader represents a filter header that can be imported into
+// the chain store. It wraps a headerfs.FilterHeader with additional
+// functionality needed for the import process.
+type FilterHeader struct {
+	headerfs.FilterHeader
+}
+
+// Compile-time assertion to ensure FilterHeader implements Header interface.
+var _ Header = (*FilterHeader)(nil)
+
+// Deserialize reconstructs a filter header from binary data at the specified
+// height.
+func (f *FilterHeader) Deserialize(r io.Reader, height uint32) error {
+	// Read the filter hash (32 bytes).
+	if _, err := io.ReadFull(r, f.FilterHash[:]); err != nil {
+		return fmt.Errorf("failed to read filter hash: %w", err)
+	}
+
+	// Set filter header height.
+	f.FilterHeader.Height = height
+
+	return nil
+}
+
+// ValidateMetadata checks if the provided HeaderMetadata is of the correct type
+// for filter headers. It returns an error if the header type is not
+// headerfs.RegularFilter.
+func (f *FilterHeader) ValidateMetadata(m *HeaderMetadata) error {
+	if m.HeaderType != headerfs.RegularFilter {
 		return fmt.Errorf("type mismatch: file contains %v headers, "+
 			"but expected filter headers", m.HeaderType)
 	}
 	return nil
 }
-
-// Ensure BlockHeader and FilterHeader implements ChainImportHeader.
-var _ ChainImportHeader = (*ChainImportBlockHeader)(nil)
-var _ ChainImportHeader = (*ChainImportFilterHeader)(nil)
 
 // HeaderIterator interface for iterating over headers.
 type HeaderIterator[T any] interface {
@@ -206,207 +132,40 @@ type HeaderIterator[T any] interface {
 	Close() error
 }
 
-// HeaderSize returns the size in bytes for a given header type.
-func (ht HeaderType) Size() int {
-	switch ht {
-	case BlockHeader:
-		return headerfs.BlockHeaderSize
-	case FilterHeader:
-		return headerfs.RegularFilterHeaderSize
-	default:
-		return UnknownHeaderSize
-	}
+// ImportSourceHeaderIterator provides efficient iteration over headers from
+// a source.
+type ImportSourceHeaderIterator[T any] struct {
+	source  HeaderImportSource[T]
+	current int
+	end     int
 }
 
-// HeaderMetadata contains the metadata about the header source.
-type HeaderMetadata struct {
-	BitcoinChainType BitcoinChainType
-	HeaderType       HeaderType
-	StartHeight      uint32
-	EndHeight        uint32
-}
+// Compile-time assertion to ensure ImportSourceHeaderIterator implements
+// HeaderIterator interface.
+var _ HeaderIterator[any] = (*ImportSourceHeaderIterator[any])(nil)
 
-// HeaderImportSource is a generic interface for loading headers of type T.
-type HeaderImportSource[T any] interface {
-	Open() error
-	Close() error
-	GetHeaderMetadata() (*HeaderMetadata, error)
-	Iterator(start, end int) HeaderIterator[T]
-	GetHeader(index int) (T, error)
-	HeadersCount() int
-	SourceName() string
-}
+// Next returns the next header in the sequence, along with a boolean indicating
+// whether there are more headers available and any error encountered.
+func (it *ImportSourceHeaderIterator[T]) Next() (T, bool, error) {
+	var empty T
 
-// FileHeaderSource implements HeaderSource for files.
-type FileHeaderImportSource[T any] struct {
-	Path     string
-	reader   *mmap.ReaderAt
-	fileSize int
-	metadata *HeaderMetadata
-}
-
-// Open opens the file and initializes the mmap reader.
-func (f *FileHeaderImportSource[T]) Open() error {
-	// Only open if not already open
-	if f.reader != nil {
-		return nil
+	if it.current > it.end {
+		return empty, false, nil
 	}
 
-	reader, err := mmap.Open(f.Path)
+	header, err := it.source.GetHeader(it.current)
 	if err != nil {
-		return fmt.Errorf("failed to mmap file: %w", err)
-	}
-	f.reader = reader
-	f.fileSize = reader.Len()
-
-	// Read and initialize metadata from the beginning of the file.
-	mData, err := f.GetHeaderMetadata()
-	if err != nil {
-		return fmt.Errorf("failed to get header metadata: %w", err)
+		return empty, false, err
 	}
 
-	// Validate that the generic type T matches the header type in the file.
-	if err := f.validateTypeMatch(mData); err != nil {
-		return fmt.Errorf("type validation failed: %w", err)
-	}
-	f.metadata = mData
-	f.metadata.EndHeight = mData.StartHeight + uint32(f.HeadersCount()) - 1
+	it.current++
+	return header, true, nil
+}
 
+// Close releases any resources used by the iterator.
+func (it *ImportSourceHeaderIterator[T]) Close() error {
+	// Don't close the source, as it may be used elsewhere.
 	return nil
-}
-
-func (f *FileHeaderImportSource[T]) Close() error {
-	return f.reader.Close()
-}
-
-// GetHeaderMetadata reads the metadata from the file.
-func (f *FileHeaderImportSource[T]) GetHeaderMetadata() (*HeaderMetadata, error) {
-	if f.metadata != nil {
-		return f.metadata, nil
-	}
-
-	if f.reader == nil {
-		return nil, errors.New("file reader not initialized")
-	}
-
-	// Read the first 6 bytes containing metadata.
-	buf := make([]byte, HeaderMetadataSize)
-	_, err := f.reader.ReadAt(buf, 0)
-	if err != nil {
-		return &HeaderMetadata{}, fmt.Errorf("failed to read "+
-			"metadata: %w", err)
-	}
-
-	// Parse metadata.
-	metadata := HeaderMetadata{
-		BitcoinChainType: BitcoinChainType(buf[0]),
-		HeaderType:       HeaderType(buf[1]),
-		StartHeight:      binary.LittleEndian.Uint32(buf[2:6]),
-	}
-
-	// Validate header type.
-	switch metadata.HeaderType {
-	case BlockHeader, FilterHeader:
-	default:
-		metadata = HeaderMetadata{}
-		err = fmt.Errorf("invalid header type: %s", metadata.HeaderType)
-	}
-
-	return &metadata, err
-}
-
-// validateTypeMatch ensures that the generic type T matches the header type in
-// the file.
-func (f *FileHeaderImportSource[T]) validateTypeMatch(
-	metadata *HeaderMetadata) error {
-
-	var empty T
-
-	// Create the appropriate header type
-	var header ChainImportHeader
-	switch any(empty).(type) {
-	case *ChainImportBlockHeader:
-		header = &ChainImportBlockHeader{}
-	case *ChainImportFilterHeader:
-		header = &ChainImportFilterHeader{}
-	default:
-		return fmt.Errorf("unsupported generic type: %T", empty)
-	}
-
-	return header.ValidateMetadata(metadata)
-}
-
-// Iterator returns an efficient iterator for sequential header access.
-func (f *FileHeaderImportSource[T]) Iterator(start,
-	end int) HeaderIterator[T] {
-
-	return &ImportSourceHeaderIterator[T]{
-		source: f, current: start, end: end,
-	}
-}
-
-func (f *FileHeaderImportSource[T]) GetHeader(index int) (T, error) {
-	var empty T
-
-	// Calculate the absolute position for this header.
-	headerSize := f.metadata.HeaderType.Size()
-	offset := HeaderMetadataSize + (index * headerSize)
-
-	// Check if requested header is within file bounds.
-	if offset+headerSize > f.fileSize {
-		return empty, fmt.Errorf("header index %d out of bounds", index)
-	}
-
-	// Calculate the actual height from index and start height.
-	height := uint32(index) + f.metadata.StartHeight
-
-	// Read header data at the calculated offset.
-	buf := make([]byte, headerSize)
-	_, err := f.reader.ReadAt(buf, int64(offset))
-	if err != nil {
-		return empty, fmt.Errorf("failed to read header at "+
-			"index %d: %w", index, err)
-	}
-	reader := bytes.NewReader(buf)
-
-	// Create the appropriate chain import header type based on metadata.
-	var header ChainImportHeader
-	switch f.metadata.HeaderType {
-	case BlockHeader:
-		header = &ChainImportBlockHeader{
-			BlockHeader: &headerfs.BlockHeader{},
-		}
-	case FilterHeader:
-		header = &ChainImportFilterHeader{
-			FilterHeader: &headerfs.FilterHeader{},
-		}
-	default:
-		return empty, fmt.Errorf("unsupported header type: %s",
-			f.metadata.HeaderType)
-	}
-
-	if err := header.Deserialize(reader, height); err != nil {
-		return empty, err
-	}
-
-	return any(header).(T), err
-}
-
-// HeadersCount returns the number of headers in the file.
-func (f *FileHeaderImportSource[T]) HeadersCount() int {
-	usableFileSize := f.fileSize - HeaderMetadataSize
-
-	// Handle the case where file might be smaller than metadata.
-	if usableFileSize <= 0 {
-		return 0
-	}
-
-	headerSize := f.metadata.HeaderType.Size()
-	return usableFileSize / headerSize
-}
-
-func (f *FileHeaderImportSource[T]) SourceName() string {
-	return fmt.Sprintf("file(%s)", f.Path)
 }
 
 // HeaderValidator is a generic interface for validating headers of type T.
@@ -419,12 +178,16 @@ type HeadersValidator[T any] interface {
 // headers.
 type BlockHeadersImportSourceValidator struct{}
 
+// Compile-time assertion to ensure BlockHeadersImportSourceValidator implements
+// HeadersValidator interface.
+var _ HeadersValidator[*BlockHeader] = (*BlockHeadersImportSourceValidator)(nil)
+
 func (v *BlockHeadersImportSourceValidator) Validate(
-	iterator HeaderIterator[*ChainImportBlockHeader],
+	iterator HeaderIterator[*BlockHeader],
 	targetChainParams chaincfg.Params) error {
 
 	var (
-		prevHeader *ChainImportBlockHeader
+		prevHeader *BlockHeader
 		hasMore    bool
 		err        error
 	)
@@ -444,7 +207,7 @@ func (v *BlockHeadersImportSourceValidator) Validate(
 	count := 1
 	for {
 		// Get the next header.
-		var header *ChainImportBlockHeader
+		var header *BlockHeader
 		header, hasMore, err = iterator.Next()
 		if err != nil {
 			return fmt.Errorf("failed to get next block header at "+
@@ -471,7 +234,7 @@ func (v *BlockHeadersImportSourceValidator) Validate(
 }
 
 func (v *BlockHeadersImportSourceValidator) ValidatePair(prev,
-	current *ChainImportBlockHeader, targetChainParams chaincfg.Params) error {
+	current *BlockHeader, targetChainParams chaincfg.Params) error {
 
 	// Extract the block headers and heights directly.
 	prevBlockHeader := prev.BlockHeader
@@ -509,6 +272,12 @@ func (v *BlockHeadersImportSourceValidator) ValidatePair(prev,
 // headers.
 type FilterHeadersImportSourceValidator struct{}
 
+// Compile-time assertion to ensure FilterHeadersImportSourceValidator
+// implements HeadersValidator interface.
+//
+//nolint:lll
+var _ HeadersValidator[*FilterHeader] = (*FilterHeadersImportSourceValidator)(nil)
+
 // Validate performs basic validation on a stream of filter headers.
 //
 // Note: During import operations, only limited validation is possible since we
@@ -521,7 +290,7 @@ type FilterHeadersImportSourceValidator struct{}
 // order, Filter_N is the compact filter for the block, and || represents
 // concatenation.
 func (v *FilterHeadersImportSourceValidator) Validate(
-	iterator HeaderIterator[*ChainImportFilterHeader],
+	iterator HeaderIterator[*FilterHeader],
 	targetChainParams chaincfg.Params) error {
 
 	return nil
@@ -538,17 +307,202 @@ func (v *FilterHeadersImportSourceValidator) Validate(
 // can't validate if two consecutive filter headers maintain the correct
 // cryptographic relationship.
 func (v *FilterHeadersImportSourceValidator) ValidatePair(prev,
-	current *ChainImportFilterHeader, targetChainParams chaincfg.Params) error {
+	current *FilterHeader, targetChainParams chaincfg.Params) error {
 
 	return nil
 }
 
-// HeadersImport uses a generic HeaderSource to import headers.
+// ProcessingRegions currently contains only the NewHeaders region to process.
+type ProcessingRegions struct {
+	ImportStartHeight uint32
+	ImportEndHeight   uint32
+	EffectiveTip      uint32
+	NewHeaders        HeaderRegion
+}
+
+// HeaderRegion represents a contiguous range of headers.
+type HeaderRegion struct {
+	Start  uint32
+	End    uint32
+	Exists bool // Whether this region has headers to process
+}
+
+// HeaderImportSource is a generic interface for loading headers of type T.
+type HeaderImportSource[T any] interface {
+	Open() error
+	Close() error
+	GetHeaderMetadata() (*HeaderMetadata, error)
+	Iterator(start, end int) HeaderIterator[T]
+	GetHeader(index int) (T, error)
+	HeadersCount() int
+	SourceName() string
+}
+
+// Compile-time assertion to ensure FileHeaderImportSource implements
+// HeaderImportSource interface.
+var _ HeaderImportSource[Header] = (*FileHeaderImportSource[Header])(nil)
+
+// FileHeaderSource implements HeaderImportSource for files.
+type FileHeaderImportSource[T Header] struct {
+	Path     string
+	reader   *mmap.ReaderAt
+	fileSize int
+	metadata *HeaderMetadata
+}
+
+// Open opens the file and initializes the mmap reader.
+func (f *FileHeaderImportSource[T]) Open() error {
+	// Only open if not already open.
+	if f.reader != nil {
+		return nil
+	}
+
+	reader, err := mmap.Open(f.Path)
+	if err != nil {
+		return fmt.Errorf("failed to mmap file: %w", err)
+	}
+	f.reader = reader
+	f.fileSize = reader.Len()
+
+	// Read and initialize metadata from the beginning of the file.
+	mData, err := f.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get header metadata: %w", err)
+	}
+
+	// Validate that the generic type T matches the header type in the file.
+	if err := f.validateTypeMatch(mData); err != nil {
+		return fmt.Errorf("type validation failed: %w", err)
+	}
+	f.metadata = mData
+	f.metadata.EndHeight = mData.StartHeight + uint32(f.HeadersCount()) - 1
+
+	return nil
+}
+
+func (f *FileHeaderImportSource[T]) Close() error {
+	return f.reader.Close()
+}
+
+// GetHeaderMetadata reads the metadata from the file.
+//
+// nolint:lll
+func (f *FileHeaderImportSource[T]) GetHeaderMetadata() (*HeaderMetadata, error) {
+	if f.metadata != nil {
+		return f.metadata, nil
+	}
+
+	if f.reader == nil {
+		return nil, errors.New("file reader not initialized")
+	}
+
+	// Read the first HeaderMetadataSize bytes containing metadata.
+	buf := make([]byte, HeaderMetadataSize)
+	_, err := f.reader.ReadAt(buf, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	// Calculate offsets.
+	headerTypeOffset := BitcoinChainTypeSize
+	startHeightOffset := BitcoinChainTypeSize + HeaderTypeSize
+
+	metadata := HeaderMetadata{
+		BitcoinChainType: wire.BitcoinNet(
+			binary.LittleEndian.Uint32(buf[:BitcoinChainTypeSize]),
+		),
+		HeaderType: headerfs.HeaderType(buf[headerTypeOffset]),
+		StartHeight: binary.LittleEndian.Uint32(
+			buf[startHeightOffset:HeaderMetadataSize],
+		),
+	}
+
+	// Validate header type.
+	switch metadata.HeaderType {
+	case headerfs.Block, headerfs.RegularFilter:
+	default:
+		return nil, fmt.Errorf("invalid header type: %s",
+			metadata.HeaderType)
+	}
+
+	return &metadata, err
+}
+
+// Iterator returns an efficient iterator for sequential header access.
+func (f *FileHeaderImportSource[T]) Iterator(start,
+	end int) HeaderIterator[T] {
+
+	return &ImportSourceHeaderIterator[T]{
+		source: f, current: start, end: end,
+	}
+}
+
+func (f *FileHeaderImportSource[T]) GetHeader(index int) (T, error) {
+	var empty T
+
+	// Calculate the absolute position for this header.
+	headerSize := f.metadata.HeaderType.Size()
+	offset := HeaderMetadataSize + (index * headerSize)
+
+	// Check if requested header is within file bounds.
+	if offset+headerSize > f.fileSize {
+		return empty, fmt.Errorf("header index %d out of bounds", index)
+	}
+
+	// Calculate the actual height from index and start height.
+	height := uint32(index) + f.metadata.StartHeight
+
+	// Read header data at the calculated offset.
+	buf := make([]byte, headerSize)
+	_, err := f.reader.ReadAt(buf, int64(offset))
+	if err != nil {
+		return empty, fmt.Errorf("failed to read header at "+
+			"index %d: %w", index, err)
+	}
+	reader := bytes.NewReader(buf)
+
+	// Create the appropriate chain import header type based on metadata.
+	var header T
+	if err := header.Deserialize(reader, height); err != nil {
+		return empty, err
+	}
+
+	return header, err
+}
+
+// HeadersCount returns the number of headers in the file.
+func (f *FileHeaderImportSource[T]) HeadersCount() int {
+	usableFileSize := f.fileSize - HeaderMetadataSize
+
+	// Handle the case where file might be smaller than metadata.
+	if usableFileSize <= 0 {
+		return 0
+	}
+
+	headerSize := f.metadata.HeaderType.Size()
+	return usableFileSize / headerSize
+}
+
+func (f *FileHeaderImportSource[T]) SourceName() string {
+	return fmt.Sprintf("file(%s)", f.Path)
+}
+
+// validateTypeMatch ensures that the generic type T matches the header type in
+// the file.
+func (f *FileHeaderImportSource[T]) validateTypeMatch(
+	metadata *HeaderMetadata) error {
+
+	var header T
+	return header.ValidateMetadata(metadata)
+}
+
+// HeadersImport uses a generic HeaderImportSource to import headers.
 type HeadersImport struct {
-	BlockHeadersImportSource  HeaderImportSource[*ChainImportBlockHeader]
-	FilterHeadersImportSource HeaderImportSource[*ChainImportFilterHeader]
-	BlockHeadersValidator     HeadersValidator[*ChainImportBlockHeader]
-	FilterHeadersValidator    HeadersValidator[*ChainImportFilterHeader]
+	BlockHeadersImportSource  HeaderImportSource[*BlockHeader]
+	FilterHeadersImportSource HeaderImportSource[*FilterHeader]
+	BlockHeadersValidator     HeadersValidator[*BlockHeader]
+	FilterHeadersValidator    HeadersValidator[*FilterHeader]
+	options                   *ImportOptions
 }
 
 // Import is a multi-pass algorithm that loads, validates, and processes
@@ -556,13 +510,11 @@ type HeadersImport struct {
 // Import process is currently performed only if the target stores are
 // completely empty except for gensis block/filter header otherwise it is
 // entirely skipped.
-func (s *HeadersImport) Import(ctx context.Context,
-	options ImportOptions) (*ImportResult, error) {
-
+func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	// Check first if the target header stores are fresh.
 	isFresh, err := s.isTargetFresh(
-		options.TargetBlockHeaderStore,
-		options.TargetFilterHeaderStore,
+		s.options.TargetBlockHeaderStore,
+		s.options.TargetFilterHeaderStore,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
@@ -580,23 +532,18 @@ func (s *HeadersImport) Import(ctx context.Context,
 
 	// Initialize and open header sources before proceeding with validation
 	// and import operations.
-	if err := s.initSources(); err != nil {
+	if err := s.openSources(); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
-	defer s.deinitSources()
+	defer s.closeSources()
 
 	// Check if the sources are compatible with each other.
-	if err := s.validateSourcesCompatibility(
-		s.BlockHeadersImportSource, s.FilterHeadersImportSource,
-		options.TargetChainParams.Net,
-	); err != nil {
+	if err := s.validateSourcesCompatibility(); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
 
 	// Validate chain continuity with the target chain.
-	if err := s.validateChainContinuity(
-		options.TargetBlockHeaderStore, options.TargetFilterHeaderStore,
-	); err != nil {
+	if err := s.validateChainContinuity(); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
 
@@ -604,7 +551,7 @@ func (s *HeadersImport) Import(ctx context.Context,
 	if err := s.BlockHeadersValidator.Validate(
 		s.BlockHeadersImportSource.Iterator(
 			0, s.BlockHeadersImportSource.HeadersCount()-1,
-		), options.TargetChainParams,
+		), s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
@@ -613,7 +560,7 @@ func (s *HeadersImport) Import(ctx context.Context,
 	if err := s.FilterHeadersValidator.Validate(
 		s.FilterHeadersImportSource.Iterator(
 			0, s.FilterHeadersImportSource.HeadersCount()-1,
-		), options.TargetChainParams,
+		), s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
@@ -621,7 +568,7 @@ func (s *HeadersImport) Import(ctx context.Context,
 	// Determine processing regions that partition the import task into
 	// disjoint height ranges. Currently we only detect/process the new
 	// headers region.
-	regions := s.determineProcessingRegions(options)
+	regions := s.determineProcessingRegions()
 	result.StartHeight = regions.ImportStartHeight
 	result.EndHeight = regions.ImportEndHeight
 
@@ -630,7 +577,7 @@ func (s *HeadersImport) Import(ctx context.Context,
 	// from their highest existing header up to the import source's end
 	// height. This assumes the target stores are consistent and valid
 	// (i.e., no divergence), allowing for safe extension with new data.
-	err = s.processNewHeadersRegion(regions.NewHeaders, options, result)
+	err = s.processNewHeadersRegion(regions.NewHeaders, result)
 	if err != nil {
 		return nil, fmt.Errorf("headers import failed: new headers "+
 			"processing failed: %w", err)
@@ -643,9 +590,8 @@ func (s *HeadersImport) Import(ctx context.Context,
 		"(block and filter) (added: %d, skipped: %d) from height "+
 		"%d to %d in %s (%.2f headers/sec, %.2f%% new)",
 		result.ProcessedCount, result.AddedCount, result.SkippedCount,
-		result.StartHeight, result.EndHeight,
-		formatDuration(result.Duration), result.HeadersPerSecond(),
-		result.NewHeadersPercentage())
+		result.StartHeight, result.EndHeight, result.Duration,
+		result.HeadersPerSecond(), result.NewHeadersPercentage())
 
 	return result, nil
 }
@@ -676,9 +622,11 @@ func (s *HeadersImport) isTargetFresh(
 	return false, nil
 }
 
-func (s *HeadersImport) initSources() error {
+func (s *HeadersImport) openSources() error {
 	// Check if required import sources are provided.
-	if s.BlockHeadersImportSource == nil || s.FilterHeadersImportSource == nil {
+	if s.BlockHeadersImportSource == nil ||
+		s.FilterHeadersImportSource == nil {
+
 		return fmt.Errorf("missing required header sources - block "+
 			"headers source: %v, filter headers source: %v",
 			s.BlockHeadersImportSource != nil,
@@ -706,9 +654,9 @@ func (s *HeadersImport) initSources() error {
 	return nil
 }
 
-// deinitSources safely closes all open header sources and logs any warnings
+// closeSources safely closes all open header sources and logs any warnings
 // encountered during cleanup.
-func (s *HeadersImport) deinitSources() {
+func (s *HeadersImport) closeSources() {
 	// Close block headers source.
 	if err := s.BlockHeadersImportSource.Close(); err != nil {
 		log.Warnf("Failed to close block headers source: %v", err)
@@ -718,64 +666,15 @@ func (s *HeadersImport) deinitSources() {
 	if err := s.FilterHeadersImportSource.Close(); err != nil {
 		log.Warnf("Failed to close block headers source: %v", err)
 	}
-
-	// Uinitialize logger.
-	log = nil
 }
 
-// heightToSrcIndex converts an absolute blockchain height to a
-// source-relative index based on the provided start height.
-func (s *HeadersImport) heightToSrcIndex(height, startHeight uint32) int {
-	return int(height - startHeight)
-}
-
-// ImportSourceHeaderIterator provides efficient iteration over headers from
-// a source.
-type ImportSourceHeaderIterator[T any] struct {
-	source  HeaderImportSource[T]
-	current int
-	end     int
-}
-
-// Next returns the next header in the sequence, along with a boolean indicating
-// whether there are more headers available and any error encountered.
-func (it *ImportSourceHeaderIterator[T]) Next() (T, bool, error) {
-	var empty T
-
-	if it.current > it.end {
-		return empty, false, nil
-	}
-
-	header, err := it.source.GetHeader(it.current)
-	if err != nil {
-		return empty, false, err
-	}
-
-	it.current++
-	return header, true, nil
-}
-
-// Close releases any resources used by the iterator.
-func (it *ImportSourceHeaderIterator[T]) Close() error {
-	// Don't close the source, as it may be used elsewhere.
-	return nil
-}
-
-// Compile-time check to ensure ImportSourceHeaderIterator implements
-// HeaderIterator.
-var _ HeaderIterator[any] = (*ImportSourceHeaderIterator[any])(nil)
-
-func (s *HeadersImport) validateSourcesCompatibility(
-	blockHeadersSource HeaderImportSource[*ChainImportBlockHeader],
-	filterHeadersSource HeaderImportSource[*ChainImportFilterHeader],
-	targetBitcoinNet wire.BitcoinNet) error {
-
+func (s *HeadersImport) validateSourcesCompatibility() error {
 	// Get metadata from both header and filter sources.
-	blockMetadata, err := blockHeadersSource.GetHeaderMetadata()
+	blockMetadata, err := s.BlockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
 		return err
 	}
-	filterMetadata, err := filterHeadersSource.GetHeaderMetadata()
+	filterMetadata, err := s.FilterHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
 		return err
 	}
@@ -784,21 +683,18 @@ func (s *HeadersImport) validateSourcesCompatibility(
 	if blockMetadata.BitcoinChainType != filterMetadata.BitcoinChainType {
 		return fmt.Errorf("network type mismatch: block headers "+
 			"from %s (%v), filter headers from "+
-			"%s (%v)", blockHeadersSource.SourceName(),
+			"%s (%v)", s.BlockHeadersImportSource.SourceName(),
 			blockMetadata.BitcoinChainType,
-			filterHeadersSource.SourceName(),
+			s.FilterHeadersImportSource.SourceName(),
 			filterMetadata.BitcoinChainType)
 	}
 
 	// Validate that the source network matches the target network.
-	targetChainType, err := BitcoinNetToChainType(targetBitcoinNet)
-	if err != nil {
-		return fmt.Errorf("invalid target bitcoin network: %w", err)
-	}
-	if blockMetadata.BitcoinChainType != targetChainType {
+	if blockMetadata.BitcoinChainType != s.options.TargetChainParams.Net {
 		return fmt.Errorf("network mismatch: headers from import "+
 			"sources are for %v, but target is %v",
-			blockMetadata.BitcoinChainType, targetChainType)
+			blockMetadata.BitcoinChainType,
+			s.options.TargetChainParams.Net)
 	}
 
 	// Validate starting heights match.
@@ -810,14 +706,15 @@ func (s *HeadersImport) validateSourcesCompatibility(
 
 	// Validate header counts match exactly.
 	var (
-		blockCount  = blockHeadersSource.HeadersCount()
-		filterCount = filterHeadersSource.HeadersCount()
+		blockCount  = s.BlockHeadersImportSource.HeadersCount()
+		filterCount = s.FilterHeadersImportSource.HeadersCount()
 	)
 	if filterCount != blockCount {
 		return fmt.Errorf("headers count mismatch: block headers "+
 			"import source %s (%d), filter headers import source "+
-			"%s (%d)", blockHeadersSource.SourceName(), blockCount,
-			filterHeadersSource.SourceName(), filterCount)
+			"%s (%d)", s.BlockHeadersImportSource.SourceName(),
+			blockCount, s.FilterHeadersImportSource.SourceName(),
+			filterCount)
 	}
 
 	// Verify header counts are greater than zero.
@@ -830,10 +727,7 @@ func (s *HeadersImport) validateSourcesCompatibility(
 
 // validateChainContinuity ensures that headers from import sources can be
 // properly connected to the existing headers in the target stores.
-func (s *HeadersImport) validateChainContinuity(
-	targetBlockHeaderStore headerfs.BlockHeaderStore,
-	targetFilterHeaderStore headerfs.FilterHeaderStore) error {
-
+func (s *HeadersImport) validateChainContinuity() error {
 	// Get metadata from block header source.
 	sourceBlockMeta, err := s.BlockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
@@ -842,13 +736,13 @@ func (s *HeadersImport) validateChainContinuity(
 	}
 
 	// Get the chain tip from both target stores.
-	_, blockTipHeight, err := targetBlockHeaderStore.ChainTip()
+	_, blockTipHeight, err := s.options.TargetBlockHeaderStore.ChainTip()
 	if err != nil {
 		return fmt.Errorf("failed to get target block header chain "+
 			"tip: %w", err)
 	}
 
-	_, filterTipHeight, err := targetFilterHeaderStore.ChainTip()
+	_, filterTipHeight, err := s.options.TargetFilterHeaderStore.ChainTip()
 	if err != nil {
 		return fmt.Errorf("failed to get target block header chain "+
 			"tip: %w", err)
@@ -884,8 +778,8 @@ func (s *HeadersImport) validateChainContinuity(
 	// If import includes genesis block (starts at 0), verify it matches.
 	if importStartHeight == 0 {
 		err := s.verifyHeadersAtHeight(
-			importStartHeight, targetBlockHeaderStore,
-			targetFilterHeaderStore,
+			importStartHeight, s.options.TargetBlockHeaderStore,
+			s.options.TargetFilterHeaderStore,
 		)
 		if err != nil {
 			return fmt.Errorf("genesis block mismatch: %v", err)
@@ -898,6 +792,7 @@ func (s *HeadersImport) validateChainContinuity(
 		// Validate that the block header at height 1 from the import
 		// source connects with the previous header in the target block
 		// store.
+		targetBlockHeaderStore := s.options.TargetBlockHeaderStore
 		prevBlkHdr, err := targetBlockHeaderStore.FetchHeaderByHeight(
 			blockTipHeight,
 		)
@@ -907,7 +802,7 @@ func (s *HeadersImport) validateChainContinuity(
 		}
 
 		// Retrieve and verify the current block header for import.
-		sourceIndex := s.heightToSrcIndex(
+		sourceIndex := heightToSrcIndex(
 			importStartHeight, sourceBlockMeta.StartHeight,
 		)
 		currBlkHeader, err := s.BlockHeadersImportSource.GetHeader(
@@ -941,6 +836,58 @@ func (s *HeadersImport) validateChainContinuity(
 	return nil
 }
 
+// determineProcessingRegions partitions the header height space into regions
+// satisfying the MECE property (Mutually Exclusive, Collectively Exhaustive).
+// This strict partitioning is critical for ensuring the idempotence of the
+// overall import operation - repeated imports with the same parameters will
+// produce identical results without side effects. By cleanly separating heights
+// into non-overlapping regions with distinct processing logic, we can ensure
+// consistent application of import policies regardless of how many times the
+// operation is performed. The regions are:
+//  1. Overlap: Heights common to both source and targets
+//  2. Divergence: Heights where target stores differ within import range
+//  3. BeyondImport: Heights in targets beyond source range
+//  4. NewHeaders: Heights in source not yet in targets
+func (s *HeadersImport) determineProcessingRegions() *ProcessingRegions {
+	// Get necessary information.
+	blockMeta, _ := s.BlockHeadersImportSource.GetHeaderMetadata()
+	importStartHeight := blockMeta.StartHeight
+	importEndHeight := blockMeta.EndHeight
+
+	_, blockTipHeight, _ := s.options.TargetBlockHeaderStore.ChainTip()
+	_, filterTipHeight, _ := s.options.TargetFilterHeaderStore.ChainTip()
+	effectiveTipHeight := min(blockTipHeight, filterTipHeight)
+
+	// Create regions.
+	regions := &ProcessingRegions{
+		ImportStartHeight: importStartHeight,
+		ImportEndHeight:   importEndHeight,
+		EffectiveTip:      effectiveTipHeight,
+	}
+
+	// New Headers region.
+	// This region contains headers that are in the import source but not
+	// yet in either target store. They start one height beyond the highest
+	// tip of either store (ensuring no overlap with divergence region) and
+	// extend to the end of the import data. These headers need to be added
+	// to both stores. It only exists if there are headers beyond both tips.
+	//
+	// Note: This region is supposed to be processed after handling the
+	// overlap, divergence, and beyond import regions, ensuring that any
+	// potential inconsistencies in existing data are resolved before adding
+	// new headers. This sequential processing guarantees that new headers
+	// are only added on top of a verified and consistent chain state.
+	newStart := max(blockTipHeight, filterTipHeight) + 1
+	newEnd := importEndHeight
+	regions.NewHeaders = HeaderRegion{
+		Start:  newStart,
+		End:    newEnd,
+		Exists: newStart <= newEnd,
+	}
+
+	return regions
+}
+
 func (s *HeadersImport) verifyHeadersAtHeight(height uint32,
 	targetBlockHeaderStore headerfs.BlockHeaderStore,
 	targetFilterHeaderStore headerfs.FilterHeaderStore) error {
@@ -953,14 +900,18 @@ func (s *HeadersImport) verifyHeadersAtHeight(height uint32,
 	}
 
 	// Get and verify block headers.
-	sourceIndex := s.heightToSrcIndex(height, sourceBlockMeta.StartHeight)
-	sourceBlkHeader, err := s.BlockHeadersImportSource.GetHeader(sourceIndex)
+	sourceIndex := heightToSrcIndex(height, sourceBlockMeta.StartHeight)
+	sourceBlkHeader, err := s.BlockHeadersImportSource.GetHeader(
+		sourceIndex,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to get block header from import "+
 			"source at height %d: %w", height, err)
 	}
 
-	targetBlkHeader, err := targetBlockHeaderStore.FetchHeaderByHeight(height)
+	targetBlkHeader, err := targetBlockHeaderStore.FetchHeaderByHeight(
+		height,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to get block header from target at "+
 			"height %d: %w", height, err)
@@ -1008,77 +959,8 @@ func (s *HeadersImport) verifyHeadersAtHeight(height uint32,
 	return nil
 }
 
-// HeaderRegion represents a contiguous range of headers.
-type HeaderRegion struct {
-	Start  uint32
-	End    uint32
-	Exists bool // Whether this region has headers to process
-}
-
-// ProcessingRegions currently contains only the NewHeaders region to process.
-type ProcessingRegions struct {
-	ImportStartHeight uint32
-	ImportEndHeight   uint32
-	EffectiveTip      uint32
-	NewHeaders        HeaderRegion
-}
-
-// determineProcessingRegions partitions the header height space into regions
-// satisfying the MECE property (Mutually Exclusive, Collectively Exhaustive).
-// This strict partitioning is critical for ensuring the idempotence of the
-// overall import operation - repeated imports with the same parameters will
-// produce identical results without side effects. By cleanly separating heights
-// into non-overlapping regions with distinct processing logic, we can ensure
-// consistent application of import policies regardless of how many times the
-// operation is performed. The regions are:
-//  1. Overlap: Heights common to both source and targets
-//  2. Divergence: Heights where target stores differ within import range
-//  3. BeyondImport: Heights in targets beyond source range
-//  4. NewHeaders: Heights in source not yet in targets
-func (s *HeadersImport) determineProcessingRegions(
-	options ImportOptions) *ProcessingRegions {
-
-	// Get necessary information.
-	blockMeta, _ := s.BlockHeadersImportSource.GetHeaderMetadata()
-	importStartHeight := blockMeta.StartHeight
-	importEndHeight := blockMeta.EndHeight
-
-	_, blockTipHeight, _ := options.TargetBlockHeaderStore.ChainTip()
-	_, filterTipHeight, _ := options.TargetFilterHeaderStore.ChainTip()
-	effectiveTipHeight := min(blockTipHeight, filterTipHeight)
-
-	// Create regions.
-	regions := &ProcessingRegions{
-		ImportStartHeight: importStartHeight,
-		ImportEndHeight:   importEndHeight,
-		EffectiveTip:      effectiveTipHeight,
-	}
-
-	// New Headers region.
-	// This region contains headers that are in the import source but not
-	// yet in either target store. They start one height beyond the highest
-	// tip of either store (ensuring no overlap with divergence region) and
-	// extend to the end of the import data. These headers need to be added
-	// to both stores. It only exists if there are headers beyond both tips.
-	//
-	// Note: This region is supposed to be processed after handling the
-	// overlap, divergence, and beyond import regions, ensuring that any
-	// potential inconsistencies in existing data are resolved before adding
-	// new headers. This sequential processing guarantees that new headers
-	// are only added on top of a verified and consistent chain state.
-	newStart := max(blockTipHeight, filterTipHeight) + 1
-	newEnd := importEndHeight
-	regions.NewHeaders = HeaderRegion{
-		Start:  newStart,
-		End:    newEnd,
-		Exists: newStart <= newEnd,
-	}
-
-	return regions
-}
-
 func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
-	options ImportOptions, result *ImportResult) error {
+	result *ImportResult) error {
 
 	if !region.Exists {
 		return nil
@@ -1087,7 +969,7 @@ func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
 	log.Infof("Adding %d new headers (block and filter) from heights "+
 		"%d to %d", region.End-region.Start+1, region.Start, region.End)
 
-	err := s.appendNewHeaders(region.Start, region.End, options)
+	err := s.appendNewHeaders(region.Start, region.End)
 	if err != nil {
 		return fmt.Errorf("failed to append new headers: %w", err)
 	}
@@ -1099,9 +981,7 @@ func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
 }
 
 // appendNewHeaders adds new headers from import source.
-func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
-	options ImportOptions) error {
-
+func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 	// Get metadata from sources.
 	blockMeta, err := s.BlockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
@@ -1111,21 +991,22 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
 
 	totalHeaders := endHeight - startHeight + 1
 	log.Infof("Appending %d new headers in batches of %d", totalHeaders,
-		options.WriteBatchSize)
+		s.options.WriteBatchSizePerRegion)
 
 	// Process headers in batches.
 	for batchStart := startHeight; batchStart <= endHeight; {
 		// Calculate batch end, ensuring we don't exceed endHeight.
 		batchEnd := min(
-			batchStart+uint32(options.WriteBatchSize)-1, endHeight,
+			batchStart+uint32(s.options.WriteBatchSizePerRegion)-1,
+			endHeight,
 		)
 
 		// Calculate indices in the source based on the metadata start
 		// height.
-		sourceStartIdx := s.heightToSrcIndex(
+		sourceStartIdx := heightToSrcIndex(
 			batchStart, blockMeta.StartHeight,
 		)
-		sourceEndIdx := s.heightToSrcIndex(
+		sourceEndIdx := heightToSrcIndex(
 			batchEnd, blockMeta.StartHeight,
 		)
 
@@ -1151,7 +1032,7 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
 				break
 			}
 
-			blockHeaders = append(blockHeaders, *header.BlockHeader)
+			blockHeaders = append(blockHeaders, header.BlockHeader)
 		}
 
 		// Read filter headers batch.
@@ -1177,7 +1058,7 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
 			}
 
 			filterHeaders = append(
-				filterHeaders, *header.FilterHeader,
+				filterHeaders, header.FilterHeader,
 			)
 		}
 
@@ -1186,33 +1067,12 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
 				"batch %d-%d", batchStart, batchEnd)
 		}
 
-		// TODO(mohamedawnallah): Writing Headers to both target block
-		// and filters header store need to be done atomically. On any
-		// failure we need to revert to previous valid state and abort
-		// the import process.
-
-		// Write block headers batch to target store.
-		err = options.TargetBlockHeaderStore.WriteHeaders(
-			blockHeaders...,
+		err := s.writeHeadersToTargetStores(
+			blockHeaders, filterHeaders, batchStart, batchEnd,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to write block headers "+
-				"batch %d-%d: %w", batchStart, batchEnd, err)
-		}
-
-		// We only need to set the block header hash of the last filter
-		// header to maintain chain tip consistency for regular tip.
-		lastIdx := len(filterHeaders) - 1
-		chainTipHash := blockHeaders[lastIdx].BlockHeader.BlockHash()
-		filterHeaders[lastIdx].HeaderHash = chainTipHash
-
-		// Write filter headers batch to target store.
-		err = options.TargetFilterHeaderStore.WriteHeaders(
-			filterHeaders...,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to write filter headers "+
-				"batch %d-%d: %w", batchStart, batchEnd, err)
+			return fmt.Errorf("failed to write headers to "+
+				"target stores: %v", err)
 		}
 
 		log.Debugf("Wrote headers batch from height "+
@@ -1229,11 +1089,98 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
 	return nil
 }
 
+// Write block and filter headers to the target stores in a
+// specific order to ensure proper rollback operations
+// if needed.
+//
+// The current implementation writes headers sequentially:
+// 1. Block headers are written to the binary headers file
+// 2. Then they are indexed in the headers db for random access
+//
+// Failures are handled atomically in both the binary file
+// (via appendRaw) and the target DB. This means we only need
+// to roll back block headers in the target binary file if block
+// headers are successfully written but filter headers fail to
+// write.
+func (s *HeadersImport) writeHeadersToTargetStores(
+	blockHeaders []headerfs.BlockHeader,
+	filterHeaders []headerfs.FilterHeader, batchStart,
+	batchEnd uint32) error {
+
+	// Write block headers batch to target store.
+	err := s.options.TargetBlockHeaderStore.WriteHeaders(
+		blockHeaders...,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to write block headers "+
+			"batch %d-%d: %w", batchStart, batchEnd, err)
+	}
+
+	// We only need to set the block header hash of the last filter
+	// header to maintain chain tip consistency for regular tip.
+	lastIdx := len(filterHeaders) - 1
+	chainTipHash := blockHeaders[lastIdx].BlockHeader.BlockHash()
+	filterHeaders[lastIdx].HeaderHash = chainTipHash
+
+	// Write filter headers batch to target store.
+	err = s.options.TargetFilterHeaderStore.WriteHeaders(filterHeaders...)
+	if err != nil {
+		// If we've reached here we know the headers failed
+		// to be written to target filter store because of I/O
+		// error regards binary file or filter store and it is
+		// automatically rolledback upstream.
+		//
+		// Given the whole import operation need to satisfy
+		// the conjunction property for both block and filter
+		// header stores all or nothing so they need to be at the same
+		// length.
+		blockHeadersToTruncate := uint32(len(blockHeaders))
+		_, err := s.options.TargetBlockHeaderStore.RollbackBlockHeaders(
+			blockHeadersToTruncate,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to rollback %d headers "+
+				"from target block header store to match "+
+				"with the target filter header store",
+				blockHeadersToTruncate)
+		}
+
+		// We need to roll back to previous state.
+		return fmt.Errorf("failed to write filter headers "+
+			"batch %d-%d: %w", batchStart, batchEnd, err)
+	}
+
+	return nil
+}
+
+// ImportOptions defines parameters for the import process.
+type ImportOptions struct {
+	// Target chain configuration and header stores.
+	// These define the blockchain parameters and storage backends
+	// where imported headers will be written.
+	TargetChainParams       chaincfg.Params
+	TargetBlockHeaderStore  headerfs.BlockHeaderStore
+	TargetFilterHeaderStore headerfs.FilterHeaderStore
+
+	// Import source identifiers.
+	// These specify the file paths or locations from which
+	// block and filter headers will be imported.
+	BlockHeadersSource  string
+	FilterHeadersSource string
+
+	// Processing parameters.
+	// These control how the import process executes, including
+	// performance-related settings.
+	WriteBatchSizePerRegion int
+}
+
 // Import executes the header import process with the configuration specified in
 // the options. It handles the validation, construction of necessary components,
 // and orchestration of the import.
-func (options *ImportOptions) Import(ctx context.Context) (*ImportResult, error) {
-	// Create a derived context that we'll use for cancellable operations
+func (options *ImportOptions) Import(
+	ctx context.Context) (*ImportResult, error) {
+
+	// Create a derived context that we'll use for cancellable operations.
 	importCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1246,86 +1193,56 @@ func (options *ImportOptions) Import(ctx context.Context) (*ImportResult, error)
 		return nil, errors.New("missing filter headers source path")
 	}
 
-	// Set Logger.
-	log = options.Logger
-
 	// Set default batch size if not specified.
-	if options.WriteBatchSize <= 0 {
-		options.WriteBatchSize = 10000
+	if options.WriteBatchSizePerRegion <= 0 {
+		options.WriteBatchSizePerRegion = 10000
 		log.Infof("Using default write batch size of %d "+
-			"headers", options.WriteBatchSize)
+			"headers per region", options.WriteBatchSizePerRegion)
 	}
 
 	// Create block headers import source based on source string format.
-	blockHeadersSource, err := options.createBlockHeadersImportSource()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create block headers import "+
-			"source: %w", err)
-	}
+	blockHeadersSource := options.createBlockHeadersImportSource()
 
 	// Create filter headers import source based on source string format.
-	filterHeadersSource, err := options.createFilterHeadersImportSource()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create filter headers "+
-			"import source: %w", err)
-	}
+	filterHeadersSource := options.createFilterHeadersImportSource()
+
+	// Create block headers import source validator.
+	blockHeadersValidator := &BlockHeadersImportSourceValidator{}
+
+	// Create filter headers import source validator.
+	filterHeadersValidator := &FilterHeadersImportSourceValidator{}
+
 	// Construct the importer with all required components.
 	importer := &HeadersImport{
 		BlockHeadersImportSource:  blockHeadersSource,
 		FilterHeadersImportSource: filterHeadersSource,
-		BlockHeadersValidator:     &BlockHeadersImportSourceValidator{},
-		FilterHeadersValidator:    &FilterHeadersImportSourceValidator{},
+		BlockHeadersValidator:     blockHeadersValidator,
+		FilterHeadersValidator:    filterHeadersValidator,
+		options:                   options,
 	}
 
 	// Execute the import operation with the current options.
-	return importer.Import(importCtx, *options)
+	return importer.Import(importCtx)
 }
 
 // createBlockHeadersImportSource creates the appropriate import source for
 // block headers.
-func (options *ImportOptions) createBlockHeadersImportSource() (HeaderImportSource[*ChainImportBlockHeader], error) {
-	return createSpecificImportSource[*ChainImportBlockHeader](
-		options.BlockHeadersSource,
-	)
+//
+// nolint:lll
+func (options *ImportOptions) createBlockHeadersImportSource() HeaderImportSource[*BlockHeader] {
+	return &FileHeaderImportSource[*BlockHeader]{
+		Path: options.BlockHeadersSource,
+	}
 }
 
 // createFilterHeadersImportSource creates the appropriate import source for
 // filter headers.
-func (options *ImportOptions) createFilterHeadersImportSource() (HeaderImportSource[*ChainImportFilterHeader], error) {
-	return createSpecificImportSource[*ChainImportFilterHeader](
-		options.FilterHeadersSource,
-	)
-}
-
-// createSpecificImportSource is a private helper function (not a method) that
-// handles the generic implementation.
 //
-// nolint:unparam
-func createSpecificImportSource[T any](source string) (HeaderImportSource[T], error) {
-	// Check if source could be interpreted as a file path
-	// This is our default fallback for any string that doesn't match other
-	// patterns.
-	return &FileHeaderImportSource[T]{
-		Path: source,
-	}, nil
-
-	// For future expansion, additional source types can be added here with
-	// their own pattern detection and source construction.
-}
-
-// ImportOptions defines parameters for the import process.
-type ImportOptions struct {
-	TargetChainParams       chaincfg.Params
-	TargetBlockHeaderStore  headerfs.BlockHeaderStore
-	TargetFilterHeaderStore headerfs.FilterHeaderStore
-
-	// Import source identifiers.
-	BlockHeadersSource  string
-	FilterHeadersSource string
-
-	// Processing parameters.
-	WriteBatchSize int
-	Logger         btclog.Logger
+// nolint:lll
+func (options *ImportOptions) createFilterHeadersImportSource() HeaderImportSource[*FilterHeader] {
+	return &FileHeaderImportSource[*FilterHeader]{
+		Path: options.FilterHeadersSource,
+	}
 }
 
 // ImportResult contains statistics about a header import operation.
@@ -1364,40 +1281,8 @@ func (r *ImportResult) NewHeadersPercentage() float64 {
 	return 0
 }
 
-// formatDuration converts a duration to a human-readable string format
-// with appropriate units (ns, μs, ms, s, m, h) based on the duration length.
-func formatDuration(d time.Duration) string {
-	// For very short operations (under 1ms), use microseconds.
-	if d < time.Millisecond {
-		if d < time.Microsecond {
-			return fmt.Sprintf("%d ns", d.Nanoseconds())
-		}
-		return fmt.Sprintf("%.2f μs",
-			float64(d.Nanoseconds())/float64(time.Microsecond))
-	}
-
-	// For operations less than a second, use milliseconds.
-	if d < time.Second {
-		return fmt.Sprintf("%.2f ms",
-			float64(d.Nanoseconds())/float64(time.Millisecond))
-	}
-
-	// For operations less than a minute, use seconds.
-	if d < time.Minute {
-		return fmt.Sprintf("%.2f s",
-			d.Seconds())
-	}
-
-	// For operations less than an hour, use minutes and seconds.
-	if d < time.Hour {
-		minutes := int(d.Minutes())
-		seconds := int(d.Seconds()) % 60
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	}
-
-	// For longer operations, use hours, minutes and seconds.
-	hours := int(d.Hours())
-	minutes := int(d.Minutes()) % 60
-	seconds := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+// heightToSrcIndex converts an absolute blockchain height to a
+// source-relative index based on the provided start height.
+func heightToSrcIndex(height, startHeight uint32) int {
+	return int(height - startHeight)
 }
