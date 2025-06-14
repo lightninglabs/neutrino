@@ -158,9 +158,11 @@ func TestAppendRow(t *testing.T) {
 				truncFn: test.truncFn,
 			}
 
+			hdrFile := &headerFile{file: mockFile}
+
 			// Create a header store with our mock file.
 			h := &headerStore{
-				file:        mockFile,
+				headerFile:  hdrFile,
 				headerIndex: &headerIndex{indexType: Block},
 			}
 
@@ -207,8 +209,10 @@ func BenchmarkHeaderStoreAppendRaw(b *testing.B) {
 	tmpFile, cleanup := createFile(b, "header_benchmark")
 	defer cleanup()
 
+	hdrFile := &headerFile{file: tmpFile}
+
 	store := &headerStore{
-		file:        tmpFile,
+		headerFile:  hdrFile,
 		headerIndex: &headerIndex{indexType: Block},
 	}
 
