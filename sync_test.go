@@ -2,6 +2,7 @@ package neutrino_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -1165,7 +1166,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
 	}
-	svc.Start()
+	svc.Start(context.Background())
 	defer svc.Stop()
 
 	// Create a test harness with the three nodes and the neutrino instance.
