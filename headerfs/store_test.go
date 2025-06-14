@@ -172,10 +172,15 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderStoreRecovery tests the block header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestBlockHeaderStoreRecovery(t *testing.T) {
-	// In this test we want to exercise the ability of the block header
-	// store to recover in the face of a partial batch write (the headers
-	// were written, but the index wasn't updated).
 	cleanUp, db, tempDir, bhs, err := createTestBlockHeaderStore()
 	if cleanUp != nil {
 		defer cleanUp()
@@ -193,11 +198,20 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 
 	// Next, in order to simulate a partial write, we'll roll back the
 	// internal index by 5 blocks.
+	// Set new tip to be block 4 (height 4).
+	newTip := blockHeaders[4].BlockHash()
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-1].PrevBlock
-		if err := bhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		// Get headers 5, 6, 7, 8, 9 to truncate.
+		headerIdx := len(blockHeaders) - i - 1
+		headerHash := blockHeaders[headerIdx].BlockHash()
+		headersToTruncate[i] = &headerHash
+	}
+
+	// Truncate all 5 headers at once.
+	err = bhs.truncateIndices(&newTip, headersToTruncate, true)
+	if err != nil {
+		t.Fatalf("unable to truncate indices: %v", err)
 	}
 
 	// Next, we'll re-create the block header store in order to trigger the
@@ -225,7 +239,7 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 	}
 }
 
-func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderStore, error) {
+func createTestFilterHeaderStore() (func(), walletdb.DB, string, FilterHeaderStore, error) {
 	tempDir, err := ioutil.TempDir("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
@@ -266,12 +280,19 @@ func createTestFilterHeaderChain(numHeaders uint32) []FilterHeader {
 }
 
 func TestFilterHeaderStoreOperations(t *testing.T) {
-	cleanUp, _, _, fhs, err := createTestFilterHeaderStore()
+	cleanUp, _, _, fhsVal, err := createTestFilterHeaderStore()
 	if cleanUp != nil {
 		defer cleanUp()
 	}
 	if err != nil {
 		t.Fatalf("unable to create new block header store: %v", err)
+	}
+
+	// Type assertion to convert back to concrete *filterHeaderStore type.
+	fhs, ok := fhsVal.(*filterHeaderStore)
+	if !ok {
+		t.Fatal("filter header interface value is not of type " +
+			"*filterHeaderStore")
 	}
 
 	rand.Seed(time.Now().Unix())
@@ -380,16 +401,31 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestFilterHeaderStoreRecovery tests the filter header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestFilterHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the filter header
 	// store to recover in the face of a partial batch write (the headers
 	// were written, but the index wasn't updated).
-	cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
+	cleanUp, db, tempDir, fhsVal, err := createTestFilterHeaderStore()
 	if cleanUp != nil {
 		defer cleanUp()
 	}
 	if err != nil {
 		t.Fatalf("unable to create new block header store: %v", err)
+	}
+
+	// Type assertion to convert back to concrete *filterHeaderStore type.
+	fhs, ok := fhsVal.(*filterHeaderStore)
+	if !ok {
+		t.Fatal("filter header interface value is not of type " +
+			"*filterHeaderStore")
 	}
 
 	blockHeaders := createTestFilterHeaderChain(10)
@@ -421,17 +457,26 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	}
 
 	// Next, in order to simulate a partial write, we'll roll back the
-	// internal index by 5 blocks.
+	// internal index by 5 blocks all at once.
+	newTip := blockHeaders[4].HeaderHash // Set new tip to be block 4
+
+	// Create a slice of headers to truncate (headers 5-9).
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-2].HeaderHash
-		if err := fhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		headerIdx := 5 + i // This gives us indices 5, 6, 7, 8, 9
+		headerHash := blockHeaders[headerIdx].HeaderHash
+		headersToTruncate[i] = &headerHash
+	}
+
+	// Truncate all 5 headers at once.
+	err = fhs.truncateIndices(&newTip, headersToTruncate, true)
+	if err != nil {
+		t.Fatalf("unable to truncate indices: %v", err)
 	}
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
-	fhs, err = NewFilterHeaderStore(
+	fhsVal, err = NewFilterHeaderStore(
 		tempDir, db, RegularFilter, &chaincfg.SimNetParams, nil,
 	)
 	if err != nil {
@@ -527,10 +572,18 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 	filterHeaderChain := createTestFilterHeaderChain(chainTip)
 
 	setup := func(t *testing.T) (func(), string, walletdb.DB) {
-		cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
+		cleanUp, db, tempDir, fhsVal, err := createTestFilterHeaderStore()
 		if err != nil {
 			t.Fatalf("unable to create new filter header store: %v",
 				err)
+		}
+
+		// Type assertion to convert back to concrete *filterHeaderStore
+		// type.
+		fhs, ok := fhsVal.(*filterHeaderStore)
+		if !ok {
+			t.Fatal("filter header interface value is not of " +
+				"type *filterHeaderStore")
 		}
 
 		// We simulate the expected behavior of the block headers being

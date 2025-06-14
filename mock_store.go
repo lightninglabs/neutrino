@@ -60,6 +60,12 @@ func (m *mockBlockHeaderStore) FetchHeaderAncestors(uint32,
 func (m *mockBlockHeaderStore) HeightFromHash(*chainhash.Hash) (uint32, error) {
 	return 0, nil
 }
+func (m *mockBlockHeaderStore) RollbackBlockHeaders(
+	numHeaders uint32) (*headerfs.BlockStamp, error) {
+
+	return nil, nil
+}
+
 func (m *mockBlockHeaderStore) RollbackLastBlock() (*headerfs.BlockStamp,
 	error) {
 
