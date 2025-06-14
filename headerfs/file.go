@@ -50,27 +50,12 @@ func (h *headerStore) appendRaw(header []byte) error {
 // amount of bytes read past the seek distance is determined by the specified
 // header type.
 func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
-	var headerSize uint32
-
-	// Based on the defined header type, we'll determine the number of
-	// bytes that we need to read past the sync point.
-	switch h.indexType {
-	case Block:
-		headerSize = 80
-
-	case RegularFilter:
-		headerSize = 32
-
-	default:
-		return nil, fmt.Errorf("unknown index type: %v", h.indexType)
-	}
-
 	// TODO(roasbeef): add buffer pool
 
 	// With the number of bytes to read determined, we'll create a slice
 	// for that number of bytes, and read directly from the file into the
 	// buffer.
-	rawHeader := make([]byte, headerSize)
+	rawHeader := make([]byte, h.indexType.Size())
 	if _, err := h.file.ReadAt(rawHeader, int64(seekDist)); err != nil {
 		return nil, &ErrHeaderNotFound{err}
 	}
