@@ -378,7 +378,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Let the blockmanager handle the
 					// message.
 					progress := requests[index].HandleResp(
-						msgs[index], &resp, "",
+						msgs[index], &resp, "", nil,
 					)
 
 					if !progress.Finished {
@@ -399,7 +399,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 					// Otherwise resend the response we
 					// just sent.
 					progress = requests[index].HandleResp(
-						msgs[index], &resp2, "",
+						msgs[index], &resp2, "", nil,
 					)
 					if !progress.Finished {
 						errChan <- fmt.Errorf("got "+
@@ -617,7 +617,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 				// expect.
 				for i := range responses {
 					progress := requests[i].HandleResp(
-						msgs[i], responses[i], "",
+						msgs[i], responses[i], "", nil,
 					)
 					if i == test.firstInvalid {
 						if progress.Finished {
