@@ -23,6 +23,9 @@ func (h *headerStore) appendRaw(header []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := h.file.Sync(); err != nil {
+		return err
+	}
 
 	n, err := h.file.Write(header)
 	if err != nil {
