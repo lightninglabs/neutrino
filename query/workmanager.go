@@ -15,6 +15,9 @@ const (
 
 	// maxQueryTimeout is the maximum timeout given to a single query.
 	maxQueryTimeout = 32 * time.Second
+
+	// maxJobs is the maximum amount of jobs a single worker can have.
+	maxJobs = 32
 )
 
 var (
@@ -74,11 +77,10 @@ type PeerRanking interface {
 
 // activeWorker wraps a Worker that is currently running, together with the job
 // we have given to it.
-// TODO(halseth): support more than one active job at a time.
 type activeWorker struct {
-	w         Worker
-	activeJob *queryJob
-	onExit    chan struct{}
+	w          Worker
+	activeJobs map[uint64]*queryJob
+	onExit     chan struct{}
 }
 
 // Config holds the configuration options for a new WorkManager.
@@ -126,8 +128,8 @@ var _ WorkManager = (*peerWorkManager)(nil)
 func NewWorkManager(cfg *Config) WorkManager {
 	return &peerWorkManager{
 		cfg:        cfg,
-		newBatches: make(chan *batch),
-		jobResults: make(chan *jobResult),
+		newBatches: make(chan *batch, maxJobs),
+		jobResults: make(chan *jobResult, maxJobs),
 		quit:       make(chan struct{}),
 	}
 }
@@ -220,7 +222,7 @@ Loop:
 			for p, r := range workers {
 				// Only one active job at a time is currently
 				// supported.
-				if r.activeJob != nil {
+				if len(r.activeJobs) >= maxJobs {
 					continue
 				}
 
@@ -242,7 +244,7 @@ Loop:
 					log.Tracef("Sent job %v to worker %v",
 						next.Index(), p)
 					heap.Pop(work)
-					r.activeJob = next
+					r.activeJobs[next.Index()] = next
 
 					// Go back to start of loop, to check
 					// if there are more jobs to
@@ -278,9 +280,9 @@ Loop:
 			// remove it from our set of active workers.
 			onExit := make(chan struct{})
 			workers[peer.Addr()] = &activeWorker{
-				w:         r,
-				activeJob: nil,
-				onExit:    onExit,
+				w:          r,
+				activeJobs: make(map[uint64]*queryJob),
+				onExit:     onExit,
 			}
 
 			w.cfg.Ranking.AddPeer(peer.Addr())
@@ -302,7 +304,7 @@ Loop:
 			// Delete the job from the worker's active job, such
 			// that the slot gets opened for more work.
 			r := workers[result.peer.Addr()]
-			r.activeJob = nil
+			delete(r.activeJobs, result.job.Index())
 
 			// Get the index of this query's batch, and delete it
 			// from the map of current queries, since we don't have
