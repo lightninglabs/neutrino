@@ -105,14 +105,14 @@ func TestTargetStoreFreshnessDetection(t *testing.T) {
 			expectFresh:  false,
 		},
 		{
-			name:      "ReturnsErrorOnBlockStoreFailure",
+			name:      "ErrorOnBlockStoreFailure",
 			expectErr: true,
 			expectBlockStoreErr: errors.New(
 				"failed to get target block header",
 			),
 		},
 		{
-			name:      "ReturnsErrorOnFilterStoreFailure",
+			name:      "ErrorOnFilterStoreFailure",
 			expectErr: true,
 			expectFilterStoreErr: errors.New(
 				"failed to get target filter header",
@@ -288,7 +288,7 @@ func TestImportOpenSources(t *testing.T) {
 					"validators",
 			},
 			{
-				name: "ReturnsErrorWhenBlockFileDoesNotExist",
+				name: "ErrorOnBlockFileNotExist",
 				prep: func() (*HeadersImport, func(), error) {
 					opts := &ImportOptions{}
 					blockSource := opts.createBlockHeadersImportSource()
@@ -314,7 +314,7 @@ func TestImportOpenSources(t *testing.T) {
 					"/path/to/nonexistent/file",
 			},
 			{
-				name: "ReturnsErrorWhenFilterFileDoesNotExist",
+				name: "ErrorOnFilterFileNotExist",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers file.
 					bFile, c1, err := setupFileWithHdrs(
@@ -351,7 +351,7 @@ func TestImportOpenSources(t *testing.T) {
 					"/path/to/nonexistent/file",
 			},
 			{
-				name: "ReturnsErrOnGetBlockHeaderMetadataFail",
+				name: "ErrorOnGetBlockHeaderMetadataFail",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers empty file.
 					blockFile, err := os.CreateTemp(
@@ -388,7 +388,7 @@ func TestImportOpenSources(t *testing.T) {
 				expectErrMsg: "failed to read metadata: EOF",
 			},
 			{
-				name: "ReturnsErrOnGetFilterHeaderMetadataFail",
+				name: "ErrorOnGetFilterHeaderMetadataFail",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers file.
 					bFile, c1, err := setupFileWithHdrs(
@@ -438,7 +438,7 @@ func TestImportOpenSources(t *testing.T) {
 				expectErrMsg: "failed to read metadata: EOF",
 			},
 			{
-				name: "ReturnsErrorWhenBlockTypeValidationFails",
+				name: "ErrorOnBlockTypeValidationFails",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create filter headers file.
 					fFile, c1, err := setupFileWithHdrs(
@@ -473,7 +473,7 @@ func TestImportOpenSources(t *testing.T) {
 					"expected block headers",
 			},
 			{
-				name: "ReturnsErrorWhenFilterTypeValidationFails",
+				name: "ErrorOnFilterTypeValidationFails",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers file.
 					bFile, c1, err := setupFileWithHdrs(
@@ -557,12 +557,14 @@ func TestImportOpenSources(t *testing.T) {
 						HeaderType:       headerfs.Block,
 						StartHeight:      0,
 						EndHeight:        4,
+						HeadersCount:     5,
 					}
 					expectFilterMetadata := &HeaderMetadata{
 						BitcoinChainType: wire.SimNet,
 						HeaderType:       headerfs.RegularFilter,
 						StartHeight:      0,
 						EndHeight:        4,
+						HeadersCount:     5,
 					}
 
 					// Verify block header metadata.
@@ -665,12 +667,13 @@ func TestHeaderMetadata(t *testing.T) {
 						HeaderType:       headerfs.Block,
 						StartHeight:      0,
 						EndHeight:        4,
+						HeadersCount:     5,
 					}
 					require.Equal(t, expectBlockMetadata, m)
 				},
 			},
 			{
-				name: "ReturnsErrorWhenReaderNotInitialized",
+				name: "ErrorOnReaderNotInitialized",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers file.
 					bFile, cleanup, err := setupFileWithHdrs(
@@ -698,7 +701,7 @@ func TestHeaderMetadata(t *testing.T) {
 				expectErrMsg: "file reader not initialized",
 			},
 			{
-				name: "ReturnsErrorWhenHeaderReadFails",
+				name: "ErrorOnHeaderReadFails",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers empty file.
 					bFile, err := os.CreateTemp(
@@ -790,7 +793,7 @@ func TestHeaderMetadata(t *testing.T) {
 				expectErrMsg: "failed to read metadata: EOF",
 			},
 			{
-				name: "ReturnsErrorForUnknownHeaderType",
+				name: "ErrorOnUnknownHeaderType",
 				prep: func() (*HeadersImport, func(), error) {
 					// Create block headers empty file.
 					bFile, err := os.CreateTemp(
@@ -856,8 +859,8 @@ func TestHeaderMetadata(t *testing.T) {
 				},
 				verify:    func(t *testing.T, hm *HeaderMetadata) {},
 				expectErr: true,
-				expectErrMsg: "invalid header type: " +
-					"UnknownHeaderType(255)",
+				expectErrMsg: "failed to get header size: " +
+					"unknown header type: 255",
 			},
 		}
 
@@ -894,7 +897,7 @@ func TestHeaderMetadata(t *testing.T) {
 			expectErrMsg string
 		}{
 			{
-				name: "ReturnsErrorWhenSourceFileDoesNotExist",
+				name: "ErrorOnSourceFileNotExist",
 				prep: func() (headerfs.File, []byte, func(),
 					error) {
 					return nil, nil, func() {}, nil
@@ -1166,11 +1169,79 @@ func TestHeader(t *testing.T) {
 	t.Run("Retrieval", func(t *testing.T) {
 		t.Parallel()
 		testCases := []struct {
-			name string
-		}{}
+			name       string
+			index      int
+			headerType headerfs.HeaderType
+			// prep         func() (HeaderImportSource[HeaderBase, HeaderFactory[HeaderBase]], func(), error)
+			verify       func(*testing.T, HeaderBase)
+			expectErr    bool
+			expectErrMsg string
+		}{
+			// {
+			// 	name: "ErrorOnReaderNotInitialized",
+			// 	prep: func() (HeaderImportSource[HeaderBase, HeaderFactory[HeaderBase]], func(), error) {
+			// 		opts := &ImportOptions{}
+			// 		blockSource := opts.createBlockHeadersImportSource()
+			// 		blockImportSource, ok := blockSource.(HeaderImportSource[HeaderBase, HeaderFactory[HeaderBase]])
+			// 		if !ok {
+			// 			return nil, func() {}, errors.New("s")
+			// 		}
+			// 		return blockImportSource, func() {}, nil
+			// 	},
+			// 	verify:       func(*testing.T, HeaderBase) {},
+			// 	expectErr:    true,
+			// 	expectErrMsg: "file reader not initialized",
+			// },
+			// {
+			// 	name: "ErrorOnHeaderMetadataNotInitialized",
+			// 	prep: func() error {
+			// 		return nil
+			// 	},
+			// 	expectErr:    true,
+			// 	expectErrMsg: "header metadata not initialized",
+			// },
+			// {
+			// 	name:       "ErrorOnHeaderIsOfUnknownType",
+			// 	headerType: headerfs.UnknownHeader,
+			// 	prep: func() error {
+
+			// 		return nil
+			// 	},
+			// },
+			// {
+			// 	name: "ErrorOnHeaderIndexOutOfBounds",
+			// },
+			// {
+			// 	name: "ErrorOnBlockHeaderDeserializeFail",
+			// },
+			// {
+			// 	name: "ErrorOnFilterHeaderDeserializeFail",
+			// },
+			// {
+			// 	name: "GetBlockHeaderSuccessfully",
+			// },
+			// {
+			// 	name: "GetFilterHeaderSuccessfully",
+			// },
+		}
 
 		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {})
+			t.Run(tc.name, func(t *testing.T) {
+				importSource, cleanup, err := tc.prep()
+				t.Cleanup(cleanup)
+				require.NoError(t, err)
+
+				header, err := importSource.GetHeader(tc.index)
+				if tc.expectErr {
+					require.ErrorContains(
+						t, err, tc.expectErrMsg,
+					)
+					tc.verify(t, header)
+					return
+				}
+				require.NoError(t, err)
+				tc.verify(t, header)
+			})
 		}
 	})
 
