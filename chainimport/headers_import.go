@@ -43,6 +43,7 @@ type HeaderMetadata struct {
 	HeaderType       headerfs.HeaderType
 	StartHeight      uint32
 	EndHeight        uint32
+	HeadersCount     uint32
 }
 
 // HeaderBase is the base interface for header operations.
@@ -57,12 +58,17 @@ type HeaderBase interface {
 }
 
 // HeaderFactory is the factory interface for creating new headers.
-type HeaderFactory[T HeaderBase] interface {
+type HeaderFactory interface {
 	// HeaderFactory includes all methods from HeaderBase.
 	HeaderBase
 
-	// New creates and returns a new instance of the header type T.
-	New() T
+	// New creates and returns a new instance of the header type ReusableHeader.
+	New() ReusableHeader
+}
+
+type ReusableHeader interface {
+	HeaderBase
+	HeaderFactory
 }
 
 // BlockHeader represents a block header that can be imported into
@@ -73,8 +79,8 @@ type BlockHeader struct {
 }
 
 // Compile-time assertion to ensure BlockHeader implements
-// HeaderFactory interface.
-var _ HeaderFactory[*BlockHeader] = (*BlockHeader)(nil)
+// HeaderReusableHeaderFactory interface.
+var _ ReusableHeader = (*BlockHeader)(nil)
 
 // Deserialize reconstructs a block header from binary data at the specified
 // height.
@@ -104,7 +110,7 @@ func (b *BlockHeader) ValidateMetadata(m *HeaderMetadata) error {
 
 // New creates and returns a new empty BlockHeader instance. It is part of
 // HeaderFactory interface.
-func (b *BlockHeader) New() *BlockHeader {
+func (b *BlockHeader) New() ReusableHeader {
 	return &BlockHeader{
 		BlockHeader: headerfs.BlockHeader{
 			BlockHeader: &wire.BlockHeader{},
@@ -120,8 +126,8 @@ type FilterHeader struct {
 }
 
 // Compile-time assertion to ensure FilterHeader implements
-// HeaderFactory interface.
-var _ HeaderFactory[*FilterHeader] = (*FilterHeader)(nil)
+// ReusableHeader interface.
+var _ ReusableHeader = (*FilterHeader)(nil)
 
 // Deserialize reconstructs a filter header from binary data at the specified
 // height.
@@ -407,10 +413,7 @@ type HeaderImportSource[T HeaderBase, F HeaderFactory[T]] interface {
 	Iterator(start, end int) HeaderIterator[T, F]
 
 	// GetHeader retrieves a single header at the specified index.
-	GetHeader(index int) (T, error)
-
-	// HeadersCount returns the total number of headers in the source.
-	HeadersCount() int
+	GetHeader(index int) (ReusableHeader, error)
 
 	// GetPath returns a string identifier for this header source.
 	GetPath() string
@@ -459,7 +462,7 @@ func (f *FileHeaderImportSource[T, F]) Open() error {
 		return fmt.Errorf("type validation failed: %w", err)
 	}
 	f.metadata = mData
-	f.metadata.EndHeight = mData.StartHeight + uint32(f.HeadersCount()) - 1
+	f.metadata.EndHeight = mData.StartHeight + mData.HeadersCount - 1
 
 	return nil
 }
@@ -503,13 +506,15 @@ func (f *FileHeaderImportSource[T, F]) GetHeaderMetadata() (*HeaderMetadata, err
 		),
 	}
 
-	// Validate header type.
-	switch metadata.HeaderType {
-	case headerfs.Block, headerfs.RegularFilter:
-	default:
-		return nil, fmt.Errorf("invalid header type: %s",
-			metadata.HeaderType)
+	// Compute headers count. This also validates the header type. If the
+	// header type is not valid, we will get an error while getting the size
+	// of this header type.
+	usableFileSize := f.fileSize - HeaderMetadataSize
+	headerSize, err := metadata.HeaderType.Size()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get header size: %v", err)
 	}
+	metadata.HeadersCount = uint32(usableFileSize / headerSize)
 
 	return &metadata, err
 }
@@ -524,21 +529,28 @@ func (f *FileHeaderImportSource[T, F]) Iterator(start,
 }
 
 // GetHeader retrieves a single header at the specified index.
-func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (T, error) {
-	var empty T
+func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (ReusableHeader, error) {
+	var empty ReusableHeader
+
+	// First check if we have data initialized before attempting to get
+	// header. This validates both reader and metadata are properly set up.
+	if f.reader == nil {
+		return empty, errors.New("file reader not initialized")
+	}
+	if f.metadata == nil {
+		return empty, errors.New("header metadata not initialized")
+	}
 
 	// Calculate the absolute position for this header.
-	headerSize := f.metadata.HeaderType.Size()
-	offset := HeaderMetadataSize + (index * headerSize)
-
-	// Check if requested header is within file bounds.
-	if offset+headerSize > f.fileSize {
-		return empty, fmt.Errorf("header index %d out of bounds", index)
+	headerSize, err := f.metadata.HeaderType.Size()
+	if err != nil {
+		return empty, fmt.Errorf("failed to get header size: %v", err)
 	}
+	offset := HeaderMetadataSize + (index * headerSize)
 
 	// Read header data at the calculated offset.
 	buf := make([]byte, headerSize)
-	_, err := f.reader.ReadAt(buf, int64(offset))
+	_, err = f.reader.ReadAt(buf, int64(offset))
 	if err != nil {
 		return empty, fmt.Errorf("failed to read header at "+
 			"index %d: %w", index, err)
@@ -555,19 +567,6 @@ func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (T, error) {
 	}
 
 	return header, nil
-}
-
-// HeadersCount returns the number of headers in the file.
-func (f *FileHeaderImportSource[T, F]) HeadersCount() int {
-	usableFileSize := f.fileSize - HeaderMetadataSize
-
-	// Handle the case where file might be smaller than metadata.
-	if usableFileSize <= 0 {
-		return 0
-	}
-
-	headerSize := f.metadata.HeaderType.Size()
-	return usableFileSize / headerSize
 }
 
 // SetPath sets a string identifier for this import source.
@@ -642,11 +641,20 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
 
+	// Get current headers count. We can safely use this count for both
+	// block headers and filter headers since we've already validated that
+	// the counts match across all import sources.
+	blockMetadata, err := s.BlockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return nil, err
+	}
+
 	// Validate all block headers from import source.
 	if err := s.BlockHeadersValidator.Validate(
 		s.BlockHeadersImportSource.Iterator(
-			0, s.BlockHeadersImportSource.HeadersCount()-1,
-		), s.options.TargetChainParams,
+			0, int(blockMetadata.HeadersCount-1),
+		),
+		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
@@ -654,8 +662,9 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	// Validate all filter headers from import source.
 	if err := s.FilterHeadersValidator.Validate(
 		s.FilterHeadersImportSource.Iterator(
-			0, s.FilterHeadersImportSource.HeadersCount()-1,
-		), s.options.TargetChainParams,
+			0, int(blockMetadata.HeadersCount-1),
+		),
+		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("headers import failed: %w", err)
 	}
@@ -806,20 +815,17 @@ func (s *HeadersImport) validateSourcesCompatibility() error {
 	}
 
 	// Validate header counts match exactly.
-	var (
-		blockCount  = s.BlockHeadersImportSource.HeadersCount()
-		filterCount = s.FilterHeadersImportSource.HeadersCount()
-	)
-	if filterCount != blockCount {
+	if filterMetadata.HeadersCount != blockMetadata.HeadersCount {
 		return fmt.Errorf("headers count mismatch: block headers "+
 			"import source %s (%d), filter headers import source "+
 			"%s (%d)", s.BlockHeadersImportSource.GetPath(),
-			blockCount, s.FilterHeadersImportSource.GetPath(),
-			filterCount)
+			blockMetadata.HeadersCount,
+			s.FilterHeadersImportSource.GetPath(),
+			filterMetadata.HeadersCount)
 	}
 
 	// Verify header counts are greater than zero.
-	if blockCount == 0 {
+	if blockMetadata.HeadersCount == 0 {
 		return errors.New("no headers available in sources")
 	}
 
