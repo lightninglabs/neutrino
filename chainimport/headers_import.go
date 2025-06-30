@@ -46,29 +46,11 @@ type HeaderMetadata struct {
 	HeadersCount     uint32
 }
 
-// HeaderBase is the base interface for header operations.
-type HeaderBase interface {
+// Header is the base interface for header operations.
+type Header interface {
 	// Deserialize reconstructs the header from binary data at the specified
 	// height.
 	Deserialize(io.Reader, uint32) error
-
-	// ValidateMetadata ensures the header type is compatible with the
-	// provided metadata.
-	ValidateMetadata(*HeaderMetadata) error
-}
-
-// HeaderFactory is the factory interface for creating new headers.
-type HeaderFactory interface {
-	// HeaderFactory includes all methods from HeaderBase.
-	HeaderBase
-
-	// New creates and returns a new instance of the header type ReusableHeader.
-	New() ReusableHeader
-}
-
-type ReusableHeader interface {
-	HeaderBase
-	HeaderFactory
 }
 
 // BlockHeader represents a block header that can be imported into
@@ -79,8 +61,8 @@ type BlockHeader struct {
 }
 
 // Compile-time assertion to ensure BlockHeader implements
-// HeaderReusableHeaderFactory interface.
-var _ ReusableHeader = (*BlockHeader)(nil)
+// HeaderBase interface.
+var _ Header = (*BlockHeader)(nil)
 
 // Deserialize reconstructs a block header from binary data at the specified
 // height.
@@ -97,20 +79,8 @@ func (b *BlockHeader) Deserialize(r io.Reader, height uint32) error {
 	return nil
 }
 
-// ValidateMetadata checks if the provided HeaderMetadata is of the correct type
-// for block headers. It returns an error if the header type is not
-// headerfs.Block.
-func (b *BlockHeader) ValidateMetadata(m *HeaderMetadata) error {
-	if m.HeaderType != headerfs.Block {
-		return fmt.Errorf("type mismatch: file contains %v headers, "+
-			"but expected block headers", m.HeaderType)
-	}
-	return nil
-}
-
-// New creates and returns a new empty BlockHeader instance. It is part of
-// HeaderFactory interface.
-func (b *BlockHeader) New() ReusableHeader {
+// NewBlockHeader creates and returns a new empty BlockHeader instance.
+func NewBlockHeader() Header {
 	return &BlockHeader{
 		BlockHeader: headerfs.BlockHeader{
 			BlockHeader: &wire.BlockHeader{},
@@ -126,8 +96,8 @@ type FilterHeader struct {
 }
 
 // Compile-time assertion to ensure FilterHeader implements
-// ReusableHeader interface.
-var _ ReusableHeader = (*FilterHeader)(nil)
+// HeaderBase interface.
+var _ Header = (*FilterHeader)(nil)
 
 // Deserialize reconstructs a filter header from binary data at the specified
 // height.
@@ -143,30 +113,19 @@ func (f *FilterHeader) Deserialize(r io.Reader, height uint32) error {
 	return nil
 }
 
-// ValidateMetadata checks if the provided HeaderMetadata is of the correct type
-// for filter headers. It returns an error if the header type is not
-// headerfs.RegularFilter.
-func (f *FilterHeader) ValidateMetadata(m *HeaderMetadata) error {
-	if m.HeaderType != headerfs.RegularFilter {
-		return fmt.Errorf("type mismatch: file contains %v headers, "+
-			"but expected filter headers", m.HeaderType)
-	}
-	return nil
-}
-
-// New creates and returns a new empty FilterHeader instance. It is part of
-// HeaderFactory interface.
-func (b *FilterHeader) New() *FilterHeader {
+// NewFilterHeader creates and returns a new empty FilterHeader instance. It is
+// part of HeaderFactory interface.
+func NewFilterHeader() Header {
 	return &FilterHeader{
 		FilterHeader: headerfs.FilterHeader{},
 	}
 }
 
 // HeaderIterator interface for iterating over headers.
-type HeaderIterator[T HeaderBase, F HeaderFactory[T]] interface {
+type HeaderIterator interface {
 	// Next returns the next header in the sequence and advances the
 	// iterator.
-	Next() (header T, hasMore bool, err error)
+	Next() (header Header, hasMore bool, err error)
 
 	// Close releases any resources associated with the iterator.
 	Close() error
@@ -174,8 +133,8 @@ type HeaderIterator[T HeaderBase, F HeaderFactory[T]] interface {
 
 // ImportSourceHeaderIterator provides efficient iteration over headers from
 // a source.
-type ImportSourceHeaderIterator[T HeaderBase, F HeaderFactory[T]] struct {
-	source  HeaderImportSource[T, F]
+type ImportSourceHeaderIterator struct {
+	source  HeaderImportSource
 	current int
 	end     int
 }
@@ -184,12 +143,12 @@ type ImportSourceHeaderIterator[T HeaderBase, F HeaderFactory[T]] struct {
 // HeaderIterator interface.
 //
 //nolint:lll
-var _ HeaderIterator[HeaderBase, HeaderFactory[HeaderBase]] = (*ImportSourceHeaderIterator[HeaderBase, HeaderFactory[HeaderBase]])(nil)
+var _ HeaderIterator = (*ImportSourceHeaderIterator)(nil)
 
 // Next returns the next header in the sequence, along with a boolean indicating
 // whether there are more headers available and any error encountered.
-func (it *ImportSourceHeaderIterator[T, F]) Next() (T, bool, error) {
-	var empty T
+func (it *ImportSourceHeaderIterator) Next() (Header, bool, error) {
+	var empty Header
 
 	if it.current > it.end {
 		return empty, false, nil
@@ -205,21 +164,21 @@ func (it *ImportSourceHeaderIterator[T, F]) Next() (T, bool, error) {
 }
 
 // Close releases any resources used by the iterator.
-func (it *ImportSourceHeaderIterator[T, F]) Close() error {
+func (it *ImportSourceHeaderIterator) Close() error {
 	// Don't close the source, as it may be used elsewhere.
 	return nil
 }
 
 // HeaderValidator is a generic interface for validating headers of type T.
-type HeadersValidator[T HeaderBase, F HeaderFactory[T]] interface {
+type HeadersValidator interface {
 	// Validate performs comprehensive validation on a sequence of headers
 	// provided by the iterator. It checks that the entire sequence forms
 	// a valid chain according to the given chain parameters.
-	Validate(HeaderIterator[T, F], chaincfg.Params) error
+	Validate(HeaderIterator, chaincfg.Params) error
 
 	// ValidatePair verifies that two consecutive headers (prev and current)
 	// form a valid chain link according to the specified chain parameters.
-	ValidatePair(prev, current T, targetChainParams chaincfg.Params) error
+	ValidatePair(prev, current Header, targetCh chaincfg.Params) error
 }
 
 // BlockHeadersImportSourceValidator implements HeadersValidator for block
@@ -230,15 +189,14 @@ type BlockHeadersImportSourceValidator struct{}
 // HeadersValidator interface.
 //
 //nolint:lll
-var _ HeadersValidator[*BlockHeader, HeaderFactory[*BlockHeader]] = (*BlockHeadersImportSourceValidator)(nil)
+var _ HeadersValidator = (*BlockHeadersImportSourceValidator)(nil)
 
 // Validate performs thorough validation of a sequence of block headers.
 func (v *BlockHeadersImportSourceValidator) Validate(
-	iterator HeaderIterator[*BlockHeader, HeaderFactory[*BlockHeader]],
-	targetChainParams chaincfg.Params) error {
+	iterator HeaderIterator, targetChainParams chaincfg.Params) error {
 
 	var (
-		prevHeader *BlockHeader
+		prevHeader Header
 		hasMore    bool
 		err        error
 	)
@@ -258,7 +216,7 @@ func (v *BlockHeadersImportSourceValidator) Validate(
 	count := 1
 	for {
 		// Get the next header.
-		var header *BlockHeader
+		var header Header
 		header, hasMore, err = iterator.Next()
 		if err != nil {
 			return fmt.Errorf("failed to get next block header at "+
@@ -287,12 +245,22 @@ func (v *BlockHeadersImportSourceValidator) Validate(
 // ValidatePair verifies that two consecutive block headers form a valid chain
 // link.
 func (v *BlockHeadersImportSourceValidator) ValidatePair(prev,
-	current *BlockHeader, targetChainParams chaincfg.Params) error {
+	current Header, targetChainParams chaincfg.Params) error {
+
+	// Type assert prev and current headers to be block headers.
+	prevBlk, ok := prev.(*BlockHeader)
+	if !ok {
+		return fmt.Errorf("expected BlockHeader type, got %T", prev)
+	}
+	currentBlk, ok := current.(*BlockHeader)
+	if !ok {
+		return fmt.Errorf("expected BlockHeader type, got %T", current)
+	}
 
 	// Extract the block headers and heights directly.
-	prevBlockHeader := prev.BlockHeader
-	currBlockHeader := current.BlockHeader
-	prevHeight, currHeight := prev.Height, current.Height
+	prevBlockHeader := prevBlk.BlockHeader
+	currBlockHeader := currentBlk.BlockHeader
+	prevHeight, currHeight := prevBlk.Height, currentBlk.Height
 
 	// Verify that heights are consecutive.
 	if currHeight != prevHeight+1 {
@@ -329,7 +297,7 @@ type FilterHeadersImportSourceValidator struct{}
 // implements HeadersValidator interface.
 //
 //nolint:lll
-var _ HeadersValidator[*FilterHeader, HeaderFactory[*FilterHeader]] = (*FilterHeadersImportSourceValidator)(nil)
+var _ HeadersValidator = (*FilterHeadersImportSourceValidator)(nil)
 
 // Validate performs basic validation on a stream of filter headers.
 //
@@ -343,7 +311,7 @@ var _ HeadersValidator[*FilterHeader, HeaderFactory[*FilterHeader]] = (*FilterHe
 // order, Filter_N is the compact filter for the block, and || represents
 // concatenation.
 func (v *FilterHeadersImportSourceValidator) Validate(
-	iterator HeaderIterator[*FilterHeader, HeaderFactory[*FilterHeader]],
+	iterator HeaderIterator,
 	targetChainParams chaincfg.Params) error {
 
 	return nil
@@ -360,7 +328,7 @@ func (v *FilterHeadersImportSourceValidator) Validate(
 // can't validate if two consecutive filter headers maintain the correct
 // cryptographic relationship.
 func (v *FilterHeadersImportSourceValidator) ValidatePair(prev,
-	current *FilterHeader, targetChainParams chaincfg.Params) error {
+	current Header, targetChainParams chaincfg.Params) error {
 
 	return nil
 }
@@ -397,7 +365,7 @@ type HeaderRegion struct {
 }
 
 // HeaderImportSource is a generic interface for loading headers of type T.
-type HeaderImportSource[T HeaderBase, F HeaderFactory[T]] interface {
+type HeaderImportSource interface {
 	// Open initializes the header source and prepares it for reading.
 	Open() error
 
@@ -410,10 +378,10 @@ type HeaderImportSource[T HeaderBase, F HeaderFactory[T]] interface {
 
 	// Iterator returns a HeaderIterator that can traverse headers between
 	// start and end indices.
-	Iterator(start, end int) HeaderIterator[T, F]
+	Iterator(start, end int) HeaderIterator
 
 	// GetHeader retrieves a single header at the specified index.
-	GetHeader(index int) (ReusableHeader, error)
+	GetHeader(index int) (Header, error)
 
 	// GetPath returns a string identifier for this header source.
 	GetPath() string
@@ -426,19 +394,19 @@ type HeaderImportSource[T HeaderBase, F HeaderFactory[T]] interface {
 // HeaderImportSource interface.
 //
 //nolint:lll
-var _ HeaderImportSource[HeaderBase, HeaderFactory[HeaderBase]] = (*FileHeaderImportSource[HeaderBase, HeaderFactory[HeaderBase]])(nil)
+var _ HeaderImportSource = (*FileHeaderImportSource)(nil)
 
 // FileHeaderSource implements HeaderImportSource for files.
-type FileHeaderImportSource[T HeaderBase, F HeaderFactory[T]] struct {
-	Path     string
-	reader   *mmap.ReaderAt
-	fileSize int
-	metadata *HeaderMetadata
-	factory  F
+type FileHeaderImportSource struct {
+	Path          string
+	reader        *mmap.ReaderAt
+	fileSize      int
+	metadata      *HeaderMetadata
+	headerFactory func() Header
 }
 
 // Open opens the file and initializes the mmap reader.
-func (f *FileHeaderImportSource[T, F]) Open() error {
+func (f *FileHeaderImportSource) Open() error {
 	// Only open if not already open.
 	if f.reader != nil {
 		return nil
@@ -456,18 +424,13 @@ func (f *FileHeaderImportSource[T, F]) Open() error {
 	if err != nil {
 		return fmt.Errorf("failed to get header metadata: %w", err)
 	}
-
-	// Validate that the generic type T matches the header type in the file.
-	if err := f.validateTypeMatch(mData); err != nil {
-		return fmt.Errorf("type validation failed: %w", err)
-	}
 	f.metadata = mData
 	f.metadata.EndHeight = mData.StartHeight + mData.HeadersCount - 1
 
 	return nil
 }
 
-func (f *FileHeaderImportSource[T, F]) Close() error {
+func (f *FileHeaderImportSource) Close() error {
 	return f.reader.Close()
 }
 
@@ -476,7 +439,7 @@ func (f *FileHeaderImportSource[T, F]) Close() error {
 // without re-reading the file.
 //
 // nolint:lll
-func (f *FileHeaderImportSource[T, F]) GetHeaderMetadata() (*HeaderMetadata, error) {
+func (f *FileHeaderImportSource) GetHeaderMetadata() (*HeaderMetadata, error) {
 	if f.metadata != nil {
 		return f.metadata, nil
 	}
@@ -520,17 +483,15 @@ func (f *FileHeaderImportSource[T, F]) GetHeaderMetadata() (*HeaderMetadata, err
 }
 
 // Iterator returns an efficient iterator for sequential header access.
-func (f *FileHeaderImportSource[T, F]) Iterator(start,
-	end int) HeaderIterator[T, F] {
-
-	return &ImportSourceHeaderIterator[T, F]{
+func (f *FileHeaderImportSource) Iterator(start, end int) HeaderIterator {
+	return &ImportSourceHeaderIterator{
 		source: f, current: start, end: end,
 	}
 }
 
 // GetHeader retrieves a single header at the specified index.
-func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (ReusableHeader, error) {
-	var empty ReusableHeader
+func (f *FileHeaderImportSource) GetHeader(index int) (Header, error) {
+	var empty Header
 
 	// First check if we have data initialized before attempting to get
 	// header. This validates both reader and metadata are properly set up.
@@ -561,7 +522,7 @@ func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (ReusableHeader, err
 	height := uint32(index) + f.metadata.StartHeight
 
 	// Create the appropriate chain import header type based on metadata.
-	header := f.factory.New()
+	header := f.headerFactory()
 	if err := header.Deserialize(reader, height); err != nil {
 		return empty, err
 	}
@@ -570,32 +531,23 @@ func (f *FileHeaderImportSource[T, F]) GetHeader(index int) (ReusableHeader, err
 }
 
 // SetPath sets a string identifier for this import source.
-func (f *FileHeaderImportSource[T, F]) SetPath(path string) {
+func (f *FileHeaderImportSource) SetPath(path string) {
 	f.Path = path
 }
 
 // GetPath returns a string identifier for this import source.
-func (f *FileHeaderImportSource[T, F]) GetPath() string {
+func (f *FileHeaderImportSource) GetPath() string {
 	return f.Path
-}
-
-// validateTypeMatch ensures that the generic type T matches the header type in
-// the file.
-//
-//nolint:lll
-func (f *FileHeaderImportSource[T, F]) validateTypeMatch(m *HeaderMetadata) error {
-	var header T
-	return header.ValidateMetadata(m)
 }
 
 // HeadersImport uses a generic HeaderImportSource to import headers.
 //
 //nolint:lll
 type HeadersImport struct {
-	BlockHeadersImportSource  HeaderImportSource[*BlockHeader, HeaderFactory[*BlockHeader]]
-	FilterHeadersImportSource HeaderImportSource[*FilterHeader, HeaderFactory[*FilterHeader]]
-	BlockHeadersValidator     HeadersValidator[*BlockHeader, HeaderFactory[*BlockHeader]]
-	FilterHeadersValidator    HeadersValidator[*FilterHeader, HeaderFactory[*FilterHeader]]
+	BlockHeadersImportSource  HeaderImportSource
+	FilterHeadersImportSource HeaderImportSource
+	BlockHeadersValidator     HeadersValidator
+	FilterHeadersValidator    HeadersValidator
 	options                   *ImportOptions
 }
 
@@ -909,13 +861,18 @@ func (s *HeadersImport) validateChainContinuity() error {
 		sourceIndex := heightToSrcIndex(
 			importStartHeight, sourceBlockMeta.StartHeight,
 		)
-		currBlkHeader, err := s.BlockHeadersImportSource.GetHeader(
+		currHeader, err := s.BlockHeadersImportSource.GetHeader(
 			sourceIndex,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to get block header from "+
 				"import source at height %d: %w",
 				importStartHeight, err)
+		}
+		currBlkHeader, ok := currHeader.(*BlockHeader)
+		if !ok {
+			return fmt.Errorf("expected BlockHeader type, got %T",
+				currHeader)
 		}
 
 		// Ensure the current header's previous block hash matches the
@@ -1004,12 +961,17 @@ func (s *HeadersImport) verifyHeadersAtHeight(height uint32) error {
 
 	// Get and verify block headers.
 	sourceIndex := heightToSrcIndex(height, sourceBlockMeta.StartHeight)
-	sourceBlkHeader, err := s.BlockHeadersImportSource.GetHeader(
+	sourceHeader, err := s.BlockHeadersImportSource.GetHeader(
 		sourceIndex,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to get block header from import "+
 			"source at height %d: %w", height, err)
+	}
+	sourceBlkHeader, ok := sourceHeader.(*BlockHeader)
+	if !ok {
+		return fmt.Errorf("expected BlockHeader type, got %T",
+			sourceBlkHeader)
 	}
 
 	blockHeaderStore := s.options.TargetBlockHeaderStore
@@ -1029,12 +991,17 @@ func (s *HeadersImport) verifyHeadersAtHeight(height uint32) error {
 	}
 
 	// Get and verify filter headers.
-	sourceFilterHeader, err := s.FilterHeadersImportSource.GetHeader(
+	sourceHeader, err = s.FilterHeadersImportSource.GetHeader(
 		sourceIndex,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to get filter header from import "+
 			"source at height %d: %w", height, err)
+	}
+	sourceFilterHeader, ok := sourceHeader.(*FilterHeader)
+	if !ok {
+		return fmt.Errorf("expected FilterHeader type, got %T",
+			sourceHeader)
 	}
 
 	filterHeaderStore := s.options.TargetFilterHeaderStore
@@ -1131,12 +1098,19 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 					batchStart+uint32(len(blockHeaders)),
 					err)
 			}
+			blkHeader, ok := header.(*BlockHeader)
+			if !ok {
+				return fmt.Errorf("expected BlockHeader type, "+
+					"got %T", header)
+			}
 
 			if !hasMore {
 				break
 			}
 
-			blockHeaders = append(blockHeaders, header.BlockHeader)
+			blockHeaders = append(
+				blockHeaders, blkHeader.BlockHeader,
+			)
 		}
 
 		// Read filter headers batch.
@@ -1156,13 +1130,18 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 					batchStart+uint32(len(filterHeaders)),
 					err)
 			}
+			fHeader, ok := header.(*FilterHeader)
+			if !ok {
+				return fmt.Errorf("expected FilterHeader "+
+					"type, got %T", header)
+			}
 
 			if !hasMore {
 				break
 			}
 
 			filterHeaders = append(
-				filterHeaders, header.FilterHeader,
+				filterHeaders, fHeader.FilterHeader,
 			)
 		}
 
@@ -1303,16 +1282,16 @@ func (options *ImportOptions) Import(
 	}
 
 	// Create block headers import source based on source string format.
-	blockHeadersSource := options.createBlockHeadersImportSource()
+	blockHeadersSource := options.createBlkHdrImportSrc()
 
 	// Create filter headers import source based on source string format.
-	filterHeadersSource := options.createFilterHeadersImportSource()
+	filterHeadersSource := options.createFilterHdrImportSrc()
 
 	// Create block headers import source validator.
-	blockHeadersValidator := &BlockHeadersImportSourceValidator{}
+	blockHeadersValidator := options.createBlkHdrValidator()
 
 	// Create filter headers import source validator.
-	filterHeadersValidator := &FilterHeadersImportSourceValidator{}
+	filterHeadersValidator := options.createFilterHdrValidator()
 
 	// Construct the importer with all required components.
 	importer := &HeadersImport{
@@ -1331,22 +1310,30 @@ func (options *ImportOptions) Import(
 // block headers.
 //
 // nolint:lll
-func (options *ImportOptions) createBlockHeadersImportSource() HeaderImportSource[*BlockHeader, HeaderFactory[*BlockHeader]] {
-	return &FileHeaderImportSource[*BlockHeader, HeaderFactory[*BlockHeader]]{
-		Path:    options.BlockHeadersSource,
-		factory: &BlockHeader{},
+func (options *ImportOptions) createBlkHdrImportSrc() HeaderImportSource {
+	return &FileHeaderImportSource{
+		Path:          options.BlockHeadersSource,
+		headerFactory: NewBlockHeader,
 	}
+}
+
+func (options *ImportOptions) createBlkHdrValidator() HeadersValidator {
+	return &BlockHeadersImportSourceValidator{}
 }
 
 // createFilterHeadersImportSource creates the appropriate import source for
 // filter headers.
 //
 // nolint:lll
-func (options *ImportOptions) createFilterHeadersImportSource() HeaderImportSource[*FilterHeader, HeaderFactory[*FilterHeader]] {
-	return &FileHeaderImportSource[*FilterHeader, HeaderFactory[*FilterHeader]]{
-		Path:    options.FilterHeadersSource,
-		factory: &FilterHeader{},
+func (options *ImportOptions) createFilterHdrImportSrc() HeaderImportSource {
+	return &FileHeaderImportSource{
+		Path:          options.FilterHeadersSource,
+		headerFactory: NewFilterHeader,
 	}
+}
+
+func (options *ImportOptions) createFilterHdrValidator() HeadersValidator {
+	return &FilterHeadersImportSourceValidator{}
 }
 
 // ImportResult contains statistics about a header import operation.
