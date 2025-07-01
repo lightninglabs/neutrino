@@ -445,3 +445,157 @@ func TestRangeFIFO(t *testing.T) {
 	// Check the number of items visited.
 	require.Equal(t, numItems, visited)
 }
+
+// TestDeleteCallback tests that the global delete callback is called when
+// elements are deleted from the cache.
+func TestDeleteCallback(t *testing.T) {
+	t.Parallel()
+
+	deletedKeys := make([]int, 0)
+	deletedValues := make([]*sizeable, 0)
+
+	// Create cache with global callback using option pattern.
+	c := NewCache(2, WithDeleteCallback(func(key int, value *sizeable) {
+		deletedKeys = append(deletedKeys, key)
+		deletedValues = append(deletedValues, value)
+	}))
+
+	// Add elements to the LRU cache.
+	c.Put(1, &sizeable{value: 1, size: 1})
+	c.Put(2, &sizeable{value: 2, size: 1})
+
+	// This should evict key 1.
+	c.Put(3, &sizeable{value: 3, size: 1})
+
+	// Verify callback was called with correct key and value.
+	require.Len(t, deletedKeys, 1)
+	require.Len(t, deletedValues, 1)
+	require.Equal(t, 1, deletedKeys[0])
+	require.Equal(t, 1, deletedValues[0].value)
+
+	// Add another element to evict key 2.
+	c.Put(4, &sizeable{value: 4, size: 1})
+
+	require.Len(t, deletedKeys, 2)
+	require.Len(t, deletedValues, 2)
+	require.Equal(t, 2, deletedKeys[1])
+	require.Equal(t, 2, deletedValues[1].value)
+}
+
+// TestCallbackOnExplicitDelete tests that the delete callback is called when
+// elements are explicitly deleted from the cache.
+func TestCallbackOnExplicitDelete(t *testing.T) {
+	t.Parallel()
+
+	deletedKeys := make([]int, 0)
+	deletedValues := make([]*sizeable, 0)
+
+	c := NewCache(10, WithDeleteCallback(func(key int, value *sizeable) {
+		deletedKeys = append(deletedKeys, key)
+		deletedValues = append(deletedValues, value)
+	}))
+
+	// Add elements.
+	c.Put(1, &sizeable{value: 1, size: 1})
+	c.Put(2, &sizeable{value: 2, size: 1})
+
+	// Explicitly delete an element.
+	c.Delete(1)
+
+	// Verify callback was called.
+	require.Len(t, deletedKeys, 1)
+	require.Len(t, deletedValues, 1)
+	require.Equal(t, 1, deletedKeys[0])
+	require.Equal(t, 1, deletedValues[0].value)
+}
+
+// TestCallbackOnLoadAndDelete tests that the delete callback is called when
+// using the LoadAndDelete method.
+func TestCallbackOnLoadAndDelete(t *testing.T) {
+	t.Parallel()
+
+	deletedKeys := make([]int, 0)
+	deletedValues := make([]*sizeable, 0)
+
+	c := NewCache(10, WithDeleteCallback(func(key int, value *sizeable) {
+		deletedKeys = append(deletedKeys, key)
+		deletedValues = append(deletedValues, value)
+	}))
+
+	c.Put(1, &sizeable{value: 1, size: 1})
+
+	value, found := c.LoadAndDelete(1)
+	require.True(t, found)
+	require.Equal(t, 1, value.value)
+
+	// Verify callback was called.
+	require.Len(t, deletedKeys, 1)
+	require.Len(t, deletedValues, 1)
+	require.Equal(t, 1, deletedKeys[0])
+	require.Equal(t, 1, deletedValues[0].value)
+}
+
+// TestNoCallbackOnNonDelete tests that callbacks are not called when
+// elements are not deleted.
+func TestNoCallbackOnNonDelete(t *testing.T) {
+	t.Parallel()
+
+	callbackCalled := false
+
+	c := NewCache(10, WithDeleteCallback(func(key int, value *sizeable) {
+		callbackCalled = true
+	}))
+
+	// Add elements without triggering delete.
+	c.Put(1, &sizeable{value: 1, size: 1})
+	c.Put(2, &sizeable{value: 2, size: 1})
+
+	// Verify callback was not called.
+	require.False(t, callbackCalled)
+}
+
+// TestCallbackWithNilCallback tests that the cache works correctly when
+// no delete callback is provided.
+func TestCallbackWithNilCallback(t *testing.T) {
+	t.Parallel()
+
+	c := NewCache[int, *sizeable](2)
+
+	// Add elements without setting any callback.
+	c.Put(1, &sizeable{value: 1, size: 1})
+	c.Put(2, &sizeable{value: 2, size: 1})
+
+	// Trigger delete/eviction of the first element - should not panic.
+	c.Put(3, &sizeable{value: 3, size: 1})
+
+	// Verify cache still works.
+	require.Equal(t, 2, c.Len())
+	_, err := c.Get(1)
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
+}
+
+// TestMultipleDeletes tests that the delete callback is called for each
+// deletion when multiple elements are deleted at once.
+func TestMultipleDeletes(t *testing.T) {
+	t.Parallel()
+
+	deletedKeys := make([]int, 0)
+
+	c := NewCache(3, WithDeleteCallback(func(key int, value *sizeable) {
+		deletedKeys = append(deletedKeys, key)
+	}))
+
+	// Fill the cache.
+	c.Put(1, &sizeable{value: 1, size: 1})
+	c.Put(2, &sizeable{value: 2, size: 1})
+	c.Put(3, &sizeable{value: 3, size: 1})
+
+	// Add a large element that will evict multiple items.
+	c.Put(4, &sizeable{value: 4, size: 3})
+
+	// Verify callbacks were called for all evicted elements.
+	require.Len(t, deletedKeys, 3)
+	require.Contains(t, deletedKeys, 1)
+	require.Contains(t, deletedKeys, 2)
+	require.Contains(t, deletedKeys, 3)
+}
