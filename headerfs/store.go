@@ -148,11 +148,15 @@ func (h *headerFile) truncateHeaders(numHeaders uint32,
 	fileSize := fileInfo.Size()
 
 	// Calculate the total bytes to truncate based on number of headers.
+<<<<<<< HEAD
 	headerTypeSize, err := headerType.Size()
 	if err != nil {
 		return err
 	}
 	truncateLength := int64(numHeaders) * int64(headerTypeSize)
+=======
+	truncateLength := int64(numHeaders) * int64(headerType.Size())
+>>>>>>> 61ccc6c (headerfs+mock_store.go: refactor code)
 
 	// Finally, we'll use both of these values to calculate the new size of
 	// the file and truncate it accordingly.
