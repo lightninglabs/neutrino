@@ -162,7 +162,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			// our request.
 			case resp := <-msgChan:
 				progress := job.HandleResp(
-					job.Req, resp, peer.Addr(),
+					job.Req, resp, peer.Addr(), peer.OnDisconnect(),
 				)
 
 				log.Tracef("Worker %v handled msg %T while "+

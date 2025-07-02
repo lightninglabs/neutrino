@@ -448,7 +448,13 @@ func (q *cfiltersQuery) request() *query.Request {
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
 func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+	_ string, quit <-chan struct{}) query.Progress {
+
+	select {
+	case <-quit:
+		return noProgress
+	default:
+	}
 
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
@@ -839,7 +845,13 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(req, resp wire.Message, peer string, quit <-chan struct{}) query.Progress {
+		select {
+		case <-quit:
+			return noProgress
+		default:
+		}
+
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {

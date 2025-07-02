@@ -55,7 +55,7 @@ func (m *mockPeer) Addr() string {
 func makeJob() *queryJob {
 	q := &Request{
 		Req: req,
-		HandleResp: func(req, resp wire.Message, _ string) Progress {
+		HandleResp: func(req, resp wire.Message, _ string, _ <-chan struct{}) Progress {
 			if resp == finalResp {
 				return Progress{
 					Finished:   true,
