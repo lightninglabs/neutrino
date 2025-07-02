@@ -5,7 +5,12 @@ import (
 	"sync"
 
 	"github.com/lightninglabs/neutrino/cache"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
+
+// OnDeleteCallback is a function type that gets called when an element is
+// deleted from the cache. It receives the key and value of the deleted element.
+type OnDeleteCallback[K comparable, V cache.Value] func(key K, value V)
 
 // entry represents a (key,value) pair entry in the Cache. The Cache's list
 // stores entries which let us get the cache key when an entry is evicted.
@@ -34,16 +39,42 @@ type Cache[K comparable, V cache.Value] struct {
 
 	// mtx is used to make sure the Cache is thread-safe.
 	mtx sync.RWMutex
+
+	// onDelete is a callback that is called when an element is deleted from
+	// the cache.
+	onDelete fn.Option[OnDeleteCallback[K, V]]
+}
+
+// CacheOption is a function that can be used to configure the cache.
+type CacheOption[K comparable, V cache.Value] func(*Cache[K, V])
+
+// WithDeleteCallback adds a delete callback to the cache which is called
+// when an element is deleted from the cache.
+func WithDeleteCallback[K comparable, V cache.Value](
+	callback OnDeleteCallback[K, V]) CacheOption[K, V] {
+
+	return func(c *Cache[K, V]) {
+		c.onDelete = fn.Some(callback)
+	}
 }
 
 // NewCache return a cache with specified capacity, the cache's size can't
 // exceed that given capacity.
-func NewCache[K comparable, V cache.Value](capacity uint64) *Cache[K, V] {
-	return &Cache[K, V]{
+func NewCache[K comparable, V cache.Value](capacity uint64,
+	opts ...CacheOption[K, V]) *Cache[K, V] {
+
+	c := &Cache[K, V]{
 		capacity: capacity,
 		ll:       NewList[entry[K, V]](),
 		cache:    syncMap[K, *Element[entry[K, V]]]{},
 	}
+
+	// Apply all options.
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // evict will evict as many elements as necessary to make enough space for a new
@@ -79,6 +110,11 @@ func (c *Cache[K, V]) evict(needed uint64) (bool, error) {
 			// cache size.
 			c.size -= es
 
+			// Call the onDelete callback if set for the element.
+			c.onDelete.WhenSome(func(cb OnDeleteCallback[K, V]) {
+				cb(ce.key, ce.value)
+			})
+
 			// Remove the element from the cache.
 			c.ll.Remove(elr)
 			c.cache.Delete(ce.key)
@@ -89,7 +125,7 @@ func (c *Cache[K, V]) evict(needed uint64) (bool, error) {
 	return evicted, nil
 }
 
-// Put inserts a given (key,value) pair into the cache, if the key already
+// Put inserts a given (key,value) pair into the cache. If the key already
 // exists, it will replace value and update it to be most recent item in cache.
 // The return value indicates whether items had to be evicted to make room for
 // the new element.
@@ -133,7 +169,7 @@ func (c *Cache[K, V]) Put(key K, value V) (bool, error) {
 	}
 
 	// We have made enough space in the cache, so just insert it.
-	el = c.ll.PushFront(entry[K, V]{key, value})
+	el = c.ll.PushFront(entry[K, V]{key: key, value: value})
 	c.size += vs
 
 	// Release the lock.
@@ -198,6 +234,11 @@ func (c *Cache[K, V]) LoadAndDelete(key K) (V, bool) {
 	if err != nil {
 		return defaultVal, false
 	}
+
+	// Call the onDelete callback if set for the element.
+	c.onDelete.WhenSome(func(cb OnDeleteCallback[K, V]) {
+		cb(key, el.Value.value)
+	})
 
 	// Remove the element from the list and update the cache's size.
 	c.ll.Remove(el)
