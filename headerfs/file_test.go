@@ -133,7 +133,8 @@ func TestAppendRow(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			// Create a temporary file for testing.
-			tmpFile, cleanup := createFile(t, "header_store_test")
+			filename := "header_store_test"
+			tmpFile, cleanup := createFile(t, filename)
 			defer cleanup()
 
 			// Write initial data.
@@ -206,7 +207,8 @@ func TestAppendRow(t *testing.T) {
 // to isolate raw append performance from file size effects.
 func BenchmarkHeaderStoreAppendRaw(b *testing.B) {
 	// Setup temporary file and headerStore.
-	tmpFile, cleanup := createFile(b, "header_benchmark")
+	filename := "header_benchmark"
+	tmpFile, cleanup := createFile(b, filename)
 	defer cleanup()
 
 	hdrFile := &headerFile{file: tmpFile}

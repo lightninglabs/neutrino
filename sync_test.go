@@ -2,15 +2,18 @@ package neutrino_test
 
 import (
 	"bytes"
+	"compress/bzip2"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,7 +33,9 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/lightninglabs/neutrino/chainimport"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -189,6 +194,18 @@ var (
 	ourKnownTxsByFilteredBlock = make(map[chainhash.Hash][]*btcutil.Tx)
 )
 
+// init is called when the package is initialized, before any tests run.
+func init() {
+	// Set up logging once for all tests.
+	logger := btclog.NewBackend(os.Stdout)
+	chainLogger := logger.Logger("CHAIN")
+	chainLogger.SetLevel(logLevel)
+	neutrino.UseLogger(chainLogger)
+	rpcLogger := logger.Logger("RPCC")
+	rpcLogger.SetLevel(logLevel)
+	rpcclient.UseLogger(rpcLogger)
+}
+
 // secSource is an implementation of btcwallet/txauthor/SecretsSource that
 // stores WitnessPubKeyHash addresses.
 type secSource struct {
@@ -263,7 +280,7 @@ type syncTestCase struct {
 	test func(harness *neutrinoHarness, t *testing.T)
 }
 
-var testCases = []*syncTestCase{
+var testCasesWithoutImport = []*syncTestCase{
 	{
 		name: "initial sync",
 		test: testInitialSync,
@@ -1034,78 +1051,273 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 	}
 }
 
-func TestNeutrinoSync(t *testing.T) {
-	// Set up logging.
-	logger := btclog.NewBackend(os.Stdout)
-	chainLogger := logger.Logger("CHAIN")
-	chainLogger.SetLevel(logLevel)
-	neutrino.UseLogger(chainLogger)
-	rpcLogger := logger.Logger("RPCC")
-	rpcLogger.SetLevel(logLevel)
-	rpcclient.UseLogger(rpcLogger)
+// TestNeutrinoSyncWithHeadersImport tests the functionality of Neutrino's
+// headers import feature. The test creates a btcd SimNet node, generates
+// blocks, and syncs a temporary Neutrino instance with this node to obtain
+// headers. It then prepares header files for import by copying them and adding
+// the necessary metadata.
+//
+// The first part of the test creates a new Neutrino instance that imports
+// these headers from files without connecting to any peers. It verifies
+// that headers are correctly imported and the chain is properly synchronized
+// without network assistance.
+//
+// The second part generates additional blocks and creates another Neutrino
+// instance with the same import configuration but with network connectivity.
+// This tests that Neutrino correctly handles the case where header stores are
+// already populated, skipping the import process and continuing synchronization
+// from its current state.
+//
+// This test validates that the headers import mechanism works correctly both as
+// a way to bootstrap new nodes and when restarting existing nodes,
+// significantly improving sync performance in the former scenario.
+func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
+	// Setup context during testing.
+	rootCtx := context.Background()
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
 		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
-	if err != nil {
-		t.Fatalf("Couldn't create harness: %s", err)
-	}
+	require.NoError(t, err)
 	defer h1.TearDown()
+
 	err = h1.SetUp(false, 0)
-	if err != nil {
-		t.Fatalf("Couldn't set up harness: %s", err)
-	}
+	require.NoError(t, err)
+
 	_, err = h1.Client.Generate(800)
-	if err != nil {
-		t.Fatalf("Couldn't generate blocks: %s", err)
+	require.NoError(t, err)
+
+	// Create a temporary directory for the headers data.
+	tempDir := t.TempDir()
+	defer os.RemoveAll(tempDir)
+
+	// Create filters db for indexing the headers.
+	db, err := walletdb.Create(
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+	)
+	require.NoError(t, err)
+	defer db.Close()
+
+	config := neutrino.Config{
+		DataDir:     tempDir,
+		Database:    db,
+		ChainParams: chaincfg.SimNetParams,
+		AddPeers: []string{
+			h1.P2PAddress(),
+		},
+		HeadersImport: nil,
 	}
+
+	neutrino.MaxPeers = 1
+	neutrino.BanDuration = 5 * time.Second
+	neutrino.QueryPeerConnectTimeout = 10 * time.Second
+
+	// Set up export service to connect to h1 and download headers.
+	exportSvc, err := neutrino.NewChainService(config)
+	require.NoError(t, err)
+	exportSvc.Start(rootCtx)
+
+	testHarness := &neutrinoHarness{
+		h1:  h1,
+		h2:  nil,
+		h3:  nil,
+		svc: exportSvc,
+	}
+
+	// Wait for export service to sync with h1.
+	t.Logf("Waiting for export service to sync with h1 node...")
+	testInitialSync(testHarness, t)
+	t.Logf("Export service synced with h1 node")
+
+	// Create directory for importing headers.
+	importDir := t.TempDir()
+	defer os.RemoveAll(importDir)
+
+	blockHeadersFileName := "block_headers.bin"
+	filterHeadersFileName := "reg_filter_headers.bin"
+
+	// Paths to the source header files.
+	blockHeadersFilePath := filepath.Join(
+		tempDir, blockHeadersFileName,
+	)
+	filterHeadersFilePath := filepath.Join(
+		tempDir, filterHeadersFileName,
+	)
+
+	// Paths to the destination header files.
+	blockHeadersImportPath := filepath.Join(importDir, blockHeadersFileName)
+	filterHeadersImportPath := filepath.Join(
+		importDir, filterHeadersFileName,
+	)
+
+	// Copy block headers file.
+	err = copyFile(blockHeadersFilePath, blockHeadersImportPath)
+	require.NoError(t, err)
+
+	// Copy filter headers file.
+	err = copyFile(filterHeadersFilePath, filterHeadersImportPath)
+	require.NoError(t, err)
+
+	// Add header meteadata to block headers file.
+	err = chainimport.AddHeadersImportMetadata(
+		blockHeadersImportPath, chaincfg.SimNetParams.Net,
+		headerfs.Block, 0,
+	)
+	require.NoError(t, err)
+
+	// Add header meteadata to filter headers file.
+	err = chainimport.AddHeadersImportMetadata(
+		filterHeadersImportPath, chaincfg.SimNetParams.Net,
+		headerfs.RegularFilter, 0,
+	)
+	require.NoError(t, err)
+
+	// Cleanup export service and remove temp neutrino data directory to
+	// avoid any side effects during testing.
+	exportSvc.Stop()
+	require.NoError(t, db.Close())
+	require.NoError(t, os.RemoveAll(tempDir))
+
+	// Create a temporary directory for the headers data.
+	tempDir = t.TempDir()
+	defer os.RemoveAll(tempDir)
+
+	// Create filters db for indexing the headers.
+	db, err = walletdb.Create(
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+	)
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Create service with headers import but with no peers.
+	// This will test that the headers are imported correctly without
+	// network sync. No peers specified –  we want to test the import
+	// functionality by itself.
+	importConfig := neutrino.Config{
+		DataDir:     tempDir,
+		Database:    db,
+		ChainParams: chaincfg.SimNetParams,
+		HeadersImport: &neutrino.HeadersImportConfig{
+			BlockHeadersSource:      blockHeadersImportPath,
+			FilterHeadersSource:     filterHeadersImportPath,
+			WriteBatchSizePerRegion: 1000,
+		},
+		AddPeers: nil,
+	}
+
+	importSvc, err := neutrino.NewChainService(importConfig)
+	require.NoError(t, err)
+
+	// Start the import service.
+	importSvc.Start(rootCtx)
+	defer importSvc.Stop()
+
+	// Ensure that neutrino initial synced using the imported headers.
+	testHarness = &neutrinoHarness{
+		h1:  h1,
+		h2:  nil,
+		h3:  nil,
+		svc: importSvc,
+	}
+	testInitialSync(testHarness, t)
+
+	// Generate an additional 300 blocks on h1. This ensures that when we
+	// sync again, the client will need to fetch these new blocks from the
+	// network. Since the header stores are no longer empty after the first
+	// import, the import process should be skipped and Neutrino should
+	// continue syncing from its current state.
+	_, err = h1.Client.Generate(300)
+	require.NoError(t, err)
+	t.Log("Syncing again after generating more 300 blocks on h1")
+
+	// Create a new service configuration that includes both the headers
+	// import and a connection to h1. Since the stores already contain data
+	// from the previous import, the import operation should be skipped and
+	// synchronization should continue from the current state.
+	importConfig = neutrino.Config{
+		DataDir:     tempDir,
+		Database:    db,
+		ChainParams: chaincfg.SimNetParams,
+		HeadersImport: &neutrino.HeadersImportConfig{
+			BlockHeadersSource:      blockHeadersImportPath,
+			FilterHeadersSource:     filterHeadersImportPath,
+			WriteBatchSizePerRegion: 1000,
+		},
+		AddPeers: []string{h1.P2PAddress()},
+	}
+
+	importSvcToBeSkipped, err := neutrino.NewChainService(importConfig)
+	require.NoError(t, err)
+
+	// Start the service with p2p network connectivity.
+	importSvcToBeSkipped.Start(rootCtx)
+	defer importSvcToBeSkipped.Stop()
+
+	// This test doesn't explicitly verify that the import is skipped, but
+	// demonstrates that the service can successfully sync to the chain tip
+	// after the database has already been populated with headers.
+	testHarness = &neutrinoHarness{
+		h1:  h1,
+		h2:  nil,
+		h3:  nil,
+		svc: importSvcToBeSkipped,
+	}
+	testInitialSync(testHarness, t)
+}
+
+// TestNeutrinoSyncWithoutHeadersImport tests the standard synchronization
+// behavior of Neutrino without using the headers import feature.
+func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
+	// Setup context during testing.
+	rootCtx := context.Background()
+
+	// Create a btcd SimNet node and generate 800 blocks
+	h1, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+	defer h1.TearDown()
+
+	err = h1.SetUp(false, 0)
+	require.NoError(t, err)
+
+	_, err = h1.Client.Generate(800)
+	require.NoError(t, err)
 
 	// Create a second btcd SimNet node
 	h2, err := rpctest.New(
 		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
-	if err != nil {
-		t.Fatalf("Couldn't create harness: %s", err)
-	}
+	require.NoError(t, err)
 	defer h2.TearDown()
+
 	err = h2.SetUp(false, 0)
-	if err != nil {
-		t.Fatalf("Couldn't set up harness: %s", err)
-	}
+	require.NoError(t, err)
 
 	// Create a third btcd SimNet node and generate 1200 blocks
 	h3, err := rpctest.New(
 		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
 	)
-	if err != nil {
-		t.Fatalf("Couldn't create harness: %s", err)
-	}
+	require.NoError(t, err)
 	defer h3.TearDown()
+
 	err = h3.SetUp(false, 0)
-	if err != nil {
-		t.Fatalf("Couldn't set up harness: %s", err)
-	}
+	require.NoError(t, err)
+
 	_, err = h3.Client.Generate(1200)
-	if err != nil {
-		t.Fatalf("Couldn't generate blocks: %s", err)
-	}
+	require.NoError(t, err)
 
 	// Connect, sync, and disconnect h1 and h2
 	err = csd([]*rpctest.Harness{h1, h2})
-	if err != nil {
-		t.Fatalf("Couldn't connect/sync/disconnect h1 and h2: %s", err)
-	}
+	require.NoError(t, err)
 
 	// Generate 300 blocks on the first node and 350 on the second
 	_, err = h1.Client.Generate(300)
-	if err != nil {
-		t.Fatalf("Couldn't generate blocks: %s", err)
-	}
+	require.NoError(t, err)
+
 	_, err = h2.Client.Generate(350)
-	if err != nil {
-		t.Fatalf("Couldn't generate blocks: %s", err)
-	}
+	require.NoError(t, err)
 
 	// Now we have a node with 1100 blocks (h1), 1150 blocks (h2), and
 	// 1200 blocks (h3). The chains of nodes h1 and h2 match up to block
@@ -1122,10 +1334,7 @@ func TestNeutrinoSync(t *testing.T) {
 	modParams := chaincfg.SimNetParams
 	for _, height := range []int64{111, 333, 555, 777, 999} {
 		hash, err := h1.Client.GetBlockHash(height)
-		if err != nil {
-			t.Fatalf("Couldn't get block hash for height %d: %s",
-				height, err)
-		}
+		require.NoError(t, err)
 		modParams.Checkpoints = append(modParams.Checkpoints,
 			chaincfg.Checkpoint{
 				Hash:   hash,
@@ -1135,18 +1344,15 @@ func TestNeutrinoSync(t *testing.T) {
 
 	// Create a temporary directory, initialize an empty walletdb with an
 	// SPV chain namespace, and create a configuration for the ChainService.
-	tempDir, err := ioutil.TempDir("", "neutrino")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %s", err)
-	}
+	tempDir := t.TempDir()
 	defer os.RemoveAll(tempDir)
+
 	db, err := walletdb.Create(
 		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
 	)
-	if err != nil {
-		t.Fatalf("Error opening DB: %s\n", err)
-	}
+	require.NoError(t, err)
 	defer db.Close()
+
 	config := neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
@@ -1156,28 +1362,188 @@ func TestNeutrinoSync(t *testing.T) {
 			h2.P2PAddress(),
 			h1.P2PAddress(),
 		},
+		HeadersImport: nil,
 	}
 
 	neutrino.MaxPeers = 3
 	neutrino.BanDuration = 5 * time.Second
 	neutrino.QueryPeerConnectTimeout = 10 * time.Second
 	svc, err := neutrino.NewChainService(config)
-	if err != nil {
-		t.Fatalf("Error creating ChainService: %s", err)
-	}
-	svc.Start()
+	require.NoError(t, err)
+
+	svc.Start(rootCtx)
 	defer svc.Stop()
 
 	// Create a test harness with the three nodes and the neutrino instance.
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
 
-	for _, testCase := range testCases {
+	for _, testCase := range testCasesWithoutImport {
 		if ok := t.Run(testCase.name, func(t *testing.T) {
 			testCase.test(testHarness, t)
 		}); !ok {
 			break
 		}
 	}
+}
+
+// BenchmarkHeadersImport benchmarks the headers import functionality. It
+// decompresses the block and filter headers from the testdata directory and
+// imports them into a temporary database. It then benchmarks the import time
+// for different batch sizes.
+func BenchmarkHeadersImport(b *testing.B) {
+	blockHeadersPath, cleanupBlock, err := decompressBZ2ToTempFile(
+		"testdata/block-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupBlock()
+
+	filterHeadersPath, cleanupFilter, err := decompressBZ2ToTempFile(
+		"testdata/filter-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupFilter()
+
+	for exp := 10; exp <= 19; exp++ {
+		// Calculate batch size which is 2^exp.
+		batch := 1 << exp
+		b.Run(fmt.Sprintf("batchSize=%d", batch), func(b *testing.B) {
+			// Memory tracking variables
+			var memStats runtime.MemStats
+			var peakMemory uint64
+
+			// Take initial memory snapshot
+			runtime.GC()
+			runtime.ReadMemStats(&memStats)
+			initialHeapInUse := memStats.HeapInuse
+
+			tempDir := b.TempDir()
+			dbPath := filepath.Join(tempDir, "test.db")
+			db, err := walletdb.Create(
+				"bdb", dbPath, true, time.Second*10,
+			)
+			require.NoError(b, err)
+			defer db.Close()
+
+			blockStore, err := headerfs.NewBlockHeaderStore(
+				tempDir, db, &chaincfg.MainNetParams,
+			)
+			require.NoError(b, err)
+
+			filterStore, err := headerfs.NewFilterHeaderStore(
+				tempDir, db, headerfs.RegularFilter,
+				&chaincfg.MainNetParams, nil,
+			)
+			require.NoError(b, err)
+
+			opts := &chainimport.ImportOptions{
+				TargetChainParams:       chaincfg.MainNetParams,
+				TargetBlockHeaderStore:  blockStore,
+				TargetFilterHeaderStore: filterStore,
+				BlockHeadersSource:      blockHeadersPath,
+				FilterHeadersSource:     filterHeadersPath,
+				WriteBatchSizePerRegion: batch,
+			}
+
+			// Get initial CPU time.
+			var rusageStart, rusageEnd syscall.Rusage
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageStart)
+
+			// Memory monitoring goroutine.
+			stopMemMonitor := make(chan struct{})
+			memMonitorDone := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				defer close(memMonitorDone)
+
+				for {
+					select {
+					case <-ticker.C:
+						runtime.ReadMemStats(&memStats)
+						heapInUse := memStats.HeapInuse
+						if heapInUse > peakMemory {
+							peakMemory = heapInUse
+						}
+					case <-stopMemMonitor:
+						return
+					}
+				}
+			}()
+
+			// Start timer for benchmark.
+			b.ResetTimer()
+			startTime := time.Now()
+			ctx := context.Background()
+			_, err = opts.Import(ctx)
+			if err != nil {
+				b.Fatalf("import failed: %v", err)
+			}
+			elapsed := time.Since(startTime)
+			b.StopTimer()
+
+			// Stop the memory monitor.
+			close(stopMemMonitor)
+			<-memMonitorDone
+
+			// Get final CPU usage.
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageEnd)
+
+			// Calculate CPU time (user + system) in seconds.
+
+			// Extract Utime components for user time calculation.
+			rEndUtime := rusageEnd.Utime
+			rStartUtime := rusageStart.Utime
+			userTimeSec := float64(rEndUtime.Sec-rStartUtime.Sec) +
+				float64(rEndUtime.Usec-rStartUtime.Usec)/1e6
+
+			// Extract Stime components for system time calculation.
+			rEndStime := rusageEnd.Stime
+			rStartStime := rusageStart.Stime
+			sysTimeSec := float64(rEndStime.Sec-rStartStime.Sec) +
+				float64(rEndStime.Usec-rStartStime.Usec)/1e6
+
+			cpuTimeSec := userTimeSec + sysTimeSec
+
+			// Calculate headers per second.
+			headersPerSecond := float64(100000) / elapsed.Seconds()
+
+			// Report peak memory.
+			peakMemoryB := float64(peakMemory - initialHeapInUse)
+			peakMemoryMB := peakMemoryB / (1024 * 1024)
+			b.ReportMetric(peakMemoryMB, "MB_peak")
+
+			// Report additional essential metrics.
+			b.ReportMetric(headersPerSecond, "headers/s")
+			b.ReportMetric(cpuTimeSec, "cpu_s")
+		})
+	}
+}
+
+// decompressBZ2ToTempFile decompresses a bz2 file to a temporary file.
+func decompressBZ2ToTempFile(srcPath string) (string, func(), error) {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return "", nil, err
+	}
+	defer f.Close()
+
+	bz2r := bzip2.NewReader(f)
+	tempFile, err := os.CreateTemp(
+		"", filepath.Base(srcPath)+"-decompressed-*",
+	)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if _, err := io.Copy(tempFile, bz2r); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return "", nil, err
+	}
+	tempFile.Close()
+
+	cleanup := func() { os.Remove(tempFile.Name()) }
+	return tempFile.Name(), cleanup, nil
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
@@ -1551,4 +1917,35 @@ func goroutineDump() string {
 	buf := make([]byte, 1<<18)
 	runtime.Stack(buf, true)
 	return string(buf)
+}
+
+// copyFile is a helper function to copy a file from source to destination.
+func copyFile(src, dst string) error {
+	// Open the source file.
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer sourceFile.Close()
+
+	// Create the destination file.
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer destFile.Close()
+
+	// Copy the contents.
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to copy file contents: %w", err)
+	}
+
+	// Ensure all data is written to disk.
+	err = destFile.Sync()
+	if err != nil {
+		return fmt.Errorf("failed to sync file: %w", err)
+	}
+
+	return nil
 }
