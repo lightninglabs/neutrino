@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"golang.org/x/exp/mmap"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -245,7 +246,8 @@ func (v *BlockHeadersImportSourceValidator) Validate(
 		count++
 	}
 
-	log.Debugf("Successfully validated %d block headers", count)
+	log.Debugf("Successfully validated %d block headers from import "+
+		"source", count)
 	return nil
 }
 
@@ -319,8 +321,8 @@ func (v *FilterHeadersImportSourceValidator) Validate(
 	iterator HeaderIterator,
 	targetChainParams chaincfg.Params) error {
 
-	log.Debug("Skipping filter headers validation - missing access to " +
-		"original compact filters")
+	log.Debug("Skipping filter headers import source validation - " +
+		"missing access to original compact filters")
 	return nil
 }
 
@@ -591,21 +593,6 @@ type HeadersImport struct {
 // users who don't yet have headers data, or existing users who are willing to
 // reset their headers data.
 func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
-	// Check first if the target header stores are fresh.
-	isFresh, err := s.isTargetFresh(
-		s.options.TargetBlockHeaderStore,
-		s.options.TargetFilterHeaderStore,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect if target stores "+
-			"are fresh import failed: %w", err)
-	}
-	if !isFresh {
-		log.Info("Skipping headers import: target header stores are " +
-			"not empty")
-		return &ImportResult{}, nil
-	}
-
 	// Create result structure at the beginning to capture total duration.
 	result := &ImportResult{
 		StartTime: time.Now(),
@@ -640,7 +627,8 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	}
 
 	// Validate all block headers from import source.
-	log.Debugf("Validating %d block headers", metadata.HeadersCount)
+	log.Debugf("Validating %d block headers from import source",
+		metadata.HeadersCount)
 	if err := s.BlockHeadersValidator.Validate(
 		s.BlockHeadersImportSource.Iterator(
 			0, metadata.HeadersCount-1,
@@ -648,11 +636,12 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("failed to validate block "+
-			"headers: %w", err)
+			"headers from import source: %w", err)
 	}
 
 	// Validate all filter headers from import source.
-	log.Debugf("Validating %d filter headers", metadata.HeadersCount)
+	log.Debugf("Validating %d filter headers from import source",
+		metadata.HeadersCount)
 	if err := s.FilterHeadersValidator.Validate(
 		s.FilterHeadersImportSource.Iterator(
 			0, metadata.HeadersCount-1,
@@ -660,7 +649,7 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("failed to validate filter "+
-			"headers: %w", err)
+			"headers from import source: %w", err)
 	}
 
 	// Determine processing regions that partition the import task into
@@ -673,9 +662,14 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	result.StartHeight = regions.ImportStartHeight
 	result.EndHeight = regions.ImportEndHeight
 
-	// TODO(mohamedawnallah): process the overlap region. This mainly
-	// includes a validation strategy for the overlap region between headers
-	// from import and target sources.
+	// Process the overlap region, which contains headers common to both
+	// import and target stores. This includes a validation strategy for
+	// these shared headers.
+	err = s.processOverlapRegion(ctx, regions.Overlap, result)
+	if err != nil {
+		return nil, fmt.Errorf("headers import failed: overlap region "+
+			"headers validation failed: %w", err)
+	}
 
 	// TODO(mohamedawnallah): Process the divergence region. This includes
 	// strategy/strategies for handling divergence region that may exist in
@@ -703,32 +697,6 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		result.HeadersPerSecond(), result.NewHeadersPercentage())
 
 	return result, nil
-}
-
-// isTargetFresh checks if the target header stores are in their initial state,
-// meaning they contain only the genesis header (height 0).
-func (s *HeadersImport) isTargetFresh(
-	targetBlockHeaderStore headerfs.BlockHeaderStore,
-	targetFilterHeaderStore headerfs.FilterHeaderStore) (bool, error) {
-
-	// Get the chain tip from both target stores.
-	_, blockTipHeight, err := targetBlockHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target block header "+
-			"chain tip: %w", err)
-	}
-
-	_, filterTipHeight, err := targetFilterHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target filter header "+
-			"chain tip: %w", err)
-	}
-
-	if blockTipHeight == 0 && filterTipHeight == 0 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 // openSources initializes and opens all required header import sources. It
@@ -1174,9 +1142,107 @@ func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			sourceFilterHeaderHash, targetFilterHeaderHash)
 	}
 
-	log.Debugf("Headers from %s (block) and %s (filter) verified at "+
-		"height %d", s.BlockHeadersImportSource.GetURI(),
-		s.FilterHeadersImportSource.GetURI(), height)
+	log.Debugf("Headers from import sources verified at height %d", height)
+	return nil
+}
+
+// processOverlapRegion processes the overlap region by validating all headers
+// in the region match exactly between import and target sources.
+func (s *HeadersImport) processOverlapRegion(ctx context.Context,
+	region HeaderRegion, result *ImportResult) error {
+
+	if !region.Exists {
+		return nil
+	}
+
+	log.Infof("Validating headers in the overlap region between import "+
+		"and target sources from heights %d to %d", region.Start,
+		region.End)
+
+	// Validate all headers in overlap region match. If mismatches are found
+	// during validation, the import operation is aborted.
+	err := s.validateHeadersExactMatch(ctx, region.Start, region.End)
+	if err != nil {
+		return fmt.Errorf("overlap region validation failed: %w", err)
+	}
+
+	result.SkippedCount += int(region.End - region.Start + 1)
+
+	return nil
+}
+
+// validateHeadersExactMatch validates all headers in the specified range
+// match exactly between import and target sources.
+//
+// The function uses parallel validation for larger ranges and sequential
+// validation for smaller ranges to optimize performance.
+func (s *HeadersImport) validateHeadersExactMatch(ctx context.Context,
+	startHeight, endHeight uint32) error {
+
+	// Calculate the range size
+	rangeSize := endHeight - startHeight + 1
+
+	// If range is small, process sequentially
+	if rangeSize <= 100 {
+		return s.validateHeadersSequential(startHeight, endHeight)
+	}
+
+	// Create an errgroup with a derived context.
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Set concurrency limit based on CPU cores, but cap reasonably.
+	g.SetLimit(min(runtime.NumCPU(), 8))
+
+	// Queue up all the heights to validate.
+	for height := startHeight; height <= endHeight; height++ {
+		// Add work to the errgroup.
+		g.Go(func() error {
+			// Check if context has been canceled before starting
+			// work.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// Verify headers at this target height.
+			err := s.verifyHeadersAtTargetHeight(height)
+			if err != nil {
+				return fmt.Errorf("header verification failed "+
+					"at height %d: %w", height, err)
+			}
+
+			return nil
+		})
+	}
+
+	// Wait for all verification goroutines to complete or for any error.
+	err := g.Wait()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Validated %d headers in the overlap region between import "+
+		"and target sources from heights %d to %d",
+		endHeight-startHeight+1, startHeight, endHeight)
+
+	return nil
+}
+
+// validateHeadersSequential performs sequential validation for smaller ranges.
+//
+// The function validates headers sequentially for smaller ranges to optimize
+// performance.
+func (s *HeadersImport) validateHeadersSequential(startHeight,
+	endHeight uint32) error {
+
+	for height := startHeight; height <= endHeight; height++ {
+		err := s.verifyHeadersAtTargetHeight(height)
+		if err != nil {
+			return fmt.Errorf("header verification failed at "+
+				"height %d: %w", height, err)
+		}
+	}
 
 	return nil
 }

@@ -14,6 +14,7 @@ require (
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b
+	golang.org/x/sync v0.15.0
 )
 
 require (
