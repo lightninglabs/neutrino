@@ -84,7 +84,7 @@ type blockManagerCfg struct {
 
 	// RegFilterHeaders is the store where filter headers for the regular
 	// compact filters are persistently stored.
-	RegFilterHeaders *headerfs.FilterHeaderStore
+	RegFilterHeaders headerfs.FilterHeaderStore
 
 	// TimeSource is used to access a time estimate based on the clocks of
 	// the connected peers.
@@ -702,7 +702,7 @@ waitForHeaders:
 // network, if it can, and resolves any conflicts between them. It then writes
 // any verified headers to the store.
 func (b *blockManager) getUncheckpointedCFHeaders(
-	store *headerfs.FilterHeaderStore, fType wire.FilterType) error {
+	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
 
 	// Get the filter header store's chain tip.
 	filterTip, filtHeight, err := store.ChainTip()
@@ -928,7 +928,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 // checkpoints we got from the network. It assumes that the filter header store
 // matches the checkpoints up to the tip of the store.
 func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store *headerfs.FilterHeaderStore, fType wire.FilterType) {
+	store headerfs.FilterHeaderStore, fType wire.FilterType) {
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
@@ -1174,7 +1174,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 // filter header field in the next message range before writing to disk, and
 // the current height after writing the headers.
 func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
-	store *headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
+	store headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
 
 	// Check that the PrevFilterHeader is the same as the last stored so we
 	// can prevent misalignment.
@@ -1364,7 +1364,7 @@ func verifyCheckpoint(prevCheckpoint, nextCheckpoint *chainhash.Hash,
 // information.
 func (b *blockManager) resolveConflict(
 	checkpoints map[string][]*chainhash.Hash,
-	store *headerfs.FilterHeaderStore, fType wire.FilterType) (
+	store headerfs.FilterHeaderStore, fType wire.FilterType) (
 	[]*chainhash.Hash, error) {
 
 	// First check the served checkpoints against the hardcoded ones.
@@ -1913,7 +1913,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 // existing store up to the tip of the store. If all of the peers match but
 // the store doesn't, the height at which the mismatch occurs is returned.
 func checkCFCheckptSanity(cp map[string][]*chainhash.Hash,
-	headerStore *headerfs.FilterHeaderStore) (int, error) {
+	headerStore headerfs.FilterHeaderStore) (int, error) {
 
 	// Get the known best header to compare against checkpoints.
 	_, storeTip, err := headerStore.ChainTip()

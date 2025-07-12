@@ -55,7 +55,7 @@ func (m *mockDispatcher) Query(requests []*query.Request,
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
-	*headerfs.FilterHeaderStore, error) {
+	headerfs.FilterHeaderStore, error) {
 
 	// Set up the block and filter header stores.
 	tempDir := t.TempDir()
