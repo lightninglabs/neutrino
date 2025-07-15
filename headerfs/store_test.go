@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/require"
 )
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
@@ -225,8 +226,9 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 	}
 }
 
-func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderStore, error) {
-	tempDir, err := ioutil.TempDir("", "store_test")
+//nolint:lll
+func createTestFilterHeaderStore() (func(), walletdb.DB, string, FilterHeaderStore, error) {
+	tempDir, err := os.MkdirTemp("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -266,13 +268,12 @@ func createTestFilterHeaderChain(numHeaders uint32) []FilterHeader {
 }
 
 func TestFilterHeaderStoreOperations(t *testing.T) {
-	cleanUp, _, _, fhs, err := createTestFilterHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	cleanUp, _, _, fS, err := createTestFilterHeaderStore()
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
+
+	fhs, ok := fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	rand.Seed(time.Now().Unix())
 
@@ -384,19 +385,18 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the filter header
 	// store to recover in the face of a partial batch write (the headers
 	// were written, but the index wasn't updated).
-	cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	cleanUp, db, tempDir, fS, err := createTestFilterHeaderStore()
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
+
+	fhs, ok := fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	blockHeaders := createTestFilterHeaderChain(10)
 
 	// We simulate the expected behavior of the block headers being written
 	// to disk before the filter headers are.
-	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
 		for _, header := range blockHeaders {
@@ -410,48 +410,38 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 		}
 
 		return nil
-	}); err != nil {
-		t.Fatalf("unable to pre-load block index: %v", err)
-	}
+	})
+	require.NoError(t, err, "unable to pre-load block index")
 
-	// Next, we'll insert the filter header chain itself in to the
-	// database.
-	if err := fhs.WriteHeaders(blockHeaders...); err != nil {
-		t.Fatalf("unable to write block headers: %v", err)
-	}
+	// Next, we'll insert the filter header chain itself in to the database.
+	err = fhs.WriteHeaders(blockHeaders...)
+	require.NoError(t, err)
 
 	// Next, in order to simulate a partial write, we'll roll back the
 	// internal index by 5 blocks.
 	for i := 0; i < 5; i++ {
 		newTip := blockHeaders[len(blockHeaders)-i-2].HeaderHash
-		if err := fhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		err := fhs.truncateIndex(&newTip, true)
+		require.NoError(t, err)
 	}
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
-	fhs, err = NewFilterHeaderStore(
+	fS, err = NewFilterHeaderStore(
 		tempDir, db, RegularFilter, &chaincfg.SimNetParams, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to re-create bhs: %v", err)
-	}
+	require.NoError(t, err)
+
+	fhs, ok = fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	// The chain tip of this new instance should be of height 5, and match
 	// the 5th to last filter header.
 	tipHash, tipHeight, err := fhs.ChainTip()
-	if err != nil {
-		t.Fatalf("unable to get chain tip: %v", err)
-	}
-	if tipHeight != 5 {
-		t.Fatalf("tip height mismatch: expected %v, got %v", 5, tipHeight)
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), tipHeight)
 	prevHeaderHash := blockHeaders[5].FilterHash
-	if bytes.Equal(prevHeaderHash[:], tipHash[:]) {
-		t.Fatalf("block hash mismatch: expected %v, got %v",
-			prevHeaderHash, tipHash[:])
-	}
+	require.NotEqual(t, tipHash, prevHeaderHash)
 }
 
 // TestBlockHeadersFetchHeaderAncestors tests that we're able to properly fetch
@@ -527,11 +517,11 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 	filterHeaderChain := createTestFilterHeaderChain(chainTip)
 
 	setup := func(t *testing.T) (func(), string, walletdb.DB) {
-		cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
-		if err != nil {
-			t.Fatalf("unable to create new filter header store: %v",
-				err)
-		}
+		cleanUp, db, tempDir, fS, err := createTestFilterHeaderStore()
+		require.NoError(t, err)
+
+		fhs, ok := fS.(*filterHeaderStore)
+		require.True(t, ok)
 
 		// We simulate the expected behavior of the block headers being
 		// written to disk before the filter headers are.
@@ -599,8 +589,8 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		success := t.Run(testCase.name, func(t *testing.T) {
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 			// We'll start the test by setting up our required
 			// dependencies.
 			cleanUp, tempDir, db := setup(t)
@@ -609,29 +599,28 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 			// We'll then re-initialize the filter header store with
 			// its expected assertion.
 			fhs, err := NewFilterHeaderStore(
-				tempDir, db, RegularFilter, &chaincfg.SimNetParams,
-				testCase.headerAssertion,
+				tempDir, db, RegularFilter,
+				&chaincfg.SimNetParams, tc.headerAssertion,
 			)
-			if err != nil {
-				t.Fatalf("unable to make new fhs: %v", err)
-			}
+			require.NoError(t, err)
 
 			// If the assertion failed, we should expect the tip of
 			// the chain to no longer exist as the state should've
 			// been removed.
 			_, err = fhs.FetchHeaderByHeight(chainTip)
-			if testCase.shouldRemove {
-				if _, ok := err.(*ErrHeaderNotFound); !ok {
-					t.Fatal("expected file to be removed")
-				}
-			}
-			if !testCase.shouldRemove && err != nil {
-				t.Fatal("expected file to not be removed")
+			if tc.shouldRemove {
+				_, ok := err.(*ErrHeaderNotFound)
+				require.True(
+					t, ok, "expected file to be removed",
+				)
+			} else {
+				// When file shouldn't be removed, we expect
+				// no error.
+				msg := "expected no error when file should " +
+					"not be removed"
+				require.NoError(t, err, msg)
 			}
 		})
-		if !success {
-			break
-		}
 	}
 }
 

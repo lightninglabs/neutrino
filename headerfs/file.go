@@ -140,7 +140,7 @@ func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 
 // readHeader reads a single filter header at the specified height from the
 // flat files on disk.
-func (f *FilterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
+func (f *filterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
 	seekDistance := uint64(height) * 32
 
 	rawHeader, err := f.readRaw(seekDistance)
@@ -158,7 +158,7 @@ func (f *FilterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
 //
 // NOTE: The end height is _inclusive_ so we'll fetch all headers from the
 // startHeight up to the end height, including the final header.
-func (f *FilterHeaderStore) readHeaderRange(startHeight uint32,
+func (f *filterHeaderStore) readHeaderRange(startHeight uint32,
 	endHeight uint32) ([]chainhash.Hash, error) {
 
 	// Based on the defined header type, we'll determine the number of
