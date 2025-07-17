@@ -105,6 +105,10 @@ type File interface {
 	Name() string
 }
 
+type headerFile struct {
+	file File
+}
+
 // headerStore combines a on-disk set of headers within a flat file in addition
 // to a database which indexes that flat file. Together, these two abstractions
 // can be used in order to build an indexed header store for any type of
@@ -115,7 +119,7 @@ type File interface {
 type headerStore struct {
 	mtx sync.RWMutex // nolint:structcheck // false positive because used as embedded struct only
 
-	file File
+	*headerFile
 
 	*headerIndex
 }
@@ -125,6 +129,8 @@ type headerStore struct {
 // file will be created as necessary.
 func newHeaderStore(db walletdb.DB, filePath string,
 	hType HeaderType) (*headerStore, error) {
+
+	var headerFile = &headerFile{}
 
 	var flatFileName string
 	switch hType {
@@ -141,10 +147,11 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	// We'll open the file, creating it if necessary and ensuring that all
 	// writes are actually appends to the end of the file.
 	fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
-	headerFile, err := os.OpenFile(flatFileName, fileFlags, 0644)
+	file, err := os.OpenFile(flatFileName, fileFlags, 0644)
 	if err != nil {
 		return nil, err
 	}
+	headerFile.file = file
 
 	// With the file open, we'll then create the header index so we can
 	// have random access into the flat files.
@@ -154,7 +161,7 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}
 
 	return &headerStore{
-		file:        headerFile,
+		headerFile:  headerFile,
 		headerIndex: index,
 	}, nil
 }
