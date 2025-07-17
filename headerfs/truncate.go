@@ -1,9 +1,9 @@
-//go:build !windows
-// +build !windows
-
 package headerfs
 
-import "fmt"
+import (
+	"os"
+	"runtime"
+)
 
 // singleTruncate truncates a single header from the end of the header file.
 // This can be used in the case of a re-org to remove the last header from the
@@ -22,18 +22,27 @@ func (h *headerStore) singleTruncate() error {
 
 	// Next, we'll determine the number of bytes we need to truncate from
 	// the end of the file.
-	var truncateLength int64
-	switch h.indexType {
-	case Block:
-		truncateLength = 80
-	case RegularFilter:
-		truncateLength = 32
-	default:
-		return fmt.Errorf("unknown index type: %v", h.indexType)
+	truncateLength, err := h.indexType.Size()
+	if err != nil {
+		return err
+	}
+	newSize := fileSize - int64(truncateLength)
+
+	// On Windows, we need to close, truncate, and reopen the file.
+	if runtime.GOOS == "windows" {
+		fileName := h.file.Name()
+		if err = h.file.Close(); err != nil {
+			return err
+		}
+
+		if err = os.Truncate(fileName, newSize); err != nil {
+			return err
+		}
+
+		fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
+		h.file, err = os.OpenFile(fileName, fileFlags, 0644)
+		return err
 	}
 
-	// Finally, we'll use both of these values to calculate the new size of
-	// the file and truncate it accordingly.
-	newSize := fileSize - truncateLength
 	return h.file.Truncate(newSize)
 }

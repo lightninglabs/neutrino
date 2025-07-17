@@ -100,6 +100,9 @@ type File interface {
 	Stat() (os.FileInfo, error)
 	Sync() error
 	Truncate(size int64) error
+
+	// Returns the name of the file.
+	Name() string
 }
 
 // headerStore combines a on-disk set of headers within a flat file in addition
@@ -111,8 +114,6 @@ type File interface {
 // TODO(roasbeef): quickcheck coverage.
 type headerStore struct {
 	mtx sync.RWMutex // nolint:structcheck // false positive because used as embedded struct only
-
-	fileName string
 
 	file File
 
@@ -153,7 +154,6 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}
 
 	return &headerStore{
-		fileName:    flatFileName,
 		file:        headerFile,
 		headerIndex: index,
 	}, nil
@@ -800,7 +800,7 @@ func (f *filterHeaderStore) maybeResetHeaderState(
 		if err := f.file.Close(); err != nil {
 			return true, err
 		}
-		if err := os.Remove(f.fileName); err != nil {
+		if err := os.Remove(f.file.Name()); err != nil {
 			return true, err
 		}
 		return true, nil
