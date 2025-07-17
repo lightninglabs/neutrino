@@ -45,11 +45,14 @@ type HeaderType uint8
 const (
 	// Block is the header type that represents regular Bitcoin block
 	// headers.
-	Block HeaderType = iota
+	Block HeaderType = 0
 
 	// RegularFilter is a header type that represents the basic filter
 	// header type for the filter header chain.
-	RegularFilter
+	RegularFilter HeaderType = 1
+
+	// UnknownHeader represents an unrecognized header type.
+	UnknownHeader HeaderType = 255
 )
 
 const (
@@ -59,6 +62,9 @@ const (
 	// RegularFilterHeaderSize is the size in bytes of the RegularFilter
 	// header type.
 	RegularFilterHeaderSize = 32
+
+	// UnknownHeaderSize is the size for the unknown header type.
+	UnknownHeaderSize = 0
 
 	// numSubBucketBytes is the number of bytes of a hash that's used as a
 	// sub bucket to store the index keys (hash->height) in. Storing a large
@@ -78,11 +84,37 @@ const (
 func (h HeaderType) String() string {
 	switch h {
 	case Block:
-		return "Block"
+		return "BlockHeader"
 	case RegularFilter:
-		return "RegularFilter"
+		return "RegularFilterHeader"
 	default:
 		return fmt.Sprintf("UnknownHeaderType(%d)", h)
+	}
+}
+
+// Size returns the size in bytes for a given header type.
+func (h HeaderType) Size() (int, error) {
+	switch h {
+	case Block:
+		return BlockHeaderSize, nil
+	case RegularFilter:
+		return RegularFilterHeaderSize, nil
+	default:
+		return UnknownHeaderSize, fmt.Errorf("unknown header type: "+
+			"%d", h)
+	}
+}
+
+// TipKey returns the current tip key for the given header type.
+// Returns an error if the header type is unknown.
+func (h HeaderType) TipKey() ([]byte, error) {
+	switch h {
+	case Block:
+		return bitcoinTip, nil
+	case RegularFilter:
+		return regFilterTip, nil
+	default:
+		return nil, fmt.Errorf("unknown header type: %d", h)
 	}
 }
 
@@ -174,13 +206,9 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 		// so we can update the index once all the header entries have
 		// been updated.
 		// TODO(roasbeef): only need block tip?
-		switch h.indexType {
-		case Block:
-			tipKey = bitcoinTip
-		case RegularFilter:
-			tipKey = regFilterTip
-		default:
-			return fmt.Errorf("unknown index type: %v", h.indexType)
+		tipKey, err := h.indexType.TipKey()
+		if err != nil {
+			return err
 		}
 
 		var (
@@ -260,18 +288,11 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 
 	rootBucket := tx.ReadBucket(indexBucket)
 
-	var tipKey []byte
-
 	// Based on the specified index type of this instance of the index,
 	// we'll grab the particular key that tracks the chain tip.
-	switch h.indexType {
-	case Block:
-		tipKey = bitcoinTip
-	case RegularFilter:
-		tipKey = regFilterTip
-	default:
-		return nil, 0, fmt.Errorf("unknown chain tip index type: %v",
-			h.indexType)
+	tipKey, err := h.indexType.TipKey()
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// Now that we have the particular tip key for this header type, we'll
@@ -312,13 +333,9 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, remove bool) error {
 		// Based on the specified index type of this instance of the
 		// index, we'll grab the key that tracks the tip of the chain
 		// we need to update.
-		switch h.indexType {
-		case Block:
-			tipKey = bitcoinTip
-		case RegularFilter:
-			tipKey = regFilterTip
-		default:
-			return fmt.Errorf("unknown index type: %v", h.indexType)
+		tipKey, err := h.indexType.TipKey()
+		if err != nil {
+			return err
 		}
 
 		// If the remove flag is set, then we'll also delete this entry
