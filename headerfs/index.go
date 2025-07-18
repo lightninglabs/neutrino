@@ -3,6 +3,7 @@ package headerfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -320,11 +321,25 @@ func (h *headerIndex) chainTipWithTx(tx walletdb.ReadTx) (*chainhash.Hash,
 	return tipHash, tipHeight, nil
 }
 
-// truncateIndex truncates the index for a particular header type by a single
-// header entry. The passed newTip pointer should point to the hash of the new
-// chain tip. Optionally, if the entry is to be deleted as well, then the
-// remove flag should be set to true.
-func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, remove bool) error {
+// truncateIndices truncates the index for a particular header type by removing
+// a set of header entries. The passed newTip pointer should point to the hash
+// of the new chain tip. The blockHeadersToTruncate contains the hashes of all
+// block headers that should be removed from the index, which are the block
+// headers after the new tip. Optionally, if the entries are to be deleted as
+// well, then the remove flag should be set to true.
+func (h *headerIndex) truncateIndices(newTip *chainhash.Hash,
+	blockHeadersToTruncate []*chainhash.Hash, remove bool) error {
+
+	if remove && len(blockHeadersToTruncate) == 0 {
+		return errors.New("remove flag set but headers to truncate " +
+			"beyond new tip not provided")
+	}
+
+	if !remove && len(blockHeadersToTruncate) != 0 {
+		return errors.New("headers to truncate beyond new tip " +
+			"provided but remove flag not set")
+	}
+
 	return walletdb.Update(h.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
@@ -338,13 +353,13 @@ func (h *headerIndex) truncateIndex(newTip *chainhash.Hash, remove bool) error {
 			return err
 		}
 
-		// If the remove flag is set, then we'll also delete this entry
-		// from the database as the primary index (block headers) is
-		// being rolled back.
+		// If the remove flag is set, then we'll also delete those
+		// entries from the database as the primary index
+		// (block headers) is being rolled back.
 		if remove {
-			prevTipHash := rootBucket.Get(tipKey)
-			err := delHeaderEntry(rootBucket, prevTipHash)
-			if err != nil {
+			if err := deleteHeaderEntries(
+				rootBucket, blockHeadersToTruncate,
+			); err != nil {
 				return err
 			}
 		}
@@ -417,26 +432,66 @@ func getHeaderEntryFallback(rootBucket walletdb.ReadBucket,
 	return binary.BigEndian.Uint32(heightBytes), nil
 }
 
-// delHeaderEntry tries to remove a header entry from the bbolt database. It
-// first looks if a key for it exists in the old place, the root bucket. If it
-// does, it's deleted from there. If not, it's attempted to be deleted from the
-// sub bucket instead.
-func delHeaderEntry(rootBucket walletdb.ReadWriteBucket, hashBytes []byte) error {
-	// In case this header was stored in the old place (the root bucket
-	// directly), let's remove it from there.
-	if len(rootBucket.Get(hashBytes)) == 4 {
-		return rootBucket.Delete(hashBytes)
+// deleteHeaderEntries tries to remove multiple header entries from the bbolt
+// database. For each header hash, it first looks if a key exists in the old
+// place, the root bucket. If it does, it's deleted from there. If not, it's
+// attempted to be deleted from the appropriate sub-bucket instead.
+func deleteHeaderEntries(rootBucket walletdb.ReadWriteBucket,
+	headerHashes []*chainhash.Hash) error {
+
+	if len(headerHashes) == 0 {
+		return nil
 	}
 
-	// The hash wasn't stored in the root bucket. So we try the sub bucket
-	// now. If that doesn't exist, something is wrong and we want to return
-	// an error here.
-	subBucket := rootBucket.NestedReadWriteBucket(
-		hashBytes[0:numSubBucketBytes],
-	)
-	if subBucket == nil {
-		return ErrHashNotFound
+	// Group hashes by their sub-bucket for more efficient deletion.
+	bySubBucket := make(map[string][]*chainhash.Hash)
+	rootBucketHashes := make([]*chainhash.Hash, 0, len(headerHashes))
+
+	// Check which hashes are in the root bucket and group the rest by their
+	// sub-bucket prefix.
+	for _, hash := range headerHashes {
+		// Convert hash to bytes for DB operations.
+		hashBytes := hash.CloneBytes()
+
+		// In case this header was stored in the old place
+		// (the root bucket directly), let's check and mark it for
+		// removal from there.
+		if len(rootBucket.Get(hashBytes)) == 4 {
+			rootBucketHashes = append(rootBucketHashes, hash)
+			continue
+		}
+		// The hash wasn't stored in the root bucket. So we need
+		// to use the sub-bucket. We extract the prefix to
+		// determine which sub-bucket to use.
+		prefix := string(hashBytes[0:numSubBucketBytes])
+		bySubBucket[prefix] = append(bySubBucket[prefix], hash)
 	}
 
-	return subBucket.Delete(hashBytes)
+	// Delete entries from root bucket.
+	for _, hash := range rootBucketHashes {
+		hashBytes := hash.CloneBytes()
+		if err := rootBucket.Delete(hashBytes); err != nil {
+			return err
+		}
+	}
+
+	// Delete enties from sub-buckets.
+	for prefix, hashes := range bySubBucket {
+		// Try to get the sub-bucket for this prefix. If it doesn't
+		// exist, something is wrong and we want to return an error.
+		subBucket := rootBucket.NestedReadWriteBucket([]byte(prefix))
+		if subBucket == nil {
+			return fmt.Errorf("%w: sub-bucket for prefix %x not "+
+				"found", ErrHashNotFound, prefix)
+		}
+
+		for _, hash := range hashes {
+			hashBytes := hash.CloneBytes()
+			if err := subBucket.Delete(hashBytes); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

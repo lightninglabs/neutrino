@@ -173,57 +173,61 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderStoreRecovery tests the block header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestBlockHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the block header
 	// store to recover in the face of a partial batch write (the headers
 	// were written, but the index wasn't updated).
 	cleanUp, db, tempDir, bhs, err := createTestBlockHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
 
 	// First we'll generate a test header chain of length 10, inserting it
 	// into the header store.
 	blockHeaders := createTestBlockHeaderChain(10)
-	if err := bhs.WriteHeaders(blockHeaders...); err != nil {
-		t.Fatalf("unable to write block headers: %v", err)
-	}
+	err = bhs.WriteHeaders(blockHeaders...)
+	require.NoError(t, err)
 
 	// Next, in order to simulate a partial write, we'll roll back the
-	// internal index by 5 blocks.
+	// internal index by 5 blocks all at once.
+
+	// Set new tip to be block 4 (height 4).
+	newTip := blockHeaders[4].BlockHash()
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-1].PrevBlock
-		if err := bhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		// Get headers 5, 6, 7, 8, 9 to truncate.
+		headerIdx := len(blockHeaders) - i - 1
+		headerHash := blockHeaders[headerIdx].BlockHash()
+		headersToTruncate[i] = &headerHash
 	}
+
+	// Truncate all 5 headers at once.
+	err = bhs.truncateIndices(&newTip, headersToTruncate, true)
+	require.NoError(t, err)
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
 	hs, err := NewBlockHeaderStore(tempDir, db, &chaincfg.SimNetParams)
-	if err != nil {
-		t.Fatalf("unable to re-create bhs: %v", err)
-	}
-	bhs = hs.(*blockHeaderStore)
+	require.NoError(t, err)
+
+	bhs, ok := hs.(*blockHeaderStore)
+	require.True(t, ok)
 
 	// The chain tip of this new instance should be of height 5, and match
 	// the 5th to last block header.
 	tipHash, tipHeight, err := bhs.ChainTip()
-	if err != nil {
-		t.Fatalf("unable to get chain tip: %v", err)
-	}
-	if tipHeight != 5 {
-		t.Fatalf("tip height mismatch: expected %v, got %v", 5, tipHeight)
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), tipHeight)
 	prevHeaderHash := blockHeaders[5].BlockHash()
 	tipBlockHash := tipHash.BlockHash()
-	if bytes.Equal(prevHeaderHash[:], tipBlockHash[:]) {
-		t.Fatalf("block hash mismatch: expected %v, got %v",
-			prevHeaderHash, tipBlockHash)
-	}
+	require.NotEqual(t, tipBlockHash, prevHeaderHash)
 }
 
 //nolint:lll
@@ -381,6 +385,14 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestFilterHeaderStoreRecovery tests the filter header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestFilterHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the filter header
 	// store to recover in the face of a partial batch write (the headers
@@ -418,12 +430,23 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Next, in order to simulate a partial write, we'll roll back the
-	// internal index by 5 blocks.
+	// internal index by 5 blocks all at once.
+
+	// Set new tip to be block 4.
+	newTip := blockHeaders[4].HeaderHash
+
+	// Create a slice of headers to truncate (headers 5-9).
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-2].HeaderHash
-		err := fhs.truncateIndex(&newTip, true)
-		require.NoError(t, err)
+		// This gives us indices 5, 6, 7, 8, 9.
+		headerIdx := 5 + i
+		headerHash := blockHeaders[headerIdx].HeaderHash
+		headersToTruncate[i] = &headerHash
 	}
+
+	// Truncate all 5 headers at once.
+	err = fhs.truncateIndices(&newTip, headersToTruncate, true)
+	require.NoError(t, err)
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.

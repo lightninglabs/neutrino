@@ -405,7 +405,7 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	defer h.mtx.Unlock()
 
 	// First, we'll obtain the latest height that the index knows of.
-	_, chainTipHeight, err := h.chainTip()
+	lastBlock, chainTipHeight, err := h.chainTip()
 	if err != nil {
 		return nil, err
 	}
@@ -419,13 +419,19 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	}
 	prevHeaderHash := prevHeader.BlockHash()
 
+	// Compute the block headers to truncate.
+	headersToTruncate := []*chainhash.Hash{lastBlock}
+
 	// Now that we have the information we need to return from this
 	// function, we can now truncate the header file, and then use the hash
 	// of the prevHeader to set the proper index chain tip.
 	if err := h.truncateHeaders(1, h.indexType); err != nil {
 		return nil, err
 	}
-	if err := h.truncateIndex(&prevHeaderHash, true); err != nil {
+
+	if err := h.truncateIndices(
+		&prevHeaderHash, headersToTruncate, true,
+	); err != nil {
 		return nil, err
 	}
 
@@ -989,7 +995,7 @@ func (f *filterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// As the block headers should already be written, we only need to
 	// update the tip pointer for this particular header type.
 	newTip := hdrs[len(hdrs)-1].toIndexEntry().hash
-	return f.truncateIndex(&newTip, false)
+	return f.truncateIndices(&newTip, []*chainhash.Hash{}, false)
 }
 
 // ChainTip returns the latest filter header and height known to the
@@ -1047,7 +1053,9 @@ func (f *filterHeaderStore) RollbackLastBlock(
 	if err := f.truncateHeaders(1, f.indexType); err != nil {
 		return nil, err
 	}
-	if err := f.truncateIndex(newTip, false); err != nil {
+
+	err = f.truncateIndices(newTip, []*chainhash.Hash{}, false)
+	if err != nil {
 		return nil, err
 	}
 
