@@ -254,23 +254,20 @@ func TestBlockCache(t *testing.T) {
 
 	// Load the first 255 blocks from disk.
 	blocks, err := loadBlocks(t, blockDataFile, blockDataNet)
-	if err != nil {
-		t.Fatalf("loadBlocks: Unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
 	// We'll use a simple mock header store since the GetBlocks method
 	// assumes we only query for blocks with an already known header.
-	headers := newMockBlockHeaderStore()
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
 
 	// Iterate through the blocks, calculating the size of half of them,
 	// and writing them to the header store.
 	var size uint64
 	for i, b := range blocks {
-		header := headerfs.BlockHeader{
-			BlockHeader: &b.MsgBlock().Header,
-			Height:      uint32(i),
-		}
-		headers.WriteHeaders(header)
+		blkHeader := &b.MsgBlock().Header
+		mBlockHeaderStore.On("FetchHeader", b.Hash()).Return(
+			blkHeader, uint32(i), nil,
+		)
 
 		sz, _ := (&CacheableBlock{Block: b}).Size()
 		if i < len(blocks)/2 {
@@ -284,7 +281,7 @@ func TestBlockCache(t *testing.T) {
 		BlockCache: lru.NewCache[wire.InvVect, *CacheableBlock](
 			size,
 		),
-		BlockHeaders: headers,
+		BlockHeaders: mBlockHeaderStore,
 		chainParams: chaincfg.Params{
 			PowLimit: maxPowLimit,
 		},
@@ -317,7 +314,9 @@ func TestBlockCache(t *testing.T) {
 				continue
 			}
 
-			header, _, err := headers.FetchHeader(b.Hash())
+			header, _, err := mBlockHeaderStore.FetchHeader(
+				b.Hash(),
+			)
 			require.NoError(t, err)
 
 			resp := &wire.MsgBlock{
@@ -333,13 +332,16 @@ func TestBlockCache(t *testing.T) {
 			select {
 			case queries <- inv.Hash:
 			case <-time.After(1 * time.Second):
-				t.Fatalf("query was not handled")
+				require.Fail(t, "query was not handled")
 			}
 
 			return errChan
 		}
 
-		t.Fatalf("queried for unknown block: %v", inv.Hash)
+		require.Failf(
+			t, "Test Failed Due to Unknown Block",
+			"queried for unknown block: %v", inv.Hash,
+		)
 
 		return errChan
 	}

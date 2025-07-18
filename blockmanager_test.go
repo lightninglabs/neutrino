@@ -798,8 +798,11 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 	for _, test := range testCases {
 		// Create a mock block header store. We only need to be able to
 		// serve a header for the target index.
-		blockHeaders := newMockBlockHeaderStore()
-		blockHeaders.heights[targetIndex] = blockHeader
+		mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+
+		mBlockHeaderStore.On("FetchHeaderByHeight", targetIndex).Return(
+			&blockHeader, nil,
+		)
 
 		// We set up the mock queryAllPeers to only respond according to
 		// the active testcase.
@@ -851,7 +854,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		bm := &blockManager{
 			cfg: &blockManagerCfg{
-				BlockHeaders:  blockHeaders,
+				BlockHeaders:  mBlockHeaderStore,
 				queryAllPeers: queryAllPeers,
 			},
 		}
