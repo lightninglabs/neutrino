@@ -80,6 +80,17 @@ func (m *MockBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	return args.Error(0)
 }
 
+// RollbackBlockHeaders rolls back block headers in the mock block header store.
+func (m *MockBlockHeaderStore) RollbackBlockHeaders(
+	numHeaders uint32) (*BlockStamp, error) {
+
+	args := m.Called(numHeaders)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*BlockStamp), args.Error(1)
+}
+
 // RollbackLastBlock rolls back the last block in the mock block header store.
 func (m *MockBlockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	args := m.Called()

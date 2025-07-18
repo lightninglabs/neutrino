@@ -70,11 +70,25 @@ type BlockHeaderStore interface {
 	// single atomic transaction.
 	WriteHeaders(...BlockHeader) error
 
+	// RollbackBlockHeaders rolls back a specified number of headers from
+	// the tip of the chain. It removes the most recent 'numHeaders' from
+	// the block headers file and updates the corresponding indices. This
+	// method is used during blockchain reorganizations to remove headers
+	// that are no longer part of the main chain. The function will return
+	// an error if the rollback would reach or go before the genesis block
+	// (height 0). The information about the new header tip after truncation
+	// is returned.
+	RollbackBlockHeaders(numHeaders uint32) (*BlockStamp, error)
+
 	// RollbackLastBlock rolls back the BlockHeaderStore by a _single_
 	// header. This method is meant to be used in the case of re-org which
 	// disconnects the latest block header from the end of the main chain.
 	// The information about the new header tip after truncation is
 	// returned.
+	//
+	// NOTE: This function is maintained for backward compatibility since it
+	// is a publicly exposed function. It now internally utilizes
+	// RollbackBlockHeaders API.
 	RollbackLastBlock() (*BlockStamp, error)
 }
 
@@ -393,6 +407,71 @@ func (h *blockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 	return h.heightFromHash(hash)
 }
 
+// RollbackBlockHeaders removes the specified number of block headers from the
+// end of the chain. It returns a BlockStamp representing the new chain tip. If
+// numHeaders is 0, it returns an empty BlockStamp without performing any
+// operations.
+//
+// The function ensures rollback doesn't remove or go beyond the genesis block
+// (height 0). It determines the current chain tip height, reads the header
+// range to be removed along with the new tip header, truncates the headers file
+// to remove the specified number of headers, and updates the header indices to
+// reflect the new chain tip.
+func (h *blockHeaderStore) RollbackBlockHeaders(n uint32) (*BlockStamp, error) {
+	if n == 0 {
+		return &BlockStamp{}, nil
+	}
+
+	// Lock store for rollback.
+	h.mtx.Lock()
+	defer h.mtx.Unlock()
+
+	// First, we'll obtain the latest height that the index knows of.
+	_, chainTipHeight, err := h.chainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure the rollback doesn't remove or go beyond the genesis block.
+	if n > chainTipHeight {
+		return nil, fmt.Errorf("cannot roll back %d headers when "+
+			"chain height is %d", n, chainTipHeight)
+	}
+
+	// With this height obtained, we'll use it to read the previous header
+	// from disk, so we can populate our return value which requires the
+	// prev header hash.
+	headers, err := h.readHeaderRange(chainTipHeight-n, chainTipHeight)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read headers range: %v", err)
+	}
+	prevHeader := headers[0]
+	prevHeaderHash := prevHeader.BlockHash()
+
+	// Transform to blockhashes for downstream operations, starting at
+	// headers + 1 skipping the previous header.
+	headersToTruncate := make([]*chainhash.Hash, len(headers)-1)
+	for i, header := range headers[1:] {
+		blkHash := header.BlockHash()
+		headersToTruncate[i] = &blkHash
+	}
+
+	if err := h.truncateHeaders(n, h.indexType); err != nil {
+		return nil, err
+	}
+
+	err = h.truncateIndices(&prevHeaderHash, headersToTruncate, true)
+	if err != nil {
+		return nil, err
+	}
+
+	return &BlockStamp{
+		Height:    int32(chainTipHeight - n),
+		Hash:      prevHeaderHash,
+		Timestamp: prevHeader.Timestamp,
+	}, nil
+}
+
 // RollbackLastBlock rollsback both the index, and on-disk header file by a
 // _single_ header. This method is meant to be used in the case of re-org which
 // disconnects the latest block header from the end of the main chain. The
@@ -400,46 +479,7 @@ func (h *blockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 //
 // NOTE: Part of the BlockHeaderStore interface.
 func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
-	// Lock store for write.
-	h.mtx.Lock()
-	defer h.mtx.Unlock()
-
-	// First, we'll obtain the latest height that the index knows of.
-	lastBlock, chainTipHeight, err := h.chainTip()
-	if err != nil {
-		return nil, err
-	}
-
-	// With this height obtained, we'll use it to read the previous header
-	// from disk, so we can populate our return value which requires the
-	// prev header hash.
-	prevHeader, err := h.readHeader(chainTipHeight - 1)
-	if err != nil {
-		return nil, err
-	}
-	prevHeaderHash := prevHeader.BlockHash()
-
-	// Compute the block headers to truncate.
-	headersToTruncate := []*chainhash.Hash{lastBlock}
-
-	// Now that we have the information we need to return from this
-	// function, we can now truncate the header file, and then use the hash
-	// of the prevHeader to set the proper index chain tip.
-	if err := h.truncateHeaders(1, h.indexType); err != nil {
-		return nil, err
-	}
-
-	if err := h.truncateIndices(
-		&prevHeaderHash, headersToTruncate, true,
-	); err != nil {
-		return nil, err
-	}
-
-	return &BlockStamp{
-		Height:    int32(chainTipHeight) - 1,
-		Hash:      prevHeaderHash,
-		Timestamp: prevHeader.Timestamp,
-	}, nil
+	return h.RollbackBlockHeaders(1)
 }
 
 // BlockHeader is a Bitcoin block header that also has its height included.

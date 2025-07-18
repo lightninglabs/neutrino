@@ -3,6 +3,8 @@ package headerfs
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -18,6 +20,41 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/require"
 )
+
+// Block headers for testing captured from simnet network.
+var blockHdrs = []string{
+	"010000000000000000000000000000000000000000000000000000000000" +
+		"0000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3" +
+		"888a51323a9fb8aa4b1e5e4a45068653ffff7f2002000000",
+	"00000020f67ad7695d9b662a72ff3d8edbbb2de0bfa67b13974bb9910d11" +
+		"6d5cbd863e68c552826d121f12fcb288895d9488d189891ce0a6" +
+		"5a56193ea2ff3d4b99eabb875fac5a68ffff7f2003000000",
+	"000000200582f786cda8187a3bb13c044a70f11a5f299cbdb55dd43744a2" +
+		"de24cef76a72964688cc27da9f45261b8c35b00edea462f26469" +
+		"67fcb6052063d0140a1275de60ac5a68ffff7f2001000000",
+	"00000020f83e8ae2309315ff0a36646e2d43e7aa777b7aaa1eadb4876073" +
+		"e7a8dac11c1dc3a5e71065b6ab83ed8972d277de2670ceed1fc4" +
+		"3fd03f066cc84047d95eeaa360ac5a68ffff7f2002000000",
+	"000000203513820c27ba7b218bb6732e851ef404986f299f44b4275334d5" +
+		"eab0db09710835f6fc14632ebb23e141f680ae6aec6bdf76557b" +
+		"46daf1b4c0160631d89e1ac461ac5a68ffff7f2000000000",
+}
+
+// Filter headers for testing captured from simnet network.
+//
+// nolint:unused
+var filterHdrs = []string{
+	"b2ef0f5c5d790832d79fc9c9a7b3cef02dd94f143c63feba9d836248cad6" +
+		"24cf",
+	"b14a448b043b12401327695318318bbb53ec955e1e7963e3fd569a450448" +
+		"9177",
+	"75ae9eebc6e956fcb4fa00853aec5f252cf0046ed03587feece580386a6c" +
+		"d113",
+	"f99cbb96ca78c36c741b3765d78b22f0c1039add8afa6d2f6284b5cd6ab9" +
+		"d8d6",
+	"33e95706f9580a84e2cb167faf2239079805113cc7d3aaefff194b1ce6e6" +
+		"a26c",
+}
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	*blockHeaderStore, error) {
@@ -648,3 +685,210 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 }
 
 // TODO(roasbeef): combined re-org scenarios
+
+// TestRollbackBlockHeaders tests that we're able to rollback block headers
+// successfully from the block header store.
+func TestRollbackBlockHeaders(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		blockHeaderStore BlockHeaderStore
+		cleanup          func()
+		err              error
+	}
+	type Verify struct {
+		tc               *testing.T
+		blockHeaderStore BlockHeaderStore
+		blockStamp       *BlockStamp
+	}
+	rollbackPrep := func() Prep {
+		// Prep target header stores.
+		tempDir := t.TempDir()
+		c1 := func() {
+			os.RemoveAll(tempDir)
+		}
+
+		dbPath := filepath.Join(tempDir, "test.db")
+		db, err := walletdb.Create(
+			"bdb", dbPath, true, time.Second*10,
+		)
+		cleanup := func() {
+			db.Close()
+			c1()
+		}
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		bHS, err := NewBlockHeaderStore(
+			tempDir, db, &chaincfg.SimNetParams,
+		)
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		// Prep block headers to write to the target headers store.
+		// Ignore the genesis block header since NewBlockHeaderStore
+		// already wrote it.
+		nBHs := len(blockHdrs)
+		blkHdrsToWrite := make([]BlockHeader, nBHs-1)
+		for i := 1; i < nBHs; i++ {
+			blockHdr := blockHdrs[i]
+			h, err := constructBlkHdr(
+				blockHdr, uint32(i),
+			)
+			if err != nil {
+				return Prep{
+					cleanup: cleanup,
+					err:     err,
+				}
+			}
+			blkHdrsToWrite[i-1] = *h
+		}
+
+		// Write block headers to the store.
+		err = bHS.WriteHeaders(blkHdrsToWrite...)
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		return Prep{
+			blockHeaderStore: bHS,
+			cleanup:          cleanup,
+		}
+	}
+	testCases := []struct {
+		name         string
+		nHeaders     uint32
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name:      "ErrorOnRollingbackGenesisHeader",
+			nHeaders:  uint32(len(blockHdrs)),
+			prep:      rollbackPrep,
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("cannot roll back %d "+
+				"headers when chain height is %d",
+				len(blockHdrs), len(blockHdrs)-1),
+		},
+		{
+			name:      "ErrorOnRollingbackBeyondGenesisHeader",
+			nHeaders:  uint32(len(blockHdrs) + 1),
+			prep:      rollbackPrep,
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("cannot roll back %d "+
+				"headers when chain height is %d",
+				len(blockHdrs)+1, len(blockHdrs)-1),
+		},
+		{
+			name:     "NoErrorOnRollingbackNoHeaders",
+			nHeaders: 0,
+			prep:     rollbackPrep,
+			verify:   func(Verify) {},
+		},
+		{
+			name:     "RollbackHeadersSuccessfully",
+			nHeaders: uint32(len(blockHdrs) - 1),
+			prep:     rollbackPrep,
+			verify: func(v Verify) {
+				// Verify chain tip of the block header store.
+				bHS := v.blockHeaderStore
+				chainTipB, height, err := bHS.ChainTip()
+				require.NoError(t, err)
+
+				// Since we have wrote 4 headers and those
+				// rolledback on filter headers write failure,
+				// we can expect the chain tip height to be 0.
+				require.Equal(v.tc, uint32(0), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+
+				// Assert that the known blockstamp height
+				// currently equals the genesis header height.
+				require.Equal(t, int32(0), v.blockStamp.Height)
+
+				// Assert that the known blockstamp hash equals
+				// the genesis header hash.
+				require.Equal(
+					t, chainTipBEx.BlockHash(),
+					v.blockStamp.Hash,
+				)
+
+				// Assert that the know blockstamp timestamp
+				// equals the genesis header timestamp.
+				require.Equal(
+					t, chainTipBEx.Timestamp,
+					v.blockStamp.Timestamp,
+				)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.blockHeaderStore
+			blockStamp, err := store.RollbackBlockHeaders(
+				tc.nHeaders,
+			)
+			verify := Verify{
+				tc:               t,
+				blockHeaderStore: prep.blockHeaderStore,
+				blockStamp:       blockStamp,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// constructBlkHdr constructs a block header from a hex string and height.
+func constructBlkHdr(blockHeaderHex string,
+	height uint32) (*BlockHeader, error) {
+
+	buff, err := hex.DecodeString(blockHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode block header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+
+	// Deserialize block header.
+	bH := &BlockHeader{
+		BlockHeader: &wire.BlockHeader{},
+		Height:      height,
+	}
+	if err := bH.Deserialize(reader); err != nil {
+		return nil, fmt.Errorf("failed to deserialize block "+
+			"header: %v", err)
+	}
+
+	return bH, nil
+}
