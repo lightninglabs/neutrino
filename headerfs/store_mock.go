@@ -1,9 +1,12 @@
 package headerfs
 
 import (
+	"io"
+
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -162,4 +165,55 @@ func (m *MockFilterHeaderStore) RollbackLastBlock(
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*BlockStamp), args.Error(1)
+}
+
+// MockWalletDB is a mock implementation of walletdb.DB for testing.
+type MockWalletDB struct {
+	mock.Mock
+}
+
+// Update implements the walletdb.DB interface.
+func (m *MockWalletDB) Update(fn func(tx walletdb.ReadWriteTx) error) error {
+	args := m.Called(fn)
+	return args.Error(0)
+}
+
+// View implements the walletdb.DB interface.
+func (m *MockWalletDB) View(fn func(tx walletdb.ReadTx) error) error {
+	args := m.Called(fn)
+	return args.Error(0)
+}
+
+// BeginReadWriteTx implements the walletdb.DB interface.
+func (m *MockWalletDB) BeginReadWriteTx() (walletdb.ReadWriteTx, error) {
+	args := m.Called()
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(walletdb.ReadWriteTx), args.Error(1)
+}
+
+// BeginReadTx implements the walletdb.DB interface.
+func (m *MockWalletDB) BeginReadTx() (walletdb.ReadTx, error) {
+	args := m.Called()
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(walletdb.ReadTx), args.Error(1)
+}
+
+// Copy implements the walletdb.DB interface.
+func (m *MockWalletDB) Copy(w io.Writer) error {
+	args := m.Called(w)
+	return args.Error(0)
+}
+
+// Close implements the walletdb.DB interface.
+func (m *MockWalletDB) Close() error {
+	args := m.Called()
+	return args.Error(0)
 }

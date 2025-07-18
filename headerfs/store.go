@@ -538,7 +538,35 @@ func (h *blockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 		headerLocs[i] = header.toIndexEntry()
 	}
 
-	return h.addHeaders(headerLocs)
+	// Attempt to add the headers to the database. If this fails, we'll need
+	// to roll back any changes to the header file to maintain consistency.
+	// The rollback process bases on the number of header serialized. If
+	// both the initial operation and the rollback fail, we return
+	// a detailed error explaining both failures to aid in debugging.
+	if err := h.addHeaders(headerLocs); err != nil {
+		// Since the probability of failing to write to the database is
+		// very low, it is mostly worth the cost of file sync operation
+		// to make sure truncate headers does it correctly.
+		if err := h.file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync block headers "+
+				"file: %v", err)
+		}
+
+		headersToRollback := len(hdrs)
+		truncateErr := h.truncateHeaders(
+			uint32(headersToRollback), h.indexType,
+		)
+		if truncateErr != nil {
+			return fmt.Errorf("failed to rollback block headers "+
+				"from binary file to previous valid state: "+
+				"%v, error writing to database: %v, headers "+
+				"to rollback: %d", truncateErr, err,
+				headersToRollback)
+		}
+		return fmt.Errorf("failed to add block headers to db: %v", err)
+	}
+
+	return nil
 }
 
 // blockLocatorFromHash takes a given block hash and then creates a block
@@ -1035,7 +1063,35 @@ func (f *filterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// As the block headers should already be written, we only need to
 	// update the tip pointer for this particular header type.
 	newTip := hdrs[len(hdrs)-1].toIndexEntry().hash
-	return f.truncateIndices(&newTip, []*chainhash.Hash{}, false)
+
+	// Attempt to add the headers to the database. If this fails, we'll need
+	// to roll back any changes to the header file to maintain consistency.
+	// The rollback process bases on the number of header serialized. If
+	// both the initial operation and the rollback fail, we return
+	// a detailed error explaining both failures to aid in debugging.
+	if err := f.truncateIndices(&newTip, nil, false); err != nil {
+		// Since the probability of failing to write to the database is
+		// very low, it is mostly worth the cost of file sync operation
+		// to make sure truncate headers does it correctly.
+		if err := f.file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync filter headers "+
+				"file: %v", err)
+		}
+
+		headersToRollback := len(hdrs)
+		truncateErr := f.truncateHeaders(
+			uint32(headersToRollback), f.indexType,
+		)
+		if truncateErr != nil {
+			return fmt.Errorf("failed to rollback filter headers "+
+				"binary file to previous valid state: %v, "+
+				"error writing to database: %v", truncateErr,
+				err)
+		}
+		return fmt.Errorf("failed to add filter headers to db: %v", err)
+	}
+
+	return nil
 }
 
 // ChainTip returns the latest filter header and height known to the

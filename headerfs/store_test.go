@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -41,8 +43,6 @@ var blockHdrs = []string{
 }
 
 // Filter headers for testing captured from simnet network.
-//
-// nolint:unused
 var filterHdrs = []string{
 	"b2ef0f5c5d790832d79fc9c9a7b3cef02dd94f143c63feba9d836248cad6" +
 		"24cf",
@@ -265,6 +265,164 @@ func TestBlockHeaderStoreRecovery(t *testing.T) {
 	prevHeaderHash := blockHeaders[5].BlockHash()
 	tipBlockHash := tipHash.BlockHash()
 	require.NotEqual(t, tipBlockHash, prevHeaderHash)
+}
+
+// TestBlockHeaderStoreOnDBWriteRecovery tests the block header store's ability
+// to rollback block header file store on db write failure.
+func TestBlockHeaderStoreOnDBWriteRecovery(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		blockHeaderStore    BlockHeaderStore
+		db                  walletdb.DB
+		blockHeadersToWrite []BlockHeader
+		cleanup             func()
+		err                 error
+	}
+	type Verify struct {
+		tc               *testing.T
+		blockHeaderStore BlockHeaderStore
+		db               walletdb.DB
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "RollbackBlockHeadersOnDBWriteFailure",
+			prep: func() Prep {
+				// Prep target header stores.
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				bHS, err := NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since NewBlockHeaderStore already
+				// wrote it.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make([]BlockHeader, nBHs-1)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					if err != nil {
+						return Prep{
+							cleanup: cleanup,
+							err:     err,
+						}
+					}
+					blkHdrsToWrite[i-1] = *h
+				}
+
+				bS := bHS.(*blockHeaderStore)
+
+				// Mock wallet db to trigger the db update
+				// failure.
+				mWalletDB := &MockWalletDB{}
+
+				mWalletDB.On("BeginReadWriteTx").Return(
+					nil, errors.New("I/O write error"),
+				)
+
+				bS.db = mWalletDB
+
+				return Prep{
+					blockHeaderStore:    bHS,
+					db:                  db,
+					blockHeadersToWrite: blkHdrsToWrite,
+					cleanup:             cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Restore the original wallet db.
+				bS, ok := v.blockHeaderStore.(*blockHeaderStore)
+				require.True(v.tc, ok)
+				bS.db = v.db
+
+				// Verify that calling the chain tip of the
+				// block header store doesn't trigger target
+				// height not in index error.
+				chainTipB, height, err := bS.ChainTip()
+				require.NoError(t, err)
+
+				// Since we have wrote 4 block headers and those
+				// rolledback on db write failure, we can expect
+				// the chain tip height to be 0.
+				require.Equal(v.tc, uint32(0), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+
+				// Verify that the block header file contains
+				// only the genesis header of size 80 bytes.
+				fileInfo, err := bS.file.Stat()
+				require.NoError(v.tc, err)
+				require.Equal(v.tc, int64(80), fileInfo.Size())
+			},
+			expectErr: true,
+			expectErrMsg: "failed to add block headers to db: " +
+				"I/O write error",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.blockHeaderStore
+			err := store.WriteHeaders(prep.blockHeadersToWrite...)
+			verify := Verify{
+				tc:               t,
+				blockHeaderStore: prep.blockHeaderStore,
+				db:               prep.db,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
 }
 
 //nolint:lll
@@ -502,6 +660,146 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 	require.Equal(t, uint32(5), tipHeight)
 	prevHeaderHash := blockHeaders[5].FilterHash
 	require.NotEqual(t, tipHash, prevHeaderHash)
+}
+
+// TestFilterHeaderStoreDBWriteRecovery tests the filter header store's ability
+// to rollback filter header file store on db write failure.
+func TestFilterHeaderStoreDBWriteRecovery(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		filterHeaderStore    FilterHeaderStore
+		db                   walletdb.DB
+		filterHeadersToWrite []FilterHeader
+		cleanup              func()
+		err                  error
+	}
+	type Verify struct {
+		tc                *testing.T
+		filterHeaderStore FilterHeaderStore
+		db                walletdb.DB
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "RollbackFilterHeadersOnDBWriteFailure",
+			prep: func() Prep {
+				// Prep target header stores.
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				fHS, err := NewFilterHeaderStore(
+					tempDir, db, RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since NewFilterHeaderStore already
+				// wrote it.
+				nFHs := len(filterHdrs)
+				filtHdrsToWrite := make([]FilterHeader, nFHs-1)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					if err != nil {
+						return Prep{
+							cleanup: cleanup,
+							err:     err,
+						}
+					}
+					filtHdrsToWrite[i-1] = *h
+				}
+
+				fS := fHS.(*filterHeaderStore)
+
+				// Mock wallet db to trigger the db update
+				// failure.
+				mWalletDB := &MockWalletDB{}
+
+				mWalletDB.On("BeginReadWriteTx").Return(
+					nil, errors.New("I/O write error"),
+				)
+
+				fS.db = mWalletDB
+
+				return Prep{
+					filterHeaderStore:    fHS,
+					db:                   db,
+					filterHeadersToWrite: filtHdrsToWrite,
+					cleanup:              cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Restore the original wallet db.
+				fHS := v.filterHeaderStore
+				fS, ok := fHS.(*filterHeaderStore)
+				require.True(v.tc, ok)
+				fS.db = v.db
+
+				// Verify that the filter header file contains
+				// only the genesis header of size 32 bytes.
+				fileInfo, err := fS.file.Stat()
+				require.NoError(v.tc, err)
+				require.Equal(v.tc, int64(32), fileInfo.Size())
+			},
+			expectErr: true,
+			expectErrMsg: "failed to add filter headers to db: " +
+				"I/O write error",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.filterHeaderStore
+			err := store.WriteHeaders(prep.filterHeadersToWrite...)
+			verify := Verify{
+				tc:                t,
+				filterHeaderStore: prep.filterHeaderStore,
+				db:                prep.db,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
 }
 
 // TestBlockHeadersFetchHeaderAncestors tests that we're able to properly fetch
@@ -891,4 +1189,26 @@ func constructBlkHdr(blockHeaderHex string,
 	}
 
 	return bH, nil
+}
+
+// constructFilterHdr constructs a filter header from a hex string and height.
+func constructFilterHdr(filterHeaderHex string,
+	height uint32) (*FilterHeader, error) {
+
+	buff, err := hex.DecodeString(filterHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode filter header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+
+	// Deserialize filter header.
+	fH := &FilterHeader{
+		Height: height,
+	}
+	if _, err := io.ReadFull(reader, fH.FilterHash[:]); err != nil {
+		return nil, fmt.Errorf("failed to read filter hash: %w", err)
+	}
+
+	return fH, nil
 }
