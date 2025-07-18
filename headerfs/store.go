@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -107,6 +108,63 @@ type File interface {
 
 type headerFile struct {
 	file File
+}
+
+// truncateHeaders truncates one or more headers from the end of the header
+// file. This can be used in the case of a re-org to remove headers from the end
+// of the main chain.
+//
+// The numHeaders parameter specifies how many headers to truncate. If
+// numHeaders is 1, this is equivalent to the old singleTruncate behavior.
+//
+// This function handles platform-specific differences in file truncation. On
+// Windows, the file is closed, truncated, and reopened due to Windows
+// limitations on truncating open files. On other platforms, the file is
+// truncated directly without closing.
+func (h *headerFile) truncateHeaders(numHeaders uint32,
+	headerType HeaderType) error {
+
+	// If numHeaders is 0, treat it as a no-op and return no error.
+	if numHeaders == 0 {
+		return nil
+	}
+
+	// In order to truncate the file, we'll need to grab the absolute size
+	// of the file as it stands currently.
+	fileInfo, err := h.file.Stat()
+	if err != nil {
+		return err
+	}
+	fileSize := fileInfo.Size()
+
+	// Calculate the total bytes to truncate based on number of headers.
+	headerTypeSize, err := headerType.Size()
+	if err != nil {
+		return err
+	}
+	truncateLength := int64(numHeaders) * int64(headerTypeSize)
+
+	// Finally, we'll use both of these values to calculate the new size of
+	// the file and truncate it accordingly.
+	newSize := fileSize - truncateLength
+
+	// On Windows, we need to close, truncate, and reopen the file.
+	if runtime.GOOS == "windows" {
+		fileName := h.file.Name()
+		if err = h.file.Close(); err != nil {
+			return err
+		}
+
+		if err = os.Truncate(fileName, newSize); err != nil {
+			return err
+		}
+
+		fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
+		h.file, err = os.OpenFile(fileName, fileFlags, 0644)
+		return err
+	}
+
+	return h.file.Truncate(newSize)
 }
 
 // headerStore combines a on-disk set of headers within a flat file in addition
@@ -247,12 +305,9 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
-	for fileHeight > tipHeight {
-		if err := bhs.singleTruncate(); err != nil {
-			return nil, err
-		}
-
-		fileHeight--
+	err = bhs.truncateHeaders(fileHeight-tipHeight, bhs.indexType)
+	if err != nil {
+		return nil, err
 	}
 
 	return bhs, nil
@@ -362,13 +417,12 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	prevHeaderHash := prevHeader.BlockHash()
 
 	// Now that we have the information we need to return from this
 	// function, we can now truncate the header file, and then use the hash
 	// of the prevHeader to set the proper index chain tip.
-	if err := h.singleTruncate(); err != nil {
+	if err := h.truncateHeaders(1, h.indexType); err != nil {
 		return nil, err
 	}
 	if err := h.truncateIndex(&prevHeaderHash, true); err != nil {
@@ -767,15 +821,10 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
-	for fileHeight > tipHeight {
-		if err := fhs.singleTruncate(); err != nil {
-			return nil, err
-		}
-
-		fileHeight--
+	err = fhs.truncateHeaders(fileHeight-tipHeight, fhs.indexType)
+	if err != nil {
+		return nil, err
 	}
-
-	// TODO(roasbeef): make above into func
 
 	return fhs, nil
 }
@@ -995,7 +1044,7 @@ func (f *filterHeaderStore) RollbackLastBlock(
 
 	// Now that we have the information we need to return from this
 	// function, we can now truncate both the header file and the index.
-	if err := f.singleTruncate(); err != nil {
+	if err := f.truncateHeaders(1, f.indexType); err != nil {
 		return nil, err
 	}
 	if err := f.truncateIndex(newTip, false); err != nil {
