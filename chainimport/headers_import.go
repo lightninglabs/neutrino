@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"golang.org/x/exp/mmap"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -43,6 +45,84 @@ const (
 	// headers to process in a single batch when no specific batch
 	// size is provided.
 	DefaultWriteBatchSizePerRegion = 16384
+)
+
+// OverlapMode defines how to handle headers that overlap between the import
+// source and existing headers in the stores. Regardless of the overlap mode
+// used, a sampling method is used to validate headers data in overlapping
+// ranges (if any) to ensure basic integrity.
+type OverlapMode uint8
+
+const (
+	// AppendOnly adds headers only beyond what already exists in each
+	// store. If import source contains headers that overlap with existing
+	// data, it will skip those without validation and only append the new
+	// ones. This mode is optimized for performance with large header
+	// datasets from trusted sources, avoiding the overhead of additional
+	// validation between import and target sources while preserving
+	// existing data. It is the default mode as it efficiently handles
+	// imports while minimizing the risk of unintended chain
+	// reorganizations.
+	AppendOnly OverlapMode = iota
+
+	// ValidateAndAppend validates that any overlapping headers match before
+	// appending new ones. If mismatches are found during validation, the
+	// import operation is aborted.
+	ValidateAndAppend
+)
+
+// String returns a human-readable representation of the overlap mode.
+func (m OverlapMode) String() string {
+	switch m {
+	case AppendOnly:
+		return "AppendOnlyMode"
+	case ValidateAndAppend:
+		return "ValidateAndAppendMode"
+	default:
+		return fmt.Sprintf("OverlapMode(%d)", m)
+	}
+}
+
+// SyncModes encapsulates the verification and append modes for header
+// synchronization.
+type SyncModes struct {
+	Verify VerifyMode
+	Append AppendMode
+}
+
+// VerifyMode represents the headers verification mode to use between import
+// and target sources.
+type VerifyMode uint8
+
+const (
+	// VerifyBlockAndFilter indicates both block and filter headers should
+	// be verified between import and target sources.
+	VerifyBlockAndFilter VerifyMode = iota
+
+	// VerifyBlockOnly indicates only block headers should be verified
+	// between import and target sources.
+	VerifyBlockOnly
+
+	// VerifyFilterOnly indicates only filter headers should be verified
+	// between import and target sources.
+	VerifyFilterOnly
+)
+
+// AppendMode specifies which header types to append during synchronization.
+type AppendMode uint8
+
+const (
+	// AppendBlockAndFilter indicates both block and filter headers should
+	// be appended during synchronization.
+	AppendBlockAndFilter AppendMode = iota
+
+	// AppendBlockOnly indicates only block headers should be appended
+	// during synchronization.
+	AppendBlockOnly
+
+	// AppendFilterOnly indicates only filter headers should be appended
+	// during synchronization.
+	AppendFilterOnly
 )
 
 // HeaderMetadata contains the metadata about the header source.
@@ -326,8 +406,8 @@ func (v *FilterHeadersImportSourceValidator) Validate(
 	iterator HeaderIterator,
 	targetChainParams chaincfg.Params) error {
 
-	log.Debug("Skipping filter headers validation - missing access to " +
-		"original compact filters")
+	log.Debug("Skipping filter headers import validation - missing " +
+		"access to original compact filters")
 	return nil
 }
 
@@ -353,9 +433,9 @@ func NewFilterHeadersImportSourceValidator() HeadersValidator {
 	return &FilterHeadersImportSourceValidator{}
 }
 
-// ProcessingRegions currently contains regions to process. Those regions
-// overlap, divergence, and new headers region are all detected
-// but only new headers region processed.
+// ProcessingRegions contains the different processing regions for a header
+// import. The full range of headers is partitioned into overlap, divergence,
+// and new headers regions, which are all processed during an import.
 type ProcessingRegions struct {
 	// ImportStartHeight defines the starting block height for the import
 	// process.
@@ -736,28 +816,8 @@ type HeadersImport struct {
 }
 
 // Import is a multi-pass algorithm that loads, validates, and processes
-// headers from the configured import sources into the target header stores. The
-// Import process is currently performed only if the target stores are
-// completely empty except for gensis block/filter header otherwise it is
-// entirely skipped. On first development iteration, it is designed to serve new
-// users who don't yet have headers data, or existing users who are willing to
-// reset their headers data.
+// headers from the configured import sources into the target header stores.
 func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
-	// Check first if the target header stores are fresh.
-	isFresh, err := s.isTargetFresh(
-		s.options.TargetBlockHeaderStore,
-		s.options.TargetFilterHeaderStore,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect if target stores "+
-			"are fresh import failed: %w", err)
-	}
-	if !isFresh {
-		log.Info("Skipping headers import: target header stores are " +
-			"not empty")
-		return &ImportResult{}, nil
-	}
-
 	// Create result structure at the beginning to capture total duration.
 	result := &ImportResult{
 		StartTime: time.Now(),
@@ -792,7 +852,8 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	}
 
 	// Validate all block headers from import source.
-	log.Debugf("Validating %d block headers", metadata.HeadersCount)
+	log.Debugf("Validating %d block headers from import source",
+		metadata.HeadersCount)
 	if err := s.BlockHeadersValidator.Validate(
 		s.BlockHeadersImportSource.Iterator(
 			0, metadata.HeadersCount-1,
@@ -800,11 +861,12 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("failed to validate block "+
-			"headers: %w", err)
+			"headers from import source: %w", err)
 	}
 
 	// Validate all filter headers from import source.
-	log.Debugf("Validating %d filter headers", metadata.HeadersCount)
+	log.Debugf("Validating %d filter headers from import source",
+		metadata.HeadersCount)
 	if err := s.FilterHeadersValidator.Validate(
 		s.FilterHeadersImportSource.Iterator(
 			0, metadata.HeadersCount-1,
@@ -812,7 +874,7 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		s.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("failed to validate filter "+
-			"headers: %w", err)
+			"headers from import source: %w", err)
 	}
 
 	// Determine processing regions that partition the import task into
@@ -825,13 +887,28 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 	result.StartHeight = regions.ImportStartHeight
 	result.EndHeight = regions.ImportEndHeight
 
-	// TODO(mohamedawnallah): process the overlap region. This mainly
-	// includes a validation strategy for the overlap region between headers
-	// from import and target sources.
+	// Process divergence headers region.
+	// Process headers in the divergence region by validating the headers
+	// from the corresponding import source with the target leading store.
+	// If validation passed it syncs the lag target store if validation
+	// failed the import process aborted recommending the user to perhaps
+	// try again with headers import disable and let neutrino sync their
+	// stores eventually in an optimistic way.
+	if err = s.processDivergenceHeadersRegion(
+		ctx, regions.Divergence, s.options, result,
+	); err != nil {
+		return nil, fmt.Errorf("divergence processing failed: %w", err)
+	}
 
-	// TODO(mohamedawnallah): Process the divergence region. This includes
-	// strategy/strategies for handling divergence region that may exist in
-	// the target header stores while importing.
+	// Process overlap headers region.
+	// Process headers in the overlap region by either skipping validation
+	// (AppendOnly mode) or validating that headers match exactly between
+	// import and target sources (ValidateAndAppend mode).
+	err = s.processOverlapHeadersRegion(ctx, regions.Overlap, result)
+	if err != nil {
+		return nil, fmt.Errorf("headers import failed: overlap region "+
+			"headers validation failed: %w", err)
+	}
 
 	// Process new headers region.
 	// Add headers from the import source to the target stores, extending
@@ -855,32 +932,6 @@ func (s *HeadersImport) Import(ctx context.Context) (*ImportResult, error) {
 		result.HeadersPerSecond(), result.NewHeadersPercentage())
 
 	return result, nil
-}
-
-// isTargetFresh checks if the target header stores are in their initial state,
-// meaning they contain only the genesis header (height 0).
-func (s *HeadersImport) isTargetFresh(
-	targetBlockHeaderStore headerfs.BlockHeaderStore,
-	targetFilterHeaderStore headerfs.FilterHeaderStore) (bool, error) {
-
-	// Get the chain tip from both target stores.
-	_, blockTipHeight, err := targetBlockHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target block header "+
-			"chain tip: %w", err)
-	}
-
-	_, filterTipHeight, err := targetFilterHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target filter header "+
-			"chain tip: %w", err)
-	}
-
-	if blockTipHeight == 0 && filterTipHeight == 0 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 // openSources initializes and opens all required header import sources. It
@@ -1000,7 +1051,9 @@ func (s *HeadersImport) validateSourcesCompatibility() error {
 }
 
 // validateChainContinuity ensures that headers from import sources can be
-// properly connected to the existing headers in the target stores.
+// properly connected to the existing headers in the target stores. It uses
+// sampling method to validate headers data in overlapping ranges (if any) to
+// minimize processing time.
 func (s *HeadersImport) validateChainContinuity() error {
 	// Get metadata from block header source. We can safely use this count
 	// for both block headers and filter headers since we've already
@@ -1024,50 +1077,95 @@ func (s *HeadersImport) validateChainContinuity() error {
 			"tip: %w", err)
 	}
 
-	// Ensure that both target header stores have the same tip height.
-	// A mismatch indicates a divergence region that has not yet been
-	// processed. Once a resolution strategy is implemented, this check
-	// will no longer return an error, and the effective tip height
-	// will be defined as the minimum of the two.
+	// Take the minimum of the two heights as the effective chain tip height
+	// to handle the case where one store might be ahead in case of existent
+	// divergence region.
+	effectiveTipHeight := min(blockTipHeight, filterTipHeight)
 	if blockTipHeight != filterTipHeight {
-		return fmt.Errorf("divergence detected between target header "+
-			"store tip heights (block=%d, filter=%d)",
-			blockTipHeight, filterTipHeight)
+		log.Infof("Target header stores at different heights "+
+			"(block=%d, filter=%d), using effective tip height %d",
+			blockTipHeight, filterTipHeight, effectiveTipHeight)
 	}
 
 	// Extract import height range.
 	importStartHeight := sourceMetadata.StartHeight
 	importEndHeight := sourceMetadata.EndHeight
 
-	// If import wants to start after height 1, we'd have a gap.
-	if importStartHeight > 1 {
-		return fmt.Errorf("target stores contain only genesis block "+
-			"(height 0) but import data starts at height %d, "+
-			"creating a gap", importStartHeight)
-	}
+	switch {
+	case importStartHeight > effectiveTipHeight+1:
+		// Import data doesn't start at the next height after the target
+		// tip height, there would be a gap in the chain.
+		return fmt.Errorf("import data starts at height %d but target "+
+			"tip is at %d, creating a gap",
+			importStartHeight, effectiveTipHeight)
 
-	// If import includes genesis block (starts at 0), verify it matches.
-	if importStartHeight == 0 {
-		err := s.verifyHeadersAtTargetHeight(importStartHeight)
-		if err != nil {
-			return fmt.Errorf("genesis header mismatch: %v", err)
-		}
-		log.Infof("Genesis headers verified, import data will extend " +
-			"chain from genesis")
-	} else {
-		// Import starts at height 1, which connects to genesis.
-		// Validate that the block header at height 1 from the import
-		// source connects with the previous header in the target block
-		// store.
+	case importStartHeight > effectiveTipHeight:
+		// Import data starts immediately after the target tip height.
+		// This is a forward extension.
 		if err := s.validateHeaderConnection(
-			importStartHeight, blockTipHeight, sourceMetadata,
+			importStartHeight, blockTipHeight,
+			sourceMetadata,
 		); err != nil {
 			return fmt.Errorf("failed to validate header "+
 				"connection: %v", err)
 		}
+		log.Infof("Import headers data will extend chain from height "+
+			"%d", importStartHeight)
 
-		log.Info("Target stores contain only genesis block, import " +
-			"data will extend chain from height 1")
+	case importStartHeight <= effectiveTipHeight:
+		// Import data starts before or at the target tip height. This
+		// means there is an overlap, so we need to verify compatibility
+		// using sampling approach for minimal processing time.
+
+		// First we need to determine the overlap range.
+		overlapStart := importStartHeight
+		overlapEnd := min(effectiveTipHeight, importEndHeight)
+
+		// Now we can verify headers at the start of the overlap range.
+		if err = s.verifyHeadersAtTargetHeight(
+			overlapStart, VerifyBlockAndFilter,
+		); err != nil {
+			return err
+		}
+
+		// If overlap range is more than 1 header, we can also verify at
+		// the end.
+		if overlapEnd > overlapStart {
+			if err = s.verifyHeadersAtTargetHeight(
+				overlapEnd, VerifyBlockAndFilter,
+			); err != nil {
+				return err
+			}
+		}
+
+		// If the overlap range is more than 2 headers, also verify at
+		// the middle point.
+		if overlapEnd-overlapStart > 2 {
+			middleHeight := (overlapStart + overlapEnd) / 2
+			if err = s.verifyHeadersAtTargetHeight(
+				middleHeight, VerifyBlockAndFilter,
+			); err != nil {
+				return err
+			}
+		}
+
+		// Validate headers beyond the overlap region if there are any
+		// remaining headers to import.
+		if overlapEnd < importEndHeight {
+			// Ensure the first header from the import source exists
+			// the overlap range properly connects to the existing
+			// chain.
+			if err := s.validateHeaderConnection(
+				overlapEnd+1, blockTipHeight,
+				sourceMetadata,
+			); err != nil {
+				return fmt.Errorf("failed to validate header "+
+					"connection: %v", err)
+			}
+		}
+
+		log.Infof("Sampling validation successful for overlap headers "+
+			"range (%d-%d)", overlapStart, overlapEnd)
 	}
 
 	log.Infof("Chain continuity validation successful: import data "+
@@ -1231,7 +1329,9 @@ func (s *HeadersImport) determineProcessingRegions() (*ProcessingRegions, error)
 //
 // The function retrieves the header from both sources at the given height and
 // verifies they are identical, returning an error if any discrepancy is found.
-func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
+func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32,
+	verifyMode VerifyMode) error {
+
 	// Get header metadata from import souces. We can safely use this header
 	// metadata for both block headers and filter headers since we've
 	// already validated that those header metadata are compatible with each
@@ -1246,6 +1346,50 @@ func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
 	importSourceIndex := targetHeightToImportSourceIndex(
 		height, headerMetadata.StartHeight,
 	)
+
+	switch verifyMode {
+	case VerifyBlockAndFilter:
+		if err := s.verifyBlockHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return err
+		}
+
+		if err := s.verifyFilterHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return err
+		}
+
+		log.Debugf("Headers from import and target (block and filter) "+
+			"sources verified at height %d", height)
+
+	case VerifyBlockOnly:
+		if err := s.verifyBlockHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return err
+		}
+		log.Debugf("Headers from import and target block sources "+
+			"verified at height %d", height)
+
+	case VerifyFilterOnly:
+		if err := s.verifyFilterHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return err
+		}
+		log.Debugf("Headers from import and target filter sources "+
+			"verified at height %d", height)
+	}
+
+	return nil
+}
+
+// verifyBlockHeadersAtTargetHeight ensures block headers at the specified
+// height match exactly between import and target sources.
+func (s *HeadersImport) verifyBlockHeadersAtTargetHeight(height uint32,
+	importSourceIndex uint32) error {
 
 	// Get block header at that index from the import source.
 	importSourceHeader, err := s.BlockHeadersImportSource.GetHeader(
@@ -1283,10 +1427,18 @@ func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			sourceBlkHeaderHash, targetBlkHeaderHash)
 	}
 
-	// Get and verify filter headers. We can safely use the same import
-	// source index used for import source block header store since we've
-	// validated earlier their start height and headers count match exactly.
-	importSourceHeader, err = s.FilterHeadersImportSource.GetHeader(
+	log.Debugf("Headers from import and target block sources verified at "+
+		"height %d", height)
+	return nil
+}
+
+// verifyFilterHeadersAtTargetHeight ensures filter headers at the specified
+// height match exactly between import and target sources.
+func (s *HeadersImport) verifyFilterHeadersAtTargetHeight(height uint32,
+	importSourceIndex uint32) error {
+
+	// Get filter header at the index from the import source.
+	importSourceHeader, err := s.FilterHeadersImportSource.GetHeader(
 		importSourceIndex,
 	)
 	if err != nil {
@@ -1302,7 +1454,7 @@ func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			importSourceHeader)
 	}
 
-	// Get the equivalent filter header from target store.s
+	// Get the equivalent filter header from target store.
 	filterHeaderStore := s.options.TargetFilterHeaderStore
 	targetFilterHeader, err := filterHeaderStore.FetchHeaderByHeight(
 		height,
@@ -1321,16 +1473,230 @@ func (s *HeadersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			sourceFilterHeaderHash, targetFilterHeaderHash)
 	}
 
-	log.Debugf("Headers from %s (block) and %s (filter) verified at "+
-		"height %d", s.BlockHeadersImportSource.GetURI(),
-		s.FilterHeadersImportSource.GetURI(), height)
+	log.Debugf("Headers from import and target filter sources verified at "+
+		"height %d", height)
+	return nil
+}
+
+// processOverlapHeadersRegion processes the headers in the overlap region by
+// either skipping validation (AppendOnly mode) or validating that headers match
+// exactly between import and target sources (ValidateAndAppend mode). When
+// using ValidateAndAppend mode, if any mismatches are found during validation,
+// the import operation is aborted.
+func (s *HeadersImport) processOverlapHeadersRegion(ctx context.Context,
+	region HeaderRegion, result *ImportResult) error {
+
+	if !region.Exists {
+		return nil
+	}
+
+	log.Infof("Validating headers in the overlap region between import "+
+		"and target sources from heights %d to %d", region.Start,
+		region.End)
+
+	switch s.options.OverlapMode {
+	case AppendOnly:
+		// Skip all headers in overlap region.
+		log.Infof("Skipping validating %d headers (block and filter) "+
+			"in overlap region due to %s mode",
+			region.End-region.Start+1, s.options.OverlapMode)
+	case ValidateAndAppend:
+		// Validate all headers in overlap region match. If mismatches
+		// are found during validation, the import operation is aborted.
+		if err := s.validateHeadersExactMatch(
+			ctx, region.Start, region.End, VerifyBlockAndFilter,
+		); err != nil {
+			return fmt.Errorf("overlap region validation failed: "+
+				"%w", err)
+		}
+
+		log.Infof("Successfully validated %d headers "+
+			"(block and filter) in overlap region",
+			region.End-region.Start+1)
+	}
+
+	result.SkippedCount += int(region.End - region.Start + 1)
 
 	return nil
 }
 
-// processNewHeadersRegion imports headers from the specified region into the
-// target stores. This method handles the case where headers exist in the import
-// source but not in the target stores.
+// validateHeadersExactMatch validates all headers in the specified range match
+// exactly between import and target sources.
+//
+// The function heuristically processes sequentially for smaller ranges and uses
+// parallel validation for larger ranges to optimize performance.
+func (s *HeadersImport) validateHeadersExactMatch(ctx context.Context,
+	startHeight, endHeight uint32, verifyMode VerifyMode) error {
+
+	// Calculate the range size.
+	rangeSize := endHeight - startHeight + 1
+
+	// If range is small, heuristically process sequentially.
+	if rangeSize <= 100 {
+		return s.validateHeadersSequential(
+			startHeight, endHeight, verifyMode,
+		)
+	}
+
+	// Create an errgroup with a derived context.
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Set concurrency limit based on CPU cores, but cap reasonably.
+	g.SetLimit(min(runtime.NumCPU(), 8))
+
+	// Queue up all the heights to validate.
+	for height := startHeight; height <= endHeight; height++ {
+		// Add work to the errgroup.
+		g.Go(func() error {
+			// Check if context has been canceled before starting
+			// work.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// Verify headers at this target height.
+			err := s.verifyHeadersAtTargetHeight(height, verifyMode)
+			if err != nil {
+				return fmt.Errorf("header verification failed "+
+					"at height %d: %w", height, err)
+			}
+
+			return nil
+		})
+	}
+
+	// Wait for all verification goroutines to complete or for any error.
+	err := g.Wait()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Validated %d headers in the overlap region between import "+
+		"and target sources from heights %d to %d ",
+		endHeight-startHeight+1, startHeight, endHeight)
+
+	return nil
+}
+
+// validateHeadersSequential performs sequential validation for smaller ranges.
+//
+// The function validates headers sequentially for smaller ranges to optimize
+// performance.
+func (s *HeadersImport) validateHeadersSequential(startHeight,
+	endHeight uint32, verifyMode VerifyMode) error {
+
+	for height := startHeight; height <= endHeight; height++ {
+		err := s.verifyHeadersAtTargetHeight(height, verifyMode)
+		if err != nil {
+			return fmt.Errorf("block and filter header "+
+				"verification failed at height %d: %w", height,
+				err)
+		}
+	}
+
+	return nil
+}
+
+func (s *HeadersImport) processDivergenceHeadersRegion(ctx context.Context,
+	region HeaderRegion, options *ImportOptions,
+	result *ImportResult) error {
+
+	if !region.Exists {
+		return nil
+	}
+
+	log.Infof("Processing divergence region from heights %d to %d for "+
+		"block and filter headers", region.Start, region.End)
+
+	if err := s.validateLeadAndSyncLag(ctx, region, options); err != nil {
+		return fmt.Errorf("divergence region processing failed: %w",
+			err)
+	}
+
+	result.ProcessedCount += int(region.End - region.Start + 1)
+	result.AddedCount += int(region.End - region.Start + 1)
+
+	return nil
+}
+
+// validateLeadAndSyncLag resolves divergence between target stores by
+// validating the leading target store against import source and syncing the
+// lagging target store with headers from the import source.
+func (s *HeadersImport) validateLeadAndSyncLag(ctx context.Context,
+	region HeaderRegion, options *ImportOptions) error {
+
+	// Get the chain tip for the target block header store.
+	_, blockTipHeight, err := options.TargetBlockHeaderStore.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to get target block header chain "+
+			"tip: %w", err)
+	}
+
+	// Get the chain tip for the target filter header store.
+	_, filterTipHeight, err := options.TargetFilterHeaderStore.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to get target filter header chain "+
+			"tip: %w", err)
+	}
+
+	// Determine sync modes based on which store is leading and which is
+	// lagging.
+	syncModes, err := s.determineSyncModes(blockTipHeight, filterTipHeight)
+	if err != nil {
+		return err
+	}
+
+	// Validate headers from the leading store against import source.
+	if err := s.validateHeadersExactMatch(
+		ctx, region.Start, region.End, syncModes.Verify,
+	); err != nil {
+		return fmt.Errorf("failed to validate common block "+
+			"headers between import and target "+
+			"sources: %w", err)
+	}
+
+	// Sync the lagging store with headers from import source.
+	if err := s.appendNewHeaders(
+		region.Start, region.End, syncModes.Append,
+	); err != nil {
+		return fmt.Errorf("failed to sync target header "+
+			"store: %w", err)
+	}
+
+	return nil
+}
+
+// determineSyncModes determines the verification and append modes based on the
+// relative heights of block and filter header stores.
+//
+// NOTE: This is supposed to be called after divergence region has been
+// detected.
+func (s *HeadersImport) determineSyncModes(blockTipHeight,
+	filterTipHeight uint32) (*SyncModes, error) {
+
+	switch {
+	case blockTipHeight > filterTipHeight:
+		return &SyncModes{
+			Verify: VerifyBlockOnly,
+			Append: AppendFilterOnly,
+		}, nil
+	case blockTipHeight < filterTipHeight:
+		return &SyncModes{
+			Verify: VerifyFilterOnly,
+			Append: AppendBlockOnly,
+		}, nil
+	default:
+		return nil, fmt.Errorf("both header stores have "+
+			"equal height (%d) - this indicates a logic error in "+
+			"divergence detection", blockTipHeight)
+	}
+}
+
+// processNewHeadersRegion processes the headers in the new headers region by
+// importing them into the target stores. This method handles the case where
+// headers exist in the import source but not in the target stores.
 func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
 	result *ImportResult) error {
 
@@ -1341,8 +1707,9 @@ func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
 	log.Infof("Adding %d new headers (block and filter) from heights "+
 		"%d to %d", region.End-region.Start+1, region.Start, region.End)
 
-	err := s.appendNewHeaders(region.Start, region.End)
-	if err != nil {
+	if err := s.appendNewHeaders(
+		region.Start, region.End, AppendBlockAndFilter,
+	); err != nil {
 		return fmt.Errorf("failed to append new headers: %w", err)
 	}
 
@@ -1353,7 +1720,9 @@ func (s *HeadersImport) processNewHeadersRegion(region HeaderRegion,
 }
 
 // appendNewHeaders adds new headers from import source.
-func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
+func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32,
+	appendMode AppendMode) error {
+
 	// Get metadata from sources.
 	metadata, err := s.BlockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
@@ -1362,6 +1731,7 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 	}
 
 	totalHeaders := endHeight - startHeight + 1
+
 	log.Infof("Appending %d new headers in batches of %d", totalHeaders,
 		s.options.WriteBatchSizePerRegion)
 
@@ -1382,105 +1752,156 @@ func (s *HeadersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 			batchEnd, metadata.StartHeight,
 		)
 
-		// Read block headers batch.
-		blockHeaders := make(
-			[]headerfs.BlockHeader, 0, batchEnd-batchStart+1,
+		var (
+			blockHeaders  []headerfs.BlockHeader
+			filterHeaders []headerfs.FilterHeader
 		)
-		blockIter := s.BlockHeadersImportSource.Iterator(
-			sourceStartIdx, sourceEndIdx,
-		)
-		defer blockIter.Close()
 
-		for {
-			header, hasMore, err := blockIter.Next()
-			if err != nil {
-				return fmt.Errorf("failed to read block "+
-					"header at height %d: %w",
-					batchStart+uint32(len(blockHeaders)),
-					err)
-			}
+		// Read block headers batch if needed.
+		if appendMode == AppendBlockOnly ||
+			appendMode == AppendBlockAndFilter {
 
-			if header != nil {
-				blkHeader, ok := header.(*BlockHeader)
-				if !ok {
-					return fmt.Errorf("expected "+
-						"BlockHeader type, got %T",
-						header)
+			blockHeaders = make(
+				[]headerfs.BlockHeader, 0,
+				batchEnd-batchStart+1,
+			)
+
+			blockIter := s.BlockHeadersImportSource.Iterator(
+				sourceStartIdx, sourceEndIdx,
+			)
+			defer blockIter.Close()
+
+			for {
+				header, hasMore, err := blockIter.Next()
+				height := batchStart + uint32(len(blockHeaders))
+				if err != nil {
+					return fmt.Errorf("failed to read "+
+						"block header at height %d: %w",
+						height, err)
 				}
 
-				blockHeaders = append(
-					blockHeaders, blkHeader.BlockHeader,
-				)
-			}
+				if header != nil {
+					blkHeader, ok := header.(*BlockHeader)
+					if !ok {
+						return fmt.Errorf("expected "+
+							"BlockHeader type, "+
+							"got %T", header)
+					}
 
-			if !hasMore {
-				break
-			}
-		}
-
-		// Read filter headers batch.
-		filterHeaders := make(
-			[]headerfs.FilterHeader, 0, batchEnd-batchStart+1,
-		)
-		filterIter := s.FilterHeadersImportSource.Iterator(
-			sourceStartIdx, sourceEndIdx,
-		)
-		defer filterIter.Close()
-
-		for {
-			header, hasMore, err := filterIter.Next()
-			if err != nil {
-				return fmt.Errorf("failed to read filter "+
-					"header at height %d: %w",
-					batchStart+uint32(len(filterHeaders)),
-					err)
-			}
-
-			if header != nil {
-				fHeader, ok := header.(*FilterHeader)
-				if !ok {
-					return fmt.Errorf("expected "+
-						"FilterHeader type, got %T",
-						header)
+					blockHeaders = append(
+						blockHeaders,
+						blkHeader.BlockHeader,
+					)
 				}
 
-				filterHeaders = append(
-					filterHeaders, fHeader.FilterHeader,
-				)
+				if !hasMore {
+					break
+				}
 			}
 
-			if !hasMore {
-				break
+			if len(blockHeaders) == 0 {
+				return fmt.Errorf("no block headers read for "+
+					"batch %d-%d", batchStart, batchEnd)
 			}
 		}
 
-		// The length check conditions should never be triggered
-		// during normal import operations as validation occurs earlier.
-		// They serve as sanity checks to catch unexpected
-		// inconsistencies.
-		if len(blockHeaders) != len(filterHeaders) {
-			return fmt.Errorf("mismatch between block headers "+
-				"(%d) and filter headers (%d) for batch %d-%d",
-				len(blockHeaders), len(filterHeaders),
-				batchStart, batchEnd)
-		}
-		if len(blockHeaders) == 0 {
-			return fmt.Errorf("no headers read for "+
-				"batch %d-%d", batchStart, batchEnd)
+		// Read filter headers batch if needed.
+		if appendMode == AppendFilterOnly ||
+			appendMode == AppendBlockAndFilter {
+
+			filterHeaders = make(
+				[]headerfs.FilterHeader, 0,
+				batchEnd-batchStart+1,
+			)
+			filterIter := s.FilterHeadersImportSource.Iterator(
+				sourceStartIdx, sourceEndIdx,
+			)
+			defer filterIter.Close()
+
+			for {
+				header, hasMore, err := filterIter.Next()
+				h := batchStart + uint32(len(filterHeaders))
+				if err != nil {
+					return fmt.Errorf("failed to read "+
+						"filter header at height %d: "+
+						"%w", h, err)
+				}
+
+				if header != nil {
+					fHeader, ok := header.(*FilterHeader)
+					if !ok {
+						return fmt.Errorf("expected "+
+							"FilterHeader type, "+
+							"got %T", header)
+					}
+
+					filterHeaders = append(
+						filterHeaders,
+						fHeader.FilterHeader,
+					)
+				}
+
+				if !hasMore {
+					break
+				}
+			}
+
+			if len(filterHeaders) == 0 {
+				return fmt.Errorf("no filter headers read for "+
+					"batch %d-%d", batchStart, batchEnd)
+			}
+
+			// Check if we are in append filter only mode and
+			// this is the very last batch before updating the last
+			// header hash.
+			isLastBatch := batchEnd+1 > endHeight
+			if appendMode == AppendFilterOnly && isLastBatch {
+				// Get the chain tip from both target stores.
+				tBHS := s.options.TargetBlockHeaderStore
+				lastH, height, err := tBHS.ChainTip()
+				if err != nil {
+					return fmt.Errorf("failed to get "+
+						"target block header chain "+
+						"tip: %w", err)
+				}
+
+				lastBH := headerfs.BlockHeader{
+					BlockHeader: lastH,
+					Height:      height,
+				}
+				setLastFilterHeaderHash(filterHeaders, lastBH)
+			}
 		}
 
-		setLastFilterHeaderHash(filterHeaders, blockHeaders)
+		if appendMode == AppendBlockAndFilter {
+			// The length check conditions should never be triggered
+			// during normal import operations as validation occurs
+			// earlier. They serve as sanity checks to catch
+			// unexpected inconsistencies.
+			if len(blockHeaders) != len(filterHeaders) {
+				return fmt.Errorf("mismatch between block "+
+					"headers (%d) and filter headers (%d) "+
+					"for batch %d-%d", len(blockHeaders),
+					len(filterHeaders), batchStart,
+					batchEnd)
+			}
 
+			// Set the filter header hash.
+			lastBH := blockHeaders[len(blockHeaders)-1]
+			setLastFilterHeaderHash(filterHeaders, lastBH)
+		}
+
+		// Write the headers to the target stores.
 		err := s.writeHeadersToTargetStores(
 			blockHeaders, filterHeaders, batchStart, batchEnd,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to write headers to "+
-				"target stores: %v", err)
+			return fmt.Errorf("failed to write headers to target "+
+				"stores: %v", err)
 		}
 
-		log.Debugf("Wrote headers batch from height "+
-			"%d to %d (%d headers)", batchStart, batchEnd,
+		log.Debugf("Wrote headers batch from height %d to %d "+
+			"(%d headers)", batchStart, batchEnd,
 			batchEnd-batchStart+1)
 
 		// Move to next batch.
@@ -1568,6 +1989,11 @@ type ImportOptions struct {
 	// each batch per region. This controls performance characteristics of
 	// the import.
 	WriteBatchSizePerRegion int
+
+	// OverlapMode defines how to handle headers that overlap between the
+	// import source and existing data in the target stores. Defaults to
+	// AppendOnly.
+	OverlapMode OverlapMode
 }
 
 // Import executes the header import process with the configuration specified in
@@ -1799,13 +2225,12 @@ func AddHeadersImportMetadata(sourceFilePath string, chainType wire.BitcoinNet,
 // to match the block hash of the corresponding block header. This maintains
 // chain tip consistency for the regular tip.
 func setLastFilterHeaderHash(filterHeaders []headerfs.FilterHeader,
-	blockHeaders []headerfs.BlockHeader) {
+	chainTipBlockHeader headerfs.BlockHeader) {
 
 	// We only need to set the block header hash of the last filter
 	// header to maintain chain tip consistency for regular tip.
-	lastIdx := len(filterHeaders) - 1
-	chainTipHash := blockHeaders[lastIdx].BlockHeader.BlockHash()
-	filterHeaders[lastIdx].HeaderHash = chainTipHash
+	chainTipHash := chainTipBlockHeader.BlockHeader.BlockHash()
+	filterHeaders[len(filterHeaders)-1].HeaderHash = chainTipHash
 }
 
 // targetHeightToImportSourceIndex converts the absolute blockchain target

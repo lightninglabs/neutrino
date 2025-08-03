@@ -1065,12 +1065,11 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
 // This tests that Neutrino correctly handles the case where header stores are
-// already populated, skipping the import process and continuing synchronization
-// from its current state.
+// already populated, successfully processing the overlap headers region, and
+// continuing synchronization from its current state.
 //
 // This test validates that the headers import mechanism works correctly both as
-// a way to bootstrap new nodes and when restarting existing nodes,
-// significantly improving sync performance in the former scenario.
+// a way to bootstrap nodes and significantly improving sync performance.
 func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	// Setup context during testing.
 	rootCtx := context.Background()
@@ -1116,7 +1115,9 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	// Set up export service to connect to h1 and download headers.
 	exportSvc, err := neutrino.NewChainService(config)
 	require.NoError(t, err)
-	exportSvc.Start(rootCtx)
+	err = exportSvc.Start(rootCtx)
+	require.NoError(t, err)
+	defer exportSvc.Stop()
 
 	testHarness := &neutrinoHarness{
 		h1:  h1,
@@ -1202,6 +1203,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 			BlockHeadersSource:      blockHeadersImportPath,
 			FilterHeadersSource:     filterHeadersImportPath,
 			WriteBatchSizePerRegion: 1000,
+			OverlapMode:             chainimport.AppendOnly,
 		},
 		AddPeers: nil,
 	}
@@ -1210,7 +1212,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	require.NoError(t, err)
 
 	// Start the import service.
-	importSvc.Start(rootCtx)
+	err = importSvc.Start(rootCtx)
+	require.NoError(t, err)
 	defer importSvc.Stop()
 
 	// Ensure that neutrino initial synced using the imported headers.
@@ -1224,17 +1227,17 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 
 	// Generate an additional 300 blocks on h1. This ensures that when we
 	// sync again, the client will need to fetch these new blocks from the
-	// network. Since the header stores are no longer empty after the first
-	// import, the import process should be skipped and Neutrino should
-	// continue syncing from its current state.
+	// network. Neutrino should continue syncing properly from its current
+	// state.
 	_, err = h1.Client.Generate(300)
 	require.NoError(t, err)
 	t.Log("Syncing again after generating more 300 blocks on h1")
 
 	// Create a new service configuration that includes both the headers
 	// import and a connection to h1. Since the stores already contain data
-	// from the previous import, the import operation should be skipped and
-	// synchronization should continue from the current state.
+	// from the previous import, the import operation should process overlap
+	// headers region properly and synchronization should continue from the
+	// current state.
 	importConfig = neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
@@ -1243,25 +1246,28 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 			BlockHeadersSource:      blockHeadersImportPath,
 			FilterHeadersSource:     filterHeadersImportPath,
 			WriteBatchSizePerRegion: 1000,
+			OverlapMode:             chainimport.ValidateAndAppend,
 		},
 		AddPeers: []string{h1.P2PAddress()},
 	}
 
-	importSvcToBeSkipped, err := neutrino.NewChainService(importConfig)
+	importSvcToBeVerified, err := neutrino.NewChainService(importConfig)
 	require.NoError(t, err)
 
 	// Start the service with p2p network connectivity.
-	importSvcToBeSkipped.Start(rootCtx)
-	defer importSvcToBeSkipped.Stop()
+	err = importSvcToBeVerified.Start(rootCtx)
+	require.NoError(t, err)
+	defer importSvcToBeVerified.Stop()
 
-	// This test doesn't explicitly verify that the import is skipped, but
-	// demonstrates that the service can successfully sync to the chain tip
-	// after the database has already been populated with headers.
+	// This test doesn't explicitly verify that the import handled overlap
+	// headers region unit properly, but demonstrates that the service can
+	// successfully sync to the chain tip after the database has already
+	// been populated with headers without any errors raised.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
 		h3:  nil,
-		svc: importSvcToBeSkipped,
+		svc: importSvcToBeVerified,
 	}
 	testInitialSync(testHarness, t)
 }
@@ -1371,7 +1377,8 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	svc, err := neutrino.NewChainService(config)
 	require.NoError(t, err)
 
-	svc.Start(rootCtx)
+	err = svc.Start(rootCtx)
+	require.NoError(t, err)
 	defer svc.Stop()
 
 	// Create a test harness with the three nodes and the neutrino instance.

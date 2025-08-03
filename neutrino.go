@@ -657,6 +657,11 @@ type HeadersImportConfig struct {
 	// Actual memory usage can vary depending on factors such as database
 	// state, Go garbage collector semantics and activity.
 	WriteBatchSizePerRegion int
+
+	// OverlapMode defines how to handle headers that overlap between the
+	// import source and existing data in the target stores. Defaults to
+	// AppendOnly.
+	OverlapMode chainimport.OverlapMode
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -1676,6 +1681,7 @@ func (s *ChainService) Start(ctx context.Context) error {
 			TargetBlockHeaderStore:  s.BlockHeaders,
 			TargetFilterHeaderStore: s.RegFilterHeaders,
 			WriteBatchSizePerRegion: s.headersImport.WriteBatchSizePerRegion,
+			OverlapMode:             s.headersImport.OverlapMode,
 		}
 		if _, err := options.Import(ctx); err != nil {
 			return err
