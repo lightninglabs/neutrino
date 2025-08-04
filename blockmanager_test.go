@@ -55,7 +55,7 @@ func (m *mockDispatcher) Query(requests []*query.Request,
 
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
-	*headerfs.FilterHeaderStore, error) {
+	headerfs.FilterHeaderStore, error) {
 
 	// Set up the block and filter header stores.
 	tempDir := t.TempDir()
@@ -798,8 +798,11 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 	for _, test := range testCases {
 		// Create a mock block header store. We only need to be able to
 		// serve a header for the target index.
-		blockHeaders := newMockBlockHeaderStore()
-		blockHeaders.heights[targetIndex] = blockHeader
+		mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+
+		mBlockHeaderStore.On("FetchHeaderByHeight", targetIndex).Return(
+			&blockHeader, nil,
+		)
 
 		// We set up the mock queryAllPeers to only respond according to
 		// the active testcase.
@@ -851,7 +854,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		bm := &blockManager{
 			cfg: &blockManagerCfg{
-				BlockHeaders:  blockHeaders,
+				BlockHeaders:  mBlockHeaderStore,
 				queryAllPeers: queryAllPeers,
 			},
 		}

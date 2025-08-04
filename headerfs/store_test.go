@@ -3,6 +3,10 @@ package headerfs
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -16,7 +20,41 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/require"
 )
+
+// Block headers for testing captured from simnet network.
+var blockHdrs = []string{
+	"010000000000000000000000000000000000000000000000000000000000" +
+		"0000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3" +
+		"888a51323a9fb8aa4b1e5e4a45068653ffff7f2002000000",
+	"00000020f67ad7695d9b662a72ff3d8edbbb2de0bfa67b13974bb9910d11" +
+		"6d5cbd863e68c552826d121f12fcb288895d9488d189891ce0a6" +
+		"5a56193ea2ff3d4b99eabb875fac5a68ffff7f2003000000",
+	"000000200582f786cda8187a3bb13c044a70f11a5f299cbdb55dd43744a2" +
+		"de24cef76a72964688cc27da9f45261b8c35b00edea462f26469" +
+		"67fcb6052063d0140a1275de60ac5a68ffff7f2001000000",
+	"00000020f83e8ae2309315ff0a36646e2d43e7aa777b7aaa1eadb4876073" +
+		"e7a8dac11c1dc3a5e71065b6ab83ed8972d277de2670ceed1fc4" +
+		"3fd03f066cc84047d95eeaa360ac5a68ffff7f2002000000",
+	"000000203513820c27ba7b218bb6732e851ef404986f299f44b4275334d5" +
+		"eab0db09710835f6fc14632ebb23e141f680ae6aec6bdf76557b" +
+		"46daf1b4c0160631d89e1ac461ac5a68ffff7f2000000000",
+}
+
+// Filter headers for testing captured from simnet network.
+var filterHdrs = []string{
+	"b2ef0f5c5d790832d79fc9c9a7b3cef02dd94f143c63feba9d836248cad6" +
+		"24cf",
+	"b14a448b043b12401327695318318bbb53ec955e1e7963e3fd569a450448" +
+		"9177",
+	"75ae9eebc6e956fcb4fa00853aec5f252cf0046ed03587feece580386a6c" +
+		"d113",
+	"f99cbb96ca78c36c741b3765d78b22f0c1039add8afa6d2f6284b5cd6ab9" +
+		"d8d6",
+	"33e95706f9580a84e2cb167faf2239079805113cc7d3aaefff194b1ce6e6" +
+		"a26c",
+}
 
 func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 	*blockHeaderStore, error) {
@@ -172,61 +210,224 @@ func TestBlockHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderStoreRecovery tests the block header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestBlockHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the block header
 	// store to recover in the face of a partial batch write (the headers
 	// were written, but the index wasn't updated).
 	cleanUp, db, tempDir, bhs, err := createTestBlockHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
 
 	// First we'll generate a test header chain of length 10, inserting it
 	// into the header store.
 	blockHeaders := createTestBlockHeaderChain(10)
-	if err := bhs.WriteHeaders(blockHeaders...); err != nil {
-		t.Fatalf("unable to write block headers: %v", err)
-	}
+	err = bhs.WriteHeaders(blockHeaders...)
+	require.NoError(t, err)
 
 	// Next, in order to simulate a partial write, we'll roll back the
-	// internal index by 5 blocks.
+	// internal index by 5 blocks all at once.
+
+	// Set new tip to be block 4 (height 4).
+	newTip := blockHeaders[4].BlockHash()
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-1].PrevBlock
-		if err := bhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		// Get headers 5, 6, 7, 8, 9 to truncate.
+		headerIdx := len(blockHeaders) - i - 1
+		headerHash := blockHeaders[headerIdx].BlockHash()
+		headersToTruncate[i] = &headerHash
 	}
+
+	// Truncate all 5 headers at once.
+	err = bhs.truncateIndices(&newTip, headersToTruncate, true)
+	require.NoError(t, err)
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
 	hs, err := NewBlockHeaderStore(tempDir, db, &chaincfg.SimNetParams)
-	if err != nil {
-		t.Fatalf("unable to re-create bhs: %v", err)
-	}
-	bhs = hs.(*blockHeaderStore)
+	require.NoError(t, err)
+
+	bhs, ok := hs.(*blockHeaderStore)
+	require.True(t, ok)
 
 	// The chain tip of this new instance should be of height 5, and match
 	// the 5th to last block header.
 	tipHash, tipHeight, err := bhs.ChainTip()
-	if err != nil {
-		t.Fatalf("unable to get chain tip: %v", err)
-	}
-	if tipHeight != 5 {
-		t.Fatalf("tip height mismatch: expected %v, got %v", 5, tipHeight)
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), tipHeight)
 	prevHeaderHash := blockHeaders[5].BlockHash()
 	tipBlockHash := tipHash.BlockHash()
-	if bytes.Equal(prevHeaderHash[:], tipBlockHash[:]) {
-		t.Fatalf("block hash mismatch: expected %v, got %v",
-			prevHeaderHash, tipBlockHash)
+	require.NotEqual(t, tipBlockHash, prevHeaderHash)
+}
+
+// TestBlockHeaderStoreOnDBWriteRecovery tests the block header store's ability
+// to rollback block header file store on db write failure.
+func TestBlockHeaderStoreOnDBWriteRecovery(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		blockHeaderStore    BlockHeaderStore
+		db                  walletdb.DB
+		blockHeadersToWrite []BlockHeader
+		cleanup             func()
+		err                 error
+	}
+	type Verify struct {
+		tc               *testing.T
+		blockHeaderStore BlockHeaderStore
+		db               walletdb.DB
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "RollbackBlockHeadersOnDBWriteFailure",
+			prep: func() Prep {
+				// Prep target header stores.
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				bHS, err := NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since NewBlockHeaderStore already
+				// wrote it.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make([]BlockHeader, nBHs-1)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					if err != nil {
+						return Prep{
+							cleanup: cleanup,
+							err:     err,
+						}
+					}
+					blkHdrsToWrite[i-1] = *h
+				}
+
+				bS := bHS.(*blockHeaderStore)
+
+				// Mock wallet db to trigger the db update
+				// failure.
+				mWalletDB := &MockWalletDB{}
+
+				mWalletDB.On("BeginReadWriteTx").Return(
+					nil, errors.New("I/O write error"),
+				)
+
+				bS.db = mWalletDB
+
+				return Prep{
+					blockHeaderStore:    bHS,
+					db:                  db,
+					blockHeadersToWrite: blkHdrsToWrite,
+					cleanup:             cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Restore the original wallet db.
+				bS, ok := v.blockHeaderStore.(*blockHeaderStore)
+				require.True(v.tc, ok)
+				bS.db = v.db
+
+				// Verify that calling the chain tip of the
+				// block header store doesn't trigger target
+				// height not in index error.
+				chainTipB, height, err := bS.ChainTip()
+				require.NoError(t, err)
+
+				// Since we have wrote 4 block headers and those
+				// rolledback on db write failure, we can expect
+				// the chain tip height to be 0.
+				require.Equal(v.tc, uint32(0), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+
+				// Verify that the block header file contains
+				// only the genesis header of size 80 bytes.
+				fileInfo, err := bS.file.Stat()
+				require.NoError(v.tc, err)
+				require.Equal(v.tc, int64(80), fileInfo.Size())
+			},
+			expectErr: true,
+			expectErrMsg: "failed to add block headers to db: " +
+				"I/O write error",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.blockHeaderStore
+			err := store.WriteHeaders(prep.blockHeadersToWrite...)
+			verify := Verify{
+				tc:               t,
+				blockHeaderStore: prep.blockHeaderStore,
+				db:               prep.db,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
 	}
 }
 
-func createTestFilterHeaderStore() (func(), walletdb.DB, string, *FilterHeaderStore, error) {
-	tempDir, err := ioutil.TempDir("", "store_test")
+//nolint:lll
+func createTestFilterHeaderStore() (func(), walletdb.DB, string, FilterHeaderStore, error) {
+	tempDir, err := os.MkdirTemp("", "store_test")
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -266,13 +467,12 @@ func createTestFilterHeaderChain(numHeaders uint32) []FilterHeader {
 }
 
 func TestFilterHeaderStoreOperations(t *testing.T) {
-	cleanUp, _, _, fhs, err := createTestFilterHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	cleanUp, _, _, fS, err := createTestFilterHeaderStore()
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
+
+	fhs, ok := fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	rand.Seed(time.Now().Unix())
 
@@ -380,23 +580,30 @@ func TestFilterHeaderStoreOperations(t *testing.T) {
 	}
 }
 
+// TestFilterHeaderStoreRecovery tests the filter header store's ability to
+// recover from a partial write scenario. It simulates a situation where headers
+// were written to the database but the index wasn't fully updated
+// (which could happen if the system crashes during an update). The test writes
+// 10 headers, then intentionally corrupts the database by rolling back the
+// index by 5 blocks all at once. It then recreates the header store and
+// verifies that the recovery logic correctly detects the inconsistency and
+// restores the index to match the last properly indexed header.
 func TestFilterHeaderStoreRecovery(t *testing.T) {
 	// In this test we want to exercise the ability of the filter header
 	// store to recover in the face of a partial batch write (the headers
 	// were written, but the index wasn't updated).
-	cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
-	if cleanUp != nil {
-		defer cleanUp()
-	}
-	if err != nil {
-		t.Fatalf("unable to create new block header store: %v", err)
-	}
+	cleanUp, db, tempDir, fS, err := createTestFilterHeaderStore()
+	t.Cleanup(cleanUp)
+	require.NoError(t, err)
+
+	fhs, ok := fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	blockHeaders := createTestFilterHeaderChain(10)
 
 	// We simulate the expected behavior of the block headers being written
 	// to disk before the filter headers are.
-	if err := walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(fhs.db, func(tx walletdb.ReadWriteTx) error {
 		rootBucket := tx.ReadWriteBucket(indexBucket)
 
 		for _, header := range blockHeaders {
@@ -410,47 +617,188 @@ func TestFilterHeaderStoreRecovery(t *testing.T) {
 		}
 
 		return nil
-	}); err != nil {
-		t.Fatalf("unable to pre-load block index: %v", err)
-	}
+	})
+	require.NoError(t, err, "unable to pre-load block index")
 
-	// Next, we'll insert the filter header chain itself in to the
-	// database.
-	if err := fhs.WriteHeaders(blockHeaders...); err != nil {
-		t.Fatalf("unable to write block headers: %v", err)
-	}
+	// Next, we'll insert the filter header chain itself in to the database.
+	err = fhs.WriteHeaders(blockHeaders...)
+	require.NoError(t, err)
 
 	// Next, in order to simulate a partial write, we'll roll back the
-	// internal index by 5 blocks.
+	// internal index by 5 blocks all at once.
+
+	// Set new tip to be block 4.
+	newTip := blockHeaders[4].HeaderHash
+
+	// Create a slice of headers to truncate (headers 5-9).
+	headersToTruncate := make([]*chainhash.Hash, 5)
 	for i := 0; i < 5; i++ {
-		newTip := blockHeaders[len(blockHeaders)-i-2].HeaderHash
-		if err := fhs.truncateIndex(&newTip, true); err != nil {
-			t.Fatalf("unable to truncate index: %v", err)
-		}
+		// This gives us indices 5, 6, 7, 8, 9.
+		headerIdx := 5 + i
+		headerHash := blockHeaders[headerIdx].HeaderHash
+		headersToTruncate[i] = &headerHash
 	}
+
+	// Truncate all 5 headers at once.
+	err = fhs.truncateIndices(&newTip, headersToTruncate, true)
+	require.NoError(t, err)
 
 	// Next, we'll re-create the block header store in order to trigger the
 	// recovery logic.
-	fhs, err = NewFilterHeaderStore(
+	fS, err = NewFilterHeaderStore(
 		tempDir, db, RegularFilter, &chaincfg.SimNetParams, nil,
 	)
-	if err != nil {
-		t.Fatalf("unable to re-create bhs: %v", err)
-	}
+	require.NoError(t, err)
+
+	fhs, ok = fS.(*filterHeaderStore)
+	require.True(t, ok)
 
 	// The chain tip of this new instance should be of height 5, and match
 	// the 5th to last filter header.
 	tipHash, tipHeight, err := fhs.ChainTip()
-	if err != nil {
-		t.Fatalf("unable to get chain tip: %v", err)
-	}
-	if tipHeight != 5 {
-		t.Fatalf("tip height mismatch: expected %v, got %v", 5, tipHeight)
-	}
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), tipHeight)
 	prevHeaderHash := blockHeaders[5].FilterHash
-	if bytes.Equal(prevHeaderHash[:], tipHash[:]) {
-		t.Fatalf("block hash mismatch: expected %v, got %v",
-			prevHeaderHash, tipHash[:])
+	require.NotEqual(t, tipHash, prevHeaderHash)
+}
+
+// TestFilterHeaderStoreDBWriteRecovery tests the filter header store's ability
+// to rollback filter header file store on db write failure.
+func TestFilterHeaderStoreDBWriteRecovery(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		filterHeaderStore    FilterHeaderStore
+		db                   walletdb.DB
+		filterHeadersToWrite []FilterHeader
+		cleanup              func()
+		err                  error
+	}
+	type Verify struct {
+		tc                *testing.T
+		filterHeaderStore FilterHeaderStore
+		db                walletdb.DB
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "RollbackFilterHeadersOnDBWriteFailure",
+			prep: func() Prep {
+				// Prep target header stores.
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				fHS, err := NewFilterHeaderStore(
+					tempDir, db, RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since NewFilterHeaderStore already
+				// wrote it.
+				nFHs := len(filterHdrs)
+				filtHdrsToWrite := make([]FilterHeader, nFHs-1)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					if err != nil {
+						return Prep{
+							cleanup: cleanup,
+							err:     err,
+						}
+					}
+					filtHdrsToWrite[i-1] = *h
+				}
+
+				fS := fHS.(*filterHeaderStore)
+
+				// Mock wallet db to trigger the db update
+				// failure.
+				mWalletDB := &MockWalletDB{}
+
+				mWalletDB.On("BeginReadWriteTx").Return(
+					nil, errors.New("I/O write error"),
+				)
+
+				fS.db = mWalletDB
+
+				return Prep{
+					filterHeaderStore:    fHS,
+					db:                   db,
+					filterHeadersToWrite: filtHdrsToWrite,
+					cleanup:              cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Restore the original wallet db.
+				fHS := v.filterHeaderStore
+				fS, ok := fHS.(*filterHeaderStore)
+				require.True(v.tc, ok)
+				fS.db = v.db
+
+				// Verify that the filter header file contains
+				// only the genesis header of size 32 bytes.
+				fileInfo, err := fS.file.Stat()
+				require.NoError(v.tc, err)
+				require.Equal(v.tc, int64(32), fileInfo.Size())
+			},
+			expectErr: true,
+			expectErrMsg: "failed to add filter headers to db: " +
+				"I/O write error",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.filterHeaderStore
+			err := store.WriteHeaders(prep.filterHeadersToWrite...)
+			verify := Verify{
+				tc:                t,
+				filterHeaderStore: prep.filterHeaderStore,
+				db:                prep.db,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
 	}
 }
 
@@ -527,11 +875,11 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 	filterHeaderChain := createTestFilterHeaderChain(chainTip)
 
 	setup := func(t *testing.T) (func(), string, walletdb.DB) {
-		cleanUp, db, tempDir, fhs, err := createTestFilterHeaderStore()
-		if err != nil {
-			t.Fatalf("unable to create new filter header store: %v",
-				err)
-		}
+		cleanUp, db, tempDir, fS, err := createTestFilterHeaderStore()
+		require.NoError(t, err)
+
+		fhs, ok := fS.(*filterHeaderStore)
+		require.True(t, ok)
 
 		// We simulate the expected behavior of the block headers being
 		// written to disk before the filter headers are.
@@ -599,8 +947,8 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		success := t.Run(testCase.name, func(t *testing.T) {
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
 			// We'll start the test by setting up our required
 			// dependencies.
 			cleanUp, tempDir, db := setup(t)
@@ -609,30 +957,258 @@ func TestFilterHeaderStateAssertion(t *testing.T) {
 			// We'll then re-initialize the filter header store with
 			// its expected assertion.
 			fhs, err := NewFilterHeaderStore(
-				tempDir, db, RegularFilter, &chaincfg.SimNetParams,
-				testCase.headerAssertion,
+				tempDir, db, RegularFilter,
+				&chaincfg.SimNetParams, tc.headerAssertion,
 			)
-			if err != nil {
-				t.Fatalf("unable to make new fhs: %v", err)
-			}
+			require.NoError(t, err)
 
 			// If the assertion failed, we should expect the tip of
 			// the chain to no longer exist as the state should've
 			// been removed.
 			_, err = fhs.FetchHeaderByHeight(chainTip)
-			if testCase.shouldRemove {
-				if _, ok := err.(*ErrHeaderNotFound); !ok {
-					t.Fatal("expected file to be removed")
-				}
-			}
-			if !testCase.shouldRemove && err != nil {
-				t.Fatal("expected file to not be removed")
+			if tc.shouldRemove {
+				_, ok := err.(*ErrHeaderNotFound)
+				require.True(
+					t, ok, "expected file to be removed",
+				)
+			} else {
+				// When file shouldn't be removed, we expect
+				// no error.
+				msg := "expected no error when file should " +
+					"not be removed"
+				require.NoError(t, err, msg)
 			}
 		})
-		if !success {
-			break
-		}
 	}
 }
 
 // TODO(roasbeef): combined re-org scenarios
+
+// TestRollbackBlockHeaders tests that we're able to rollback block headers
+// successfully from the block header store.
+func TestRollbackBlockHeaders(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		blockHeaderStore BlockHeaderStore
+		cleanup          func()
+		err              error
+	}
+	type Verify struct {
+		tc               *testing.T
+		blockHeaderStore BlockHeaderStore
+		blockStamp       *BlockStamp
+	}
+	rollbackPrep := func() Prep {
+		// Prep target header stores.
+		tempDir := t.TempDir()
+		c1 := func() {
+			os.RemoveAll(tempDir)
+		}
+
+		dbPath := filepath.Join(tempDir, "test.db")
+		db, err := walletdb.Create(
+			"bdb", dbPath, true, time.Second*10,
+		)
+		cleanup := func() {
+			db.Close()
+			c1()
+		}
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		bHS, err := NewBlockHeaderStore(
+			tempDir, db, &chaincfg.SimNetParams,
+		)
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		// Prep block headers to write to the target headers store.
+		// Ignore the genesis block header since NewBlockHeaderStore
+		// already wrote it.
+		nBHs := len(blockHdrs)
+		blkHdrsToWrite := make([]BlockHeader, nBHs-1)
+		for i := 1; i < nBHs; i++ {
+			blockHdr := blockHdrs[i]
+			h, err := constructBlkHdr(
+				blockHdr, uint32(i),
+			)
+			if err != nil {
+				return Prep{
+					cleanup: cleanup,
+					err:     err,
+				}
+			}
+			blkHdrsToWrite[i-1] = *h
+		}
+
+		// Write block headers to the store.
+		err = bHS.WriteHeaders(blkHdrsToWrite...)
+		if err != nil {
+			return Prep{
+				cleanup: cleanup,
+				err:     err,
+			}
+		}
+
+		return Prep{
+			blockHeaderStore: bHS,
+			cleanup:          cleanup,
+		}
+	}
+	testCases := []struct {
+		name         string
+		nHeaders     uint32
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name:      "ErrorOnRollingbackGenesisHeader",
+			nHeaders:  uint32(len(blockHdrs)),
+			prep:      rollbackPrep,
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("cannot roll back %d "+
+				"headers when chain height is %d",
+				len(blockHdrs), len(blockHdrs)-1),
+		},
+		{
+			name:      "ErrorOnRollingbackBeyondGenesisHeader",
+			nHeaders:  uint32(len(blockHdrs) + 1),
+			prep:      rollbackPrep,
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("cannot roll back %d "+
+				"headers when chain height is %d",
+				len(blockHdrs)+1, len(blockHdrs)-1),
+		},
+		{
+			name:     "NoErrorOnRollingbackNoHeaders",
+			nHeaders: 0,
+			prep:     rollbackPrep,
+			verify:   func(Verify) {},
+		},
+		{
+			name:     "RollbackHeadersSuccessfully",
+			nHeaders: uint32(len(blockHdrs) - 1),
+			prep:     rollbackPrep,
+			verify: func(v Verify) {
+				// Verify chain tip of the block header store.
+				bHS := v.blockHeaderStore
+				chainTipB, height, err := bHS.ChainTip()
+				require.NoError(t, err)
+
+				// Since we have wrote 4 headers and those
+				// rolledback on filter headers write failure,
+				// we can expect the chain tip height to be 0.
+				require.Equal(v.tc, uint32(0), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+
+				// Assert that the known blockstamp height
+				// currently equals the genesis header height.
+				require.Equal(t, int32(0), v.blockStamp.Height)
+
+				// Assert that the known blockstamp hash equals
+				// the genesis header hash.
+				require.Equal(
+					t, chainTipBEx.BlockHash(),
+					v.blockStamp.Hash,
+				)
+
+				// Assert that the know blockstamp timestamp
+				// equals the genesis header timestamp.
+				require.Equal(
+					t, chainTipBEx.Timestamp,
+					v.blockStamp.Timestamp,
+				)
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			store := prep.blockHeaderStore
+			blockStamp, err := store.RollbackBlockHeaders(
+				tc.nHeaders,
+			)
+			verify := Verify{
+				tc:               t,
+				blockHeaderStore: prep.blockHeaderStore,
+				blockStamp:       blockStamp,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// constructBlkHdr constructs a block header from a hex string and height.
+func constructBlkHdr(blockHeaderHex string,
+	height uint32) (*BlockHeader, error) {
+
+	buff, err := hex.DecodeString(blockHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode block header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+
+	// Deserialize block header.
+	bH := &BlockHeader{
+		BlockHeader: &wire.BlockHeader{},
+		Height:      height,
+	}
+	if err := bH.Deserialize(reader); err != nil {
+		return nil, fmt.Errorf("failed to deserialize block "+
+			"header: %v", err)
+	}
+
+	return bH, nil
+}
+
+// constructFilterHdr constructs a filter header from a hex string and height.
+func constructFilterHdr(filterHeaderHex string,
+	height uint32) (*FilterHeader, error) {
+
+	buff, err := hex.DecodeString(filterHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode filter header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+
+	// Deserialize filter header.
+	fH := &FilterHeader{
+		Height: height,
+	}
+	if _, err := io.ReadFull(reader, fH.FilterHash[:]); err != nil {
+		return nil, fmt.Errorf("failed to read filter hash: %w", err)
+	}
+
+	return fH, nil
+}

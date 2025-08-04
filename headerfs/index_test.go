@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stretchr/testify/require"
 )
 
 func createTestIndex(t testing.TB) (func(), *headerIndex, error) {
@@ -43,6 +45,16 @@ func createTestIndex(t testing.TB) (func(), *headerIndex, error) {
 	return cleanUp, filterDB, nil
 }
 
+// TestAddHeadersIndexRetrieve tests the header index functionality by verifying
+// the writing of random headers, ensuring the database tip matches the last
+// inserted header, checking each header can be retrieved by hash, and testing
+// index truncation.
+// It specifically exercises the truncateIndices method with an explicit list of
+// headers to remove, ensuring proper index maintenance when headers are removed
+// from the chain. The test first writes a batch of headers, verifies the chain
+// tip, confirms retrieval by hash for all entries, truncates the last header,
+// and finally verifies the tip has been properly updated to the second-to-last
+// entry.
 func TestAddHeadersIndexRetrieve(t *testing.T) {
 	cleanUp, hIndex, err := createTestIndex(t)
 	defer cleanUp()
@@ -90,8 +102,12 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 	// Next if we truncate the index by one, then we should end up at the
 	// second to last entry for the tip.
 	newTip := headerIndex[numHeaders-2]
-	if err := hIndex.truncateIndex(&newTip.hash, true); err != nil {
-		t.Fatalf("unable to truncate index: %v", err)
+
+	// Truncate just the last header.
+	headersToTruncate := []*chainhash.Hash{&lastEntry.hash}
+	err = hIndex.truncateIndices(&newTip.hash, headersToTruncate, true)
+	if err != nil {
+		t.Fatalf("unable to truncate indices: %v", err)
 	}
 
 	// This time the database tip should be the _second_ to last entry
@@ -113,7 +129,11 @@ func TestAddHeadersIndexRetrieve(t *testing.T) {
 
 // TestHeaderStorageFallback makes sure that the changes to the header storage
 // location in the bbolt database for reduced memory consumption don't impact
-// existing users that already have entries in their database.
+// existing users that already have entries in their database. The test verifies
+// compatibility with both old format headers stored directly in the root bucket
+// and new format headers (stored in sub-buckets). It tests reading from both
+// formats and ensures that the truncation functionality correctly handles
+// removing headers from either storage format.
 func TestHeaderStorageFallback(t *testing.T) {
 	cleanUp, hIndex, err := createTestIndex(t)
 	if err != nil {
@@ -184,49 +204,95 @@ func TestHeaderStorageFallback(t *testing.T) {
 		}
 	}
 
-	// And finally, we trim the chain all the way down to the first header.
-	// To do so, we first need to make sure the tip points to the last entry
-	// we added.
-	lastEntry := newHeaderEntries[len(newHeaderEntries)-1]
-	if err := hIndex.truncateIndex(&lastEntry.hash, false); err != nil {
-		t.Fatalf("error setting new tip: %v", err)
+	// Now we'll test the truncation functionality by truncating all the way
+	// back to the first old header. We'll do this in steps to verify the
+	// truncation works properly on both new and old format headers.
+
+	// First, set the chain tip to the last new header without removing
+	// anything.
+	lastNewHeader := newHeaderEntries[len(newHeaderEntries)-1]
+	err = hIndex.truncateIndices(&lastNewHeader.hash, nil, false)
+	require.NoError(t, err)
+
+	// Next, truncate all new headers except the first one.
+	truncationPoint := newHeaderEntries[0]
+	headersToTruncate := make([]*chainhash.Hash, 0, len(newHeaderEntries)-1)
+	for i := 1; i < len(newHeaderEntries); i++ {
+		headersToTruncate = append(
+			headersToTruncate, &newHeaderEntries[i].hash,
+		)
 	}
-	for _, header := range newHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
-			t.Fatalf("error truncating tip: %v", err)
+	err = hIndex.truncateIndices(
+		&truncationPoint.hash, headersToTruncate, true,
+	)
+	require.NoError(t, err)
+
+	// Verify that only the first new header remains and all others
+	// are gone.
+	for i, header := range newHeaderEntries {
+		height, err := hIndex.heightFromHash(&header.hash)
+		if i == 0 {
+			// First header should still be there.
+			msg := "first new header should still exist"
+			require.NoError(t, err, msg)
+			require.Equal(t, header.height, height)
+			continue
 		}
-	}
-	for _, header := range oldHeaderEntries {
-		if err := hIndex.truncateIndex(&header.hash, true); err != nil {
-			t.Fatalf("error truncating tip: %v", err)
+
+		if err == nil {
+			// All other headers should be gone.
+			msg := fmt.Sprintf("header at index %d should be "+
+				"deleted, but still exists", i)
+			require.Fail(t, msg)
 		}
 	}
 
-	// All the headers except the very last should now be deleted.
-	for i := 0; i < len(oldHeaderEntries)-1; i++ {
-		header := oldHeaderEntries[i]
-		if _, err := hIndex.heightFromHash(&header.hash); err == nil {
-			t.Fatalf("expected error reading old entry %x",
-				header.hash[:])
-		}
-	}
-	for _, header := range newHeaderEntries {
-		if _, err := hIndex.heightFromHash(&header.hash); err == nil {
-			t.Fatalf("expected error reading old entry %x",
-				header.hash[:])
-		}
+	// Now truncate back to the last old header.
+	truncationPoint = oldHeaderEntries[len(oldHeaderEntries)-1]
+	headersToTruncate = []*chainhash.Hash{&newHeaderEntries[0].hash}
+	err = hIndex.truncateIndices(
+		&truncationPoint.hash, headersToTruncate, true,
+	)
+	require.NoError(t, err, "error truncating to old headers")
+
+	// Verify all new headers are gone.
+	for i, header := range newHeaderEntries {
+		_, err := hIndex.heightFromHash(&header.hash)
+		msg := fmt.Sprintf("new header at index %d should be deleted, "+
+			"but still exists", i)
+		require.Error(t, err, msg)
 	}
 
-	// The last entry should still be there.
-	lastEntry = oldHeaderEntries[len(oldHeaderEntries)-1]
-	height, err := hIndex.heightFromHash(&lastEntry.hash)
-	if err != nil {
-		t.Fatalf("error reading old entry: %v", err)
+	// Finally, truncate to the first old header.
+	truncationPoint = oldHeaderEntries[0]
+	headersToTruncate = make([]*chainhash.Hash, 0, len(oldHeaderEntries)-1)
+	for i := 1; i < len(oldHeaderEntries); i++ {
+		headersToTruncate = append(
+			headersToTruncate, &oldHeaderEntries[i].hash,
+		)
 	}
+	err = hIndex.truncateIndices(
+		&truncationPoint.hash, headersToTruncate, true,
+	)
+	require.NoError(t, err, "error truncating to old headers")
 
-	if height != lastEntry.height {
-		t.Fatalf("unexpected height, got %d wanted %d", height,
-			lastEntry.height)
+	// Verify only the first old header remains.
+	for i, header := range oldHeaderEntries {
+		height, err := hIndex.heightFromHash(&header.hash)
+		if i == 0 {
+			// First header should still be there.
+			msg := "first old header should still exist"
+			require.NoError(t, err, msg)
+			require.Equal(t, header.height, height)
+			continue
+		}
+
+		if err == nil {
+			// All other headers should be gone.
+			msg := fmt.Sprintf("old header at index %d should be "+
+				"deleted, but still exists", i)
+			require.Fail(t, msg)
+		}
 	}
 }
 

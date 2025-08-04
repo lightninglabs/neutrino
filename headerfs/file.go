@@ -50,19 +50,11 @@ func (h *headerStore) appendRaw(header []byte) error {
 // amount of bytes read past the seek distance is determined by the specified
 // header type.
 func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
-	var headerSize uint32
-
-	// Based on the defined header type, we'll determine the number of
-	// bytes that we need to read past the sync point.
-	switch h.indexType {
-	case Block:
-		headerSize = 80
-
-	case RegularFilter:
-		headerSize = 32
-
-	default:
-		return nil, fmt.Errorf("unknown index type: %v", h.indexType)
+	// Based on the defined header type, we'll determine the number of bytes
+	// that we need to read past the sync point.
+	headerSize, err := h.indexType.Size()
+	if err != nil {
+		return nil, err
 	}
 
 	// TODO(roasbeef): add buffer pool
@@ -140,7 +132,7 @@ func (h *blockHeaderStore) readHeader(height uint32) (wire.BlockHeader, error) {
 
 // readHeader reads a single filter header at the specified height from the
 // flat files on disk.
-func (f *FilterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
+func (f *filterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
 	seekDistance := uint64(height) * 32
 
 	rawHeader, err := f.readRaw(seekDistance)
@@ -158,7 +150,7 @@ func (f *FilterHeaderStore) readHeader(height uint32) (*chainhash.Hash, error) {
 //
 // NOTE: The end height is _inclusive_ so we'll fetch all headers from the
 // startHeight up to the end height, including the final header.
-func (f *FilterHeaderStore) readHeaderRange(startHeight uint32,
+func (f *filterHeaderStore) readHeaderRange(startHeight uint32,
 	endHeight uint32) ([]chainhash.Hash, error) {
 
 	// Based on the defined header type, we'll determine the number of

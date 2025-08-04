@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -69,11 +70,25 @@ type BlockHeaderStore interface {
 	// single atomic transaction.
 	WriteHeaders(...BlockHeader) error
 
+	// RollbackBlockHeaders rolls back a specified number of headers from
+	// the tip of the chain. It removes the most recent 'numHeaders' from
+	// the block headers file and updates the corresponding indices. This
+	// method is used during blockchain reorganizations to remove headers
+	// that are no longer part of the main chain. The function will return
+	// an error if the rollback would reach or go before the genesis block
+	// (height 0). The information about the new header tip after truncation
+	// is returned.
+	RollbackBlockHeaders(numHeaders uint32) (*BlockStamp, error)
+
 	// RollbackLastBlock rolls back the BlockHeaderStore by a _single_
 	// header. This method is meant to be used in the case of re-org which
 	// disconnects the latest block header from the end of the main chain.
 	// The information about the new header tip after truncation is
 	// returned.
+	//
+	// NOTE: This function is maintained for backward compatibility since it
+	// is a publicly exposed function. It now internally utilizes
+	// RollbackBlockHeaders API.
 	RollbackLastBlock() (*BlockStamp, error)
 }
 
@@ -100,6 +115,70 @@ type File interface {
 	Stat() (os.FileInfo, error)
 	Sync() error
 	Truncate(size int64) error
+
+	// Returns the name of the file.
+	Name() string
+}
+
+type headerFile struct {
+	file File
+}
+
+// truncateHeaders truncates one or more headers from the end of the header
+// file. This can be used in the case of a re-org to remove headers from the end
+// of the main chain.
+//
+// The numHeaders parameter specifies how many headers to truncate. If
+// numHeaders is 1, this is equivalent to the old singleTruncate behavior.
+//
+// This function handles platform-specific differences in file truncation. On
+// Windows, the file is closed, truncated, and reopened due to Windows
+// limitations on truncating open files. On other platforms, the file is
+// truncated directly without closing.
+func (h *headerFile) truncateHeaders(numHeaders uint32,
+	headerType HeaderType) error {
+
+	// If numHeaders is 0, treat it as a no-op and return no error.
+	if numHeaders == 0 {
+		return nil
+	}
+
+	// In order to truncate the file, we'll need to grab the absolute size
+	// of the file as it stands currently.
+	fileInfo, err := h.file.Stat()
+	if err != nil {
+		return err
+	}
+	fileSize := fileInfo.Size()
+
+	// Calculate the total bytes to truncate based on number of headers.
+	headerTypeSize, err := headerType.Size()
+	if err != nil {
+		return err
+	}
+	truncateLength := int64(numHeaders) * int64(headerTypeSize)
+
+	// Finally, we'll use both of these values to calculate the new size of
+	// the file and truncate it accordingly.
+	newSize := fileSize - truncateLength
+
+	// On Windows, we need to close, truncate, and reopen the file.
+	if runtime.GOOS == "windows" {
+		fileName := h.file.Name()
+		if err = h.file.Close(); err != nil {
+			return err
+		}
+
+		if err = os.Truncate(fileName, newSize); err != nil {
+			return err
+		}
+
+		fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
+		h.file, err = os.OpenFile(fileName, fileFlags, 0644)
+		return err
+	}
+
+	return h.file.Truncate(newSize)
 }
 
 // headerStore combines a on-disk set of headers within a flat file in addition
@@ -112,9 +191,7 @@ type File interface {
 type headerStore struct {
 	mtx sync.RWMutex // nolint:structcheck // false positive because used as embedded struct only
 
-	fileName string
-
-	file File
+	*headerFile
 
 	*headerIndex
 }
@@ -124,6 +201,8 @@ type headerStore struct {
 // file will be created as necessary.
 func newHeaderStore(db walletdb.DB, filePath string,
 	hType HeaderType) (*headerStore, error) {
+
+	var headerFile = &headerFile{}
 
 	var flatFileName string
 	switch hType {
@@ -140,10 +219,11 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	// We'll open the file, creating it if necessary and ensuring that all
 	// writes are actually appends to the end of the file.
 	fileFlags := os.O_RDWR | os.O_APPEND | os.O_CREATE
-	headerFile, err := os.OpenFile(flatFileName, fileFlags, 0644)
+	file, err := os.OpenFile(flatFileName, fileFlags, 0644)
 	if err != nil {
 		return nil, err
 	}
+	headerFile.file = file
 
 	// With the file open, we'll then create the header index so we can
 	// have random access into the flat files.
@@ -153,8 +233,7 @@ func newHeaderStore(db walletdb.DB, filePath string,
 	}
 
 	return &headerStore{
-		fileName:    flatFileName,
-		file:        headerFile,
+		headerFile:  headerFile,
 		headerIndex: index,
 	}, nil
 }
@@ -240,12 +319,9 @@ func NewBlockHeaderStore(filePath string, db walletdb.DB,
 
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
-	for fileHeight > tipHeight {
-		if err := bhs.singleTruncate(); err != nil {
-			return nil, err
-		}
-
-		fileHeight--
+	err = bhs.truncateHeaders(fileHeight-tipHeight, bhs.indexType)
+	if err != nil {
+		return nil, err
 	}
 
 	return bhs, nil
@@ -331,14 +407,22 @@ func (h *blockHeaderStore) HeightFromHash(hash *chainhash.Hash) (uint32, error) 
 	return h.heightFromHash(hash)
 }
 
-// RollbackLastBlock rollsback both the index, and on-disk header file by a
-// _single_ header. This method is meant to be used in the case of re-org which
-// disconnects the latest block header from the end of the main chain. The
-// information about the new header tip after truncation is returned.
+// RollbackBlockHeaders removes the specified number of block headers from the
+// end of the chain. It returns a BlockStamp representing the new chain tip. If
+// numHeaders is 0, it returns an empty BlockStamp without performing any
+// operations.
 //
-// NOTE: Part of the BlockHeaderStore interface.
-func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
-	// Lock store for write.
+// The function ensures rollback doesn't remove or go beyond the genesis block
+// (height 0). It determines the current chain tip height, reads the header
+// range to be removed along with the new tip header, truncates the headers file
+// to remove the specified number of headers, and updates the header indices to
+// reflect the new chain tip.
+func (h *blockHeaderStore) RollbackBlockHeaders(n uint32) (*BlockStamp, error) {
+	if n == 0 {
+		return &BlockStamp{}, nil
+	}
+
+	// Lock store for rollback.
 	h.mtx.Lock()
 	defer h.mtx.Unlock()
 
@@ -348,31 +432,54 @@ func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
 		return nil, err
 	}
 
+	// Ensure the rollback doesn't remove or go beyond the genesis block.
+	if n > chainTipHeight {
+		return nil, fmt.Errorf("cannot roll back %d headers when "+
+			"chain height is %d", n, chainTipHeight)
+	}
+
 	// With this height obtained, we'll use it to read the previous header
 	// from disk, so we can populate our return value which requires the
 	// prev header hash.
-	prevHeader, err := h.readHeader(chainTipHeight - 1)
+	headers, err := h.readHeaderRange(chainTipHeight-n, chainTipHeight)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read headers range: %v", err)
+	}
+	prevHeader := headers[0]
+	prevHeaderHash := prevHeader.BlockHash()
+
+	// Transform to blockhashes for downstream operations, starting at
+	// headers + 1 skipping the previous header.
+	headersToTruncate := make([]*chainhash.Hash, len(headers)-1)
+	for i, header := range headers[1:] {
+		blkHash := header.BlockHash()
+		headersToTruncate[i] = &blkHash
+	}
+
+	if err := h.truncateHeaders(n, h.indexType); err != nil {
+		return nil, err
+	}
+
+	err = h.truncateIndices(&prevHeaderHash, headersToTruncate, true)
 	if err != nil {
 		return nil, err
 	}
 
-	prevHeaderHash := prevHeader.BlockHash()
-
-	// Now that we have the information we need to return from this
-	// function, we can now truncate the header file, and then use the hash
-	// of the prevHeader to set the proper index chain tip.
-	if err := h.singleTruncate(); err != nil {
-		return nil, err
-	}
-	if err := h.truncateIndex(&prevHeaderHash, true); err != nil {
-		return nil, err
-	}
-
 	return &BlockStamp{
-		Height:    int32(chainTipHeight) - 1,
+		Height:    int32(chainTipHeight - n),
 		Hash:      prevHeaderHash,
 		Timestamp: prevHeader.Timestamp,
 	}, nil
+}
+
+// RollbackLastBlock rollsback both the index, and on-disk header file by a
+// _single_ header. This method is meant to be used in the case of re-org which
+// disconnects the latest block header from the end of the main chain. The
+// information about the new header tip after truncation is returned.
+//
+// NOTE: Part of the BlockHeaderStore interface.
+func (h *blockHeaderStore) RollbackLastBlock() (*BlockStamp, error) {
+	return h.RollbackBlockHeaders(1)
 }
 
 // BlockHeader is a Bitcoin block header that also has its height included.
@@ -431,7 +538,35 @@ func (h *blockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 		headerLocs[i] = header.toIndexEntry()
 	}
 
-	return h.addHeaders(headerLocs)
+	// Attempt to add the headers to the database. If this fails, we'll need
+	// to roll back any changes to the header file to maintain consistency.
+	// The rollback process bases on the number of header serialized. If
+	// both the initial operation and the rollback fail, we return
+	// a detailed error explaining both failures to aid in debugging.
+	if err := h.addHeaders(headerLocs); err != nil {
+		// Since the probability of failing to write to the database is
+		// very low, it is mostly worth the cost of file sync operation
+		// to make sure truncate headers does it correctly.
+		if err := h.file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync block headers "+
+				"file: %v", err)
+		}
+
+		headersToRollback := len(hdrs)
+		truncateErr := h.truncateHeaders(
+			uint32(headersToRollback), h.indexType,
+		)
+		if truncateErr != nil {
+			return fmt.Errorf("failed to rollback block headers "+
+				"from binary file to previous valid state: "+
+				"%v, error writing to database: %v, headers "+
+				"to rollback: %d", truncateErr, err,
+				headersToRollback)
+		}
+		return fmt.Errorf("failed to add block headers to db: %v", err)
+	}
+
+	return nil
 }
 
 // blockLocatorFromHash takes a given block hash and then creates a block
@@ -613,13 +748,43 @@ func (h *blockHeaderStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 	return &latestHeader, tipHeight, nil
 }
 
-// FilterHeaderStore is an implementation of a fully fledged database for any
-// variant of filter headers.  The FilterHeaderStore combines a flat file to
+// FilterHeaderStore defines the interface for storing and retrieving filter
+// headers.
+type FilterHeaderStore interface {
+	// ChainTip returns the hash and height of the latest filter header.
+	ChainTip() (*chainhash.Hash, uint32, error)
+
+	// FetchHeader fetches the filter header for a specific block hash.
+	FetchHeader(hash *chainhash.Hash) (*chainhash.Hash, error)
+
+	// FetchHeaderAncestors fetches the given number of headers starting
+	// from the specified stop hash and working backwards.
+	FetchHeaderAncestors(numHeaders uint32,
+		stopHash *chainhash.Hash) ([]chainhash.Hash, uint32, error)
+
+	// FetchHeaderByHeight fetches the filter header for a specific block
+	// height.
+	FetchHeaderByHeight(height uint32) (*chainhash.Hash, error)
+
+	// WriteHeaders writes a set of filter headers to the store.
+	WriteHeaders(hdrs ...FilterHeader) error
+
+	// RollbackLastBlock rolls back the last block, returning the new tip
+	// after rollback.
+	RollbackLastBlock(newTip *chainhash.Hash) (*BlockStamp, error)
+}
+
+// filterHeaderStore is an implementation of a fully fledged database for any
+// variant of filter headers. The filterHeaderStore combines a flat file to
 // store the block headers with a database instance for managing the index into
 // the set of flat files.
-type FilterHeaderStore struct {
+type filterHeaderStore struct {
 	*headerStore
 }
+
+// Compile-time assertion to ensure filterHeaderStore implements
+// FilterHeaderStore interface.
+var _ FilterHeaderStore = (*filterHeaderStore)(nil)
 
 // NewFilterHeaderStore returns a new instance of the FilterHeaderStore based
 // on a target file path, filter type, and target net parameters. These
@@ -628,7 +793,7 @@ type FilterHeaderStore struct {
 // inserted.
 func NewFilterHeaderStore(filePath string, db walletdb.DB,
 	filterType HeaderType, netParams *chaincfg.Params,
-	headerStateAssertion *FilterHeader) (*FilterHeaderStore, error) {
+	headerStateAssertion *FilterHeader) (FilterHeaderStore, error) {
 
 	fStore, err := newHeaderStore(db, filePath, filterType)
 	if err != nil {
@@ -642,7 +807,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 		return nil, err
 	}
 
-	fhs := &FilterHeaderStore{
+	fhs := &filterHeaderStore{
 		fStore,
 	}
 
@@ -730,15 +895,10 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 
 	// Otherwise, we'll need to truncate the file until it matches the
 	// current index tip.
-	for fileHeight > tipHeight {
-		if err := fhs.singleTruncate(); err != nil {
-			return nil, err
-		}
-
-		fileHeight--
+	err = fhs.truncateHeaders(fileHeight-tipHeight, fhs.indexType)
+	if err != nil {
+		return nil, err
 	}
-
-	// TODO(roasbeef): make above into func
 
 	return fhs, nil
 }
@@ -746,7 +906,7 @@ func NewFilterHeaderStore(filePath string, db walletdb.DB,
 // maybeResetHeaderState will reset the header state if the header assertion
 // fails, but only if the target height is found. The boolean returned indicates
 // that header state was reset.
-func (f *FilterHeaderStore) maybeResetHeaderState(
+func (f *filterHeaderStore) maybeResetHeaderState(
 	headerStateAssertion *FilterHeader) (bool, error) {
 
 	// First, we'll attempt to locate the header at this height. If no such
@@ -770,7 +930,7 @@ func (f *FilterHeaderStore) maybeResetHeaderState(
 		if err := f.file.Close(); err != nil {
 			return true, err
 		}
-		if err := os.Remove(f.fileName); err != nil {
+		if err := os.Remove(f.file.Name()); err != nil {
 			return true, err
 		}
 		return true, nil
@@ -781,7 +941,11 @@ func (f *FilterHeaderStore) maybeResetHeaderState(
 
 // FetchHeader returns the filter header that corresponds to the passed block
 // height.
-func (f *FilterHeaderStore) FetchHeader(hash *chainhash.Hash) (*chainhash.Hash, error) {
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) FetchHeader(
+	hash *chainhash.Hash) (*chainhash.Hash, error) {
+
 	// Lock store for read.
 	f.mtx.RLock()
 	defer f.mtx.RUnlock()
@@ -795,7 +959,11 @@ func (f *FilterHeaderStore) FetchHeader(hash *chainhash.Hash) (*chainhash.Hash, 
 }
 
 // FetchHeaderByHeight returns the filter header for a particular block height.
-func (f *FilterHeaderStore) FetchHeaderByHeight(height uint32) (*chainhash.Hash, error) {
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) FetchHeaderByHeight(
+	height uint32) (*chainhash.Hash, error) {
+
 	// Lock store for read.
 	f.mtx.RLock()
 	defer f.mtx.RUnlock()
@@ -809,7 +977,9 @@ func (f *FilterHeaderStore) FetchHeaderByHeight(height uint32) (*chainhash.Hash,
 // then return the final header specified by the stop hash. We'll also return
 // the starting height of the header range as well so callers can compute the
 // height of each header without knowing the height of the stop hash.
-func (f *FilterHeaderStore) FetchHeaderAncestors(numHeaders uint32,
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) FetchHeaderAncestors(numHeaders uint32,
 	stopHash *chainhash.Hash) ([]chainhash.Hash, uint32, error) {
 
 	// First, we'll find the final header in the range, this will be the
@@ -855,7 +1025,9 @@ func (f *FilterHeader) toIndexEntry() headerEntry {
 // WriteHeaders writes a batch of filter headers to persistent storage. The
 // headers themselves are appended to the flat file, and then the index updated
 // to reflect the new entries.
-func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// Lock store for write.
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
@@ -891,12 +1063,42 @@ func (f *FilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// As the block headers should already be written, we only need to
 	// update the tip pointer for this particular header type.
 	newTip := hdrs[len(hdrs)-1].toIndexEntry().hash
-	return f.truncateIndex(&newTip, false)
+
+	// Attempt to add the headers to the database. If this fails, we'll need
+	// to roll back any changes to the header file to maintain consistency.
+	// The rollback process bases on the number of header serialized. If
+	// both the initial operation and the rollback fail, we return
+	// a detailed error explaining both failures to aid in debugging.
+	if err := f.truncateIndices(&newTip, nil, false); err != nil {
+		// Since the probability of failing to write to the database is
+		// very low, it is mostly worth the cost of file sync operation
+		// to make sure truncate headers does it correctly.
+		if err := f.file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync filter headers "+
+				"file: %v", err)
+		}
+
+		headersToRollback := len(hdrs)
+		truncateErr := f.truncateHeaders(
+			uint32(headersToRollback), f.indexType,
+		)
+		if truncateErr != nil {
+			return fmt.Errorf("failed to rollback filter headers "+
+				"binary file to previous valid state: %v, "+
+				"error writing to database: %v", truncateErr,
+				err)
+		}
+		return fmt.Errorf("failed to add filter headers to db: %v", err)
+	}
+
+	return nil
 }
 
 // ChainTip returns the latest filter header and height known to the
 // FilterHeaderStore.
-func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 	// Lock store for read.
 	f.mtx.RLock()
 	defer f.mtx.RUnlock()
@@ -919,7 +1121,11 @@ func (f *FilterHeaderStore) ChainTip() (*chainhash.Hash, uint32, error) {
 // re-org which disconnects the latest filter header from the end of the main
 // chain. The information about the latest header tip after truncation is
 // returned.
-func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*BlockStamp, error) {
+//
+// NOTE: Part of the FilterHeaderStore interface.
+func (f *filterHeaderStore) RollbackLastBlock(
+	newTip *chainhash.Hash) (*BlockStamp, error) {
+
 	// Lock store for write.
 	f.mtx.Lock()
 	defer f.mtx.Unlock()
@@ -940,10 +1146,12 @@ func (f *FilterHeaderStore) RollbackLastBlock(newTip *chainhash.Hash) (*BlockSta
 
 	// Now that we have the information we need to return from this
 	// function, we can now truncate both the header file and the index.
-	if err := f.singleTruncate(); err != nil {
+	if err := f.truncateHeaders(1, f.indexType); err != nil {
 		return nil, err
 	}
-	if err := f.truncateIndex(newTip, false); err != nil {
+
+	err = f.truncateIndices(newTip, []*chainhash.Hash{}, false)
+	if err != nil {
 		return nil, err
 	}
 
