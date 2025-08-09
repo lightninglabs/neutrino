@@ -1474,10 +1474,13 @@ func BenchmarkHeadersImport(b *testing.B) {
 			b.ResetTimer()
 			startTime := time.Now()
 			ctx := context.Background()
-			_, err = opts.Import(ctx)
-			if err != nil {
-				b.Fatalf("import failed: %v", err)
-			}
+
+			importer, err := chainimport.NewHeadersImport(opts)
+			require.NoError(b, err)
+
+			_, err = importer.Import(ctx)
+			require.NoError(b, err)
+
 			elapsed := time.Since(startTime)
 			b.StopTimer()
 

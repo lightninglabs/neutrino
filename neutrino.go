@@ -1677,7 +1677,11 @@ func (s *ChainService) Start(ctx context.Context) error {
 			TargetFilterHeaderStore: s.RegFilterHeaders,
 			WriteBatchSizePerRegion: s.headersImport.WriteBatchSizePerRegion,
 		}
-		if _, err := options.Import(ctx); err != nil {
+		importer, err := chainimport.NewHeadersImport(&options)
+		if err != nil {
+			return err
+		}
+		if _, err := importer.Import(ctx); err != nil {
 			return err
 		}
 	}

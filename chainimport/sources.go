@@ -1,0 +1,342 @@
+package chainimport
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+
+	"golang.org/x/exp/mmap"
+)
+
+// fileheaderImportSource implements headerImportSource for header files.
+//
+// Expected file format:
+// - ImportMetadata (9 bytes): Chain type (4), header type (1), start height (4)
+// - Header data: Consecutive raw headers starting from the specified height
+//
+// The file contains a fixed-size metadata header followed by a sequence of
+// blockchain headers. Each header's size depends on its type – 80 bytes for
+// block headers and 32 bytes for filter headers. Headers must be stored
+// consecutively without gaps or padding.
+type fileheaderImportSource struct {
+	uri           string
+	file          ImportHeadersFile
+	fileSize      int
+	metadata      *headerMetadata
+	headerFactory func() Header
+}
+
+// Compile-time assertion to ensure fileheaderImportSource implements
+// headerImportSource interface.
+var _ HeaderImportSource = (*fileheaderImportSource)(nil)
+
+// newFileheaderImportSource creates a new file header import source with the
+// given URI and header factory.
+func newFileheaderImportSource(uri string,
+	headerFactory func() Header) *fileheaderImportSource {
+
+	return &fileheaderImportSource{
+		uri:           uri,
+		headerFactory: headerFactory,
+	}
+}
+
+// Open opens the file and initializes the reader.
+func (f *fileheaderImportSource) Open() error {
+	r, err := mmap.Open(f.GetURI())
+	if err != nil {
+		return fmt.Errorf("failed to mmap file: %w", err)
+	}
+
+	f.file = newMmapFile(r, 0)
+	f.fileSize = f.file.Len()
+
+	// Read and initialize metadata from the beginning of the file.
+	mData, err := f.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get header metadata: %w", err)
+	}
+	f.metadata = mData
+	f.metadata.endHeight = mData.startHeight + mData.headersCount - 1
+
+	return nil
+}
+
+// Close closes the file and releases the mmap reader.
+func (f *fileheaderImportSource) Close() error {
+	return f.file.Close()
+}
+
+// GetHeaderMetadata reads the metadata from the file. The metadata is memoized
+// after the first call, with subsequent calls returning the cached result
+// without re-reading the file.
+func (f *fileheaderImportSource) GetHeaderMetadata() (*headerMetadata, error) {
+	if f.metadata != nil {
+		return f.metadata, nil
+	}
+
+	if f.file == nil {
+		return nil, errors.New("file reader not initialized")
+	}
+
+	// Decode import metadata.
+	importMetadata := &importMetadata{}
+	if err := importMetadata.decode(f.file); err != nil {
+		return nil, err
+	}
+
+	headerMetadata := &headerMetadata{
+		importMetadata: importMetadata,
+	}
+
+	// Construct header type size. This also validates the header type. If
+	// the header type is not valid, we will get an error while getting the
+	// size of this header type.
+	headerSize, err := importMetadata.headerType.Size()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get header size: %v", err)
+	}
+	headerMetadata.headerSize = headerSize
+
+	// Compute the usable headers file size.
+	usableFileSize := f.fileSize - importMetadata.Size()
+
+	// Check if there are any headers available in the import source.
+	if usableFileSize == 0 {
+		return nil, errors.New("no headers available in import source")
+	}
+
+	// Verify that the file contains complete headers with no partial data.
+	if usableFileSize%headerSize != 0 {
+		return nil, fmt.Errorf("file size (%d) is not a multiple of "+
+			"header size (%d); possible data corruption",
+			usableFileSize, headerSize)
+	}
+
+	// Compute headers count.
+	headerMetadata.headersCount = uint32(usableFileSize / headerSize)
+
+	return headerMetadata, err
+}
+
+// Iterator returns an efficient iterator for sequential header access.
+func (f *fileheaderImportSource) Iterator(start, end uint32,
+	batchSize uint32) HeaderIterator {
+
+	return &importSourceHeaderIterator{
+		source:       f,
+		currentIndex: start,
+		endIndex:     end,
+		batchSize:    batchSize,
+	}
+}
+
+// GetHeader retrieves a single header at the specified index.
+func (f *fileheaderImportSource) GetHeader(index uint32) (Header, error) {
+	var empty Header
+
+	// First check if we have data initialized before attempting to get
+	// header. This validates both reader and metadata are properly set up.
+	if f.file == nil {
+		return empty, errors.New("file reader not initialized")
+	}
+	if f.metadata == nil {
+		return empty, errors.New("header metadata not initialized")
+	}
+
+	// Calculate the absolute position for this header.
+	offset := importMetadataSize + (index * uint32(f.metadata.headerSize))
+
+	// Read header data at the calculated offset.
+	buf := make([]byte, f.metadata.headerSize)
+	_, err := f.file.ReadAt(buf, int64(offset))
+	if err != nil {
+		return empty, fmt.Errorf("failed to read header at "+
+			"index %d: %w", index, err)
+	}
+	reader := bytes.NewReader(buf)
+
+	// Calculate the actual height from index and start height.
+	height := index + f.metadata.startHeight
+
+	// Create the appropriate chain import header type based on metadata.
+	header := f.headerFactory()
+	if err := header.Deserialize(reader, height); err != nil {
+		return empty, err
+	}
+
+	return header, nil
+}
+
+// SetURI sets the file path for this import source. This method is primarily
+// used by HTTP import sources to dynamically update the file path after
+// downloading headers to a temporary file.
+func (f *fileheaderImportSource) SetURI(uri string) {
+	f.uri = uri
+}
+
+// GetURI returns the file path for this import source.
+func (f *fileheaderImportSource) GetURI() string {
+	return f.uri
+}
+
+// httpheaderImportSource implements headerImportSource for serving header files
+// over HTTP(s).
+type httpheaderImportSource struct {
+	uri        string
+	httpClient HttpClient
+	file       HeaderImportSource
+}
+
+// Compile-time assertion to ensure httpheaderImportSource implements
+// headerImportSource interface.
+var _ HeaderImportSource = (*httpheaderImportSource)(nil)
+
+// newHTTPheaderImportSource creates a new HTTP header import source.
+func newHTTPheaderImportSource(uri string, httpClient HttpClient,
+	importSource HeaderImportSource) *httpheaderImportSource {
+
+	return &httpheaderImportSource{
+		uri:        uri,
+		httpClient: httpClient,
+		file:       importSource,
+	}
+}
+
+// Open opens the HTTP header import source based on file header import source.
+func (h *httpheaderImportSource) Open() error {
+	// Download the headers file.
+	resp, err := h.httpClient.Get(h.uri)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Check status code.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download file: status code %d",
+			resp.StatusCode)
+	}
+
+	// Create a temporary file.
+	tempFile, err := os.CreateTemp("", "neutrino-headers-http-import-*.tmp")
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+	}
+
+	// Copy the response body to the temporary file.
+	_, err = io.Copy(tempFile, resp.Body)
+	if err != nil {
+		cleanup()
+		return err
+	}
+
+	// Sync the file to ensure all data is written to disk.
+	if err = tempFile.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("failed to sync temporary file: %w", err)
+	}
+
+	// Close before using it with FileheaderImportSource.
+	tempFile.Close()
+
+	// Set he URI for FileheaderImportSource.
+	h.file.SetURI(tempFile.Name())
+	return h.file.Open()
+}
+
+// Close closes the HTTP header import source resources.
+func (h *httpheaderImportSource) Close() error {
+	if err := h.file.Close(); err != nil {
+		return fmt.Errorf("failed to close file import source: %w", err)
+	}
+
+	// Remove the temporary file.
+	if err := os.Remove(h.file.GetURI()); err != nil {
+		return fmt.Errorf("failed to remove temporary file: %w", err)
+	}
+
+	return nil
+}
+
+// GetHeaderMetadata reads the metadata from the file. The metadata is memoized
+// after the first call, with subsequent calls returning the cached result
+// without re-reading the file.
+func (h *httpheaderImportSource) GetHeaderMetadata() (*headerMetadata, error) {
+	return h.file.GetHeaderMetadata()
+}
+
+// Iterator returns an efficient iterator for sequential header access.
+func (h *httpheaderImportSource) Iterator(start, end uint32,
+	batchSize uint32) HeaderIterator {
+
+	return h.file.Iterator(start, end, batchSize)
+}
+
+// GetHeader retrieves a single header at the specified index.
+func (h *httpheaderImportSource) GetHeader(index uint32) (Header, error) {
+	return h.file.GetHeader(index)
+}
+
+// GetURI returns the HTTP URL for this import source.
+func (h *httpheaderImportSource) GetURI() string {
+	return h.uri
+}
+
+// SetURI sets the HTTP URL for this import source.
+func (h *httpheaderImportSource) SetURI(uri string) {
+	h.uri = uri
+}
+
+// newHTTPClient creates a new HTTP client.
+func newHTTPClient() HttpClient {
+	return &http.Client{}
+}
+
+// mmapFile wraps mmap.ReaderAt to provide ImportHeadersFile interface.
+type mmapFile struct {
+	readerAt *mmap.ReaderAt
+	offset   int64
+}
+
+// Compile-time assertion to ensure mmapFile implements ImportHeadersFile
+// interface.
+var _ ImportHeadersFile = (*mmapFile)(nil)
+
+// newMmapFile creates a new memory-mapped file adapter for mmap.ReaderAt.
+func newMmapFile(readerAt *mmap.ReaderAt, offset int64) *mmapFile {
+	return &mmapFile{
+		readerAt: readerAt,
+		offset:   offset,
+	}
+}
+
+// Read implements io.Reader interface.
+func (m *mmapFile) Read(p []byte) (n int, err error) {
+	n, err = m.readerAt.ReadAt(p, m.offset)
+	m.offset += int64(n)
+	return n, err
+}
+
+// ReadAt implements io.ReaderAt interface.
+func (m *mmapFile) ReadAt(p []byte, off int64) (n int, err error) {
+	// Simply delegate to the underlying ReaderAt.
+	return m.readerAt.ReadAt(p, off)
+}
+
+// Close implements io.Closer interface.
+func (m *mmapFile) Close() error {
+	return m.readerAt.Close()
+}
+
+// Len returns the length of the underlying reader.
+func (m *mmapFile) Len() int {
+	return m.readerAt.Len()
+}
