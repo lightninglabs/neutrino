@@ -637,6 +637,25 @@ type HeadersImportConfig struct {
 	// FilterHeadersSource specifies where to obtain filter headers from.
 	// This could be a file path, URL, or other source identifier.
 	FilterHeadersSource string
+
+	// WriteBatchSizePerRegion defines the number of headers to write in a
+	// single batch per processing region during import. The import process
+	// divides header ranges into distinct regions
+	// (overlap, divergence, and new headers), each with different
+	// processing requirements. Each region is processed in batches of this
+	// size to optimize database performance while maintaining data
+	// integrity boundaries. Larger values improve speed but increase memory
+	// usage.
+	//
+	// Default value: 16,384 (2^14) entries.
+	// This results in 16,384 block headers and 16,384 filter headers per
+	// batch. The total upper bound size per batch is:
+	//   - Block headers: (16,384 * 80 bytes) / (2^10) = 1.28 MB
+	//   - Filter headers: (16,384 * 32 bytes) / (2^10) = 0.5 MB
+	// Peak memory usage observed during benchmarking was ≈ 66 MB.
+	// Actual memory usage can vary depending on factors such as database
+	// state, Go garbage collector semantics and activity.
+	WriteBatchSizePerRegion int
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -1644,6 +1663,7 @@ func (s *ChainService) Start() error {
 	}
 
 	// Import headers if configured.
+	//nolint:lll
 	if s.headersImport != nil {
 		options := chainimport.ImportOptions{
 			BlockHeadersSource:  s.headersImport.BlockHeadersSource,
@@ -1654,6 +1674,7 @@ func (s *ChainService) Start() error {
 			},
 			TargetBlockHeaderStore:  s.BlockHeaders,
 			TargetFilterHeaderStore: s.RegFilterHeaders,
+			WriteBatchSizePerRegion: s.headersImport.WriteBatchSizePerRegion,
 		}
 		importer, err := chainimport.NewHeadersImport(&options)
 		if err != nil {

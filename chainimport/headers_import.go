@@ -9,6 +9,12 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
+const (
+	// defaultWriteBatchSizePerRegion defines the default number of headers
+	// to process in a single batch when no specific batch size is provided.
+	defaultWriteBatchSizePerRegion = 16384
+)
+
 // headersImport orchestrates the import of blockchain headers from external
 // sources into local header stores. It handles validation, processing, and
 // atomic writes of both block headers and filter headers while maintaining
@@ -31,6 +37,13 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	// First validate import options.
 	if err := options.validate(); err != nil {
 		return nil, err
+	}
+
+	// Set default batch size if not specified.
+	if options.WriteBatchSizePerRegion <= 0 {
+		options.WriteBatchSizePerRegion = defaultWriteBatchSizePerRegion
+		log.Infof("Using default write batch size of %d "+
+			"headers per region", options.WriteBatchSizePerRegion)
 	}
 
 	blockHeadersSource := options.createBlockHeaderImportSrc()
@@ -478,6 +491,11 @@ type ImportOptions struct {
 	// FilterHeadersSource is the file path or source location for filter
 	// headers to be imported.
 	FilterHeadersSource string
+
+	// WriteBatchSizePerRegion specifies the number of headers to write in
+	// each batch per region. This controls performance characteristics of
+	// the import.
+	WriteBatchSizePerRegion int
 }
 
 // validate checks that all required fields in ImportOptions are properly set
