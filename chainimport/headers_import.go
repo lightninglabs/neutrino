@@ -15,6 +15,47 @@ const (
 	defaultWriteBatchSizePerRegion = 16384
 )
 
+// processingRegions currently contains regions to process. Those regions
+// overlap, divergence, and new headers region are all detected
+// but only new headers region processed.
+type processingRegions struct {
+	// importStartHeight defines the starting block height for the import
+	// process.
+	importStartHeight uint32
+
+	// importEndHeight defines the ending block height for the import
+	// process.
+	importEndHeight uint32
+
+	// effectiveTip represents the current chain tip height that is
+	// effective for processing.
+	effectiveTip uint32
+
+	// overlap contains the region of headers that overlap with the target
+	// chain.
+	overlap headerRegion
+
+	// divergence contains the region of headers that diverge from the
+	// target chain.
+	divergence headerRegion
+
+	// newHeaders contains the region of new headers that need to be
+	// processed.
+	newHeaders headerRegion
+}
+
+// headerRegion represents a contiguous range of headers.
+type headerRegion struct {
+	// start is the beginning height of this header region.
+	start uint32
+
+	// end is the ending height of this header region.
+	end uint32
+
+	// exists indicates whether this region has headers to process.
+	exists bool
+}
+
 // headersImport orchestrates the import of blockchain headers from external
 // sources into local header stores. It handles validation, processing, and
 // atomic writes of both block headers and filter headers while maintaining
@@ -151,6 +192,16 @@ func (h *headersImport) Import() (*ImportResult, error) {
 		return nil, fmt.Errorf("failed to validate filter "+
 			"headers: %w", err)
 	}
+
+	// Determine processing regions that partition the import task into
+	// disjoint height ranges.
+	regions, err := h.determineProcessingRegions()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine processing "+
+			"regions: %w", err)
+	}
+	result.StartHeight = regions.importStartHeight
+	result.EndHeight = regions.importEndHeight
 
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(result.StartTime)
@@ -331,6 +382,97 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 		h.filterHeadersImportSource.GetURI(), height)
 
 	return nil
+}
+
+// determineProcessingRegions partitions the header height space into regions
+// satisfying the MECE property (Mutually Exclusive, Collectively Exhaustive).
+// This strict partitioning is critical for ensuring the idempotence of the
+// overall import operation - repeated imports with the same parameters will
+// produce identical results without side effects. By cleanly separating heights
+// into non-overlapping regions with distinct processing logic, we can ensure
+// consistent application of import policies regardless of how many times the
+// operation is performed. The regions are:
+//  1. Overlap: Heights common to both source and targets
+//  2. Divergence: Heights where target stores differ within import range
+//  3. NewHeaders: Heights in source not yet in targets
+//
+//nolint:lll
+func (h *headersImport) determineProcessingRegions() (*processingRegions, error) {
+	// Get header metadata for import sources. The start and end height
+	// constraint range validated upstream.
+	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get header metadata: %v", err)
+	}
+	importStartHeight := metadata.startHeight
+	importEndHeight := metadata.endHeight
+
+	// Get chain tips for target stores.
+	_, bTipHeight, err := h.options.TargetBlockHeaderStore.ChainTip()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target block header "+
+			"store chain tip: %v", err)
+	}
+	_, fTipHeight, err := h.options.TargetFilterHeaderStore.ChainTip()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target filter header "+
+			"store chain tip: %v", err)
+	}
+	effectiveTipHeight := min(bTipHeight, fTipHeight)
+
+	// Create regions construct.
+	regions := &processingRegions{
+		importStartHeight: importStartHeight,
+		importEndHeight:   importEndHeight,
+		effectiveTip:      effectiveTipHeight,
+	}
+
+	// 1. Overlap region.
+	// This region contains headers that exist in both the import source and
+	// target stores, from the start of the import range up to the effective
+	// tip height.
+	overlapStart := importStartHeight
+	overlapEnd := min(effectiveTipHeight, importEndHeight)
+	regions.overlap = headerRegion{
+		start:  overlapStart,
+		end:    overlapEnd,
+		exists: overlapStart <= overlapEnd,
+	}
+
+	// 2. Divergence region.
+	// This region contains headers where one store extends beyond the
+	// effective tip but still within the import range. It represents
+	// heights where targetblock and filter headers are out of sync and need
+	// reconciliation.
+	divergeStart := effectiveTipHeight + 1
+	divergeEnd := min(max(bTipHeight, fTipHeight), importEndHeight)
+	regions.divergence = headerRegion{
+		start:  divergeStart,
+		end:    divergeEnd,
+		exists: bTipHeight != fTipHeight && divergeStart <= divergeEnd,
+	}
+
+	// 3. New Headers region.
+	// This region contains headers that are in the import source but not
+	// yet in either target store. They start one height beyond the highest
+	// tip of either store (ensuring no overlap with divergence region) and
+	// extend to the end of the import data. These headers need to be added
+	// to both stores. It only exists if there are headers beyond both tips.
+	//
+	// Note: This region is supposed to be processed after handling the
+	// overlap, and divergence regions, ensuring that any potential
+	// inconsistencies in existing data are resolved before adding new
+	// headers. This sequential processing guarantees that new headers
+	// are only added on top of a verified and consistent chain state.
+	newStart := max(bTipHeight, fTipHeight) + 1
+	newEnd := importEndHeight
+	regions.newHeaders = headerRegion{
+		start:  newStart,
+		end:    newEnd,
+		exists: newStart <= newEnd,
+	}
+
+	return regions, nil
 }
 
 // validateHeaderConnection verifies that a block header from the import source

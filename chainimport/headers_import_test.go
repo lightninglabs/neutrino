@@ -4474,6 +4474,807 @@ func TestHeaderValidationOnSequentialFilterHeaders(t *testing.T) {
 	}
 }
 
+// TestHeaderProcessing tests the header processing. It checks that the header
+// processing is done correctly.
+//
+// The goal of these test cases is to determine the processing regions. For
+// convenience and shorter test case names, we'll use the following notation:
+// - A refers to data from import sources. No divergence.
+// - B refers to data from target sources when both target stores have the same
+// length. In case of divergence, B specifically refers to the target block
+// headers store, while F refers to the target filter headers store.
+func TestHeaderProcessing(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		hImport *headersImport
+		err     error
+	}
+	type Verify struct {
+		tc                *testing.T
+		processingRegions *processingRegions
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		// ❌ Error validation test cases.
+		{
+			name: "ErrorOnGetHeaderMetadataFailure",
+			prep: func() Prep {
+				// Prep error to mock.
+				expectErr := errors.New("failed to get " +
+					"header metadata")
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(
+					nil, expectErr,
+				)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(60), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(60), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "failed to get header metadata",
+		},
+		{
+			name: "ErrorOnTargetBlockStoreChainTipFailure",
+			prep: func() Prep {
+				// Prep error to mock.
+				expectErr := errors.New("failed to get block " +
+					"header store chain tip")
+
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 50,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(0),
+					expectErr,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(60), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to get block header store " +
+				"chain tip",
+		},
+		{
+			name: "ErrorOnGetChainTipForTargetFilterStore",
+			prep: func() Prep {
+				// Prep error to mock.
+				expectErr := errors.New("failed to get " +
+					"filter header store chain tip")
+
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 50,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(60), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(0), expectErr,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to get filter header store " +
+				"chain tip",
+		},
+
+		// ✅ Non-divergent cases (B = F).
+
+		/*
+			A:     [=========]
+			B: [=======]
+			F: [=======]
+		*/
+		{
+			name: "AAndBOverlap_AEndsAfterB",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 50,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(60), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(60), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the divergence region doesn't
+				// exist.
+				dR := v.processingRegions.divergence
+				require.False(v.tc, dR.exists)
+
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  50,
+					end:    60,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the new headers region was
+				// properly detected.
+				nHR := v.processingRegions.newHeaders
+				nHRE := headerRegion{
+					start:  61,
+					end:    90,
+					exists: true,
+				}
+				require.Equal(v.tc, nHRE, nHR)
+			},
+		},
+
+		/*
+			A:     [=====]
+			B: [===========]
+			F: [===========]
+		*/
+		{
+			name: "BCompletelyOverlapsA",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 50,
+					},
+					endHeight: 70,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(90), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(90), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the divergence region doesn't
+				// exist.
+				dR := v.processingRegions.divergence
+				require.False(v.tc, dR.exists)
+
+				// Assert that the new headers region doesn't
+				// exist.
+				nHR := v.processingRegions.newHeaders
+				require.False(v.tc, nHR.exists)
+
+				// Assert that the overlap region is properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  50,
+					end:    70,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+			},
+		},
+
+		/*
+			A:         [======]
+			B: [======]
+			F: [======]
+		*/
+		{
+			name: "AAndBDoNotOverlap_AComesAfterB",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 51,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(50), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(50), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the divergence region doesn't
+				// exist.
+				dR := v.processingRegions.divergence
+				require.False(v.tc, dR.exists)
+
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				require.False(v.tc, oR.exists)
+
+				// Assert that the new headers region was
+				// properly detected.
+				nHR := v.processingRegions.newHeaders
+				nHRE := headerRegion{
+					start:  51,
+					end:    90,
+					exists: true,
+				}
+				require.Equal(v.tc, nHRE, nHR)
+			},
+		},
+
+		// ⚠️ Divergent cases (B ≠ F), B & F start at same pos.
+
+		/*
+			A: [===========]
+			B: [=====]
+			F: [===============]
+		*/
+		{
+			name: "Divergence_AFFullyOverlapsB",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 0,
+					},
+					endHeight: 70,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(40), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(90), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the new headers region
+				// doesn't exist.
+				nHR := v.processingRegions.newHeaders
+				require.False(v.tc, nHR.exists)
+
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  0,
+					end:    40,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the divergence region was
+				// properly detected.
+				dR := v.processingRegions.divergence
+				dRE := headerRegion{
+					start:  41,
+					end:    70,
+					exists: true,
+				}
+				require.Equal(v.tc, dRE, dR)
+			},
+		},
+
+		/*
+			A: [===============]
+			B: [=====]
+			F: [===========]
+		*/
+		{
+			name: "Divergence_AFullyOverlapsBF",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 0,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(40), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(70), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  0,
+					end:    40,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the divergence region was
+				// properly detected
+				dR := v.processingRegions.divergence
+				dRE := headerRegion{
+					start:  41,
+					end:    70,
+					exists: true,
+				}
+				require.Equal(v.tc, dRE, dR)
+
+				// Assert that the new headers region was
+				// properly detected.
+				nHR := v.processingRegions.newHeaders
+				nHRE := headerRegion{
+					start:  71,
+					end:    90,
+					exists: true,
+				}
+				require.Equal(v.tc, nHRE, nHR)
+			},
+		},
+
+		/*
+			A: [===========]
+			B: [===============]
+			F: [=====]
+		*/
+		{
+			name: "Divergence_ABFullyOverlapsF",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 0,
+					},
+					endHeight: 70,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(90), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(40), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the new headers region doesn't
+				// exist.
+				nHR := v.processingRegions.newHeaders
+				require.False(v.tc, nHR.exists)
+
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  0,
+					end:    40,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the divergence region was
+				// properly detected
+				dR := v.processingRegions.divergence
+				dRE := headerRegion{
+					start:  41,
+					end:    70,
+					exists: true,
+				}
+				require.Equal(v.tc, dRE, dR)
+			},
+		},
+
+		/*
+			A:     [=======]
+			B: [===========]
+			F: [=========]
+		*/
+		{
+			name: "Divergence_BAndFCompletelyContainA",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 40,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(90), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(70), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the new headers region doesn't
+				// exist.
+				nHR := v.processingRegions.newHeaders
+				require.False(v.tc, nHR.exists)
+
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  40,
+					end:    70,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the divergence region was
+				// properly detected
+				dR := v.processingRegions.divergence
+				dRE := headerRegion{
+					start:  71,
+					end:    90,
+					exists: true,
+				}
+				require.Equal(v.tc, dRE, dR)
+			},
+		},
+
+		/*
+			A:     [===========]
+			B: [=====]
+			F: [======]
+		*/
+		{
+			name: "Divergence_AEndsAfterBothBAndF",
+			prep: func() Prep {
+				// Prep header metadata.
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 30,
+					},
+					endHeight: 90,
+				}
+
+				// Mock GetHeaderMetadata.
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				// Mock ChainTip on target header store.
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(40), nil,
+				)
+
+				// Mock ChainTip on target header store.
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(50), nil,
+				)
+
+				// Configure Import options.
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				h := &headersImport{
+					blockHeadersImportSource: hIS,
+					options:                  ops,
+				}
+
+				return Prep{
+					hImport: h,
+				}
+			},
+			verify: func(v Verify) {
+				// Assert that the overlap region was properly
+				// detected.
+				oR := v.processingRegions.overlap
+				oRE := headerRegion{
+					start:  30,
+					end:    40,
+					exists: true,
+				}
+				require.Equal(v.tc, oRE, oR)
+
+				// Assert that the divergence region was
+				// properly detected.
+				dR := v.processingRegions.divergence
+				dRE := headerRegion{
+					start:  41,
+					end:    50,
+					exists: true,
+				}
+				require.Equal(v.tc, dRE, dR)
+
+				// Assert that the new headers region was
+				// properly detected.
+				nHR := v.processingRegions.newHeaders
+				nHRE := headerRegion{
+					start:  51,
+					end:    90,
+					exists: true,
+				}
+				require.Equal(v.tc, nHRE, nHR)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			require.NoError(t, prep.err)
+			imprt := prep.hImport
+			regs, err := imprt.determineProcessingRegions()
+			verify := Verify{
+				tc:                t,
+				processingRegions: regs,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
 // setupFileWithHdrs creates a temporary file with headers and returns the file,
 // a cleanup function, and an error if any.
 func setupFileWithHdrs(hT headerfs.HeaderType,
