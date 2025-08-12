@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -28,6 +29,9 @@ type headersImport struct {
 	// import source.
 	filterHeadersImportSource HeaderImportSource
 
+	// blockHeadersValidator validates the imported block headers.
+	blockHeadersValidator HeadersValidator
+
 	// options contains configuration parameters for the import process.
 	options *ImportOptions
 }
@@ -47,9 +51,14 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	blockHeadersSource := options.createBlockHeaderImportSrc()
 	filterHeadersSource := options.createFilterHeaderImportSrc()
 
+	blockheadersValidator := options.createBlockHeaderValidator(
+		blockHeadersSource,
+	)
+
 	importer := &headersImport{
 		blockHeadersImportSource:  blockHeadersSource,
 		filterHeadersImportSource: filterHeadersSource,
+		blockHeadersValidator:     blockheadersValidator,
 		options:                   options,
 	}
 
@@ -93,6 +102,27 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	if err := h.validateChainContinuity(); err != nil {
 		return nil, fmt.Errorf("failed to validate continuity of "+
 			"import headers chain with target chain: %v", err)
+	}
+
+	// Get header metadata from import souces. We can safely use this header
+	// metadata for both block headers and filter headers since we've
+	// already validated that those header metadata are compatible with each
+	// other.
+	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debugf("Validating %d block headers", metadata.headersCount)
+	blockHeadersIterator := h.blockHeadersImportSource.Iterator(
+		0, metadata.headersCount-1,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+
+	err = h.blockHeadersValidator.Validate(blockHeadersIterator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate block "+
+			"headers: %w", err)
 	}
 
 	result.EndTime = time.Now()
@@ -462,6 +492,10 @@ type ImportOptions struct {
 	// each batch per region. This controls performance characteristics of
 	// the import.
 	WriteBatchSizePerRegion int
+
+	// ValidationFlags specifies the behavior flags used during header
+	// validation. It defaults to BFNone.
+	ValidationFlags blockchain.BehaviorFlags
 }
 
 // validate checks that all required fields in import options are properly set
@@ -491,6 +525,17 @@ func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
 func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
 	return newFileHeaderImportSource(
 		options.FilterHeadersSource, newFilterHeader,
+	)
+}
+
+// createBlockHeaderValidator creates the appropriate validator for block
+// headers.
+func (options *ImportOptions) createBlockHeaderValidator(
+	blockHeadersImportSource HeaderImportSource) HeadersValidator {
+
+	return newBlockHeadersImportSourceValidator(
+		options.TargetChainParams, options.TargetBlockHeaderStore,
+		options.ValidationFlags, blockHeadersImportSource,
 	)
 }
 

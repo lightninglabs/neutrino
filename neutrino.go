@@ -656,6 +656,10 @@ type HeadersImportConfig struct {
 	// Actual memory usage can vary depending on factors such as database
 	// state, Go garbage collector semantics and activity.
 	WriteBatchSizePerRegion int
+
+	// ValidationFlags specifies the behavior flags used during header
+	// validation. It defaults to BFNone.
+	ValidationFlags blockchain.BehaviorFlags
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -1665,6 +1669,7 @@ func (s *ChainService) Start() error {
 			TargetChainParams:       s.chainParams,
 			TargetBlockHeaderStore:  s.BlockHeaders,
 			TargetFilterHeaderStore: s.RegFilterHeaders,
+			ValidationFlags:         s.headersImport.ValidationFlags,
 			WriteBatchSizePerRegion: s.headersImport.WriteBatchSizePerRegion,
 		}
 		importer, err := chainimport.NewHeadersImport(&options)
