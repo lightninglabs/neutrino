@@ -403,6 +403,13 @@ func (h *headersImport) openSources() error {
 			h.filterHeadersImportSource != nil)
 	}
 
+	if h.blockHeadersValidator == nil || h.filterHeadersValidator == nil {
+		return fmt.Errorf("missing required header validators - block "+
+			"headers validator: %v, filter headers "+
+			"validator: %v", h.blockHeadersValidator != nil,
+			h.filterHeadersValidator != nil)
+	}
+
 	if err := h.blockHeadersImportSource.Open(); err != nil {
 		return err
 	}
