@@ -105,6 +105,93 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 	}
 }
 
+// TestImportSkipOperation tests the import skip operation. It checks that the
+// import is skipped if the target header store is populated with headers.
+func TestImportSkipOperation(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		options *ImportOptions
+	}
+	type verify struct {
+		tc            *testing.T
+		importOptions *ImportOptions
+		importResult  *ImportResult
+	}
+	testCases := []struct {
+		name         string
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "TargetFilterStorePopulatedWithHeaders",
+			prep: func() prep {
+				tBS := &headerfs.MockBlockHeaderStore{}
+				tBS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(0), nil,
+				)
+
+				tFS := &headerfs.MockFilterHeaderStore{}
+				tFS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(3), nil,
+				)
+
+				bIS := "/path/to/blocks"
+				fIS := "/path/to/filters"
+
+				ops := &ImportOptions{
+					BlockHeadersSource:      bIS,
+					FilterHeadersSource:     fIS,
+					TargetBlockHeaderStore:  tBS,
+					TargetFilterHeaderStore: tFS,
+				}
+
+				return prep{
+					options: ops,
+				}
+			},
+			verify: func(v verify) {
+				// Verify the default batch size is set.
+				ops := v.importOptions
+				require.Equal(
+					v.tc, defaultWriteBatchSizePerRegion,
+					ops.WriteBatchSizePerRegion,
+				)
+
+				// Verify no headers added/processed.
+				require.Equal(
+					v.tc, 0, v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, 0, v.importResult.ProcessedCount,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			hI, err := NewHeadersImport(prep.options)
+			require.NoError(t, err)
+			importResult, err := hI.Import()
+			verify := verify{
+				tc:            t,
+				importOptions: prep.options,
+				importResult:  importResult,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
 // TestTargetStoreFreshnessDetection tests the logic for detecting whether the
 // target header stores are fresh (only contain genesis headers). It covers
 // various combinations of block and filter header heights and error cases.
