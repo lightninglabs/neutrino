@@ -1651,7 +1651,7 @@ func (s *ChainService) Start() error {
 		if err != nil {
 			return err
 		}
-		if err := importer.Import(); err != nil {
+		if _, err := importer.Import(); err != nil {
 			return err
 		}
 	}

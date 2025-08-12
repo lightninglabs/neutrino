@@ -2,6 +2,7 @@ package chainimport
 
 import (
 	"errors"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -29,8 +30,8 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 }
 
 // Import import headers data in target header stores.
-func (h *headersImport) Import() error {
-	return nil
+func (h *headersImport) Import() (*ImportResult, error) {
+	return &ImportResult{}, nil
 }
 
 // ImportOptions defines options for the import process.
@@ -68,4 +69,50 @@ func (options *ImportOptions) validate() error {
 	}
 
 	return nil
+}
+
+// ImportResult contains statistics about a header import operation.
+type ImportResult struct {
+	// ProcessedCount is the total number of headers examined.
+	ProcessedCount int
+
+	// AddedCount is the number of headers newly added to destination.
+	AddedCount int
+
+	// SkippedCount is the number of headers already in destination.
+	SkippedCount int
+
+	// StartHeight is the first height processed.
+	StartHeight uint32
+
+	// EndHeight is the last height processed.
+	EndHeight uint32
+
+	// StartTime is the time when import operation started.
+	StartTime time.Time
+
+	// EndTime is the time when import operation completed.
+	EndTime time.Time
+
+	// Duration is the total time taken for the import operation.
+	Duration time.Duration
+}
+
+// HeadersPerSecond calculates the processing rate in headers per second as a
+// performance metric. Returns 0 if Duration is zero to avoid division by zero.
+func (r *ImportResult) HeadersPerSecond() float64 {
+	if r.Duration.Seconds() > 0 {
+		return float64(r.ProcessedCount) / r.Duration.Seconds()
+	}
+	return 0
+}
+
+// NewHeadersPercentage calculates the percentage of processed headers that were
+// newly added (not already present in the target). Returns 0 if no headers were
+// processed to avoid division by zero.
+func (r *ImportResult) NewHeadersPercentage() float64 {
+	if r.ProcessedCount > 0 {
+		return float64(r.AddedCount) / float64(r.ProcessedCount) * 100
+	}
+	return 0
 }
