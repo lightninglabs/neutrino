@@ -83,10 +83,94 @@ func (h *headersImport) Import() (*ImportResult, error) {
 			"header import sources with each other: %w", err)
 	}
 
+	// Validate chain continuity with the target chain.
+	if err := h.validateChainContinuity(); err != nil {
+		return nil, fmt.Errorf("failed to validate continuity of "+
+			"import headers chain with target chain: %v", err)
+	}
+
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(result.StartTime)
 
 	return result, nil
+}
+
+// validateChainContinuity ensures that headers from import sources can be
+// properly connected to the existing headers in the target stores.
+func (h *headersImport) validateChainContinuity() error {
+	// Get metadata from block header source. We can safely use this count
+	// for both block headers and filter headers since we've already
+	// validated that the counts match across all import sources.
+	sourceMetadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get block header "+
+			"metadata: %w", err)
+	}
+
+	// Get the chain tip from both target stores.
+	_, blockTipHeight, err := h.options.TargetBlockHeaderStore.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to get target block header chain "+
+			"tip: %w", err)
+	}
+
+	_, filterTipHeight, err := h.options.TargetFilterHeaderStore.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to get target filter header chain "+
+			"tip: %w", err)
+	}
+
+	// Ensure that both target header stores have the same tip height.
+	// A mismatch indicates a divergence region that has not yet been
+	// processed. Once a resolution strategy is implemented, this check
+	// will no longer return an error, and the effective tip height
+	// will be defined as the minimum of the two.
+	if blockTipHeight != filterTipHeight {
+		return fmt.Errorf("divergence detected between target header "+
+			"store tip heights (block=%d, filter=%d)",
+			blockTipHeight, filterTipHeight)
+	}
+
+	// Extract import height range.
+	importStartHeight := sourceMetadata.startHeight
+	importEndHeight := sourceMetadata.endHeight
+
+	// If import wants to start after height 1, we'd have a gap.
+	if importStartHeight > 1 {
+		return fmt.Errorf("target stores contain only genesis block "+
+			"(height 0) but import data starts at height %d, "+
+			"creating a gap", importStartHeight)
+	}
+
+	// If import includes genesis block (starts at 0), verify it matches.
+	if importStartHeight == 0 {
+		err := h.verifyHeadersAtTargetHeight(importStartHeight)
+		if err != nil {
+			return fmt.Errorf("genesis header mismatch: %v", err)
+		}
+		log.Infof("Genesis headers verified, import data will extend " +
+			"chain from genesis")
+	} else {
+		// Import starts at height 1, which connects to genesis.
+		// Validate that the block header at height 1 from the import
+		// source connects with the previous header in the target block
+		// store.
+		if err := h.validateHeaderConnection(
+			importStartHeight, blockTipHeight, sourceMetadata,
+		); err != nil {
+			return fmt.Errorf("failed to validate header "+
+				"connection: %v", err)
+		}
+
+		log.Info("Target stores contain only genesis block, import " +
+			"data will extend chain from height 1")
+	}
+
+	log.Infof("Chain continuity validation successful: import data "+
+		"(%d-%d) connects properly with target chain",
+		importStartHeight, importEndHeight)
+
+	return nil
 }
 
 // verifyHeadersAtTargetHeight ensures headers at the specified height match
@@ -182,6 +266,59 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 	log.Debugf("Headers from %s (block) and %s (filter) verified at "+
 		"height %d", h.blockHeadersImportSource.GetURI(),
 		h.filterHeadersImportSource.GetURI(), height)
+
+	return nil
+}
+
+// validateHeaderConnection verifies that a block header from the import source
+// properly connects with the previous header in the target block store.
+func (h *headersImport) validateHeaderConnection(targetStartHeight,
+	prevTargetBlockHeight uint32, headerMetadata *headerMetadata) error {
+
+	// Get the previous block header from target store.
+	prevBlkHdr, err := h.options.TargetBlockHeaderStore.FetchHeaderByHeight(
+		prevTargetBlockHeight,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get block header from "+
+			"target at height %d: %w", prevTargetBlockHeight, err)
+	}
+
+	// Convert target height to the equivalent index for import sources.
+	importSourceIndex := targetHeightToImportSourceIndex(
+		targetStartHeight, headerMetadata.startHeight,
+	)
+
+	// Get block header at that index from the import source.
+	currHeader, err := h.blockHeadersImportSource.GetHeader(
+		importSourceIndex,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get block header from "+
+			"import source at height %d: %w",
+			targetStartHeight, err)
+	}
+
+	currBlkHeader, err := assertBlockHeader(currHeader)
+	if err != nil {
+		return err
+	}
+
+	// Ensure the current header's previous block hash matches the
+	// hash of the previously fetched block header to maintain chain
+	// integrity.
+	prevHash := prevBlkHdr.BlockHash()
+	if !currBlkHeader.PrevBlock.IsEqual(&prevHash) {
+		return fmt.Errorf("header chain broken: current "+
+			"header's PrevBlock (%v) doesn't match "+
+			"previous header's hash (%v)",
+			currBlkHeader.PrevBlock, prevHash)
+	}
+
+	log.Debugf("Validated block header connection: import height %d "+
+		"properly connects to target chain at height %d "+
+		"(prev hash: %v)", targetStartHeight, prevTargetBlockHeight,
+		prevHash)
 
 	return nil
 }
