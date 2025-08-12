@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -120,7 +121,7 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 // first development iteration, it is designed to serve new users who don't yet
 // have headers data, or existing users who are willing to reset their headers
 // data.
-func (h *headersImport) Import() (*ImportResult, error) {
+func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 	isFresh, err := h.isTargetFresh(
 		h.options.TargetBlockHeaderStore,
 		h.options.TargetFilterHeaderStore,
@@ -169,7 +170,7 @@ func (h *headersImport) Import() (*ImportResult, error) {
 		uint32(h.options.WriteBatchSizePerRegion),
 	)
 
-	err = h.blockHeadersValidator.Validate(blockHeadersIterator)
+	err = h.blockHeadersValidator.Validate(ctx, blockHeadersIterator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate block "+
 			"headers: %w", err)
@@ -181,7 +182,7 @@ func (h *headersImport) Import() (*ImportResult, error) {
 		uint32(h.options.WriteBatchSizePerRegion),
 	)
 
-	err = h.filterHeadersValidator.Validate(filterHeadersIterator)
+	err = h.filterHeadersValidator.Validate(ctx, filterHeadersIterator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate filter "+
 			"headers: %w", err)
@@ -210,7 +211,7 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	// from their highest existing header up to the import source's end
 	// height. This assumes the target stores are consistent and valid
 	// (i.e., no divergence), allowing for safe extension with new data.
-	err = h.processNewHeadersRegion(regions.newHeaders, result)
+	err = h.processNewHeadersRegion(ctx, regions.newHeaders, result)
 	if err != nil {
 		return nil, fmt.Errorf("headers import failed: new headers "+
 			"processing failed: %w", err)
@@ -481,8 +482,8 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 // processNewHeadersRegion imports headers from the specified region into the
 // target stores. This method handles the case where headers exist in the import
 // source but not in the target stores.
-func (h *headersImport) processNewHeadersRegion(region headerRegion,
-	result *ImportResult) error {
+func (h *headersImport) processNewHeadersRegion(ctx context.Context,
+	region headerRegion, result *ImportResult) error {
 
 	if !region.exists {
 		return nil
@@ -491,7 +492,7 @@ func (h *headersImport) processNewHeadersRegion(region headerRegion,
 	log.Infof("Adding %d new headers (block and filter) from heights "+
 		"%d to %d", region.end-region.start+1, region.start, region.end)
 
-	err := h.appendNewHeaders(region.start, region.end)
+	err := h.appendNewHeaders(ctx, region.start, region.end)
 	if err != nil {
 		return fmt.Errorf("failed to append new headers: %w", err)
 	}
@@ -503,7 +504,9 @@ func (h *headersImport) processNewHeadersRegion(region headerRegion,
 }
 
 // appendNewHeaders adds new headers from import source.
-func (h *headersImport) appendNewHeaders(startHeight, endHeight uint32) error {
+func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
+	endHeight uint32) error {
+
 	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
 		return fmt.Errorf("failed to get block header "+
@@ -533,6 +536,10 @@ func (h *headersImport) appendNewHeaders(startHeight, endHeight uint32) error {
 
 	batchStart := startHeight
 	for {
+		if err := ctxCancelled(ctx); err != nil {
+			return err
+		}
+
 		batchEnd, err := h.processBatch(
 			blockIter, filterIter, batchStart,
 		)

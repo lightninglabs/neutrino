@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg"
@@ -47,7 +48,9 @@ func newFilterHeadersImportSourceValidator(
 // where FilterHeader_N-1 is the previous filter header in little-endian byte
 // order, Filter_N is the compact filter for the block, and || represents
 // concatenation.
-func (v *filterHeadersImportSourceValidator) Validate(it HeaderIterator) error {
+func (v *filterHeadersImportSourceValidator) Validate(ctx context.Context,
+	it HeaderIterator) error {
+
 	var (
 		start     = it.GetStartIndex()
 		end       = it.GetEndIndex()
@@ -59,6 +62,10 @@ func (v *filterHeadersImportSourceValidator) Validate(it HeaderIterator) error {
 		if err != nil {
 			return fmt.Errorf("failed to get next batch for "+
 				"validation: %w", err)
+		}
+
+		if err := ctxCancelled(ctx); err != nil {
+			return nil
 		}
 
 		if err = v.ValidateBatch(batch); err != nil {

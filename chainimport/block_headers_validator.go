@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -49,7 +50,9 @@ func newBlockHeadersImportSourceValidator(targetChainParams chaincfg.Params,
 }
 
 // Validate performs thorough validation of a batch of block headers.
-func (v *blockHeadersImportSourceValidator) Validate(it HeaderIterator) error {
+func (v *blockHeadersImportSourceValidator) Validate(ctx context.Context,
+	it HeaderIterator) error {
+
 	var (
 		start      = it.GetStartIndex()
 		end        = it.GetEndIndex()
@@ -62,6 +65,10 @@ func (v *blockHeadersImportSourceValidator) Validate(it HeaderIterator) error {
 		if err != nil {
 			return fmt.Errorf("failed to get next batch for "+
 				"validation: %w", err)
+		}
+
+		if err := ctxCancelled(ctx); err != nil {
+			return nil
 		}
 
 		if err = v.ValidateBatch(batch); err != nil {
