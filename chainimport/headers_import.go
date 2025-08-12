@@ -89,6 +89,103 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	return result, nil
 }
 
+// verifyHeadersAtTargetHeight ensures headers at the specified height match
+// exactly between import and target sources by performing a byte-level
+// comparison.
+//
+// The function retrieves the header from both sources at the given height and
+// verifies they are identical, returning an error if any discrepancy is found.
+func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
+	// Get header metadata from import souces. We can safely use this header
+	// metadata for both block headers and filter headers since we've
+	// already validated that those header metadata are compatible with each
+	// other.
+	headerMetadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get block header "+
+			"metadata: %w", err)
+	}
+
+	// Convert target height to the equivalent index for import sources.
+	importSourceIndex := targetHeightToImportSourceIndex(
+		height, headerMetadata.startHeight,
+	)
+
+	// Get block header at that index from the import source.
+	importSourceHeader, err := h.blockHeadersImportSource.GetHeader(
+		importSourceIndex,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get block header from import "+
+			"source at height %d: %w", height, err)
+	}
+
+	importSourceBlkHeader, err := assertBlockHeader(importSourceHeader)
+	if err != nil {
+		return err
+	}
+
+	// Get the equivalent block header from target store.
+	targetBlkHeaderStore := h.options.TargetBlockHeaderStore
+	targetBlkHeader, err := targetBlkHeaderStore.FetchHeaderByHeight(
+		height,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get block header from target at "+
+			"height %d: %w", height, err)
+	}
+
+	// Compare block headers from import and target sources.
+	sourceBlkHeaderHash := importSourceBlkHeader.BlockHash()
+	targetBlkHeaderHash := targetBlkHeader.BlockHash()
+	if !sourceBlkHeaderHash.IsEqual(&targetBlkHeaderHash) {
+		return fmt.Errorf("block header mismatch at height %d: source "+
+			"has %v but target has %v", height,
+			sourceBlkHeaderHash, targetBlkHeaderHash)
+	}
+
+	// Get and verify filter headers. We can safely use the same import
+	// source index used for import source block header store since we've
+	// validated earlier their start height and headers count match exactly.
+	importSourceHeader, err = h.filterHeadersImportSource.GetHeader(
+		importSourceIndex,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get filter header from import "+
+			"source at height %d: %w", height, err)
+	}
+
+	importSourceFilterHeader, err := assertFilterHeader(importSourceHeader)
+	if err != nil {
+		return err
+	}
+
+	// Get the equivalent filter header from target store.s
+	filterHeaderStore := h.options.TargetFilterHeaderStore
+	targetFilterHeader, err := filterHeaderStore.FetchHeaderByHeight(
+		height,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get filter header from target at "+
+			"height %d: %w", height, err)
+	}
+
+	// Compare filter headers from import and target sources.
+	sourceFilterHeaderHash := importSourceFilterHeader.FilterHash
+	targetFilterHeaderHash := *targetFilterHeader
+	if !sourceFilterHeaderHash.IsEqual(&targetFilterHeaderHash) {
+		return fmt.Errorf("filter header mismatch at height %d: "+
+			"source has %v but target has %v", height,
+			sourceFilterHeaderHash, targetFilterHeaderHash)
+	}
+
+	log.Debugf("Headers from %s (block) and %s (filter) verified at "+
+		"height %d", h.blockHeadersImportSource.GetURI(),
+		h.filterHeadersImportSource.GetURI(), height)
+
+	return nil
+}
+
 // isTargetFresh checks if the target header stores are in their initial state,
 // meaning they contain only the genesis header (height 0).
 func (h *headersImport) isTargetFresh(

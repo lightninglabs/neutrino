@@ -74,3 +74,30 @@ func AddHeadersImportMetadata(sourceFilePath string, chainType wire.BitcoinNet,
 
 	return nil
 }
+
+// targetHeightToImportSourceIndex converts the absolute blockchain target
+// height to the equivalent import source height based on the start height
+// input.
+func targetHeightToImportSourceIndex(targetH, importStartH uint32) uint32 {
+	return targetH - importStartH
+}
+
+// assertBlockHeader type asserts header to *blockHeader or returns error.
+func assertBlockHeader(header Header) (*blockHeader, error) {
+	blkHeader, ok := header.(*blockHeader)
+	if !ok {
+		return nil, fmt.Errorf("expected blockHeader type, got %T",
+			header)
+	}
+	return blkHeader, nil
+}
+
+// assertFilterHeader type asserts header to *filterHeader or returns error.
+func assertFilterHeader(header Header) (*filterHeader, error) {
+	fHeader, ok := header.(*filterHeader)
+	if !ok {
+		return nil, fmt.Errorf("expected filterHeader type, got %T",
+			header)
+	}
+	return fHeader, nil
+}
