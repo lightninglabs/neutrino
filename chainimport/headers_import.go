@@ -28,6 +28,9 @@ type headersImport struct {
 	// import source.
 	filterHeadersImportSource HeaderImportSource
 
+	// blockHeadersValidator validates the imported block headers.
+	blockHeadersValidator HeadersValidator
+
 	// options contains configuration parameters for the import process.
 	options *ImportOptions
 }
@@ -49,9 +52,12 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	blockHeadersSource := options.createBlockHeaderImportSrc()
 	filterHeadersSource := options.createFilterHeaderImportSrc()
 
+	blockheadersValidator := options.createBlockHeaderValidator()
+
 	importer := &headersImport{
 		blockHeadersImportSource:  blockHeadersSource,
 		filterHeadersImportSource: filterHeadersSource,
+		blockHeadersValidator:     blockheadersValidator,
 		options:                   options,
 	}
 
@@ -100,6 +106,30 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	if err := h.validateChainContinuity(); err != nil {
 		return nil, fmt.Errorf("failed to validate continuity of "+
 			"import headers chain with target chain: %v", err)
+	}
+
+	// Get header metadata from import souces. We can safely use this header
+	// metadata for both block headers and filter headers since we've
+	// already validated that those header metadata are compatible with each
+	// other.
+	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate all block headers from import source.
+	log.Debugf("Validating %d block headers", metadata.headersCount)
+	blockHeadersIterator := h.blockHeadersImportSource.Iterator(
+		0, metadata.headersCount-1,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+	defer blockHeadersIterator.Close()
+
+	if err := h.blockHeadersValidator.Validate(
+		blockHeadersIterator, h.options.TargetChainParams,
+	); err != nil {
+		return nil, fmt.Errorf("failed to validate block "+
+			"headers: %w", err)
 	}
 
 	result.EndTime = time.Now()
@@ -527,6 +557,12 @@ func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
 	return newFileHeaderImportSource(
 		options.FilterHeadersSource, newFilterHeader,
 	)
+}
+
+// createBlockHeaderValidator creates the appropriate validator for block
+// headers.
+func (options *ImportOptions) createBlockHeaderValidator() HeadersValidator {
+	return newBlockHeadersImportSourceValidator()
 }
 
 // ImportResult contains statistics about a header import operation.

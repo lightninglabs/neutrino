@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
+	"regexp"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -3629,6 +3633,566 @@ func TestHeaderRetrievalOnSequentialHeaders(t *testing.T) {
 			}
 			require.NoError(t, err)
 			tc.verify(verify)
+		})
+	}
+}
+
+// TestHeaderValidationOnBlockHeadersPair tests the header validation on a
+// block header pair. It checks that the header is validated correctly.
+func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		hValidator HeadersValidator
+		prev       Header
+		current    Header
+		err        error
+	}
+	testCases := []struct {
+		name         string
+		tCP          chaincfg.Params
+		prep         func(tCP chaincfg.Params) Prep
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnMismatchPreviousHeaderType",
+			tCP:  chaincfg.Params{},
+			prep: func(chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+				return Prep{
+					hValidator: bHV,
+					prev:       newFilterHeader(),
+					current:    newBlockHeader(),
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "expected blockHeader type, got " +
+				"\\*chainimport.filterHeader",
+		},
+		{
+			name: "ErrorOnMismatchCurrentHeaderType",
+			tCP:  chaincfg.Params{},
+			prep: func(chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+				return Prep{
+					hValidator: bHV,
+					prev:       newBlockHeader(),
+					current:    newFilterHeader(),
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "expected blockHeader type, got " +
+				"\\*chainimport.filterHeader",
+		},
+		{
+			name: "ErrorOnNonConsecutiveHeaderChain",
+			tCP:  chaincfg.Params{},
+			prep: func(chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				nBH := len(blockHdrs)
+				currentH, err := constructBlkHdr(
+					blockHdrs[nBH-1], uint32(nBH-1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "height mismatch: previous height=0, " +
+				"current height=4",
+		},
+		{
+			name: "ErrorOnInvalidHeaderHashChain",
+			tCP:  chaincfg.Params{},
+			prep: func(chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct origin block header.
+				originH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[2], uint32(2),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				currentH.PrevBlock = originH.BlockHash()
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "header chain broken: current header's " +
+				"PrevBlock (.*) doesn't match previous " +
+				"header's hash (.*)",
+		},
+		{
+			name: "ErrorOnZeroDifficultyTarget",
+			tCP:  chaincfg.Params{},
+			prep: func(chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				currentH.Bits = 0
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "block target difficulty of .* is too " +
+				"low",
+		},
+		{
+			name: "ErrorOnDifficultyExceedsMaximumAllowed",
+			tCP:  chaincfg.SimNetParams,
+			prep: func(tCP chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				invT := new(big.Int).Add(
+					tCP.PowLimit, big.NewInt(1),
+				)
+				newT := blockchain.BigToCompact(invT)
+				currentH.Bits = newT
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "block target difficulty of .* is " +
+				"higher than max of .*",
+		},
+		{
+			name: "ErrorOnHashHigherThanTarget",
+			tCP:  chaincfg.SimNetParams,
+			prep: func(tCP chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Set an extremely high difficulty
+				// (very small target).
+				currentH.Bits = 0x1f000001
+
+				// We need to ensure the block hash will
+				// be higher than target.
+				currentH.Nonce = 0xffffffff
+				currentH.MerkleRoot = chainhash.Hash{
+					0xff, 0xff, 0xff,
+				}
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "block hash of .* is higher than " +
+				"expected max of .*",
+		},
+		{
+			name: "ErrorOnSubSecondTimestampPrecision",
+			tCP:  chaincfg.SimNetParams,
+			prep: func(tCP chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				currentH.Timestamp = time.Unix(0, 50)
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "block timestamp of .* has a higher " +
+				"precision than one second",
+		},
+		{
+			name: "ValidateBlockHeadersPairSuccessfully",
+			tCP:  chaincfg.SimNetParams,
+			prep: func(tCP chaincfg.Params) Prep {
+				opts := &ImportOptions{}
+				bHV := opts.createBlockHeaderValidator()
+
+				// Construct previous block header.
+				prevH, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				// Construct current block header.
+				currentH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return Prep{
+						err: err,
+					}
+				}
+
+				return Prep{
+					hValidator: bHV,
+					prev:       prevH,
+					current:    currentH,
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep(tc.tCP)
+			require.NoError(t, prep.err)
+
+			err := prep.hValidator.ValidatePair(
+				prep.prev, prep.current, tc.tCP,
+			)
+			if tc.expectErr {
+				matched, matchErr := regexp.MatchString(
+					tc.expectErrMsg, err.Error(),
+				)
+				require.NoError(t, matchErr)
+				require.True(
+					t, matched, "failed with: "+err.Error(),
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestHeaderValidationOnSequentialBlockHeaders tests the header validation on
+// sequential block headers. It checks that the header is validated correctly.
+func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		iterator  HeaderIterator
+		validator HeadersValidator
+		cleanup   func()
+		err       error
+	}
+	testCases := []struct {
+		name         string
+		index        int
+		prep         func() Prep
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name:  "ErrorOnHeaderOutOfBounds",
+			index: len(blockHdrs),
+			prep: func() Prep {
+				// Create block headers file.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bFile.Name())
+
+				err = bS.Open()
+				cleanup := func() {
+					bS.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				index := len(blockHdrs)
+				start := uint32(index - 1)
+				end := uint32(index)
+				bIterator := bS.Iterator(
+					start, end,
+					defaultWriteBatchSizePerRegion,
+				)
+
+				// Create block validator.
+				bV := opts.createBlockHeaderValidator()
+
+				return Prep{
+					iterator:  bIterator,
+					validator: bV,
+					cleanup:   cleanup,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("failed to read "+
+				"header at index %d", len(blockHdrs)),
+		},
+		{
+			name: "NoMoreHeadersToValidate",
+			prep: func() Prep {
+				// Create block headers file.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bFile.Name())
+
+				err = bS.Open()
+				cleanup := func() {
+					bS.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				index := len(blockHdrs) - 1
+				start := uint32(index + 1)
+				end := uint32(index)
+				bIterator := bS.Iterator(
+					start, end,
+					defaultWriteBatchSizePerRegion,
+				)
+
+				// Create block validator.
+				bV := opts.createBlockHeaderValidator()
+
+				return Prep{
+					iterator:  bIterator,
+					validator: bV,
+					cleanup:   cleanup,
+				}
+			},
+		},
+		{
+			name: "ValidSequentialHeaders",
+			prep: func() Prep {
+				// Create a file with valid block
+				// headers and metadata.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Configure import options
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bFile.Name())
+				err = bS.Open()
+				cleanup := func() {
+					bS.Close()
+					os.Remove(bS.GetURI())
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Get header metadata.
+				meta, err := bS.GetHeaderMetadata()
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Create block header iterator.
+				bIt := bS.Iterator(
+					0, meta.headersCount-1,
+					defaultWriteBatchSizePerRegion,
+				)
+
+				// Create block validator.
+				bV := opts.createBlockHeaderValidator()
+
+				return Prep{
+					iterator:  bIt,
+					validator: bV,
+					cleanup:   cleanup,
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+			err := prep.validator.Validate(
+				prep.iterator, chaincfg.SimNetParams,
+			)
+			if tc.expectErr {
+				require.ErrorContains(
+					t, err, tc.expectErrMsg,
+				)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
