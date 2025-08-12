@@ -3,6 +3,7 @@ package chainimport
 import (
 	"io"
 	"iter"
+	"net/http"
 
 	"github.com/btcsuite/btcd/chaincfg"
 )
@@ -122,4 +123,9 @@ type HeadersValidator interface {
 
 	// ValidateSingle validates a single header for basic sanity checks.
 	ValidateSingle(header Header, targetChainParams chaincfg.Params) error
+}
+
+// HttpClient defines the interface for making HTTP GET requests.
+type HttpClient interface {
+	Get(url string) (*http.Response, error)
 }
