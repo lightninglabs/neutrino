@@ -4,6 +4,7 @@
 package neutrino
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -1656,7 +1657,7 @@ func (s *ChainService) ChainParams() chaincfg.Params {
 }
 
 // Start begins connecting to peers and syncing the blockchain.
-func (s *ChainService) Start() error {
+func (s *ChainService) Start(ctx context.Context) error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
 		return nil
@@ -1680,7 +1681,7 @@ func (s *ChainService) Start() error {
 		if err != nil {
 			return err
 		}
-		if _, err := importer.Import(); err != nil {
+		if _, err := importer.Import(ctx); err != nil {
 			return err
 		}
 	}

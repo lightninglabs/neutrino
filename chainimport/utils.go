@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -93,6 +94,18 @@ func setLastFilterHeaderHash(filterHeaders []headerfs.FilterHeader,
 // input.
 func targetHeightToImportSourceIndex(targetH, importStartH uint32) uint32 {
 	return targetH - importStartH
+}
+
+// ctxCancelled checks if context is cancelled and returns the error if so. It
+// is used during long-running headers import operations to provide responsive
+// cancellation.
+func ctxCancelled(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
 
 // assertBlockHeader type asserts header to *blockHeader or returns error.

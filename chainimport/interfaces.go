@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"io"
 	"iter"
 	"net/http"
@@ -110,7 +111,7 @@ type HeadersValidator interface {
 	// Validate performs comprehensive validation on a sequence of headers
 	// provided by the iterator. It checks that the entire sequence forms
 	// a valid chain according to the given chain parameters.
-	Validate(HeaderIterator, chaincfg.Params) error
+	Validate(context.Context, HeaderIterator, chaincfg.Params) error
 
 	// ValidateBatch performs validation on a batch of headers, checking
 	// that they form a valid chain segment according to the given chain

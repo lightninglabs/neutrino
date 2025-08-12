@@ -2,6 +2,7 @@ package neutrino_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -1035,6 +1036,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 }
 
 func TestNeutrinoSync(t *testing.T) {
+	rootCtx := context.Background()
+
 	// Set up logging.
 	logger := btclog.NewBackend(os.Stdout)
 	chainLogger := logger.Logger("CHAIN")
@@ -1165,7 +1168,7 @@ func TestNeutrinoSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
 	}
-	svc.Start()
+	svc.Start(rootCtx)
 	defer svc.Stop()
 
 	// Create a test harness with the three nodes and the neutrino instance.

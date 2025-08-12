@@ -1,6 +1,7 @@
 package chainimport
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -25,14 +26,18 @@ func newBlockHeadersImportSourceValidator() HeadersValidator {
 }
 
 // Validate performs thorough validation of a batch of block headers.
-func (v *blockHeadersImportSourceValidator) Validate(
-	iterator HeaderIterator,
-	targetChainParams chaincfg.Params) error {
+func (v *blockHeadersImportSourceValidator) Validate(ctx context.Context,
+	iterator HeaderIterator, targetChainParams chaincfg.Params) error {
 
 	count := 0
 	var lastHeader Header
 
 	for {
+		// Check for context cancellation before validating next batch.
+		if err := ctxCancelled(ctx); err != nil {
+			return nil
+		}
+
 		batch, err := iterator.NextBatch()
 		if err == io.EOF {
 			break
@@ -181,11 +186,16 @@ func newFilterHeadersImportSourceValidator() HeadersValidator {
 // where FilterHeader_N-1 is the previous filter header in little-endian byte
 // order, Filter_N is the compact filter for the block, and || represents
 // concatenation.
-func (v *filterHeadersImportSourceValidator) Validate(iterator HeaderIterator,
-	targetChainParams chaincfg.Params) error {
+func (v *filterHeadersImportSourceValidator) Validate(ctx context.Context,
+	iterator HeaderIterator, targetChainParams chaincfg.Params) error {
 
 	count := 0
 	for {
+		// Check for context cancellation before validating next batch.
+		if err := ctxCancelled(ctx); err != nil {
+			return nil
+		}
+
 		batch, err := iterator.NextBatch()
 		if err == io.EOF {
 			break

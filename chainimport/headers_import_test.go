@@ -2,6 +2,7 @@ package chainimport
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -110,6 +111,7 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 // the import is skipped if the target header store is populated with headers.
 func TestImportSkipOperation(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		options *ImportOptions
 	}
@@ -179,7 +181,7 @@ func TestImportSkipOperation(t *testing.T) {
 			prep := tc.prep()
 			hI, err := NewHeadersImport(prep.options)
 			require.NoError(t, err)
-			importResult, err := hI.Import()
+			importResult, err := hI.Import(ctx)
 			verify := Verify{
 				tc:            t,
 				importOptions: prep.options,
@@ -201,6 +203,7 @@ func TestImportSkipOperation(t *testing.T) {
 // are written to the target header stores.
 func TestImportOperationOnFileHeaderSource(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		options *ImportOptions
 		cleanup func()
@@ -355,7 +358,7 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 
 			hI, err := NewHeadersImport(prep.options)
 			require.NoError(t, err)
-			importResult, err := hI.Import()
+			importResult, err := hI.Import(ctx)
 			verify := Verify{
 				tc:            t,
 				importOptions: prep.options,
@@ -377,6 +380,7 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 // are written to the target header stores.
 func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		hImport *headersImport
 		cleanup func()
@@ -583,7 +587,7 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			prep := tc.prep()
-			importResult, err := prep.hImport.Import()
+			importResult, err := prep.hImport.Import(ctx)
 			verify := Verify{
 				tc:           t,
 				importResult: importResult,
@@ -5002,6 +5006,7 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 // sequential block headers. It checks that the header is validated correctly.
 func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		iterator  HeaderIterator
 		validator HeadersValidator
@@ -5181,7 +5186,7 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 			t.Cleanup(prep.cleanup)
 			require.NoError(t, prep.err)
 			err := prep.validator.Validate(
-				prep.iterator, chaincfg.SimNetParams,
+				ctx, prep.iterator, chaincfg.SimNetParams,
 			)
 			if tc.expectErr {
 				require.ErrorContains(
@@ -5199,6 +5204,7 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 // correctly.
 func TestHeaderValidationOnSequentialFilterHeaders(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		iterator  HeaderIterator
 		validator HeadersValidator
@@ -5369,7 +5375,9 @@ func TestHeaderValidationOnSequentialFilterHeaders(t *testing.T) {
 			prep := tc.prep()
 			t.Cleanup(prep.cleanup)
 			require.NoError(t, prep.err)
-			err := prep.validator.Validate(prep.iterator, *tc.tCP)
+			err := prep.validator.Validate(
+				ctx, prep.iterator, *tc.tCP,
+			)
 			if tc.expectErr {
 				require.ErrorContains(t, err, tc.expectErrMsg)
 				return
@@ -6803,6 +6811,7 @@ func TestHeaderStorage(t *testing.T) {
 // target header stores.
 func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	type Prep struct {
 		hImport *headersImport
 		cleanup func()
@@ -7510,7 +7519,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 			t.Cleanup(prep.cleanup)
 			require.NoError(t, prep.err)
 			err := prep.hImport.processNewHeadersRegion(
-				tc.region, tc.importResult,
+				ctx, tc.region, tc.importResult,
 			)
 			verify := Verify{
 				tc:            t,
