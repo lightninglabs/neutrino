@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
@@ -17,9 +18,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/mmap"
 )
@@ -5023,6 +5026,1286 @@ func TestHeaderProcessing(t *testing.T) {
 			verify := verify{
 				tc:                t,
 				processingRegions: regs,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// TestHeaderStorage tests the header storage to the target header stores. It
+// checks that the headers are written correctly to the target header stores.
+func TestHeaderStorage(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hImport       *headersImport
+		blockHeaders  []headerfs.BlockHeader
+		filterHeaders []headerfs.FilterHeader
+		cleanup       func()
+		err           error
+	}
+	type verify struct {
+		tc      *testing.T
+		hImport *headersImport
+	}
+	testCases := []struct {
+		name         string
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnBlockHeadersWrite",
+			prep: func() prep {
+				b := &headerfs.MockBlockHeaderStore{}
+				args := mock.Anything
+				b.On("WriteHeaders", args).Return(
+					errors.New("I/O write error"),
+				)
+
+				f := &headerfs.MockFilterHeaderStore{}
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(v verify) {},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("failed to write block "+
+				"headers batch 0-%d: I/O write error",
+				len(blockHdrs)-1),
+		},
+		{
+			name: "RollbackBlockHdrsAfterFilterHdrsFailure",
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				f := &headerfs.MockFilterHeaderStore{}
+				args := mock.Anything
+				f.On("WriteHeaders", args).Return(
+					errors.New("I/O write error"),
+				)
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader, nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport:       headersImport,
+					blockHeaders:  blkHdrsToWrite,
+					filterHeaders: nil,
+					cleanup:       cleanup,
+				}
+			},
+			verify: func(v verify) {
+				options := v.hImport.options
+				tBS := options.TargetBlockHeaderStore
+				chainTipB, height, err := tBS.ChainTip()
+				require.NoError(v.tc, err)
+
+				// Since we have wrote 4 headers and those
+				// rolledback on filter headers write failure,
+				// we can expect the chain tip height to be 0.
+				require.Equal(v.tc, uint32(0), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[0], uint32(0),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("failed to write filter "+
+				"headers batch 0-%d: I/O write error",
+				len(blockHdrs)-1),
+		},
+		{
+			name: "ErrorOnBlockHeadersRollback",
+			prep: func() prep {
+				b := &headerfs.MockBlockHeaderStore{}
+				a := mock.Anything
+				b.On("WriteHeaders", a).Return(nil)
+				b.On("RollbackBlockHeaders", a).Return(
+					nil,
+					errors.New("I/O blocks rollback error"),
+				)
+
+				f := &headerfs.MockFilterHeaderStore{}
+				f.On("WriteHeaders", a).Return(
+					errors.New("I/O write err"),
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(v verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to rollback 0 headers from " +
+				"target block header store after filter " +
+				"headers write failure. Block error: I/O " +
+				"blocks rollback error",
+		},
+		{
+			name: "NoErrorOnEmptyBlockAndFilterHeaders",
+			prep: func() prep {
+				b := &headerfs.MockBlockHeaderStore{}
+				args := mock.Anything
+				b.On("WriteHeaders", args).Return(nil)
+
+				f := &headerfs.MockFilterHeaderStore{}
+				f.On("WriteHeaders", args).Return(nil)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport:       headersImport,
+					blockHeaders:  nil,
+					filterHeaders: nil,
+					cleanup:       func() {},
+				}
+			},
+			verify: func(v verify) {},
+		},
+		{
+			name: "StoreBothBlockAndFilterHeaders",
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				f, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader,
+					nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs)
+				filtHdrsToWrite := make(
+					[]headerfs.FilterHeader, nFHs-1,
+				)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					fH := h.FilterHeader
+					filtHdrsToWrite[i-1] = fH
+				}
+
+				setLastFilterHeaderHash(
+					filtHdrsToWrite, blkHdrsToWrite,
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport:       headersImport,
+					blockHeaders:  blkHdrsToWrite,
+					filterHeaders: filtHdrsToWrite,
+					cleanup:       cleanup,
+				}
+			},
+			verify: func(v verify) {
+				options := v.hImport.options
+				tBS := options.TargetBlockHeaderStore
+				chainTipB, height, err := tBS.ChainTip()
+				require.NoError(v.tc, err)
+
+				nBHs := len(blockHdrs)
+				require.Equal(v.tc, uint32(nBHs-1), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[nBHs-1], uint32(nBHs-1),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+
+				tFS := options.TargetFilterHeaderStore
+				chainTipF, height, err := tFS.ChainTip()
+				require.NoError(v.tc, err)
+
+				nFHs := len(filterHdrs)
+				require.Equal(v.tc, uint32(nFHs-1), height)
+
+				// Assert that the known filter header at this
+				// index matches the retrieved one.
+				chainTipFEx, err := constructFilterHdr(
+					filterHdrs[nFHs-1], uint32(nFHs-1),
+				)
+				require.NoError(v.tc, err)
+				f := &chainTipFEx.FilterHash
+				require.Equal(v.tc, f, chainTipF)
+			},
+		},
+		{
+			name: "StoreBlockHeadersOnly",
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				f := &headerfs.MockFilterHeaderStore{}
+				args := mock.Anything
+				f.On("WriteHeaders", args).Return(nil)
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader, nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport:       headersImport,
+					blockHeaders:  blkHdrsToWrite,
+					filterHeaders: nil,
+					cleanup:       cleanup,
+				}
+			},
+			verify: func(v verify) {
+				options := v.hImport.options
+				tBS := options.TargetBlockHeaderStore
+				chainTipB, height, err := tBS.ChainTip()
+				require.NoError(v.tc, err)
+
+				nBHs := len(blockHdrs)
+				require.Equal(v.tc, uint32(nBHs-1), height)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[nBHs-1], uint32(nBHs-1),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+			},
+		},
+		{
+			name: "StoreFilterHeadersOnly",
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				f, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				b := &headerfs.MockBlockHeaderStore{}
+				args := mock.Anything
+				b.On("WriteHeaders", args).Return(nil)
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs)
+				filtHdrsToWrite := make(
+					[]headerfs.FilterHeader, nFHs-1,
+				)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					fH := h.FilterHeader
+					filtHdrsToWrite[i-1] = fH
+				}
+
+				lbH, err := constructBlkHdr(
+					blockHdrs[len(blockHdrs)-1],
+					uint32(len(blockHdrs)-1),
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				bH := lbH.BlockHash()
+				filtHdrsToWrite[nFHs-2].HeaderHash = bH
+
+				ops := &ImportOptions{
+					TargetFilterHeaderStore: f,
+					TargetBlockHeaderStore:  b,
+				}
+
+				headersImport := &headersImport{
+					options: ops,
+				}
+
+				return prep{
+					hImport:       headersImport,
+					blockHeaders:  nil,
+					filterHeaders: filtHdrsToWrite,
+					cleanup:       cleanup,
+				}
+			},
+			verify: func(v verify) {
+				options := v.hImport.options
+				tFS := options.TargetFilterHeaderStore
+				_, _, err := tFS.ChainTip()
+				expectErrMsg := "target height not found in " +
+					"index"
+				require.ErrorContains(v.tc, err, expectErrMsg)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+			err := prep.hImport.writeHeadersToTargetStores(
+				prep.blockHeaders, prep.filterHeaders,
+				0, uint32(len(blockHdrs)-1),
+			)
+			verify := verify{
+				tc:      t,
+				hImport: prep.hImport,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// TestHeaderStorageOnNewHeadersRegion tests the header storage on the new
+// headers region. It checks that the headers are written correctly to the
+// target header stores.
+func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	type verify struct {
+		tc            *testing.T
+		importOptions *ImportOptions
+		importResult  *ImportResult
+	}
+	testCases := []struct {
+		name         string
+		region       headerRegion
+		importResult *ImportResult
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "NoErrorOnNonExistentRegion",
+			region: headerRegion{
+				start:  1000,
+				end:    2000,
+				exists: false,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				return prep{
+					hImport: &headersImport{},
+					cleanup: func() {},
+				}
+			},
+			verify: func(verify) {},
+		},
+		{
+			name: "ErrorOnGetHeaderMetadata",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				// Mock GetHeaderMetadata.
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					nil, errors.New("I/O read error"),
+				)
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+				}
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "I/O read error",
+		},
+		{
+			name: "ErrorOnGetBlockHeader",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					nil, errors.New("I/O read error"),
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+				fIt.On("ReadBatch", in, in, in).Return(nil, nil)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to read block headers batch at " +
+				"height 1: I/O read error",
+		},
+		{
+			name: "ErrorOnTypeAssertingBlockHeader",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{
+						newFilterHeader(),
+					}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+				fIt.On("ReadBatch", in, in, in).Return(nil, nil)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "expected blockHeader type, got " +
+				"*chainimport.filterHeader",
+		},
+		{
+			name: "ErrorOnGetFilterHeader",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+
+				fIt.On("ReadBatch", in, in, in).Return(
+					nil, errors.New("I/O read error"),
+				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to read filter headers batch " +
+				"at height 1: I/O read error",
+		},
+		{
+			name: "ErrorOnTypeAssertingFilterHeader",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+				fIt.On("ReadBatch", in, in, in).Return(
+					[]Header{
+						newBlockHeader(),
+					}, nil,
+				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "expected filterHeader type, got " +
+				"*chainimport.blockHeader",
+		},
+		{
+			name: "ErrorOnHeadersLengthMismatch",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+				fIt.On("ReadBatch", in, in, in).Return(
+					[]Header{
+						newFilterHeader(),
+					}, nil,
+				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "mismatch between block headers (0) " +
+				"and filter headers (1)",
+		},
+		{
+			name: "ErrorOnNoHeadersRead",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+				fIt.On("ReadBatch", in, in, in).Return(
+					[]Header{}, nil,
+				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "no headers read",
+		},
+		{
+			name: "ErrorOnWriteHeadersToTargetStores",
+			region: headerRegion{
+				start:  1,
+				end:    100,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					[]Header{
+						newBlockHeader(),
+					}, nil,
+				)
+				bIt.On("GetEndIndex").Return(uint32(100))
+				bIt.On("GetBatchSize").Return(uint32(100))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+
+				fIt.On("ReadBatch", in, in, in).Return(
+					[]Header{
+						newFilterHeader(),
+					}, nil,
+				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(100))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				b := &headerfs.MockBlockHeaderStore{}
+				in = mock.Anything
+				b.On("WriteHeaders", in).Return(
+					errors.New("I/O write error"),
+				)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 100,
+					TargetBlockHeaderStore:  b,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to write headers to target " +
+				"stores",
+		},
+		{
+			name: "ProcessNewHeadersRegionSuccessfully",
+			region: headerRegion{
+				start:  1,
+				end:    4,
+				exists: true,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				cleanup := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				f, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				importMetadata := &importMetadata{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: importMetadata,
+					}, nil,
+				)
+
+				bIt := &mockHeaderIterator{}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make([]Header, nBHs-1)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					blkHdrsToWrite[i-1] = h
+				}
+
+				in := mock.Anything
+				bIt.On("ReadBatch", in, in, in).Return(
+					blkHdrsToWrite, nil,
+				).Once()
+				bIt.On("ReadBatch", in, in, in).Return(
+					nil, io.EOF,
+				)
+				bIt.On("GetEndIndex").Return(uint32(4))
+				bIt.On("GetBatchSize").Return(uint32(128))
+				bIS.On("Iterator", in, in, in).Return(bIt)
+
+				fIS := &mockHeaderImportSource{}
+
+				fIt := &mockHeaderIterator{}
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs)
+				filtHdrsToWrite := make([]Header, nFHs-1)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					filtHdrsToWrite[i-1] = h
+				}
+
+				fIt.On("ReadBatch", in, in, in).Return(
+					filtHdrsToWrite, nil,
+				).Once()
+				fIt.On("ReadBatch", in, in, in).Return(
+					nil, io.EOF,
+				)
+				fIt.On("GetEndIndex").Return(uint32(4))
+				fIt.On("GetBatchSize").Return(uint32(128))
+				fIS.On("Iterator", in, in, in).Return(fIt)
+
+				ops := &ImportOptions{
+					WriteBatchSizePerRegion: 128,
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hImport: hImport,
+					cleanup: cleanup,
+				}
+			},
+			verify: func(v verify) {
+				// Assert that added/processed headers count
+				// equal the prep test data ignoring the genesis
+				// header.
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.ProcessedCount,
+				)
+
+				// Ensure no headers are skipped in the new
+				// headers region.
+				require.Equal(
+					v.tc, 0, v.importResult.SkippedCount,
+				)
+
+				// Verify those added align with the data
+				// inserted in the target stores.
+				ops := v.importOptions
+				tBS := ops.TargetBlockHeaderStore
+				chainTipB, height, err := tBS.ChainTip()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, uint32(len(blockHdrs)-1), height,
+				)
+
+				// Assert that the known block header at this
+				// index matches the retrieved one.
+				chainTipBEx, err := constructBlkHdr(
+					blockHdrs[len(blockHdrs)-1],
+					uint32(len(blockHdrs)-1),
+				)
+				require.NoError(v.tc, err)
+				b := chainTipBEx.BlockHeader.BlockHeader
+				require.Equal(v.tc, b, chainTipB)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+			err := prep.hImport.processNewHeadersRegion(
+				tc.region, tc.importResult,
+			)
+			verify := verify{
+				tc:            t,
+				importOptions: prep.hImport.options,
+				importResult:  tc.importResult,
 			}
 			if tc.expectErr {
 				require.ErrorContains(t, err, tc.expectErrMsg)

@@ -3,6 +3,7 @@ package chainimport
 import (
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -111,11 +112,13 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	return importer, nil
 }
 
-// Import import headers data in target header stores. The Import process is
-// currently performed only if the target stores are completely empty except for
-// gensis block/filter header otherwise it is entirely skipped. On first
-// development iteration, it is designed to serve new users who don't yet have
-// headers data, or existing users who are willing to reset their headers data.
+// Import is a multi-pass algorithm that loads, validates, and processes headers
+// from the configured import sources into the target header stores. The Import
+// process is currently performed only if the target stores are completely empty
+// except for gensis block/filter header otherwise it is entirely skipped. On
+// first development iteration, it is designed to serve new users who don't yet
+// have headers data, or existing users who are willing to reset their headers
+// data.
 func (h *headersImport) Import() (*ImportResult, error) {
 	isFresh, err := h.isTargetFresh(
 		h.options.TargetBlockHeaderStore,
@@ -193,8 +196,34 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	result.StartHeight = regions.importStartHeight
 	result.EndHeight = regions.importEndHeight
 
+	// TODO(mohamedawnallah): Process the divergence region. This includes
+	// strategy/strategies for handling divergence region that may exist in
+	// the target header stores while importing.
+
+	// TODO(mohamedawnallah): process the overlap region. This mainly
+	// includes a validation strategy for the overlap region between headers
+	// from import and target sources.
+
+	// Process new headers region.
+	// Add headers from the import source to the target stores, extending
+	// from their highest existing header up to the import source's end
+	// height. This assumes the target stores are consistent and valid
+	// (i.e., no divergence), allowing for safe extension with new data.
+	err = h.processNewHeadersRegion(regions.newHeaders, result)
+	if err != nil {
+		return nil, fmt.Errorf("headers import failed: new headers "+
+			"processing failed: %w", err)
+	}
+
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(result.StartTime)
+
+	log.Infof("Headers import completed: processed %d headers "+
+		"(block and filter) (added: %d, skipped: %d) from height "+
+		"%d to %d in %s (%.2f headers/sec, %.2f%% new)",
+		result.ProcessedCount, result.AddedCount, result.SkippedCount,
+		result.StartHeight, result.EndHeight, result.Duration,
+		result.HeadersPerSecond(), result.NewHeadersPercentage())
 
 	return result, nil
 }
@@ -446,6 +475,217 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 	}
 
 	return regions, nil
+}
+
+// processNewHeadersRegion imports headers from the specified region into the
+// target stores. This method handles the case where headers exist in the import
+// source but not in the target stores.
+func (h *headersImport) processNewHeadersRegion(region headerRegion,
+	result *ImportResult) error {
+
+	if !region.exists {
+		return nil
+	}
+
+	log.Infof("Adding %d new headers (block and filter) from heights "+
+		"%d to %d", region.end-region.start+1, region.start, region.end)
+
+	err := h.appendNewHeaders(region.start, region.end)
+	if err != nil {
+		return fmt.Errorf("failed to append new headers: %w", err)
+	}
+
+	result.ProcessedCount += int(region.end - region.start + 1)
+	result.AddedCount += int(region.end - region.start + 1)
+
+	return nil
+}
+
+// appendNewHeaders adds new headers from import source.
+func (h *headersImport) appendNewHeaders(startHeight, endHeight uint32) error {
+	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get block header "+
+			"metadata: %w", err)
+	}
+
+	totalHeaders := endHeight - startHeight + 1
+	log.Infof("Appending %d new headers in batches of %d", totalHeaders,
+		h.options.WriteBatchSizePerRegion)
+
+	sourceStartIdx := targetHeightToImportSourceIndex(
+		startHeight, metadata.startHeight,
+	)
+	sourceEndIdx := targetHeightToImportSourceIndex(
+		endHeight, metadata.startHeight,
+	)
+
+	blockIter := h.blockHeadersImportSource.Iterator(
+		sourceStartIdx, sourceEndIdx,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+
+	filterIter := h.filterHeadersImportSource.Iterator(
+		sourceStartIdx, sourceEndIdx,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+
+	batchStart := startHeight
+	for {
+		batchEnd, err := h.processBatch(
+			blockIter, filterIter, batchStart,
+		)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		// Move to next batch.
+		batchStart = batchEnd + 1
+	}
+
+	log.Infof("Successfully added %d new headers from heights %d to %d",
+		totalHeaders, startHeight, endHeight)
+
+	return nil
+}
+
+// processBatch processes a single batch of headers from the iterators. It
+// returns the batch end height on success, or an error including io.EOF when no
+// more batches.
+func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
+	batchStart uint32) (uint32, error) {
+
+	blockBatch, blockErr := blockIter.ReadBatch(
+		batchStart, blockIter.GetEndIndex(), blockIter.GetBatchSize(),
+	)
+	if blockErr == io.EOF {
+		return 0, io.EOF
+	}
+	if blockErr != nil {
+		return 0, fmt.Errorf("failed to read block headers "+
+			"batch at height %d: %w", batchStart, blockErr)
+	}
+
+	// Get corresponding filter headers batch.
+	filterBatch, filterErr := filterIter.ReadBatch(
+		batchStart, blockIter.GetEndIndex(), blockIter.GetBatchSize(),
+	)
+	if filterErr == io.EOF {
+		return 0, errors.New("filter headers ended before block " +
+			"headers")
+	}
+	if filterErr != nil {
+		return 0, fmt.Errorf("failed to read filter headers "+
+			"batch at height %d: %w", batchStart, filterErr)
+	}
+
+	// Convert block header batches to target store format.
+	blockHeaders := make([]headerfs.BlockHeader, 0, len(blockBatch))
+	for _, header := range blockBatch {
+		blkHeader, err := assertBlockHeader(header)
+		if err != nil {
+			return 0, err
+		}
+		blockHeaders = append(
+			blockHeaders, blkHeader.BlockHeader,
+		)
+	}
+
+	// Convert filter header batches to target store format.
+	var filterHeaders []headerfs.FilterHeader
+	filterHeaders = make(
+		[]headerfs.FilterHeader, 0, len(filterBatch),
+	)
+	for _, header := range filterBatch {
+		fHeader, err := assertFilterHeader(header)
+		if err != nil {
+			return 0, err
+		}
+		filterHeaders = append(
+			filterHeaders, fHeader.FilterHeader,
+		)
+	}
+
+	// The length check conditions should never be triggered during normal
+	// import operations as validation occurs earlier. They serve as sanity
+	// checks to catch unexpected inconsistencies.
+	if len(blockHeaders) != len(filterHeaders) {
+		return 0, fmt.Errorf("mismatch between block headers "+
+			"(%d) and filter headers (%d)", len(blockHeaders),
+			len(filterHeaders))
+	}
+
+	if len(blockHeaders) == 0 {
+		return 0, errors.New("no headers read")
+	}
+
+	setLastFilterHeaderHash(filterHeaders, blockHeaders)
+
+	batchEnd := batchStart + uint32(len(blockBatch)) - 1
+
+	err := h.writeHeadersToTargetStores(
+		blockHeaders, filterHeaders, batchStart, batchEnd,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write headers to target "+
+			"stores: %v", err)
+	}
+
+	log.Debugf("Wrote headers batch from height %d to %d "+
+		"(%d headers)", batchStart, batchEnd,
+		batchEnd-batchStart+1)
+
+	return batchEnd, nil
+}
+
+// Write block and filter headers to the target stores in a specific order to
+// ensure proper rollback operations if needed. It also rollbacks any headers
+// written if any to target stores incase of any failures.
+func (h *headersImport) writeHeadersToTargetStores(
+	blockHeaders []headerfs.BlockHeader,
+	filterHeaders []headerfs.FilterHeader,
+	batchStart, batchEnd uint32) error {
+
+	if err := h.options.TargetBlockHeaderStore.WriteHeaders(
+		blockHeaders...,
+	); err != nil {
+		return fmt.Errorf("failed to write block headers "+
+			"batch %d-%d: %w", batchStart, batchEnd, err)
+	}
+
+	if err := h.options.TargetFilterHeaderStore.WriteHeaders(
+		filterHeaders...,
+	); err != nil {
+		// If we've reached here, the headers failed to be written to
+		// target filter store because of I/O errors regarding binary
+		// file or filter db store, and it is automatically rolled back
+		// upstream.
+		//
+		// The whole import operation needs to satisfy the conjunction
+		// property for both block and filter header stores - it's all
+		// or nothing, so they need to be at the same length. We must
+		// rollback the block headers to maintain this consistency.
+		blkStore := h.options.TargetBlockHeaderStore
+		blockHeadersToTruncate := uint32(len(blockHeaders))
+		_, rollbackErr := blkStore.RollbackBlockHeaders(
+			blockHeadersToTruncate,
+		)
+		if rollbackErr != nil {
+			return fmt.Errorf("failed to rollback %d headers from "+
+				"target block header store after filter "+
+				"headers write failure. Block error: %w, "+
+				"filter error: %v", blockHeadersToTruncate,
+				rollbackErr, err)
+		}
+
+		return fmt.Errorf("failed to write filter headers "+
+			"batch %d-%d: %w", batchStart, batchEnd, err)
+	}
+
+	return nil
 }
 
 // validateHeaderConnection verifies that a block header from the import source
