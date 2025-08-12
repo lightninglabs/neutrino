@@ -154,6 +154,18 @@ func (f *fileHeaderImportSource) GetHeader(index uint32) (Header, error) {
 	return header, nil
 }
 
+// Iterator returns an efficient iterator for sequential header access.
+func (f *fileHeaderImportSource) Iterator(start, end uint32,
+	batchSize uint32) HeaderIterator {
+
+	return &importSourceHeaderIterator{
+		source:     f,
+		startIndex: start,
+		endIndex:   end,
+		batchSize:  batchSize,
+	}
+}
+
 // SetURI sets the file path for this import source. This method is primarily
 // used by HTTP import sources to dynamically update the file path after
 // downloading headers to a temporary file.

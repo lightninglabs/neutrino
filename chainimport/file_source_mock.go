@@ -41,6 +41,14 @@ func (m *mockHeaderImportSource) GetHeader(index uint32) (Header, error) {
 	return args.Get(0).(Header), args.Error(1)
 }
 
+// Iterator returns a header iterator from the mock header import source.
+func (m *mockHeaderImportSource) Iterator(start, end uint32,
+	batchSize uint32) HeaderIterator {
+
+	args := m.Called(start, end, batchSize)
+	return args.Get(0).(HeaderIterator)
+}
+
 // GetURI gets the URI from the mock header import source.
 func (m *mockHeaderImportSource) GetURI() string {
 	args := m.Called()
