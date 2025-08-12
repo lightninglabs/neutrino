@@ -3,6 +3,7 @@ package chainimport
 import (
 	"io"
 	"iter"
+	"net/http"
 )
 
 // ImportHeadersFile defines the interface for file-like objects used in header
@@ -105,4 +106,9 @@ type HeadersValidator interface {
 
 	// ValidateSingle validates a single header for basic sanity checks.
 	ValidateSingle(header Header) error
+}
+
+// HttpClient defines the interface for making HTTP GET requests.
+type HttpClient interface {
+	Get(url string) (*http.Response, error)
 }
