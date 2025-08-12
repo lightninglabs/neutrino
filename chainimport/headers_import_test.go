@@ -195,6 +195,182 @@ func TestImportSkipOperation(t *testing.T) {
 	}
 }
 
+// TestImportOperationOnFileHeaderSource tests the import operation on a file
+// header source. It checks that the import is successful and that the headers
+// are written to the target header stores.
+func TestImportOperationOnFileHeaderSource(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		options *ImportOptions
+		cleanup func()
+		err     error
+	}
+	type Verify struct {
+		tc            *testing.T
+		importOptions *ImportOptions
+		importResult  *ImportResult
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ImportWithoutErrors",
+			prep: func() Prep {
+				// Prep target header stores.
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				c2 := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				f, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				// Create block headers import source file.
+				bFile, c3, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				c4 := func() {
+					c3()
+					c2()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: c4,
+						err:     err,
+					}
+				}
+				bPath := bFile.Name()
+
+				// Close block headers import source to be
+				// opened during import.
+				bFile.Close()
+
+				// Create filter headers import source file.
+				fFile, c5, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c5()
+					c4()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				fPath := fFile.Name()
+
+				// Close filter headers import source to be
+				// opened during import.
+				fFile.Close()
+
+				// Configure target chain parameters.
+				tCP := chaincfg.SimNetParams
+
+				ops := &ImportOptions{
+					BlockHeadersSource:      bPath,
+					FilterHeadersSource:     fPath,
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+					TargetChainParams:       tCP,
+					WriteBatchSizePerRegion: 128,
+				}
+
+				return Prep{
+					options: ops,
+					cleanup: cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Verify the user write batch size is used
+				// instead of the default one.
+				ops := v.importOptions
+				require.Equal(
+					v.tc, 128, ops.WriteBatchSizePerRegion,
+				)
+
+				// Verify headers added/processed excluding the
+				// genesis header.
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.ProcessedCount,
+				)
+
+				// Verify no headers skipped.
+				require.Equal(
+					v.tc, 0, v.importResult.SkippedCount,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			hI, err := NewHeadersImport(prep.options)
+			require.NoError(t, err)
+			importResult, err := hI.Import()
+			verify := Verify{
+				tc:            t,
+				importOptions: prep.options,
+				importResult:  importResult,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
 // TestTargetStoreFreshnessDetection tests the logic for detecting whether the
 // target header stores are fresh (only contain genesis headers). It covers
 // various combinations of block and filter header heights and error cases.
