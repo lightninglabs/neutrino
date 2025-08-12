@@ -15,6 +15,7 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/mmap"
 )
 
 // Block headers for testing captured from simnet network.
@@ -189,6 +190,520 @@ func TestTargetStoreFreshnessDetection(t *testing.T) {
 	}
 }
 
+// TestHeaderMetadataRetrieval tests the header metadata retrieval from the
+// import sources. It checks that the header metadata is retrieved correctly
+// from the import sources.
+func TestHeaderMetadataRetrieval(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	type verify struct {
+		tc        *testing.T
+		hMetadata *headerMetadata
+	}
+	testCases := []struct {
+		name         string
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnReaderNotInitialized",
+			prep: func() prep {
+				bF, cleanup, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bF.Name())
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "file reader not initialized",
+		},
+		{
+			name: "ErrorOnHeaderRead",
+			prep: func() prep {
+				bFile, err := os.CreateTemp(
+					t.TempDir(), "invalid-block-header-*",
+				)
+				c1 := func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				err = AddHeadersImportMetadata(
+					bFile.Name(), wire.SimNet, 0,
+					headerfs.Block, 0,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Reopen the file to get an updated file
+				// descriptor.
+				bFile.Close()
+				bFile, err = os.OpenFile(
+					bFile.Name(), os.O_RDWR, 0644,
+				)
+				c1 = func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bFile.Name())
+
+				// Remove the last byte of header
+				// metadata to simulate EOF error.
+				fileInfo, err := bFile.Stat()
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				fileSize := fileInfo.Size()
+				if fileSize == 0 {
+					err := fmt.Errorf("empty file: %s",
+						bFile.Name())
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				err = bFile.Truncate(fileSize - 1)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				err = bFile.Sync()
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				bFS, ok := bS.(*fileHeaderImportSource)
+				require.True(t, ok)
+
+				reader, err := mmap.Open(bFile.Name())
+				cleanup := func() {
+					reader.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				bFS.file = newMmapFile(reader)
+				bFS.fileSize = reader.Len()
+
+				bFS.metadata = nil
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bFS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "failed to read start height",
+		},
+		{
+			name: "ErrorOnUnknownHeaderType",
+			prep: func() prep {
+				bFile, err := os.CreateTemp(
+					t.TempDir(),
+					"invalid-block-header-*",
+				)
+				c1 := func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				err = AddHeadersImportMetadata(
+					bFile.Name(), wire.SimNet, 0,
+					headerfs.UnknownHeader, 0,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Reopen the file to get an updated file
+				// descriptor.
+				bFile.Close()
+				bFile, err = os.OpenFile(
+					bFile.Name(), os.O_RDWR, 0644,
+				)
+				c1 = func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bs := opts.createBlockHeaderImportSrc()
+				bs.SetURI(bFile.Name())
+
+				bFS, ok := bs.(*fileHeaderImportSource)
+				require.True(t, ok)
+
+				reader, err := mmap.Open(bFile.Name())
+				cleanup := func() {
+					reader.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				bFS.file = newMmapFile(reader)
+				bFS.fileSize = reader.Len()
+
+				bFS.metadata = nil
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bFS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to get header size: unknown " +
+				"header type: 255",
+		},
+		{
+			name: "ErrorOnNoHeadersData",
+			prep: func() prep {
+				bFile, err := os.CreateTemp(
+					t.TempDir(), "invalid-block-header-*",
+				)
+				c1 := func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				err = AddHeadersImportMetadata(
+					bFile.Name(), wire.SimNet, 0,
+					headerfs.Block, 0,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Reopen the file to get an updated file
+				// descriptor.
+				bFile.Close()
+				bFile, err = os.OpenFile(
+					bFile.Name(), os.O_RDWR, 0644,
+				)
+				c1 = func() {
+					bFile.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bs := opts.createBlockHeaderImportSrc()
+				bs.SetURI(bFile.Name())
+
+				bFS, ok := bs.(*fileHeaderImportSource)
+				require.True(t, ok)
+
+				reader, err := mmap.Open(bFile.Name())
+				cleanup := func() {
+					reader.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				bFS.file = newMmapFile(reader)
+				bFS.fileSize = reader.Len()
+
+				bFS.metadata = nil
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bFS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "no headers available in import source",
+		},
+		{
+			name: "ErrorOnPartialHeadersData",
+			prep: func() prep {
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Remove the last byte of the file to trigger
+				// data corruption.
+				fileInfo, err := bFile.Stat()
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				fileSize := fileInfo.Size()
+				if fileSize == 0 {
+					err := fmt.Errorf("empty file: %s",
+						bFile.Name())
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				err = bFile.Truncate(fileSize - 1)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+				err = bFile.Sync()
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bs := opts.createBlockHeaderImportSrc()
+				bs.SetURI(bFile.Name())
+
+				bFS, ok := bs.(*fileHeaderImportSource)
+				require.True(t, ok)
+
+				reader, err := mmap.Open(bFile.Name())
+				cleanup := func() {
+					reader.Close()
+					os.Remove(bFile.Name())
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				bFS.file = newMmapFile(reader)
+				bFS.fileSize = reader.Len()
+
+				bFS.metadata = nil
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bFS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "possible data corruption",
+		},
+		{
+			name: "ReturnsCachedMetadataWhenAvailable",
+			prep: func() prep {
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				bS.SetURI(bFile.Name())
+
+				// Force a cache miss by opening the source file
+				// for the first time.
+				err = bS.Open()
+				c2 := func() {
+					bS.Close()
+					os.Remove(bS.GetURI())
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				// Remove the source file to ensure next call
+				// must use cached data.
+				err = bS.Close()
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				headersImport := &headersImport{
+					options:                  opts,
+					blockHeadersImportSource: bS,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: c1,
+				}
+			},
+			verify: func(v verify) {
+				// Next call should result in a cache hit since
+				// the file is gone.
+				bHdrType := headerfs.Block
+				expectBlockMetadata := &headerMetadata{
+					importMetadata: &importMetadata{
+						networkMagic: wire.SimNet,
+						version:      0,
+						headerType:   bHdrType,
+						startHeight:  0,
+					},
+					endHeight:    4,
+					headerSize:   80,
+					headersCount: 5,
+				}
+				require.Equal(
+					v.tc, expectBlockMetadata,
+					v.hMetadata,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			bS := prep.hImport.blockHeadersImportSource
+			metadata, err := bS.GetHeaderMetadata()
+			verify := verify{
+				tc:        t,
+				hMetadata: metadata,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
 // TestHeaderMetadataStorage tests the header metadata storage to the file.
 // It checks that the header metadata is stored correctly to the file.
 func TestHeaderMetadataStorage(t *testing.T) {
@@ -260,9 +775,9 @@ func TestHeaderMetadataStorage(t *testing.T) {
 				}
 			},
 			verify: func(v verify) {
-				// Reopen the file to get an updated
-				// file descriptor after adding header
-				// metadata atomically.
+				// Reopen the file to get an updated file
+				// descriptor after adding header metadata
+				// atomically.
 				v.file.Close()
 				srcFile, err := os.OpenFile(
 					v.file.Name(), os.O_RDONLY, 0644,
