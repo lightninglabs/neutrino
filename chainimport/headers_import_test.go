@@ -1119,17 +1119,92 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 			expectErrMsg: "missing required header sources",
 		},
 		{
+			name: "MissingBlockANDFilterHeaderValidators",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     nil,
+					filterHeadersValidator:    nil,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header validators",
+		},
+		{
+			name: "MissingBlockHeaderValidator",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+				fV := opts.createFilterHeaderValidator()
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     nil,
+					filterHeadersValidator:    fV,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header validators",
+		},
+		{
+			name: "MissingFilterHeaderValidator",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    nil,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header validators",
+		},
+		{
 			name: "ErrorOnBlockFileNotExist",
 			prep: func() Prep {
 				opts := &ImportOptions{}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				fV := opts.createFilterHeaderValidator()
 				filePath := "/path/to/nonexistent/file"
 				bS.SetURI(filePath)
 				headersImport := &headersImport{
 					options:                   opts,
 					blockHeadersImportSource:  bS,
 					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
 				}
 				return Prep{
 					hImport: headersImport,
@@ -1160,6 +1235,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 				opts := &ImportOptions{}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
 
@@ -1170,6 +1247,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					options:                   opts,
 					blockHeadersImportSource:  bS,
 					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
 				}
 				return Prep{
 					hImport: headersImport,
@@ -1205,6 +1284,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 				opts := &ImportOptions{}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(blockFile.Name())
 
@@ -1212,6 +1293,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					options:                   opts,
 					blockHeadersImportSource:  bS,
 					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
 				}
 				return Prep{
 					hImport: headersImport,
@@ -1259,6 +1342,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 				opts := &ImportOptions{}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
 				fS.SetURI(fFile.Name())
@@ -1267,6 +1352,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					options:                   opts,
 					blockHeadersImportSource:  bS,
 					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
 				}
 				cleanup = func() {
 					headersImport.closeSources()
@@ -1313,6 +1400,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 				opts := &ImportOptions{}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
+				bV := opts.createBlockHeaderValidator()
+				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
 				fS.SetURI(fFile.Name())
@@ -1321,6 +1410,8 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					options:                   opts,
 					blockHeadersImportSource:  bS,
 					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
 				}
 				cleanup = func() {
 					headersImport.closeSources()
