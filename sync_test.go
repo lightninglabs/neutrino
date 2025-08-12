@@ -2,6 +2,7 @@ package neutrino_test
 
 import (
 	"bytes"
+	"compress/bzip2"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1369,6 +1371,169 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 			break
 		}
 	}
+}
+
+// BenchmarkHeadersImport benchmarks the headers import functionality. It
+// decompresses the block and filter headers from the testdata directory and
+// imports them into a temporary database. It then benchmarks the import time
+// for different batch sizes.
+func BenchmarkHeadersImport(b *testing.B) {
+	blockHeadersPath, cleanupBlock, err := decompressBZ2ToTempFile(
+		"testdata/block-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupBlock()
+
+	filterHeadersPath, cleanupFilter, err := decompressBZ2ToTempFile(
+		"testdata/filter-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupFilter()
+
+	for exp := 10; exp <= 19; exp++ {
+		// Calculate batch size which is 2^exp.
+		batch := 1 << exp
+		b.Run(fmt.Sprintf("batchSize=%d", batch), func(b *testing.B) {
+			// Memory tracking variables
+			var memStats runtime.MemStats
+			var peakMemory uint64
+
+			// Take initial memory snapshot
+			runtime.GC()
+			runtime.ReadMemStats(&memStats)
+			initialHeapInUse := memStats.HeapInuse
+
+			tempDir := b.TempDir()
+			dbPath := filepath.Join(tempDir, "test.db")
+			db, err := walletdb.Create(
+				"bdb", dbPath, true, time.Second*10,
+			)
+			require.NoError(b, err)
+			defer db.Close()
+
+			blockStore, err := headerfs.NewBlockHeaderStore(
+				tempDir, db, &chaincfg.MainNetParams,
+			)
+			require.NoError(b, err)
+
+			filterStore, err := headerfs.NewFilterHeaderStore(
+				tempDir, db, headerfs.RegularFilter,
+				&chaincfg.MainNetParams, nil,
+			)
+			require.NoError(b, err)
+
+			opts := &chainimport.ImportOptions{
+				TargetChainParams:       chaincfg.MainNetParams,
+				TargetBlockHeaderStore:  blockStore,
+				TargetFilterHeaderStore: filterStore,
+				BlockHeadersSource:      blockHeadersPath,
+				FilterHeadersSource:     filterHeadersPath,
+				WriteBatchSizePerRegion: batch,
+			}
+
+			// Get initial CPU time.
+			var rusageStart, rusageEnd syscall.Rusage
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageStart)
+
+			// Memory monitoring goroutine.
+			stopMemMonitor := make(chan struct{})
+			memMonitorDone := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				defer close(memMonitorDone)
+
+				for {
+					select {
+					case <-ticker.C:
+						runtime.ReadMemStats(&memStats)
+						heapInUse := memStats.HeapInuse
+						if heapInUse > peakMemory {
+							peakMemory = heapInUse
+						}
+					case <-stopMemMonitor:
+						return
+					}
+				}
+			}()
+
+			// Start timer for benchmark.
+			b.ResetTimer()
+			startTime := time.Now()
+			ctx := context.Background()
+
+			importer, err := chainimport.NewHeadersImport(opts)
+			require.NoError(b, err)
+
+			_, err = importer.Import(ctx)
+			require.NoError(b, err)
+
+			elapsed := time.Since(startTime)
+			b.StopTimer()
+
+			// Stop the memory monitor.
+			close(stopMemMonitor)
+			<-memMonitorDone
+
+			// Get final CPU usage.
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageEnd)
+
+			// Calculate CPU time (user + system) in seconds.
+
+			// Extract Utime components for user time calculation.
+			rEndUtime := rusageEnd.Utime
+			rStartUtime := rusageStart.Utime
+			userTimeSec := float64(rEndUtime.Sec-rStartUtime.Sec) +
+				float64(rEndUtime.Usec-rStartUtime.Usec)/1e6
+
+			// Extract Stime components for system time calculation.
+			rEndStime := rusageEnd.Stime
+			rStartStime := rusageStart.Stime
+			sysTimeSec := float64(rEndStime.Sec-rStartStime.Sec) +
+				float64(rEndStime.Usec-rStartStime.Usec)/1e6
+
+			cpuTimeSec := userTimeSec + sysTimeSec
+
+			// Calculate headers per second.
+			headersPerSecond := float64(100000) / elapsed.Seconds()
+
+			// Report peak memory.
+			peakMemoryB := float64(peakMemory - initialHeapInUse)
+			peakMemoryMB := peakMemoryB / (1024 * 1024)
+			b.ReportMetric(peakMemoryMB, "MB_peak")
+
+			// Report additional essential metrics.
+			b.ReportMetric(headersPerSecond, "headers/s")
+			b.ReportMetric(cpuTimeSec, "cpu_s")
+		})
+	}
+}
+
+// decompressBZ2ToTempFile decompresses a bz2 file to a temporary file.
+func decompressBZ2ToTempFile(srcPath string) (string, func(), error) {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return "", nil, err
+	}
+	defer f.Close()
+
+	bz2r := bzip2.NewReader(f)
+	tempFile, err := os.CreateTemp(
+		"", filepath.Base(srcPath)+"-decompressed-*",
+	)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if _, err := io.Copy(tempFile, bz2r); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return "", nil, err
+	}
+	tempFile.Close()
+
+	cleanup := func() { os.Remove(tempFile.Name()) }
+	return tempFile.Name(), cleanup, nil
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
