@@ -31,6 +31,9 @@ type headersImport struct {
 	// blockHeadersValidator validates the imported block headers.
 	blockHeadersValidator HeadersValidator
 
+	// filterHeadersValidator validates the imported filter headers.
+	filterHeadersValidator HeadersValidator
+
 	// options contains configuration parameters for the import process.
 	options *ImportOptions
 }
@@ -53,11 +56,13 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	filterHeadersSource := options.createFilterHeaderImportSrc()
 
 	blockheadersValidator := options.createBlockHeaderValidator()
+	filterheadersValidator := options.createFilterHeaderValidator()
 
 	importer := &headersImport{
 		blockHeadersImportSource:  blockHeadersSource,
 		filterHeadersImportSource: filterHeadersSource,
 		blockHeadersValidator:     blockheadersValidator,
+		filterHeadersValidator:    filterheadersValidator,
 		options:                   options,
 	}
 
@@ -129,6 +134,21 @@ func (h *headersImport) Import() (*ImportResult, error) {
 		blockHeadersIterator, h.options.TargetChainParams,
 	); err != nil {
 		return nil, fmt.Errorf("failed to validate block "+
+			"headers: %w", err)
+	}
+
+	// Validate all filter headers from import source.
+	log.Debugf("Validating %d filter headers", metadata.headersCount)
+	filterHeadersIterator := h.filterHeadersImportSource.Iterator(
+		0, metadata.headersCount-1,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+	defer filterHeadersIterator.Close()
+
+	if err := h.filterHeadersValidator.Validate(
+		filterHeadersIterator, h.options.TargetChainParams,
+	); err != nil {
+		return nil, fmt.Errorf("failed to validate filter "+
 			"headers: %w", err)
 	}
 
@@ -563,6 +583,12 @@ func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
 // headers.
 func (options *ImportOptions) createBlockHeaderValidator() HeadersValidator {
 	return newBlockHeadersImportSourceValidator()
+}
+
+// createFilterHeaderValidator creates the appropriate validator for filter
+// headers.
+func (options *ImportOptions) createFilterHeaderValidator() HeadersValidator {
+	return newFilterHeadersImportSourceValidator()
 }
 
 // ImportResult contains statistics about a header import operation.
