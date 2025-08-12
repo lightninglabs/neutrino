@@ -3,6 +3,8 @@ package chainimport
 import (
 	"io"
 	"iter"
+
+	"github.com/btcsuite/btcd/chaincfg"
 )
 
 // ImportHeadersFile defines the interface for file-like objects used in header
@@ -100,4 +102,24 @@ type HeaderImportSource interface {
 	// SetURI sets the location identifier for this header source
 	// (file path for file sources, URL for HTTP sources).
 	SetURI(uri string)
+}
+
+// HeadersValidator defines methods for validating blockchain headers.
+type HeadersValidator interface {
+	// Validate performs comprehensive validation on a sequence of headers
+	// provided by the iterator. It checks that the entire sequence forms
+	// a valid chain according to the given chain parameters.
+	Validate(HeaderIterator, chaincfg.Params) error
+
+	// ValidateBatch performs validation on a batch of headers, checking
+	// that they form a valid chain segment according to the given chain
+	// parameters.
+	ValidateBatch([]Header, chaincfg.Params) error
+
+	// ValidatePair verifies that two consecutive headers (prev and current)
+	// form a valid chain link according to the specified chain parameters.
+	ValidatePair(prev, current Header, targetCh chaincfg.Params) error
+
+	// ValidateSingle validates a single header for basic sanity checks.
+	ValidateSingle(header Header, targetChainParams chaincfg.Params) error
 }
