@@ -66,7 +66,21 @@ func (h *headersImport) Import() (*ImportResult, error) {
 		return &ImportResult{}, nil
 	}
 
-	return &ImportResult{}, nil
+	result := &ImportResult{
+		StartTime: time.Now(),
+	}
+
+	// Initialize and open header sources before proceeding with validation
+	// and import operations.
+	if err := h.openSources(); err != nil {
+		return nil, fmt.Errorf("failed to open sources: %w", err)
+	}
+	defer h.closeSources()
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(result.StartTime)
+
+	return result, nil
 }
 
 // isTargetFresh checks if the target header stores are in their initial state,
@@ -93,6 +107,48 @@ func (h *headersImport) isTargetFresh(
 	}
 
 	return false, nil
+}
+
+// openSources initializes and opens all required header import sources. It
+// verifies that all necessary import sources and validators are properly
+// configured, then opens each source to prepare for data reading. Returns an
+// error if any source is missing or fails to open.
+func (h *headersImport) openSources() error {
+	// Check if required import sources are provided.
+	if h.blockHeadersImportSource == nil ||
+		h.filterHeadersImportSource == nil {
+
+		return fmt.Errorf("missing required header sources - block "+
+			"headers source: %v, filter headers source: %v",
+			h.blockHeadersImportSource != nil,
+			h.filterHeadersImportSource != nil)
+	}
+
+	// Open block headers import source.
+	if err := h.blockHeadersImportSource.Open(); err != nil {
+		return err
+	}
+
+	// Open filter headers import source.
+	if err := h.filterHeadersImportSource.Open(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// closeSources safely closes all open header sources and logs any warnings
+// encountered during cleanup.
+func (h *headersImport) closeSources() {
+	// Close block headers source.
+	if err := h.blockHeadersImportSource.Close(); err != nil {
+		log.Warnf("Failed to close block headers source: %v", err)
+	}
+
+	// Close filter headers source.
+	if err := h.filterHeadersImportSource.Close(); err != nil {
+		log.Warnf("Failed to close filter headers source: %v", err)
+	}
 }
 
 // ImportOptions defines parameters for the import process.

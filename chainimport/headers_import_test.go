@@ -1033,6 +1033,364 @@ func TestHeaderMetadataStorage(t *testing.T) {
 	}
 }
 
+// TestOpenFileHeaderImportSources tests the open operation on a file header
+// import source.
+func TestOpenFileHeaderImportSources(t *testing.T) {
+	t.Parallel()
+	type Prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	type Verify struct {
+		tc      *testing.T
+		hImport *headersImport
+	}
+	testCases := []struct {
+		name         string
+		prep         func() Prep
+		verify       func(Verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "MissingBlockANDFilterHeaderImportSource",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  nil,
+					filterHeadersImportSource: nil,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header sources",
+		},
+		{
+			name: "MissingBlockHeaderImportSource",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: nil,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header sources",
+		},
+		{
+			name: "MissingFilterHeaderImportSource",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				fS := opts.createFilterHeaderImportSrc()
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  nil,
+					filterHeadersImportSource: fS,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "missing required header sources",
+		},
+		{
+			name: "ErrorOnBlockFileNotExist",
+			prep: func() Prep {
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+				filePath := "/path/to/nonexistent/file"
+				bS.SetURI(filePath)
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: func() {},
+					err:     nil,
+				}
+			},
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to mmap file: open " +
+				"/path/to/nonexistent/file",
+		},
+		{
+			name: "ErrorOnFilterFileNotExist",
+			prep: func() Prep {
+				// Create block headers file.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+
+				bS.SetURI(bFile.Name())
+
+				filePath := "/path/to/nonexistent/file"
+				bS.SetURI(filePath)
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: c1,
+					err:     nil,
+				}
+			},
+			verify:    func(Verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to mmap file: open " +
+				"/path/to/nonexistent/file",
+		},
+		{
+			name: "ErrorOnGetBlockHeaderMetadata",
+			prep: func() Prep {
+				// Create block headers empty file.
+				blockFile, err := os.CreateTemp(
+					t.TempDir(),
+					"empty-block-header-*",
+				)
+				cleanup := func() {
+					blockFile.Close()
+					os.Remove(blockFile.Name())
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+
+				bS.SetURI(blockFile.Name())
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "failed to read chain type: EOF",
+		},
+		{
+			name: "ErrorOnGetFilterHeaderMetadata",
+			prep: func() Prep {
+				// Create block headers file.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Create filter headers empty file.
+				fFile, err := os.CreateTemp(
+					t.TempDir(), "empty-filter-header-*",
+				)
+				c2 := func() {
+					fFile.Close()
+					os.Remove(fFile.Name())
+				}
+				cleanup := func() {
+					c2()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+
+				bS.SetURI(bFile.Name())
+				fS.SetURI(fFile.Name())
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+				}
+				cleanup = func() {
+					headersImport.closeSources()
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(Verify) {},
+			expectErr:    true,
+			expectErrMsg: "failed to read chain type: EOF",
+		},
+		{
+			name: "OpenSourcesCorrectly",
+			prep: func() Prep {
+				// Create block headers file.
+				bFile, c1, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				if err != nil {
+					return Prep{
+						cleanup: c1,
+						err:     err,
+					}
+				}
+
+				// Create filter headers file.
+				fFile, c2, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c2()
+					c1()
+				}
+				if err != nil {
+					return Prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				// Configure import options.
+				opts := &ImportOptions{}
+				bS := opts.createBlockHeaderImportSrc()
+				fS := opts.createFilterHeaderImportSrc()
+
+				bS.SetURI(bFile.Name())
+				fS.SetURI(fFile.Name())
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+				}
+				cleanup = func() {
+					headersImport.closeSources()
+				}
+				return Prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify: func(v Verify) {
+				// Prep block and filter hdrs metadata.
+				bHdrType := headerfs.Block
+				expectBlockMetadata := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       bHdrType,
+						startHeight:      0,
+					},
+					endHeight:    4,
+					headerSize:   80,
+					headersCount: 5,
+				}
+
+				fHdrType := headerfs.RegularFilter
+				expectFilterMetadata := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       fHdrType,
+						startHeight:      0,
+					},
+					endHeight:    4,
+					headerSize:   32,
+					headersCount: 5,
+				}
+
+				// Verify block header metadata.
+				bS := v.hImport.blockHeadersImportSource
+				metadata, err := bS.GetHeaderMetadata()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, expectBlockMetadata, metadata,
+				)
+
+				// Verify filter header metadata.
+				f := v.hImport.filterHeadersImportSource
+				metadata, err = f.GetHeaderMetadata()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, expectFilterMetadata, metadata,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			err := prep.hImport.openSources()
+			verify := Verify{
+				tc:      t,
+				hImport: prep.hImport,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
 // setupFileWithHdrs creates a temporary file with headers and returns the file,
 // a cleanup function, and an error if any.
 func setupFileWithHdrs(hT headerfs.HeaderType,
