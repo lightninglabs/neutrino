@@ -32,6 +32,9 @@ type headersImport struct {
 	// blockHeadersValidator validates the imported block headers.
 	blockHeadersValidator HeadersValidator
 
+	// filterHeadersValidator validates the imported filter headers.
+	filterHeadersValidator HeadersValidator
+
 	// options contains configuration parameters for the import process.
 	options *ImportOptions
 }
@@ -54,11 +57,13 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	blockheadersValidator := options.createBlockHeaderValidator(
 		blockHeadersSource,
 	)
+	filterheadersValidator := options.createFilterHeaderValidator()
 
 	importer := &headersImport{
 		blockHeadersImportSource:  blockHeadersSource,
 		filterHeadersImportSource: filterHeadersSource,
 		blockHeadersValidator:     blockheadersValidator,
+		filterHeadersValidator:    filterheadersValidator,
 		options:                   options,
 	}
 
@@ -122,6 +127,18 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	err = h.blockHeadersValidator.Validate(blockHeadersIterator)
 	if err != nil {
 		return nil, fmt.Errorf("failed to validate block "+
+			"headers: %w", err)
+	}
+
+	log.Debugf("Validating %d filter headers", metadata.headersCount)
+	filterHeadersIterator := h.filterHeadersImportSource.Iterator(
+		0, metadata.headersCount-1,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
+
+	err = h.filterHeadersValidator.Validate(filterHeadersIterator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate filter "+
 			"headers: %w", err)
 	}
 
@@ -537,6 +554,12 @@ func (options *ImportOptions) createBlockHeaderValidator(
 		options.TargetChainParams, options.TargetBlockHeaderStore,
 		options.ValidationFlags, blockHeadersImportSource,
 	)
+}
+
+// createFilterHeaderValidator creates the appropriate validator for filter
+// headers.
+func (options *ImportOptions) createFilterHeaderValidator() HeadersValidator {
+	return newFilterHeadersImportSourceValidator(options.TargetChainParams)
 }
 
 // ImportResult contains statistics about a header import operation.
