@@ -1691,6 +1691,512 @@ func TestImportAndTargetSourcesCompatibilityConstraint(t *testing.T) {
 	}
 }
 
+// TestImportAndTargetSourcesHeadersVerificationConstraint tests the import and
+// target sources headers verification constraint. It checks that the import
+// and target sources are verified correctly.
+func TestImportAndTargetSourcesHeadersVerificationConstraint(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hI  *headersImport
+		err error
+	}
+	testCases := []struct {
+		name         string
+		height       uint32
+		prep         func(height uint32) prep
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnGetHeaderMetadata",
+			prep: func(uint32) prep {
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					nil, errors.New("I/O read error"),
+				)
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+				}
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "failed to get block header metadata: " +
+				"I/O read error",
+		},
+		{
+			name:   "ErrorOnGetBlockHeaderFromImportSrc",
+			height: 101,
+			prep: func(height uint32) prep {
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(
+					nil, errors.New("I/O read error"),
+				)
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+				}
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "failed to get block header from " +
+				"import source at height 101: I/O read error",
+		},
+		{
+			name:   "ErrorOnTypeAssertingBlockHeader",
+			height: 101,
+			prep: func(height uint32) prep {
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(
+					newFilterHeader(), nil,
+				)
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+				}
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "expected blockHeader type, got " +
+				"*chainimport.filterHeader",
+		},
+		{
+			name:   "ErrorOnGetBlockHeaderFromTargetStore",
+			height: 101,
+			prep: func(height uint32) prep {
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(
+					newBlockHeader(), nil,
+				)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				h := height
+				bHS.On("FetchHeaderByHeight", h).Return(
+					nil, errors.New("I/O read error"),
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore: bHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+					options:                  ops,
+				}
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "failed to get block header from " +
+				"target at height 101: I/O read error",
+		},
+		{
+			name:   "ErrorOnBlockHeadersMismatch",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(
+					newBlockHeader(), nil,
+				)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore: bHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+					options:                  ops,
+				}
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr:    true,
+			expectErrMsg: "block header mismatch at height 101",
+		},
+		{
+			name:   "ErrorOnGetFilterHeaderFromImportSrc",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(bH, nil)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx = height - 1
+				fIS.On("GetHeader", importIndx).Return(
+					nil, errors.New("I/O read error"),
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore: bHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "failed to get filter header from " +
+				"import source at height 101: I/O read error",
+		},
+		{
+			name:   "ErrorOnTypeAssertingFilterHeader",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(
+					bH, nil,
+				)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx = height - 1
+				fIS.On("GetHeader", importIndx).Return(bH, nil)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore: bHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "expected filterHeader type, got " +
+				"*chainimport.blockHeader",
+		},
+		{
+			name:   "ErrorOnGetFilterHeaderFromTargetStore",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(bH, nil)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx = height - 1
+				fIS.On("GetHeader", importIndx).Return(
+					newFilterHeader(), nil,
+				)
+
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("FetchHeaderByHeight", height).Return(
+					nil, errors.New("I/O read error"),
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: "failed to get filter header from " +
+				"target at height 101: I/O read error",
+		},
+		{
+			name:   "ErrorOnFilterHeadersMismatch",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				fH, err := constructFilterHdr(
+					filterHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(bH, nil)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx = height - 1
+				fIS.On("GetHeader", importIndx).Return(
+					newFilterHeader(), nil,
+				)
+
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("FetchHeaderByHeight", height).Return(
+					&fH.FilterHash, nil,
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hI: hImport,
+				}
+			},
+			expectErr:    true,
+			expectErrMsg: "filter header mismatch at height 101",
+		},
+		{
+			name:   "VerifyHeadersAtTargetHeightWithNoErrs",
+			height: 101,
+			prep: func(height uint32) prep {
+				bH, err := constructBlkHdr(
+					blockHdrs[1], uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				fH, err := constructFilterHdr(
+					filterHdrs[1],
+					uint32(1),
+				)
+				if err != nil {
+					return prep{err: err}
+				}
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx := height - 1
+				bIS.On("GetHeader", importIndx).Return(bH, nil)
+				bIS.On("GetURI").Return("/path/to/blocks")
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("FetchHeaderByHeight", height).Return(
+					bH.BlockHeader.BlockHeader, nil,
+				)
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{
+						importMetadata: &importMetadata{
+							startHeight: uint32(1),
+						},
+					}, nil,
+				)
+				importIndx = height - 1
+				fIS.On("GetHeader", importIndx).Return(fH, nil)
+				fIS.On("GetURI").Return("/path/to/filters")
+
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("FetchHeaderByHeight", height).Return(
+					&fH.FilterHash, nil,
+				)
+
+				ops := &ImportOptions{
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+
+				return prep{
+					hI: hImport,
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep(tc.height)
+			require.NoError(t, prep.err)
+			err := prep.hI.verifyHeadersAtTargetHeight(tc.height)
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // setupFileWithHdrs creates a temporary file with headers and returns the file,
 // a cleanup function, and an error if any.
 func setupFileWithHdrs(hT headerfs.HeaderType,
@@ -1760,4 +2266,46 @@ func setupFileWithHdrs(hT headerfs.HeaderType,
 	}
 
 	return tempFile, cleanup, nil
+}
+
+// constructBlkHdr constructs a block header from a hex string and height.
+func constructBlkHdr(blockHeaderHex string,
+	height uint32) (*blockHeader, error) {
+
+	buff, err := hex.DecodeString(blockHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode block header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+	bHExpected := newBlockHeader()
+	bHExpected.Deserialize(reader, height)
+
+	bH, err := assertBlockHeader(bHExpected)
+	if err != nil {
+		return nil, err
+	}
+
+	return bH, nil
+}
+
+// constructFilterHdr constructs a filter header from a hex string and height.
+func constructFilterHdr(filterHeaderHex string,
+	height uint32) (*filterHeader, error) {
+
+	buff, err := hex.DecodeString(filterHeaderHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode filter header hex: %v",
+			err)
+	}
+	reader := bytes.NewReader(buff)
+	fHExpected := newFilterHeader()
+	fHExpected.Deserialize(reader, height)
+
+	fH, err := assertFilterHeader(fHExpected)
+	if err != nil {
+		return nil, err
+	}
+
+	return fH, nil
 }
