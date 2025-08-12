@@ -25,6 +25,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
+	"github.com/lightninglabs/neutrino/chainimport"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -602,6 +603,12 @@ type Config struct {
 	// they're doing something like a key import.
 	PersistToDisk bool
 
+	// HeadersImport contains configuration options for importing headers
+	// from external sources. When these options are set, neutrino will
+	// attempt to import headers from file before falling back to P2P
+	// synchronization.
+	HeadersImport *HeadersImportConfig
+
 	// AssertFilterHeader is an optional field that allows the creator of
 	// the ChainService to ensure that if any chain data exists, it's
 	// compliant with the expected filter header state. If neutrino starts
@@ -618,6 +625,18 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+}
+
+// HeadersImportConfig contains configuration options for importing headers
+// from external sources.
+type HeadersImportConfig struct {
+	// BlockHeadersSource specifies where to obtain block headers from.
+	// This could be a file path, URL, or other source identifier.
+	BlockHeadersSource string
+
+	// FilterHeadersSource specifies where to obtain filter headers from.
+	// This could be a file path, URL, or other source identifier.
+	FilterHeadersSource string
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -640,6 +659,8 @@ type ChainService struct { // nolint:maligned
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders headerfs.FilterHeaderStore
 	persistToDisk    bool
+
+	headersImport *HeadersImportConfig
 
 	FilterCache *lru.Cache[FilterCacheKey, *CacheableFilter]
 	BlockCache  *lru.Cache[wire.InvVect, *CacheableBlock]
@@ -737,6 +758,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		dialer:            dialer,
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
+		headersImport:     cfg.HeadersImport,
 	}
 	s.workManager = query.NewWorkManager(&query.Config{
 		ConnectedPeers: s.ConnectedPeers,
@@ -1613,6 +1635,25 @@ func (s *ChainService) Start() error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
 		return nil
+	}
+
+	// Import headers if configured.
+	//nolint:lll
+	if s.headersImport != nil {
+		options := chainimport.ImportOptions{
+			BlockHeadersSource:      s.headersImport.BlockHeadersSource,
+			FilterHeadersSource:     s.headersImport.FilterHeadersSource,
+			TargetChainParams:       s.chainParams,
+			TargetBlockHeaderStore:  s.BlockHeaders,
+			TargetFilterHeaderStore: s.RegFilterHeaders,
+		}
+		importer, err := chainimport.NewHeadersImport(&options)
+		if err != nil {
+			return err
+		}
+		if err := importer.Import(); err != nil {
+			return err
+		}
 	}
 
 	// Start the address manager and block manager, both of which are
