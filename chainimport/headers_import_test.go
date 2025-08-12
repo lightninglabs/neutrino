@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -354,6 +355,210 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 				tc:            t,
 				importOptions: prep.options,
 				importResult:  importResult,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// TestImportOperationOnHTTPHeaderSource tests the import operation on a HTTP
+// header source. It checks that the import is successful and that the headers
+// are written to the target header stores.
+func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	type verify struct {
+		tc           *testing.T
+		importResult *ImportResult
+	}
+	testCases := []struct {
+		name         string
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ImportWithoutErrors",
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				c2 := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				b, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				f, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				bFile, c3, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				c4 := func() {
+					c3()
+					c2()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c4,
+						err:     err,
+					}
+				}
+
+				fFile, c5, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c5()
+					c4()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:8311"
+
+				bRS := origin + "/headers/0"
+
+				blockStatus := http.StatusOK
+				blockBody := io.NopCloser(bFile)
+				blockRes := &http.Response{
+					StatusCode: blockStatus,
+					Body:       blockBody,
+				}
+				mockHTTPClient.On("Get", bRS).Return(
+					blockRes, nil,
+				)
+
+				fRS := origin + "/filter-headers/0"
+
+				filterStatus := http.StatusOK
+				filterBody := io.NopCloser(fFile)
+				filterRes := &http.Response{
+					StatusCode: filterStatus,
+					Body:       filterBody,
+				}
+				mockHTTPClient.On("Get", fRS).Return(
+					filterRes, nil,
+				)
+
+				bIS := newFileHeaderImportSource(
+					"", newBlockHeader,
+				)
+
+				fIS := newFileHeaderImportSource(
+					"", newFilterHeader,
+				)
+
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient, bIS,
+				)
+
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient, fIS,
+				)
+
+				tCP := chaincfg.SimNetParams
+				flags := blockchain.BFFastAdd
+
+				ops := &ImportOptions{
+					TargetChainParams:       tCP,
+					TargetBlockHeaderStore:  b,
+					TargetFilterHeaderStore: f,
+					BlockHeadersSource:      bRS,
+					FilterHeadersSource:     fRS,
+					WriteBatchSizePerRegion: 101,
+					ValidationFlags:         flags,
+				}
+
+				bV := ops.createBlockHeaderValidator(bS)
+				fV := ops.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   ops,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			verify: func(v verify) {
+				// Verify headers added/processed excluding the
+				// genesis header.
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.ProcessedCount,
+				)
+
+				// Verify no headers skipped.
+				require.Equal(
+					v.tc, 0, v.importResult.SkippedCount,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			importResult, err := prep.hImport.Import()
+			verify := verify{
+				tc:           t,
+				importResult: importResult,
 			}
 			if tc.expectErr {
 				require.ErrorContains(t, err, tc.expectErrMsg)
@@ -1700,6 +1905,369 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 			}
 			require.NoError(t, err)
 			tc.verify(verify)
+		})
+	}
+}
+
+// TestOpenHTTPHeaderImportSources tests the open operation on a HTTP header
+// import source.
+func TestOpenHTTPHeaderImportSources(t *testing.T) {
+	t.Parallel()
+	type prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	testCases := []struct {
+		name         string
+		prep         func() prep
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnGetBlockHeadersOverHTTP",
+			prep: func() prep {
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:8234"
+
+				bRS := origin + "/headers/0"
+				mockHTTPClient.On("Get", bRS).Return(
+					nil, errors.New("failed to "+
+						"download block "+
+						"headers"),
+				).Once()
+
+				fRS := origin + "/filter-headers/0"
+
+				status := http.StatusOK
+				body := io.NopCloser(bytes.NewBufferString(""))
+				res := &http.Response{
+					StatusCode: status,
+					Body:       body,
+				}
+				mockHTTPClient.On("Get", fRS).Return(res, nil)
+
+				opts := &ImportOptions{
+					BlockHeadersSource:  bRS,
+					FilterHeadersSource: fRS,
+				}
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				bV := opts.createBlockHeaderValidator(bS)
+				fV := opts.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: func() {},
+				}
+			},
+			expectErr:    true,
+			expectErrMsg: "failed to download block headers",
+		},
+		{
+			name: "ErrorOnGetBlockHeadersOverHTTPNotFound",
+			prep: func() prep {
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:7334"
+
+				bRS := origin + "/headers/0"
+				status := http.StatusNotFound
+				body := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				res := &http.Response{
+					StatusCode: status,
+					Body:       body,
+				}
+				mockHTTPClient.On("Get", bRS).Return(
+					res, nil,
+				).Once()
+
+				fRS := origin + "/filter-headers/0"
+
+				filterStatus := http.StatusOK
+				filterBody := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				filterRes := &http.Response{
+					StatusCode: filterStatus,
+					Body:       filterBody,
+				}
+				mockHTTPClient.On("Get", fRS).Return(
+					filterRes, nil,
+				)
+
+				opts := &ImportOptions{
+					BlockHeadersSource:  bRS,
+					FilterHeadersSource: fRS,
+				}
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				bV := opts.createBlockHeaderValidator(bS)
+				fV := opts.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: func() {},
+				}
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("failed to download file: "+
+				"status code %d", http.StatusNotFound),
+		},
+		{
+			name: "ErrorOnGetFilterHeadersOverHTTP",
+			prep: func() prep {
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:8344"
+
+				bRS := origin + "/headers/0"
+
+				blockStatus := http.StatusOK
+				blockBody := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				blockRes := &http.Response{
+					StatusCode: blockStatus,
+					Body:       blockBody,
+				}
+				mockHTTPClient.On("Get", bRS).Return(
+					blockRes, nil,
+				)
+
+				fRS := origin + "/filter-headers/0"
+				mockHTTPClient.On("Get", fRS).Return(
+					nil, errors.New("failed to "+
+						"download filter "+
+						"headers"),
+				).Once()
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("Open").Return(nil)
+				bIS.On("SetURI", mock.Anything).Return()
+
+				opts := &ImportOptions{
+					BlockHeadersSource:  bRS,
+					FilterHeadersSource: fRS,
+				}
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient, bIS,
+				)
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				cleanup := func() {
+					os.Remove(bS.uri)
+				}
+
+				bV := opts.createBlockHeaderValidator(bS)
+				fV := opts.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			expectErr:    true,
+			expectErrMsg: "failed to download filter headers",
+		},
+		{
+			name: "ErrorOnGetHTTPFilterHeadersNotFound",
+			prep: func() prep {
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:8334"
+
+				bRS := origin + "/headers/0"
+
+				blockStatus := http.StatusOK
+				blockBody := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				blockRes := &http.Response{
+					StatusCode: blockStatus,
+					Body:       blockBody,
+				}
+				mockHTTPClient.On("Get", bRS).Return(
+					blockRes, nil,
+				)
+
+				fRS := origin + "/filter-headers/0"
+				status := http.StatusNotFound
+				body := io.NopCloser(bytes.NewBufferString(""))
+				res := &http.Response{
+					StatusCode: status,
+					Body:       body,
+				}
+				mockHTTPClient.On("Get", fRS).Return(
+					res, nil,
+				).Once()
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("Open").Return(nil)
+				bIS.On("SetURI", mock.Anything).Return()
+
+				opts := &ImportOptions{
+					BlockHeadersSource:  bRS,
+					FilterHeadersSource: fRS,
+				}
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient, bIS,
+				)
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient,
+					&mockHeaderImportSource{},
+				)
+				cleanup := func() {
+					os.Remove(bS.uri)
+				}
+
+				bV := opts.createBlockHeaderValidator(bS)
+				fV := opts.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("failed to download file: "+
+				"status code %d", http.StatusNotFound),
+		},
+		{
+			name: "OpenSourcesCorrectly",
+			prep: func() prep {
+				mockHTTPClient := &mockHTTPClient{}
+				origin := "http://localhost:8323"
+
+				bRS := origin + "/headers/0"
+
+				blockStatus := http.StatusOK
+				blockBody := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				blockRes := &http.Response{
+					StatusCode: blockStatus,
+					Body:       blockBody,
+				}
+				mockHTTPClient.On("Get", bRS).Return(
+					blockRes, nil,
+				)
+
+				fRS := origin + "/filter-headers/0"
+
+				filterStatus := http.StatusOK
+				filterBody := io.NopCloser(
+					bytes.NewBufferString(""),
+				)
+				filterRes := &http.Response{
+					StatusCode: filterStatus,
+					Body:       filterBody,
+				}
+				mockHTTPClient.On("Get", fRS).Return(
+					filterRes, nil,
+				)
+
+				bIS := &mockHeaderImportSource{}
+				bIS.On("Open").Return(nil)
+				bIS.On("SetURI", mock.Anything).Return()
+
+				fIS := &mockHeaderImportSource{}
+				fIS.On("Open").Return(nil)
+				fIS.On("SetURI", mock.Anything).Return()
+
+				opts := &ImportOptions{
+					BlockHeadersSource:  bRS,
+					FilterHeadersSource: fRS,
+				}
+				bS := newHTTPHeaderImportSource(
+					bRS, mockHTTPClient,
+					bIS,
+				)
+				fS := newHTTPHeaderImportSource(
+					fRS, mockHTTPClient,
+					fIS,
+				)
+				cleanup := func() {
+					os.Remove(fS.uri)
+					os.Remove(bS.uri)
+				}
+
+				bV := opts.createBlockHeaderValidator(bS)
+				fV := opts.createFilterHeaderValidator()
+
+				headersImport := &headersImport{
+					options:                   opts,
+					blockHeadersImportSource:  bS,
+					filterHeadersImportSource: fS,
+					blockHeadersValidator:     bV,
+					filterHeadersValidator:    fV,
+				}
+
+				return prep{
+					hImport: headersImport,
+					cleanup: cleanup,
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+
+			err := prep.hImport.openSources()
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
