@@ -14,6 +14,15 @@ import (
 // atomic writes of both block headers and filter headers while maintaining
 // chain integrity and consistency between stores.
 type headersImport struct {
+	// blockHeadersImportSource provides access to block headers from import
+	// source.
+	blockHeadersImportSource HeaderImportSource
+
+	// blockHeadersImportSource provides access to filter headers from
+	// import source.
+	filterHeadersImportSource HeaderImportSource
+
+	// options contains configuration parameters for the import process.
 	options *ImportOptions
 }
 
@@ -24,8 +33,13 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 		return nil, err
 	}
 
+	blockHeadersSource := options.createBlockHeaderImportSrc()
+	filterHeadersSource := options.createFilterHeaderImportSrc()
+
 	importer := &headersImport{
-		options: options,
+		blockHeadersImportSource:  blockHeadersSource,
+		filterHeadersImportSource: filterHeadersSource,
+		options:                   options,
 	}
 
 	return importer, nil
@@ -117,6 +131,22 @@ func (options *ImportOptions) validate() error {
 	}
 
 	return nil
+}
+
+// createBlockHeaderImportSrc creates the appropriate import source for block
+// headers.
+func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
+	return newFileHeaderImportSource(
+		options.BlockHeadersSource, newBlockHeader,
+	)
+}
+
+// createFilterHeaderImportSrc creates the appropriate import source for
+// filter headers.
+func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
+	return newFileHeaderImportSource(
+		options.FilterHeadersSource, newFilterHeader,
+	)
 }
 
 // ImportResult contains statistics about a header import operation.
