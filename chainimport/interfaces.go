@@ -30,6 +30,10 @@ type HeaderImportSource interface {
 	// Close releases any resources associated with the header source.
 	Close() error
 
+	// GetHeaderMetadata retrieves metadata information about the headers
+	// collection.
+	GetHeaderMetadata() (*headerMetadata, error)
+
 	// GetHeader retrieves a single header at the specified index using
 	// efficient random access (memory-mapped files) without loading the
 	// entire file into memory.
