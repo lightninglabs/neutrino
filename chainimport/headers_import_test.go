@@ -10,6 +10,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -1387,6 +1388,368 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 			}
 			require.NoError(t, err)
 			tc.verify(verify)
+		})
+	}
+}
+
+// TestImportAndTargetSourcesCompatibilityConstraint tests the import and
+// target sources compatibility constraint. It checks that the import and
+// target sources are compatible.
+func TestImportAndTargetSourcesCompatibilityConstraint(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name         string
+		prep         func() *headersImport
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "ErrorOnGetBlockHeaderMetadata",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					nil, errors.New("I/O read error"),
+				)
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+				}
+				return hImport
+			},
+			expectErr:    true,
+			expectErrMsg: "I/O read error",
+		},
+		{
+			name: "ErrorOnGetFilterHeaderMetadata",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{}, nil,
+				)
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					nil, errors.New("I/O read error"),
+				)
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+				}
+				return hImport
+			},
+			expectErr:    true,
+			expectErrMsg: "I/O read error",
+		},
+		{
+			name: "ErrorOnIncorrectBlockHeaderType",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						headerType: rFT,
+					},
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				fIS.On("GetHeaderMetadata").Return(
+					&headerMetadata{}, nil,
+				)
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: "incorrect block header type: expected " +
+				"BlockHeader, got RegularFilterHeader",
+		},
+		{
+			name: "ErrorOnIncorrectFilterHeaderType",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						headerType: headerfs.Block,
+					},
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						headerType: headerfs.Block,
+					},
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: "incorrect filter header type: " +
+				"expected RegularFilterHeader, got BlockHeader",
+		},
+		{
+			name: "ErrorOnMismatchImportChainTypes",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bT := headerfs.Block
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.MainNet,
+						headerType:       bT,
+					},
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+				bIS.On("GetURI").Return("/path/to/blocks")
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       rFT,
+					},
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+				fIS.On("GetURI").Return("/path/to/filters")
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("network type mismatch: "+
+				"block headers from /path/to/blocks (%s), "+
+				"filter headers from /path/to/filters (%s)",
+				wire.MainNet, wire.SimNet),
+		},
+		{
+			name: "ErrorOnMismatchImportTargetChainTypes",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bT := headerfs.Block
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       bT,
+					},
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       rFT,
+					},
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+
+				// Configure target chain parameters.
+				tCP := chaincfg.Params{
+					Net: wire.MainNet,
+				}
+
+				// Configure import options.
+				ops := &ImportOptions{
+					TargetChainParams: tCP,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: fmt.Sprintf("network mismatch: headers "+
+				"from import sources are for %s, but target "+
+				"is %s", wire.SimNet, wire.MainNet),
+		},
+		{
+			name: "ErrorOnMismatchImportStartHeights",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bT := headerfs.Block
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       bT,
+						startHeight:      1,
+					},
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+				bIS.On("GetURI").Return("/path/to/blocks")
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       rFT,
+						startHeight:      3,
+					},
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+				fIS.On("GetURI").Return("/path/to/filters")
+
+				// Configure target chain parameters.
+				tCP := chaincfg.Params{
+					Net: wire.SimNet,
+				}
+
+				// Configure import options.
+				ops := &ImportOptions{
+					TargetChainParams: tCP,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: "start height mismatch: block headers " +
+				"start at 1, filter headers start at 3",
+		},
+		{
+			name: "ErrorOnMismatchImportHeadersCount",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bT := headerfs.Block
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       bT,
+						startHeight:      1,
+					},
+					headersCount: 3,
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+				bIS.On("GetURI").Return("/path/to/blocks")
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       rFT,
+						startHeight:      1,
+					},
+					headersCount: 5,
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+				fIS.On("GetURI").Return("/path/to/filters")
+
+				// Configure target chain parameters.
+				tCP := chaincfg.Params{
+					Net: wire.SimNet,
+				}
+
+				// Configure import options.
+				ops := &ImportOptions{
+					TargetChainParams: tCP,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+				return hImport
+			},
+			expectErr: true,
+			expectErrMsg: "headers count mismatch: block headers " +
+				"import source /path/to/blocks (3), filter " +
+				"headers import source /path/to/filters (5)",
+		},
+		{
+			name: "ValidateSourcesSuccessfully",
+			prep: func() *headersImport {
+				// Mock block import store.
+				bIS := &mockHeaderImportSource{}
+				bT := headerfs.Block
+				bM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       bT,
+						startHeight:      1,
+					},
+					headersCount: 3,
+				}
+				bIS.On("GetHeaderMetadata").Return(bM, nil)
+
+				// Mock filter import store.
+				fIS := &mockHeaderImportSource{}
+				rFT := headerfs.RegularFilter
+				fM := &headerMetadata{
+					importMetadata: &importMetadata{
+						bitcoinChainType: wire.SimNet,
+						headerType:       rFT,
+						startHeight:      1,
+					},
+					headersCount: 3,
+				}
+				fIS.On("GetHeaderMetadata").Return(fM, nil)
+
+				// Configure target chain parameters.
+				tCP := chaincfg.Params{
+					Net: wire.SimNet,
+				}
+
+				// Configure import options.
+				ops := &ImportOptions{
+					TargetChainParams: tCP,
+				}
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					options:                   ops,
+				}
+				return hImport
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hImport := tc.prep()
+			err := hImport.validateSourcesCompatibility()
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

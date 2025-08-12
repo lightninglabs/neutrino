@@ -77,6 +77,12 @@ func (h *headersImport) Import() (*ImportResult, error) {
 	}
 	defer h.closeSources()
 
+	// Check if the sources are compatible with each other.
+	if err := h.validateSourcesCompatibility(); err != nil {
+		return nil, fmt.Errorf("failed to validate compatibility of "+
+			"header import sources with each other: %w", err)
+	}
+
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(result.StartTime)
 
@@ -149,6 +155,72 @@ func (h *headersImport) closeSources() {
 	if err := h.filterHeadersImportSource.Close(); err != nil {
 		log.Warnf("Failed to close filter headers source: %v", err)
 	}
+}
+
+// validateSourcesCompatibility ensures that block and filter header sources
+// are compatible with each other and with the target chain.
+func (h *headersImport) validateSourcesCompatibility() error {
+	// Get metadata from both header and filter sources.
+	blockMetadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return err
+	}
+	filterMetadata, err := h.filterHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return err
+	}
+
+	// Validate that block headers are of the correct type.
+	if blockMetadata.headerType != headerfs.Block {
+		return fmt.Errorf("incorrect block header type: expected %s, "+
+			"got %s", headerfs.Block, blockMetadata.headerType)
+	}
+
+	// Validate that filter headers are of the correct type.
+	if filterMetadata.headerType != headerfs.RegularFilter {
+		return fmt.Errorf("incorrect filter header type: expected %v, "+
+			"got %v", headerfs.RegularFilter,
+			filterMetadata.headerType)
+	}
+
+	// Validate that network types match.
+	if blockMetadata.bitcoinChainType != filterMetadata.bitcoinChainType {
+		return fmt.Errorf("network type mismatch: block headers "+
+			"from %s (%v), filter headers from "+
+			"%s (%v)", h.blockHeadersImportSource.GetURI(),
+			blockMetadata.bitcoinChainType,
+			h.filterHeadersImportSource.GetURI(),
+			filterMetadata.bitcoinChainType)
+	}
+
+	// Validate that the source network matches the target network.
+	if blockMetadata.bitcoinChainType != h.options.TargetChainParams.Net {
+		return fmt.Errorf("network mismatch: headers from import "+
+			"sources are for %v, but target is %v",
+			blockMetadata.bitcoinChainType,
+			h.options.TargetChainParams.Net)
+	}
+
+	// Validate starting heights match.
+	if blockMetadata.startHeight != filterMetadata.startHeight {
+		return fmt.Errorf("start height mismatch: block headers start "+
+			"at %d, filter headers start at %d",
+			blockMetadata.startHeight, filterMetadata.startHeight)
+	}
+
+	// Validate header counts match exactly. This also implicitly validates
+	// the end height. The end height is constructed from the start height
+	// and headers count.
+	if filterMetadata.headersCount != blockMetadata.headersCount {
+		return fmt.Errorf("headers count mismatch: block headers "+
+			"import source %s (%d), filter headers import source "+
+			"%s (%d)", h.blockHeadersImportSource.GetURI(),
+			blockMetadata.headersCount,
+			h.filterHeadersImportSource.GetURI(),
+			filterMetadata.headersCount)
+	}
+
+	return nil
 }
 
 // ImportOptions defines parameters for the import process.
