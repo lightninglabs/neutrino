@@ -2,6 +2,7 @@ package chainimport
 
 import (
 	"iter"
+	"net/http"
 
 	"github.com/stretchr/testify/mock"
 )
@@ -117,4 +118,19 @@ func (m *mockHeaderIterator) NextBatch() ([]Header, error) {
 func (m *mockHeaderIterator) Close() error {
 	args := m.Called()
 	return args.Error(0)
+}
+
+// mockHTTPClient mocks an HTTP client for testing HTTP header import source
+// interactions.
+type mockHTTPClient struct {
+	mock.Mock
+}
+
+// Get returns a response from the mock HTTP client.
+func (m *mockHTTPClient) Get(url string) (*http.Response, error) {
+	args := m.Called(url)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*http.Response), args.Error(1)
 }

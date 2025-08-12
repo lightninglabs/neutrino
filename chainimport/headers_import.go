@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
@@ -961,6 +962,18 @@ func (options *ImportOptions) validate() error {
 // createBlockHeaderImportSrc creates the appropriate import source for block
 // headers.
 func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
+	// Check if the block headers source is a HTTP(s) URI.
+	if strings.HasPrefix(options.BlockHeadersSource, "http") {
+		// The empty string ("") URI passed to newFileHeaderImportSource
+		// will be replaced by the temporary file name once the file has
+		// been downloaded from the HTTP source.
+		return newHTTPHeaderImportSource(
+			options.BlockHeadersSource, newHTTPClient(),
+			newFileHeaderImportSource("", newBlockHeader),
+		)
+	}
+
+	// Otherwise, fallback to file headers import source.
 	return newFileHeaderImportSource(
 		options.BlockHeadersSource, newBlockHeader,
 	)
@@ -969,6 +982,15 @@ func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
 // createFilterHeaderImportSrc creates the appropriate import source for
 // filter headers.
 func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
+	// Check if the filter headers source is a HTTP(s) URI.
+	if strings.HasPrefix(options.FilterHeadersSource, "http") {
+		return newHTTPHeaderImportSource(
+			options.FilterHeadersSource, newHTTPClient(),
+			newFileHeaderImportSource("", newFilterHeader),
+		)
+	}
+
+	// Otherwise, fallback to file headers import source.
 	return newFileHeaderImportSource(
 		options.FilterHeadersSource, newFilterHeader,
 	)
