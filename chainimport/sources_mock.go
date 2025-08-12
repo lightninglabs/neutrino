@@ -1,6 +1,8 @@
 package chainimport
 
 import (
+	"iter"
+
 	"github.com/stretchr/testify/mock"
 )
 
@@ -41,6 +43,14 @@ func (m *mockHeaderImportSource) GetHeader(index uint32) (Header, error) {
 	return args.Get(0).(Header), args.Error(1)
 }
 
+// Iterator returns a header iterator from the mock header import source.
+func (m *mockHeaderImportSource) Iterator(start, end uint32,
+	batchSize uint32) HeaderIterator {
+
+	args := m.Called(start, end, batchSize)
+	return args.Get(0).(HeaderIterator)
+}
+
 // GetURI gets the URI from the mock header import source.
 func (m *mockHeaderImportSource) GetURI() string {
 	args := m.Called()
@@ -51,4 +61,60 @@ func (m *mockHeaderImportSource) GetURI() string {
 func (m *mockHeaderImportSource) SetURI(uri string) {
 	m.Called(uri)
 	m.uri = uri
+}
+
+// mockHeaderIterator mocks a header iterator for testing header iteration
+// logic.
+type mockHeaderIterator struct {
+	mock.Mock
+}
+
+// Iterator returns an iter.Seq2[Header, error] for the specified range.
+func (m *mockHeaderIterator) Iterator(start,
+	end uint32) iter.Seq2[Header, error] {
+
+	args := m.Called(start, end)
+	return args.Get(0).(iter.Seq2[Header, error])
+}
+
+// BatchIterator returns an iterator that yields batches of headers.
+func (m *mockHeaderIterator) BatchIterator(start,
+	end uint32) iter.Seq2[[]Header, error] {
+
+	args := m.Called(start, end)
+	return args.Get(0).(iter.Seq2[[]Header, error])
+}
+
+// ReadBatch collects all headers from the given range into a slice.
+func (m *mockHeaderIterator) ReadBatch(start, end uint32) ([]Header, error) {
+	args := m.Called(start, end)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]Header), args.Error(1)
+}
+
+// Next returns the next header in the current iteration sequence.
+func (m *mockHeaderIterator) Next() (Header, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(Header), args.Error(1)
+}
+
+// NextBatch returns the next batch of headers in the current iteration
+// sequence.
+func (m *mockHeaderIterator) NextBatch() ([]Header, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]Header), args.Error(1)
+}
+
+// Close closes the mock header iterator.
+func (m *mockHeaderIterator) Close() error {
+	args := m.Called()
+	return args.Error(0)
 }

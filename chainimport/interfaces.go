@@ -1,6 +1,9 @@
 package chainimport
 
-import "io"
+import (
+	"io"
+	"iter"
+)
 
 // ImportHeadersFile defines the interface for file-like objects used in header
 // import operations. It combines standard I/O interfaces with length
@@ -20,6 +23,53 @@ type Header interface {
 	Deserialize(io.Reader, uint32) error
 }
 
+// StatelessIterator provides functional iteration over headers using Go's iter
+// package. Each method call creates a fresh, independent iterator.
+type StatelessIterator interface {
+	// Iterator returns an iter.Seq2[header, error] for the specified range.
+	// Each call creates a fresh iterator that independently traverses the
+	// range.
+	Iterator(start, end uint32) iter.Seq2[Header, error]
+
+	// BatchIterator returns an iterator that yields batches of headers for
+	// the specified range, where each batch respects the configured batch
+	// size limit. Each call creates a fresh iterator that independently
+	// traverses the range.
+	BatchIterator(start, end uint32) iter.Seq2[[]Header, error]
+
+	// ReadBatch collects all headers from the given range into a slice.
+	ReadBatch(start, end uint32) ([]Header, error)
+
+	// Close releases any resources associated with the iterator.
+	Close() error
+}
+
+// StatefulIterator provides position-based iteration over headers with internal
+// state.
+type StatefulIterator interface {
+	// Next returns the next header in the current iteration sequence.
+	// Maintains internal position state. Returns nil, io.EOF when no more
+	// headers are available.
+	Next() (Header, error)
+
+	// NextBatch returns the next batch of headers in the current iteration
+	// sequence. Maintains internal position state. Returns nil, io.EOF when
+	// no more batches are available.
+	NextBatch() ([]Header, error)
+
+	// Close releases any resources associated with the iterator.
+	Close() error
+}
+
+// HeaderIterator combines both stateless and stateful iteration capabilities.
+type HeaderIterator interface {
+	// StatelessIterator provides functional iteration with fresh iterators.
+	StatelessIterator
+
+	// StatefulIterator provides sequential iteration with internal state.
+	StatefulIterator
+}
+
 // HeaderImportSource is an interface for loading headers from various sources
 // (files, HTTP endpoints) with support for both sequential iteration and
 // efficient random access using memory-mapped files.
@@ -33,6 +83,10 @@ type HeaderImportSource interface {
 	// GetHeaderMetadata retrieves metadata information about the headers
 	// collection.
 	GetHeaderMetadata() (*headerMetadata, error)
+
+	// Iterator returns a headerIterator that can traverse headers between
+	// start and end indices.
+	Iterator(start, end uint32, batchSize uint32) HeaderIterator
 
 	// GetHeader retrieves a single header at the specified index using
 	// efficient random access (memory-mapped files) without loading the
