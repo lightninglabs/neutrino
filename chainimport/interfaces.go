@@ -87,3 +87,22 @@ type HeaderImportSource interface {
 	// (file path for file sources, URL for HTTP sources).
 	SetURI(uri string)
 }
+
+// HeadersValidator defines methods for validating blockchain headers.
+type HeadersValidator interface {
+	// Validate performs comprehensive validation on a sequence of headers
+	// provided by the iterator. It checks that the entire sequence forms
+	// a valid chain.
+	Validate(HeaderIterator) error
+
+	// ValidateBatch performs validation on a batch of headers, checking
+	// that they form a valid chain segment.
+	ValidateBatch([]Header) error
+
+	// ValidatePair verifies that two consecutive headers (prev and current)
+	// form a valid chain link.
+	ValidatePair(prev, current Header) error
+
+	// ValidateSingle validates a single header for basic sanity checks.
+	ValidateSingle(header Header) error
+}
