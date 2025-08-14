@@ -404,10 +404,7 @@ Loop:
 				// If it was a timeout, we dynamically increase
 				// it for the next attempt.
 				if result.err == ErrQueryTimeout {
-					newTimeout := result.job.timeout * 2
-					if newTimeout > maxQueryTimeout {
-						newTimeout = maxQueryTimeout
-					}
+					newTimeout := min(result.job.timeout*2, maxQueryTimeout)
 					result.job.timeout = newTimeout
 				}
 

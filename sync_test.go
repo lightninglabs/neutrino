@@ -751,10 +751,7 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	}
 
 	if !bytes.Equal(wantLog, gotLog) {
-		leastBytes := len(wantLog)
-		if len(gotLog) < leastBytes {
-			leastBytes = len(gotLog)
-		}
+		leastBytes := min(len(gotLog), len(wantLog))
 		diffIndex := 0
 		for i := 0; i < leastBytes; i++ {
 			if wantLog[i] != gotLog[i] {
