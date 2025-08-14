@@ -982,10 +982,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		startHeightRange :=
 			(currentInterval * wire.CFCheckptInterval) + 1
 
-		nextInterval := currentInterval + maxCFCheckptsPerQuery
-		if nextInterval > uint32(len(checkpoints)) {
-			nextInterval = uint32(len(checkpoints))
-		}
+		nextInterval := min(currentInterval+maxCFCheckptsPerQuery, uint32(len(checkpoints)))
 		endHeightRange := nextInterval * wire.CFCheckptInterval
 
 		log.Tracef("Checkpointed cfheaders request start_range=%v, "+

@@ -2,6 +2,7 @@ package pushtx
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/btcsuite/btcd/wire"
@@ -75,13 +76,7 @@ func IsBroadcastError(err error, codes ...BroadcastErrorCode) bool {
 		return false
 	}
 
-	for _, code := range codes {
-		if broadcastErr.Code == code {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(codes, broadcastErr.Code)
 }
 
 // ParseBroadcastError maps a peer's reject message for a transaction to a
