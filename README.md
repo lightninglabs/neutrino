@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml/badge.svg)](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml)
 [![Godoc](https://godoc.org/github.com/lightninglabs/neutrino?status.svg)](https://godoc.org/github.com/lightninglabs/neutrino)
-[![Coverage Status](https://coveralls.io/repos/github/lightninglabs/neutrino/badge.svg?branch=master)](https://coveralls.io/github/lightninglabs/neutrino?branch=master)
+[![Coverage Status](https://s3.amazonaws.com/assets.coveralls.io/badges/coveralls_72.svg?branch=master)](https://coveralls.io/github/lightninglabs/neutrino?branch=master)
 
 Neutrino is a Bitcoin light client written in Go and designed with mobile
 Lightning Network clients in mind. It uses a
