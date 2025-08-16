@@ -1,7 +1,7 @@
 # Neutrino: Privacy-Preserving Bitcoin Light Client
 
 [![Build Status](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml/badge.svg)](https://github.com/lightninglabs/neutrino/actions/workflows/main.yml)
-[![Godoc](https://godoc.org/github.com/lightninglabs/neutrino?status.svg)](https://godoc.org/github.com/lightninglabs/neutrino)
+[![Godoc](https://pkg.go.dev/github.com/lightninglabs/neutrino?utm_source=godoc?status.svg)](https://pkg.go.dev/github.com/lightninglabs/neutrino?utm_source=godoc)
 [![Coverage Status](https://coveralls.io/repos/github/lightninglabs/neutrino/badge.svg?branch=master)](https://coveralls.io/github/lightninglabs/neutrino?branch=master)
 
 Neutrino is a Bitcoin light client written in Go and designed with mobile
