@@ -13,6 +13,7 @@ require (
 	github.com/lightninglabs/neutrino/cache v1.1.2
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/stretchr/testify v1.9.0
+	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50
 )
 
 require (
