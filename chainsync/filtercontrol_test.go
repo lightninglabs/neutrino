@@ -6,15 +6,20 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/stretchr/testify/require"
 )
 
-func TestControlCFHeader(t *testing.T) {
+// TestValidateCFHeader tests filter header validation against checkpoints,
+// including successful validation, mismatch detection, and unknown height
+// handling.
+func TestValidateCFHeader(t *testing.T) {
 	t.Parallel()
 
 	// We'll modify our backing list of checkpoints for this test.
 	height := uint32(999)
 	header := hashFromStr(
-		"4a242283a406a7c089f671bb8df7671e5d5e9ba577cea1047d30a7f4919df193",
+		"4a242283a406a7c089f671bb8df7671e5d5e9ba577cea1047d30a7f4919d" +
+			"f193",
 	)
 	filterHeaderCheckpoints = map[wire.BitcoinNet]map[uint32]*chainhash.Hash{
 		chaincfg.MainNetParams.Net: {
@@ -23,30 +28,25 @@ func TestControlCFHeader(t *testing.T) {
 	}
 
 	// Expect the control at height to succeed.
-	err := ControlCFHeader(
+	err := ValidateCFHeader(
 		chaincfg.MainNetParams, wire.GCSFilterRegular, height, header,
 	)
-	if err != nil {
-		t.Fatalf("error checking height: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Pass an invalid header, this should return an error.
 	header = hashFromStr(
-		"000000000006a7c089f671bb8df7671e5d5e9ba577cea1047d30a7f4919df193",
+		"000000000006a7c089f671bb8df7671e5d5e9ba577cea1047d30a7f4919d" +
+			"f193",
 	)
-	err = ControlCFHeader(
+	err = ValidateCFHeader(
 		chaincfg.MainNetParams, wire.GCSFilterRegular, height, header,
 	)
-	if err != ErrCheckpointMismatch {
-		t.Fatalf("expected ErrCheckpointMismatch, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrCheckpointMismatch)
 
 	// Finally, control an unknown height. This should also pass since we
 	// don't have the checkpoint stored.
-	err = ControlCFHeader(
+	err = ValidateCFHeader(
 		chaincfg.MainNetParams, wire.GCSFilterRegular, 99, header,
 	)
-	if err != nil {
-		t.Fatalf("error checking height: %v", err)
-	}
+	require.NoError(t, err)
 }

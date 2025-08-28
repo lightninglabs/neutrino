@@ -1371,7 +1371,7 @@ func (b *blockManager) resolveConflict(
 	for peer, cp := range checkpoints {
 		for i, header := range cp {
 			height := uint32((i + 1) * wire.CFCheckptInterval)
-			err := chainsync.ControlCFHeader(
+			err := chainsync.ValidateCFHeader(
 				b.cfg.ChainParams, fType, height, header,
 			)
 			if err == chainsync.ErrCheckpointMismatch {

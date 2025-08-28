@@ -48,10 +48,10 @@ var filterHeaderCheckpoints = map[wire.BitcoinNet]map[uint32]*chainhash.Hash{
 	},
 }
 
-// ControlCFHeader controls the given filter header against our list of
+// ValidateCFHeader validates the given filter header against our list of
 // checkpoints. It returns ErrCheckpointMismatch if we have a checkpoint at the
 // given height, and it doesn't match.
-func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
+func ValidateCFHeader(params chaincfg.Params, fType wire.FilterType,
 	height uint32, filterHeader *chainhash.Hash) error {
 
 	if fType != wire.GCSFilterRegular {
@@ -73,6 +73,18 @@ func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
 	}
 
 	return nil
+}
+
+// ControlCFHeader controls the given filter header against our list of
+// checkpoints. It returns ErrCheckpointMismatch if we have a checkpoint at the
+// given height, and it doesn't match.
+//
+// Deprecated: This function will be removed in a future version. Use
+// ValidateCFHeader as an equivalent replacement.
+func ControlCFHeader(params chaincfg.Params, fType wire.FilterType,
+	height uint32, filterHeader *chainhash.Hash) error {
+
+	return ValidateCFHeader(params, fType, height, filterHeader)
 }
 
 // hashFromStr makes a chainhash.Hash from a valid hex string. If the string is
