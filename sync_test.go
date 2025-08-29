@@ -2,6 +2,7 @@ package neutrino_test
 
 import (
 	"bytes"
+	"compress/bzip2"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1367,6 +1369,195 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 			break
 		}
 	}
+}
+
+// BenchmarkHeadersImport benchmarks the headers import functionality. It
+// decompresses the block and filter headers from the testdata directory and
+// imports them into a temporary database. It then benchmarks the import time
+// for different batch sizes.
+func BenchmarkHeadersImport(b *testing.B) {
+	blockHeadersPath, cleanupBlock, err := decompressBZ2ToTempFile(
+		"testdata/block-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupBlock()
+
+	filterHeadersPath, cleanupFilter, err := decompressBZ2ToTempFile(
+		"testdata/filter-headers-mainnet-1-100_000.bz2",
+	)
+	require.NoError(b, err)
+	defer cleanupFilter()
+
+	expectedHeaders := 100_000
+
+	validateFileSize(
+		b, blockHeadersPath, expectedHeaders, headerfs.Block,
+	)
+
+	validateFileSize(
+		b, filterHeadersPath, expectedHeaders, headerfs.RegularFilter,
+	)
+
+	for exp := 10; exp <= 19; exp++ {
+		// Calculate batch size which is 2^exp.
+		batch := 1 << exp
+		b.Run(fmt.Sprintf("batchSize=%d", batch), func(b *testing.B) {
+			var memStats runtime.MemStats
+			var peakMemory uint64
+
+			// Take initial memory snapshot before starting the
+			// benchmark. This establishes a baseline for memory
+			// usage measurements.
+			runtime.GC()
+			runtime.ReadMemStats(&memStats)
+			initialHeapInUse := memStats.HeapInuse
+
+			tempDir := b.TempDir()
+			dbPath := filepath.Join(tempDir, "test.db")
+			db, err := walletdb.Create(
+				"bdb", dbPath, true, time.Second*10,
+			)
+			require.NoError(b, err)
+			defer db.Close()
+
+			blockStore, err := headerfs.NewBlockHeaderStore(
+				tempDir, db, &chaincfg.MainNetParams,
+			)
+			require.NoError(b, err)
+
+			filterStore, err := headerfs.NewFilterHeaderStore(
+				tempDir, db, headerfs.RegularFilter,
+				&chaincfg.MainNetParams, nil,
+			)
+			require.NoError(b, err)
+
+			opts := &chainimport.ImportOptions{
+				TargetChainParams:       chaincfg.MainNetParams,
+				TargetBlockHeaderStore:  blockStore,
+				TargetFilterHeaderStore: filterStore,
+				BlockHeadersSource:      blockHeadersPath,
+				FilterHeadersSource:     filterHeadersPath,
+				WriteBatchSizePerRegion: batch,
+			}
+
+			// Get initial CPU time for measuring CPU usage during
+			// import.
+			var rusageStart, rusageEnd syscall.Rusage
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageStart)
+
+			// Start memory monitoring goroutine to track peak
+			// memory usage. It samples memory stats every 10ms to
+			// capture the highest usage.
+			stopMemMonitor := make(chan struct{})
+			memMonitorDone := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				defer close(memMonitorDone)
+
+				for {
+					select {
+					case <-ticker.C:
+						runtime.ReadMemStats(&memStats)
+						heapInUse := memStats.HeapInuse
+						if heapInUse > peakMemory {
+							peakMemory = heapInUse
+						}
+					case <-stopMemMonitor:
+						return
+					}
+				}
+			}()
+
+			b.ResetTimer()
+			startTime := time.Now()
+			ctx := context.Background()
+
+			importer, err := chainimport.NewHeadersImport(opts)
+			require.NoError(b, err)
+
+			_, err = importer.Import(ctx)
+			require.NoError(b, err)
+
+			elapsed := time.Since(startTime)
+			b.StopTimer()
+
+			close(stopMemMonitor)
+			<-memMonitorDone
+
+			// Get final CPU usage after import completion.
+			syscall.Getrusage(syscall.RUSAGE_SELF, &rusageEnd)
+
+			// Calculate total CPU time (user + system) in seconds.
+			rEndUtime := rusageEnd.Utime
+			rStartUtime := rusageStart.Utime
+			userTimeSec := float64(rEndUtime.Sec-rStartUtime.Sec) +
+				float64(rEndUtime.Usec-rStartUtime.Usec)/1e6
+
+			rEndStime := rusageEnd.Stime
+			rStartStime := rusageStart.Stime
+			sysTimeSec := float64(rEndStime.Sec-rStartStime.Sec) +
+				float64(rEndStime.Usec-rStartStime.Usec)/1e6
+
+			cpuTimeSec := userTimeSec + sysTimeSec
+
+			// Calculate import throughput in headers per second.
+			hPS := float64(expectedHeaders) / elapsed.Seconds()
+
+			peakMemoryB := float64(peakMemory - initialHeapInUse)
+			peakMemoryMB := peakMemoryB / (1024 * 1024)
+			b.ReportMetric(peakMemoryMB, "MB_peak")
+
+			b.ReportMetric(hPS, "headers/s")
+			b.ReportMetric(cpuTimeSec, "cpu_s")
+		})
+	}
+}
+
+// decompressBZ2ToTempFile decompresses a bz2 file to a temporary file.
+func decompressBZ2ToTempFile(srcPath string) (string, func(), error) {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return "", nil, err
+	}
+	defer f.Close()
+
+	bz2r := bzip2.NewReader(f)
+	tempFile, err := os.CreateTemp(
+		"", filepath.Base(srcPath)+"-decompressed-*",
+	)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if _, err := io.Copy(tempFile, bz2r); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return "", nil, err
+	}
+	tempFile.Close()
+
+	cleanup := func() { os.Remove(tempFile.Name()) }
+	return tempFile.Name(), cleanup, nil
+}
+
+// validateFileSize is a helper function that validates a file contains
+// exactly the expected number of headers with the given size per header
+// plus the constant size of header metadata at front.
+func validateFileSize(b *testing.B, filePath string, nHeaders int,
+	hType headerfs.HeaderType) {
+
+	hSize, err := hType.Size()
+	require.NoError(b, err)
+
+	fileInfo, err := os.Stat(filePath)
+	require.NoError(b, err)
+	expectedSize := int64(nHeaders*hSize + chainimport.ImportMetadataSize)
+
+	require.Equal(b, expectedSize, fileInfo.Size(),
+		"%s file should contain exactly %d headers (%d bytes) + %d "+
+			"bytes metadata", hType, nHeaders, nHeaders*hSize,
+		chainimport.ImportMetadataSize)
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
