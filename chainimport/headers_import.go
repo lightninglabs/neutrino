@@ -48,6 +48,70 @@ type processingRegions struct {
 	newHeaders headerRegion
 }
 
+// syncModes encapsulates the verification and append modes for header
+// synchronization. It is specifically designed for handling the overlap and
+// divergence headers regions internally between import and target sources.
+type syncModes struct {
+	// verify specifies the verification strategy for overlap and divergence
+	// headers regions.
+	verify verifyMode
+
+	// append specifies the append strategy for divergence and new headers
+	// regions.
+	append appendMode
+}
+
+// verifyMode represents the verification strategy for overlap and divergence
+// headers regions.
+type verifyMode uint8
+
+const (
+	// verifyBlockAndFilter indicates both block and filter headers should
+	// be verified against the corresponding block and filter headers from
+	// import source. This happens in case of overlap headers region.
+	verifyBlockAndFilter verifyMode = iota
+
+	// verifyBlockOnly indicates only block headers should be verified
+	// against the corresponding block headers from import source. This
+	// happens in case of divergence headers region where the target block
+	// headers store leads the target filter headers store.
+	verifyBlockOnly
+
+	// verifyFilterOnly indicates only filter headers should be verified
+	// against the corresponding filter headers from import source. This
+	// happens in case of divergence headers region where the target
+	// filter headers store leads the target block headers store.
+	verifyFilterOnly
+)
+
+// appendMode specifies which header types to append during synchronization. It
+// is specifically designed for handling the divergence and new headers regions
+// internally between import and target sources.
+type appendMode uint8
+
+const (
+	// appendBlockAndFilter indicates both block and filter headers should
+	// be appended during synchronization using the corresponding block and
+	// filter headers from import sources. This happens in case of new
+	// headers region where the target stores are at same height with no
+	// divergence detected.
+	appendBlockAndFilter appendMode = iota
+
+	// appendBlockOnly indicates only block headers should be appended
+	// during synchronization using the corresponding block headers from
+	// import source. This happens in case of divergence headers region
+	// where the target block headers store lags behind the target filter
+	// headers store.
+	appendBlockOnly
+
+	// appendFilterOnly indicates only filter headers should be appended
+	// during synchronization using corresponding filter headers from
+	// import source. This happens in case of divergence headers region
+	// where the target filter headers store lags behind the target block
+	// headers store.
+	appendFilterOnly
+)
+
 // headerRegion represents a contiguous range of headers.
 type headerRegion struct {
 	// start is the beginning height of this header region.
@@ -58,6 +122,9 @@ type headerRegion struct {
 
 	// exists indicates whether this region has headers to process.
 	exists bool
+
+	// syncModes contains the synchronization modes for the header region.
+	syncModes *syncModes
 }
 
 // headersImport orchestrates the import of blockchain headers from external
@@ -471,6 +538,9 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		start:  overlapStart,
 		end:    overlapEnd,
 		exists: overlapStart <= overlapEnd,
+		syncModes: &syncModes{
+			verify: verifyBlockAndFilter,
+		},
 	}
 
 	// 2. Divergence region.
@@ -480,10 +550,15 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 	// reconciliation.
 	divergeStart := effectiveTipHeight + 1
 	divergeEnd := min(max(bTipHeight, fTipHeight), importEndHeight)
+	divergeExists := bTipHeight != fTipHeight && divergeStart <= divergeEnd
+	divergenceSyncModes := h.determineDivergenceSyncModes(
+		bTipHeight, fTipHeight,
+	)
 	regions.divergence = headerRegion{
-		start:  divergeStart,
-		end:    divergeEnd,
-		exists: bTipHeight != fTipHeight && divergeStart <= divergeEnd,
+		start:     divergeStart,
+		end:       divergeEnd,
+		exists:    divergeExists,
+		syncModes: divergenceSyncModes,
 	}
 
 	// 3. New Headers region.
@@ -504,9 +579,37 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		start:  newStart,
 		end:    newEnd,
 		exists: newStart <= newEnd,
+		syncModes: &syncModes{
+			append: appendBlockAndFilter,
+		},
 	}
 
 	return regions, nil
+}
+
+// determineDivergenceSyncModes determines the appropriate sync modes for
+// processing divergence headers region based on which target store is leading.
+// It returns different verification and append strategies depending on whether
+// the block or filter headers store has a higher tip height.
+func (h *headersImport) determineDivergenceSyncModes(blockTipHeight,
+	filterTipHeight uint32) *syncModes {
+
+	switch {
+	case blockTipHeight > filterTipHeight:
+		return &syncModes{
+			verify: verifyBlockOnly,
+			append: appendFilterOnly,
+		}
+
+	case blockTipHeight < filterTipHeight:
+		return &syncModes{
+			verify: verifyFilterOnly,
+			append: appendBlockOnly,
+		}
+
+	default:
+		return nil
+	}
 }
 
 // processNewHeadersRegion imports headers from the specified region into the
