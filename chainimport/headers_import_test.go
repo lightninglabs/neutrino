@@ -5388,6 +5388,10 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  41,
 					end:    70,
 					exists: true,
+					syncModes: syncModes{
+						verify: verifyFilterOnly,
+						append: appendBlockOnly,
+					},
 				}
 				require.Equal(v.tc, dRE, dR)
 			},
@@ -5441,6 +5445,10 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  41,
 					end:    70,
 					exists: true,
+					syncModes: syncModes{
+						verify: verifyFilterOnly,
+						append: appendBlockOnly,
+					},
 				}
 				require.Equal(v.tc, dRE, dR)
 
@@ -5449,6 +5457,9 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  71,
 					end:    90,
 					exists: true,
+					syncModes: syncModes{
+						append: appendBlockAndFilter,
+					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
 			},
@@ -5505,6 +5516,10 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  41,
 					end:    70,
 					exists: true,
+					syncModes: syncModes{
+						verify: verifyBlockOnly,
+						append: appendFilterOnly,
+					},
 				}
 				require.Equal(v.tc, dRE, dR)
 			},
@@ -5561,6 +5576,10 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  71,
 					end:    90,
 					exists: true,
+					syncModes: syncModes{
+						verify: verifyBlockOnly,
+						append: appendFilterOnly,
+					},
 				}
 				require.Equal(v.tc, dRE, dR)
 			},
@@ -5614,6 +5633,10 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  41,
 					end:    50,
 					exists: true,
+					syncModes: syncModes{
+						verify: verifyFilterOnly,
+						append: appendBlockOnly,
+					},
 				}
 				require.Equal(v.tc, dRE, dR)
 
@@ -5622,6 +5645,9 @@ func TestHeaderProcessing(t *testing.T) {
 					start:  51,
 					end:    90,
 					exists: true,
+					syncModes: syncModes{
+						append: appendBlockAndFilter,
+					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
 			},
@@ -6287,6 +6313,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6313,6 +6342,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6368,6 +6400,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6425,6 +6460,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6483,6 +6521,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6542,6 +6583,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6601,6 +6645,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    100,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
@@ -6670,6 +6717,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				start:  1,
 				end:    4,
 				exists: true,
+				syncModes: syncModes{
+					append: appendBlockAndFilter,
+				},
 			},
 			importResult: &ImportResult{},
 			prep: func() prep {
