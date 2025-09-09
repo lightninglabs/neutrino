@@ -625,8 +625,9 @@ func (h *headersImport) processNewHeadersRegion(ctx context.Context,
 	log.Infof("Adding %d new headers (block and filter) from heights "+
 		"%d to %d", region.end-region.start+1, region.start, region.end)
 
-	err := h.appendNewHeaders(ctx, region.start, region.end)
-	if err != nil {
+	if err := h.appendNewHeaders(
+		ctx, region.start, region.end, region.syncModes.append,
+	); err != nil {
 		return fmt.Errorf("failed to append new headers: %w", err)
 	}
 
@@ -638,7 +639,7 @@ func (h *headersImport) processNewHeadersRegion(ctx context.Context,
 
 // appendNewHeaders adds new headers from import source.
 func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
-	endHeight uint32) error {
+	endHeight uint32, appendMode appendMode) error {
 
 	metadata, err := h.blockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
@@ -674,7 +675,7 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 		}
 
 		batchEnd, err := h.processBatch(
-			blockIter, filterIter, batchStart,
+			blockIter, filterIter, batchStart, appendMode,
 		)
 		if err == io.EOF {
 			break
@@ -697,72 +698,111 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 // returns the batch end height on success, or an error including io.EOF when no
 // more batches.
 func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
-	batchStart uint32) (uint32, error) {
+	batchStart uint32, appendMode appendMode) (uint32, error) {
 
-	blockBatch, blockErr := blockIter.ReadBatch(
-		batchStart, blockIter.GetEndIndex(), blockIter.GetBatchSize(),
+	var (
+		blockHeaders  []headerfs.BlockHeader
+		filterHeaders []headerfs.FilterHeader
+		batchEnd      uint32
 	)
-	if blockErr == io.EOF {
-		return 0, io.EOF
-	}
-	if blockErr != nil {
-		return 0, fmt.Errorf("failed to read block headers "+
-			"batch at height %d: %w", batchStart, blockErr)
-	}
 
-	// Get corresponding filter headers batch.
-	filterBatch, filterErr := filterIter.ReadBatch(
-		batchStart, blockIter.GetEndIndex(), blockIter.GetBatchSize(),
-	)
-	if filterErr == io.EOF {
-		return 0, errors.New("filter headers ended before block " +
-			"headers")
-	}
-	if filterErr != nil {
-		return 0, fmt.Errorf("failed to read filter headers "+
-			"batch at height %d: %w", batchStart, filterErr)
-	}
-
-	// Convert block header batches to target store format.
-	blockHeaders := make([]headerfs.BlockHeader, 0, len(blockBatch))
-	for _, header := range blockBatch {
-		blkHeader, err := assertBlockHeader(header)
-		if err != nil {
-			return 0, err
-		}
-		blockHeaders = append(
-			blockHeaders, blkHeader.BlockHeader,
+	if appendMode != appendFilterOnly {
+		blockBatch, blockErr := blockIter.ReadBatch(
+			batchStart, blockIter.GetEndIndex(),
+			blockIter.GetBatchSize(),
 		)
-	}
-
-	// Convert filter header batches to target store format.
-	var filterHeaders []headerfs.FilterHeader
-	filterHeaders = make(
-		[]headerfs.FilterHeader, 0, len(filterBatch),
-	)
-	for _, header := range filterBatch {
-		fHeader, err := assertFilterHeader(header)
-		if err != nil {
-			return 0, err
+		if blockErr == io.EOF {
+			return 0, io.EOF
 		}
-		filterHeaders = append(
-			filterHeaders, fHeader.FilterHeader,
+		if blockErr != nil {
+			return 0, fmt.Errorf("failed to read block headers "+
+				"batch at height %d: %w", batchStart, blockErr)
+		}
+
+		// Convert block header batches to target store format.
+		blockHeaders = make([]headerfs.BlockHeader, 0, len(blockBatch))
+		for _, header := range blockBatch {
+			blkHeader, err := assertBlockHeader(header)
+			if err != nil {
+				return 0, err
+			}
+			blockHeaders = append(
+				blockHeaders, blkHeader.BlockHeader,
+			)
+		}
+
+		batchEnd = batchStart + uint32(len(blockBatch)) - 1
+	}
+
+	if appendMode != appendBlockOnly {
+		filterBatch, filterErr := filterIter.ReadBatch(
+			batchStart, blockIter.GetEndIndex(),
+			blockIter.GetBatchSize(),
 		)
+		if filterErr == io.EOF {
+			return 0, io.EOF
+		}
+		if filterErr != nil {
+			return 0, fmt.Errorf("failed to read filter headers "+
+				"batch at height %d: %w", batchStart, filterErr)
+		}
+
+		// Convert filter header batches to target store format.
+		filterHeaders = make(
+			[]headerfs.FilterHeader, 0, len(filterBatch),
+		)
+		for _, header := range filterBatch {
+			fHeader, err := assertFilterHeader(header)
+			if err != nil {
+				return 0, err
+			}
+			filterHeaders = append(
+				filterHeaders, fHeader.FilterHeader,
+			)
+		}
+
+		batchEnd = batchStart + uint32(len(filterBatch)) - 1
+
+		isLastBatch := batchEnd >= filterIter.GetEndIndex()
+		if appendMode == appendFilterOnly && isLastBatch {
+			// Get the chain tip from both target stores.
+			tBHS := h.options.TargetBlockHeaderStore
+			lastH, height, err := tBHS.ChainTip()
+			if err != nil {
+				return 0, fmt.Errorf("failed to get target "+
+					"block header chain tip: %w", err)
+			}
+
+			i := len(filterHeaders) - 1
+			if height != filterHeaders[i].Height {
+				return 0, fmt.Errorf("mismatch between target "+
+					"block header chain tip height and "+
+					"filter headers height: %d != %d",
+					height, filterHeaders[i].Height)
+			}
+
+			chainTipBlockHeader := headerfs.BlockHeader{
+				BlockHeader: lastH,
+			}
+			setLastFilterHeaderHash(
+				filterHeaders, chainTipBlockHeader,
+			)
+		}
 	}
 
-	// The length check conditions should never be triggered during normal
-	// import operations as validation occurs earlier. They serve as sanity
-	// checks to catch unexpected inconsistencies.
-	if len(blockHeaders) != len(filterHeaders) {
-		return 0, fmt.Errorf("mismatch between block headers "+
-			"(%d) and filter headers (%d)", len(blockHeaders),
-			len(filterHeaders))
+	if appendMode == appendBlockAndFilter {
+		// The length check condition should never be triggered during
+		// normal import operations as validation occurs earlier. They
+		// serve as sanity checks to catch unexpected inconsistencies.
+		if len(blockHeaders) != len(filterHeaders) {
+			return 0, fmt.Errorf("mismatch between block headers "+
+				"(%d) and filter headers (%d)",
+				len(blockHeaders), len(filterHeaders))
+		}
+
+		chainTipBlockHeader := blockHeaders[len(blockHeaders)-1]
+		setLastFilterHeaderHash(filterHeaders, chainTipBlockHeader)
 	}
-
-	chainTipBlockHeader := blockHeaders[len(blockHeaders)-1]
-	setLastFilterHeaderHash(filterHeaders, chainTipBlockHeader)
-
-	batchEnd := batchStart + uint32(len(blockBatch)) - 1
 
 	err := h.writeHeadersToTargetStores(
 		blockHeaders, filterHeaders, batchStart, batchEnd,
