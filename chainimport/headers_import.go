@@ -268,9 +268,16 @@ func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 	result.StartHeight = regions.importStartHeight
 	result.EndHeight = regions.importEndHeight
 
-	// TODO(mohamedawnallah): Process the divergence region. This includes
-	// strategy/strategies for handling divergence region that may exist in
-	// the target header stores while importing.
+	// Process divergence headers region.
+	// Process headers in the divergence region by validating the leading
+	// store and syncing the lagging store.
+	err = h.processDivergenceHeadersRegion(
+		ctx, regions.divergence, result,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("headers import failed: divergence "+
+			"headers processing failed: %w", err)
+	}
 
 	// TODO(mohamedawnallah): process the overlap region. This mainly
 	// includes a validation strategy for the overlap region between headers
@@ -635,6 +642,53 @@ func (h *headersImport) determineDivergenceSyncModes(blockTipHeight,
 	default:
 		return syncModes{}
 	}
+}
+
+// processDivergenceHeadersRegion processes divergence headers by validating
+// the leading store and syncing the lagging store.
+func (h *headersImport) processDivergenceHeadersRegion(ctx context.Context,
+	region headerRegion, result *ImportResult) error {
+
+	if !region.exists {
+		return nil
+	}
+
+	log.Infof("Processing %d divergence headers from heights %d to %d",
+		region.end-region.start+1, region.start, region.end)
+
+	if err := h.validateLeadAndSyncLag(ctx, region); err != nil {
+		return fmt.Errorf("failed to validate lead and sync lag "+
+			"headers: %w", err)
+	}
+
+	result.ProcessedCount += int(region.end - region.start + 1)
+	result.AddedCount += int(region.end - region.start + 1)
+
+	return nil
+}
+
+// validateLeadAndSyncLag resolves divergence between target stores by
+// validating the leading target store against import source and syncing the
+// lagging target store with headers from the import source.
+func (h *headersImport) validateLeadAndSyncLag(ctx context.Context,
+	region headerRegion) error {
+
+	// Validate headers from the leading store against import source.
+	if err := h.validateHeadersSampling(
+		ctx, region.start, region.end, region.syncModes.verify,
+	); err != nil {
+		return fmt.Errorf("failed to validate headers via "+
+			"sampling: %w", err)
+	}
+
+	// Sync the lagging store with headers from import source.
+	if err := h.appendNewHeaders(
+		ctx, region.start, region.end, region.syncModes.append,
+	); err != nil {
+		return fmt.Errorf("failed to sync target header store: %w", err)
+	}
+
+	return nil
 }
 
 // processNewHeadersRegion imports headers from the specified region into the
