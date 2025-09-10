@@ -341,8 +341,9 @@ func (h *headersImport) validateChainContinuity() error {
 
 	// If import includes genesis block (starts at 0), verify it matches.
 	if importStartHeight == 0 {
-		err := h.verifyHeadersAtTargetHeight(importStartHeight)
-		if err != nil {
+		if err := h.verifyHeadersAtTargetHeight(
+			importStartHeight, verifyBlockAndFilter,
+		); err != nil {
 			return fmt.Errorf("genesis header mismatch: %v", err)
 		}
 		log.Infof("Genesis headers verified, import data will extend " +
@@ -374,7 +375,9 @@ func (h *headersImport) validateChainContinuity() error {
 // exactly between import and target sources by performing a byte-level
 // comparison. It retrieves the header from both sources at the given height and
 // verifies they are identical, returning an error if any discrepancy is found.
-func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
+func (h *headersImport) verifyHeadersAtTargetHeight(height uint32,
+	verifyMode verifyMode) error {
+
 	// Get header metadata from import souces. We can safely use this header
 	// metadata for both block headers and filter headers since we've
 	// already validated that those header metadata are compatible with each
@@ -389,18 +392,37 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 		height, headerMetadata.startHeight,
 	)
 
-	if err := h.verifyBlockHeadersAtTargetHeight(
-		height, importSourceIndex,
-	); err != nil {
-		return fmt.Errorf("failed to verify block headers at target "+
-			"height %d: %w", height, err)
-	}
+	switch verifyMode {
+	case verifyBlockAndFilter:
+		if err := h.verifyBlockHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return fmt.Errorf("failed to verify block headers at "+
+				"target height %d: %w", height, err)
+		}
 
-	if err := h.verifyFilterHeadersAtTargetHeight(
-		height, importSourceIndex,
-	); err != nil {
-		return fmt.Errorf("failed to verify filter headers at target "+
-			"height %d: %w", height, err)
+		if err := h.verifyFilterHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return fmt.Errorf("failed to verify filter headers at "+
+				"target height %d: %w", height, err)
+		}
+
+	case verifyBlockOnly:
+		if err := h.verifyBlockHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return fmt.Errorf("failed to verify block headers at "+
+				"target height %d: %w", height, err)
+		}
+
+	case verifyFilterOnly:
+		if err := h.verifyFilterHeadersAtTargetHeight(
+			height, importSourceIndex,
+		); err != nil {
+			return fmt.Errorf("failed to verify filter headers at "+
+				"target height %d: %w", height, err)
+		}
 	}
 
 	return nil
