@@ -2851,8 +2851,8 @@ func TestImportAndTargetSourcesChainContinuityConstraint(t *testing.T) {
 				}
 			},
 			expectErr: true,
-			expectErrMsg: "genesis header mismatch: block header " +
-				"mismatch at height 0",
+			expectErrMsg: "genesis header mismatch: failed to " +
+				"verify block headers at target height 0",
 		},
 		{
 			name: "ErrorOnGenesisFilterHeadersMismatch",
@@ -2920,8 +2920,8 @@ func TestImportAndTargetSourcesChainContinuityConstraint(t *testing.T) {
 				}
 			},
 			expectErr: true,
-			expectErrMsg: "genesis header mismatch: filter " +
-				"header mismatch at height 0",
+			expectErrMsg: "genesis header mismatch: failed to " +
+				"verify filter headers at target height 0",
 		},
 		{
 			name: "ValidateOnGenesisHeightSuccessfully",
