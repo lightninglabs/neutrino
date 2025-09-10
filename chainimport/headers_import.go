@@ -626,7 +626,8 @@ func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
 			len(filterHeaders))
 	}
 
-	setLastFilterHeaderHash(filterHeaders, blockHeaders)
+	chainTipBlockHeader := blockHeaders[len(blockHeaders)-1]
+	setLastFilterHeaderHash(filterHeaders, chainTipBlockHeader)
 
 	batchEnd := batchStart + uint32(len(blockBatch)) - 1
 

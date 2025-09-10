@@ -6188,9 +6188,8 @@ func TestHeaderStorage(t *testing.T) {
 					filtHdrsToWrite[i-1] = fH
 				}
 
-				setLastFilterHeaderHash(
-					filtHdrsToWrite, blkHdrsToWrite,
-				)
+				lastBH := blkHdrsToWrite[len(blkHdrsToWrite)-1]
+				setLastFilterHeaderHash(filtHdrsToWrite, lastBH)
 
 				ops := &ImportOptions{
 					TargetBlockHeaderStore:  b,

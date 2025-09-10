@@ -72,13 +72,12 @@ func AddHeadersImportMetadata(sourceFilePath string,
 // match the block hash of the corresponding block header. This maintains chain
 // tip consistency for the regular tip.
 func setLastFilterHeaderHash(filterHeaders []headerfs.FilterHeader,
-	blockHeaders []headerfs.BlockHeader) {
+	chainTipBlockHeader headerfs.BlockHeader) {
 
 	// We only need to set the block header hash of the last filter header
 	// to maintain chain tip consistency for regular tip.
-	lastIdx := len(filterHeaders) - 1
-	chainTipHash := blockHeaders[lastIdx].BlockHeader.BlockHash()
-	filterHeaders[lastIdx].HeaderHash = chainTipHash
+	chainTipHash := chainTipBlockHeader.BlockHeader.BlockHash()
+	filterHeaders[len(filterHeaders)-1].HeaderHash = chainTipHash
 }
 
 // targetHeightToImportSourceIndex converts the absolute blockchain target
