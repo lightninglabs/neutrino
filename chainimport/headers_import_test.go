@@ -6821,61 +6821,6 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				"and filter headers (1)",
 		},
 		{
-			name: "ErrorOnNoHeadersRead",
-			region: headerRegion{
-				start:  1,
-				end:    100,
-				exists: true,
-			},
-			importResult: &ImportResult{},
-			prep: func() prep {
-				bIS := &mockHeaderImportSource{}
-				importMetadata := &importMetadata{}
-				bIS.On("GetHeaderMetadata").Return(
-					&headerMetadata{
-						importMetadata: importMetadata,
-					}, nil,
-				)
-
-				bIt := &mockHeaderIterator{}
-				in := mock.Anything
-				bIt.On("ReadBatch", in, in, in).Return(
-					[]Header{}, nil,
-				)
-				bIt.On("GetEndIndex").Return(uint32(100))
-				bIt.On("GetBatchSize").Return(uint32(100))
-				bIS.On("Iterator", in, in, in).Return(bIt)
-
-				fIS := &mockHeaderImportSource{}
-
-				fIt := &mockHeaderIterator{}
-				fIt.On("ReadBatch", in, in, in).Return(
-					[]Header{}, nil,
-				)
-				fIt.On("GetEndIndex").Return(uint32(100))
-				fIt.On("GetBatchSize").Return(uint32(100))
-				fIS.On("Iterator", in, in, in).Return(fIt)
-
-				ops := &ImportOptions{
-					WriteBatchSizePerRegion: 100,
-				}
-
-				hImport := &headersImport{
-					blockHeadersImportSource:  bIS,
-					filterHeadersImportSource: fIS,
-					options:                   ops,
-				}
-
-				return prep{
-					hImport: hImport,
-					cleanup: func() {},
-				}
-			},
-			verify:       func(verify) {},
-			expectErr:    true,
-			expectErrMsg: "no headers read",
-		},
-		{
 			name: "ErrorOnWriteHeadersToTargetStores",
 			region: headerRegion{
 				start:  1,

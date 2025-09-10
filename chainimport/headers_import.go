@@ -626,10 +626,6 @@ func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
 			len(filterHeaders))
 	}
 
-	if len(blockHeaders) == 0 {
-		return 0, errors.New("no headers read")
-	}
-
 	setLastFilterHeaderHash(filterHeaders, blockHeaders)
 
 	batchEnd := batchStart + uint32(len(blockBatch)) - 1
