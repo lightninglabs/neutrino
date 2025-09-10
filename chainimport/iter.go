@@ -101,6 +101,10 @@ func (it *importSourceHeaderIterator) ReadBatch(
 		}
 	}
 
+	if len(headers) == 0 {
+		return nil, io.EOF
+	}
+
 	return headers, nil
 }
 
