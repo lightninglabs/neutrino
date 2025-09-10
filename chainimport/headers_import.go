@@ -316,6 +316,28 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 		height, headerMetadata.startHeight,
 	)
 
+	if err := h.verifyBlockHeadersAtTargetHeight(
+		height, importSourceIndex,
+	); err != nil {
+		return fmt.Errorf("failed to verify block headers at target "+
+			"height %d: %w", height, err)
+	}
+
+	if err := h.verifyFilterHeadersAtTargetHeight(
+		height, importSourceIndex,
+	); err != nil {
+		return fmt.Errorf("failed to verify filter headers at target "+
+			"height %d: %w", height, err)
+	}
+
+	return nil
+}
+
+// verifyBlockHeadersAtTargetHeight ensures block headers at the specified
+// height match exactly between import and target sources.
+func (h *headersImport) verifyBlockHeadersAtTargetHeight(height uint32,
+	importSourceIndex uint32) error {
+
 	importSourceHeader, err := h.blockHeadersImportSource.GetHeader(
 		importSourceIndex,
 	)
@@ -346,7 +368,17 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			sourceBlkHeaderHash, targetBlkHeaderHash)
 	}
 
-	importSourceHeader, err = h.filterHeadersImportSource.GetHeader(
+	log.Debugf("Block headers from import and target sources verified at "+
+		"height %d", height)
+	return nil
+}
+
+// verifyFilterHeadersAtTargetHeight ensures filter headers at the specified
+// height match exactly between import and target sources.
+func (h *headersImport) verifyFilterHeadersAtTargetHeight(height uint32,
+	importSourceIndex uint32) error {
+
+	importSourceHeader, err := h.filterHeadersImportSource.GetHeader(
 		importSourceIndex,
 	)
 	if err != nil {
@@ -376,10 +408,8 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 			sourceFilterHeaderHash, targetFilterHeaderHash)
 	}
 
-	log.Debugf("Headers from %s (block) and %s (filter) verified at "+
-		"height %d", h.blockHeadersImportSource.GetURI(),
-		h.filterHeadersImportSource.GetURI(), height)
-
+	log.Debugf("Filter headers from import and target sources verified at "+
+		"height %d", height)
 	return nil
 }
 
