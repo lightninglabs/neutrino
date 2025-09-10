@@ -3773,7 +3773,9 @@ func TestImportAndTargetSourcesHeadersVerificationConstraint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			prep := tc.prep(tc.height)
 			require.NoError(t, prep.err)
-			err := prep.hI.verifyHeadersAtTargetHeight(tc.height)
+			err := prep.hI.verifyHeadersAtTargetHeight(
+				tc.height, verifyBlockAndFilter,
+			)
 			if tc.expectErr {
 				require.ErrorContains(t, err, tc.expectErrMsg)
 				return
