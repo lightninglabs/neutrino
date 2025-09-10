@@ -2,9 +2,12 @@ package chainimport
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"slices"
 	"strings"
 	"time"
 
@@ -939,6 +942,122 @@ func (h *headersImport) validateHeaderConnection(targetStartHeight,
 		prevHash)
 
 	return nil
+}
+
+// validateHeadersSampling validates headers in the specified range using
+// sampling approach to ensure data integrity between import and target sources.
+func (h *headersImport) validateHeadersSampling(ctx context.Context,
+	startHeight, endHeight uint32, verifyMode verifyMode) error {
+
+	totalHeaders := endHeight - startHeight + 1
+
+	sampleHeights := h.determineSamplingHeights(startHeight, endHeight)
+
+	log.Debugf("Validating %d sample headers out of %d total headers in "+
+		"range %d-%d between import and target sources",
+		len(sampleHeights), totalHeaders, startHeight, endHeight)
+
+	for _, height := range sampleHeights {
+		if err := ctxCancelled(ctx); err != nil {
+			return err
+		}
+
+		err := h.verifyHeadersAtTargetHeight(height, verifyMode)
+		if err != nil {
+			return fmt.Errorf("failed to verify headers at target "+
+				"height %d: %w", height, err)
+		}
+	}
+
+	log.Infof("Validated %d sample headers out of %d total headers in "+
+		"range %d-%d between import and target sources",
+		len(sampleHeights), totalHeaders, startHeight, endHeight)
+
+	return nil
+}
+
+// determineSamplingHeights heuristically selects representative header heights
+// for sampling validation. The sampling strategy balances validation coverage
+// with performance by selecting key headers across the range.
+func (h *headersImport) determineSamplingHeights(startHeight,
+	endHeight uint32) []uint32 {
+
+	totalHeaders := endHeight - startHeight + 1
+	if totalHeaders == 0 {
+		return nil
+	}
+
+	var sampleHeights []uint32
+
+	// Always include start and end heights for boundary validation.
+	sampleHeights = append(sampleHeights, startHeight)
+	if endHeight != startHeight {
+		sampleHeights = append(sampleHeights, endHeight)
+	}
+
+	switch {
+	case totalHeaders <= 10:
+		// For small ranges (≤ 10 headers), validate all headers.
+		for height := startHeight + 1; height < endHeight; height++ {
+			sampleHeights = append(sampleHeights, height)
+		}
+
+	case totalHeaders <= 100:
+		// For medium ranges (11-100 headers), use fixed interval
+		// sample (10%).
+		numSamples := max(1, totalHeaders/10)
+		for i := range numSamples {
+			offset := totalHeaders * ((i + 1) / (numSamples + 1))
+			height := startHeight + offset
+			if height > startHeight && height < endHeight {
+				sampleHeights = append(sampleHeights, height)
+			}
+		}
+
+	default:
+		// For large ranges (>100 headers), use logarithmic sampling.
+		// Initially set sampling interval to ~5% of range (power-of-2)
+		// for sparse/dense sampling balance.
+		logInterval := uint32(1)
+		for logInterval*2 <= totalHeaders/20 {
+			logInterval *= 2
+		}
+
+		// Add logarithmic samples and stop when the next interval would
+		// be larger than 25% of the total headers range.
+		height := startHeight + logInterval
+		for height < endHeight {
+			sampleHeights = append(sampleHeights, height)
+			height += logInterval
+			logInterval *= 2
+			if logInterval > totalHeaders/4 {
+				break
+			}
+		}
+
+		// Add a few random samples for additional coverage. Sample 0.5%
+		// of headers, capped at 10.
+		randomSamples := min(10, totalHeaders/200)
+		for range randomSamples {
+			n, err := rand.Int(
+				rand.Reader, big.NewInt(int64(totalHeaders)),
+			)
+			if err != nil {
+				continue
+			}
+			offset := uint32(n.Uint64())
+			height := startHeight + offset
+			if height > startHeight && height < endHeight {
+				sampleHeights = append(sampleHeights, height)
+			}
+		}
+	}
+
+	// Ensure the sample heights are sorted ascendingly to maintain
+	// sequential access for cache locality.
+	slices.Sort(sampleHeights)
+
+	return sampleHeights
 }
 
 // isTargetFresh checks if the target header stores are in their initial state,
