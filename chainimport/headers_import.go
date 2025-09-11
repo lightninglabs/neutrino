@@ -22,9 +22,9 @@ const (
 	defaultWriteBatchSizePerRegion = 16384
 )
 
-// processingRegions currently contains regions to process. Those regions
-// overlap, divergence, and new headers region are all detected but only new
-// headers region is processed.
+// ProcessingRegions contains the different processing regions for a header
+// import. The full range of headers is partitioned into divergence, overlap,
+// and new headers regions, which are all processed during an import.
 type processingRegions struct {
 	// importStartHeight defines the starting block height for the import
 	// process.
@@ -260,9 +260,14 @@ func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 			"headers processing failed: %w", err)
 	}
 
-	// TODO(mohamedawnallah): process the overlap region. This mainly
-	// includes a validation strategy for the overlap region between headers
-	// from import and target sources.
+	// Process overlap headers region.
+	// Process headers in the overlap region by verifying the headers using
+	// a sampling approach to efficiently validate consistency.
+	err = h.processOverlapHeadersRegion(ctx, regions.overlap, result)
+	if err != nil {
+		return nil, fmt.Errorf("headers import failed: overlap "+
+			"headers processing failed: %w", err)
+	}
 
 	// Process new headers region.
 	// Add headers from the import source to the target stores, extending
@@ -347,40 +352,9 @@ func (h *headersImport) validateChainContinuity() error {
 
 	default:
 		// Import data starts before or at the target tip height. This
-		// means there is an overlap, so we need to verify compatibility
-		// using sampling approach for minimal processing time.
-
-		// First we need to determine the overlap range.
-		overlapStart := importStartHeight
+		// means there is an overlap, and we just need to validate the
+		// headers connection.
 		overlapEnd := min(effectiveTipHeight, importEndHeight)
-
-		// Now we can verify headers at the start of the overlap range.
-		if err = h.verifyHeadersAtTargetHeight(
-			overlapStart, verifyBlockAndFilter,
-		); err != nil {
-			return err
-		}
-
-		// If overlap range is more than 1 header, we can also verify at
-		// the end.
-		if overlapEnd > overlapStart {
-			if err = h.verifyHeadersAtTargetHeight(
-				overlapEnd, verifyBlockAndFilter,
-			); err != nil {
-				return err
-			}
-		}
-
-		// If the overlap range is more than 2 headers, also verify at
-		// the middle point.
-		if overlapEnd-overlapStart > 2 {
-			middleHeight := (overlapStart + overlapEnd) / 2
-			if err = h.verifyHeadersAtTargetHeight(
-				middleHeight, verifyBlockAndFilter,
-			); err != nil {
-				return err
-			}
-		}
 
 		// Validate headers beyond the overlap region if there are any
 		// remaining headers to import.
@@ -710,6 +684,30 @@ func (h *headersImport) validateLeadAndSyncLag(ctx context.Context,
 	); err != nil {
 		return fmt.Errorf("failed to sync target header store: %w", err)
 	}
+
+	return nil
+}
+
+// processOverlapHeadersRegion processes overlap headers by verifying the
+// headers using a sampling approach to efficiently validate consistency.
+func (h *headersImport) processOverlapHeadersRegion(ctx context.Context,
+	region headerRegion, result *ImportResult) error {
+
+	if !region.exists {
+		return nil
+	}
+
+	log.Infof("Verifying %d overlap headers from heights %d to %d",
+		region.end-region.start+1, region.start, region.end)
+
+	if err := h.validateHeadersSampling(
+		ctx, region.start, region.end, region.syncModes.verify,
+	); err != nil {
+		return fmt.Errorf("failed to validate headers via "+
+			"sampling: %w", err)
+	}
+
+	result.SkippedCount += int(region.end - region.start + 1)
 
 	return nil
 }
