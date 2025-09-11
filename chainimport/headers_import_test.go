@@ -107,94 +107,6 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 	}
 }
 
-// TestImportSkipOperation tests the import skip operation. It checks that the
-// import is skipped if the target header store is populated with headers.
-func TestImportSkipOperation(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	type prep struct {
-		options *ImportOptions
-	}
-	type verify struct {
-		tc            *testing.T
-		importOptions *ImportOptions
-		importResult  *ImportResult
-	}
-	testCases := []struct {
-		name         string
-		prep         func() prep
-		verify       func(verify)
-		expectErr    bool
-		expectErrMsg string
-	}{
-		{
-			name: "TargetFilterStorePopulatedWithHeaders",
-			prep: func() prep {
-				tBS := &headerfs.MockBlockHeaderStore{}
-				tBS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(0), nil,
-				)
-
-				tFS := &headerfs.MockFilterHeaderStore{}
-				tFS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(3), nil,
-				)
-
-				bIS := "/path/to/blocks"
-				fIS := "/path/to/filters"
-
-				ops := &ImportOptions{
-					BlockHeadersSource:      bIS,
-					FilterHeadersSource:     fIS,
-					TargetBlockHeaderStore:  tBS,
-					TargetFilterHeaderStore: tFS,
-				}
-
-				return prep{
-					options: ops,
-				}
-			},
-			verify: func(v verify) {
-				// Verify the default batch size is set.
-				ops := v.importOptions
-				require.Equal(
-					v.tc, defaultWriteBatchSizePerRegion,
-					ops.WriteBatchSizePerRegion,
-				)
-
-				// Verify no headers added/processed.
-				require.Equal(
-					v.tc, 0, v.importResult.AddedCount,
-				)
-				require.Equal(
-					v.tc, 0, v.importResult.ProcessedCount,
-				)
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			prep := tc.prep()
-			hI, err := NewHeadersImport(prep.options)
-			require.NoError(t, err)
-			importResult, err := hI.Import(ctx)
-			verify := verify{
-				tc:            t,
-				importOptions: prep.options,
-				importResult:  importResult,
-			}
-			if tc.expectErr {
-				require.ErrorContains(t, err, tc.expectErrMsg)
-				tc.verify(verify)
-				return
-			}
-			require.NoError(t, err)
-			tc.verify(verify)
-		})
-	}
-}
-
 // TestImportOperationOnFileHeaderSource tests the import operation on a file
 // header source. It checks that the import is successful and that the headers
 // are written to the target header stores.
@@ -337,9 +249,9 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 					v.importResult.ProcessedCount,
 				)
 
-				// Verify no headers skipped.
+				// Verify overlap headers are detected.
 				require.Equal(
-					v.tc, 0, v.importResult.SkippedCount,
+					v.tc, 1, v.importResult.SkippedCount,
 				)
 			},
 		},
@@ -548,9 +460,9 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 					v.importResult.ProcessedCount,
 				)
 
-				// Verify no headers skipped.
+				// Verify overlap headers are detected.
 				require.Equal(
-					v.tc, 0, v.importResult.SkippedCount,
+					v.tc, 1, v.importResult.SkippedCount,
 				)
 			},
 		},
@@ -571,100 +483,6 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 			}
 			require.NoError(t, err)
 			tc.verify(verify)
-		})
-	}
-}
-
-// TestTargetStoreFreshnessDetection tests the logic for detecting whether the
-// target header stores are fresh (only contain genesis headers). It covers
-// various combinations of block and filter header heights and error cases.
-func TestTargetStoreFreshnessDetection(t *testing.T) {
-	t.Parallel()
-	testCases := []struct {
-		name                 string
-		blockHeight          uint32
-		filterHeight         uint32
-		expectFresh          bool
-		expectErr            bool
-		expectFilterStoreErr error
-		expectBlockStoreErr  error
-	}{
-		{
-			name:         "OnlyGenesisHeadersExist",
-			blockHeight:  0,
-			filterHeight: 0,
-			expectFresh:  true,
-		},
-		{
-			name:         "BlockHeightGreaterThanZero",
-			blockHeight:  1,
-			filterHeight: 0,
-			expectFresh:  false,
-		},
-		{
-			name:         "FilterHeightGreaterThanZero",
-			blockHeight:  0,
-			filterHeight: 1,
-			expectFresh:  false,
-		},
-		{
-			name:         "BothHeightsGreaterThanZero",
-			blockHeight:  10,
-			filterHeight: 10,
-			expectFresh:  false,
-		},
-		{
-			name:      "ErrorOnBlockStore",
-			expectErr: true,
-			expectBlockStoreErr: errors.New(
-				"failed to get target block header",
-			),
-		},
-		{
-			name:      "ErrorOnFilterStore",
-			expectErr: true,
-			expectFilterStoreErr: errors.New(
-				"failed to get target filter header",
-			),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			mockBlockStore := &headerfs.MockBlockHeaderStore{}
-			mockBlockStore.On("ChainTip").Return(
-				&wire.BlockHeader{}, tc.blockHeight,
-				tc.expectBlockStoreErr,
-			)
-
-			mockFilterStore := &headerfs.MockFilterHeaderStore{}
-			mockFilterStore.On("ChainTip").Return(
-				&chainhash.Hash{}, tc.filterHeight,
-				tc.expectFilterStoreErr,
-			)
-
-			importer := &headersImport{}
-
-			isFresh, err := importer.isTargetFresh(
-				mockBlockStore, mockFilterStore,
-			)
-			if tc.expectErr {
-				if tc.expectBlockStoreErr != nil {
-					require.ErrorContains(
-						t, err,
-						tc.expectBlockStoreErr.Error(),
-					)
-				}
-				if tc.expectFilterStoreErr != nil {
-					require.ErrorContains(
-						t, err,
-						tc.expectFilterStoreErr.Error(),
-					)
-				}
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, isFresh, tc.expectFresh)
 		})
 	}
 }
@@ -2725,42 +2543,6 @@ func TestImportAndTargetSourcesChainContinuityConstraint(t *testing.T) {
 				"chain tip: I/O read error",
 		},
 		{
-			name: "ErrorOnDivergenceInTargetHeaderStores",
-			prep: func() prep {
-				bIS := &mockHeaderImportSource{}
-				bIS.On("GetHeaderMetadata").Return(
-					&headerMetadata{}, nil,
-				)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(0), nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(2), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource: bIS,
-					options:                  ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			expectErr: true,
-			expectErrMsg: "divergence detected between target " +
-				"header store tip heights (block=0, filter=2)",
-		},
-		{
 			name: "ErrorOnImportStartHeightCreatesGap",
 			prep: func() prep {
 				bIS := &mockHeaderImportSource{}
@@ -2798,130 +2580,8 @@ func TestImportAndTargetSourcesChainContinuityConstraint(t *testing.T) {
 				}
 			},
 			expectErr: true,
-			expectErrMsg: "target stores contain only genesis " +
-				"block (height 0) but import data starts at " +
-				"height 2, creating a gap",
-		},
-		{
-			name: "ErrorOnGenesisBlockHeadersMismatch",
-			prep: func() prep {
-				bH, err := constructBlkHdr(
-					blockHdrs[0], uint32(0),
-				)
-				if err != nil {
-					return prep{err: err}
-				}
-
-				bIS := &mockHeaderImportSource{}
-				importMetadata := &importMetadata{}
-				bIS.On("GetHeaderMetadata").Return(
-					&headerMetadata{
-						importMetadata: importMetadata,
-					}, nil,
-				)
-				bIS.On("GetHeader", uint32(0)).Return(
-					newBlockHeader(), nil,
-				)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(0), nil,
-				)
-				bHS.On("FetchHeaderByHeight", uint32(0)).Return(
-					bH.BlockHeader.BlockHeader, nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(0), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource: bIS,
-					options:                  ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			expectErr: true,
-			expectErrMsg: "genesis header mismatch: failed to " +
-				"verify block headers at target height 0",
-		},
-		{
-			name: "ErrorOnGenesisFilterHeadersMismatch",
-			prep: func() prep {
-				bH, err := constructBlkHdr(
-					blockHdrs[0], uint32(0),
-				)
-				if err != nil {
-					return prep{err: err}
-				}
-
-				fH, err := constructFilterHdr(
-					filterHdrs[0], uint32(0),
-				)
-				if err != nil {
-					return prep{err: err}
-				}
-
-				bIS := &mockHeaderImportSource{}
-				importMetadata := &importMetadata{}
-				bIS.On("GetHeaderMetadata").Return(
-					&headerMetadata{
-						importMetadata: importMetadata,
-					}, nil,
-				)
-				bIS.On("GetHeader", uint32(0)).Return(bH, nil)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(0), nil,
-				)
-				bHS.On("FetchHeaderByHeight", uint32(0)).Return(
-					bH.BlockHeader.BlockHeader, nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(0), nil,
-				)
-				fHS.On("FetchHeaderByHeight", uint32(0)).Return(
-					&fH.FilterHash, nil,
-				)
-
-				fIS := &mockHeaderImportSource{}
-				fIS.On("GetHeaderMetadata").Return(
-					&headerMetadata{}, nil,
-				)
-				fIS.On("GetHeader", uint32(0)).Return(
-					newFilterHeader(), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource:  bIS,
-					filterHeadersImportSource: fIS,
-					options:                   ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			expectErr: true,
-			expectErrMsg: "genesis header mismatch: failed to " +
-				"verify filter headers at target height 0",
+			expectErrMsg: "import data starts at height 2 but " +
+				"target tip is at 0, creating a gap",
 		},
 		{
 			name: "ValidateOnGenesisHeightSuccessfully",
@@ -7373,6 +7033,675 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 			t.Cleanup(prep.cleanup)
 			require.NoError(t, prep.err)
 			err := prep.hImport.processDivergenceHeadersRegion(
+				ctx, tc.region, tc.importResult,
+			)
+			verify := verify{
+				tc:            t,
+				importOptions: prep.hImport.options,
+				importResult:  tc.importResult,
+			}
+			if tc.expectErr {
+				require.ErrorContains(t, err, tc.expectErrMsg)
+				tc.verify(verify)
+				return
+			}
+			require.NoError(t, err)
+			tc.verify(verify)
+		})
+	}
+}
+
+// TestHeaderStorageOnOverlapHeadersRegion tests the ability of the headers
+// import process to successfully process the overlap headers region and
+// continue synchronization from its current state.
+func TestHeaderStorageOnOverlapHeadersRegion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	type prep struct {
+		hImport *headersImport
+		cleanup func()
+		err     error
+	}
+	type verify struct {
+		tc            *testing.T
+		importOptions *ImportOptions
+		importResult  *ImportResult
+	}
+	testCases := []struct {
+		name         string
+		region       headerRegion
+		importResult *ImportResult
+		prep         func() prep
+		verify       func(verify)
+		expectErr    bool
+		expectErrMsg string
+	}{
+		{
+			name: "NoErrorOnNonExistentRegion",
+			region: headerRegion{
+				start:  1000,
+				end:    2000,
+				exists: false,
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				return prep{
+					hImport: &headersImport{},
+					cleanup: func() {},
+				}
+			},
+			verify: func(verify) {},
+		},
+		{
+			name: "ErrorOnGetHeaderMetadata",
+			region: headerRegion{
+				start:  0,
+				end:    4,
+				exists: true,
+				syncModes: syncModes{
+					verify: verifyBlockAndFilter,
+				},
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				bIS := &mockHeaderImportSource{}
+				bIS.On("GetHeaderMetadata").Return(
+					nil, errors.New("I/O read error"),
+				)
+				ops := &ImportOptions{}
+				hImport := &headersImport{
+					blockHeadersImportSource: bIS,
+					options:                  ops,
+				}
+				return prep{
+					hImport: hImport,
+					cleanup: func() {},
+				}
+			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to validate headers via " +
+				"sampling: failed to verify headers at " +
+				"target height 0: failed to get block header " +
+				"metadata: I/O read error",
+		},
+		{
+			name: "ErrorOnInvalidBlockHeadersInOverlapRegion",
+			region: headerRegion{
+				start:  0,
+				end:    3,
+				exists: true,
+				syncModes: syncModes{
+					verify: verifyBlockAndFilter,
+				},
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				c2 := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				bHS, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				fHS, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader, nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+
+					// Deliberately and trivially malform
+					// the block header at index 2 to
+					// evaluate the validation behavior.
+					if i == 2 {
+						h.BlockHeader.Version = 101
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+				err = bHS.WriteHeaders(blkHdrsToWrite...)
+				require.NoError(t, err)
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs) - 1
+				filtHdrsToWrite := make(
+					[]headerfs.FilterHeader, nFHs-1,
+				)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					fH := h.FilterHeader
+					filtHdrsToWrite[i-1] = fH
+				}
+				err = fHS.WriteHeaders(filtHdrsToWrite...)
+				require.NoError(t, err)
+
+				bFile, c3, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				c4 := func() {
+					c3()
+					c2()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c4,
+						err:     err,
+					}
+				}
+				bPath := bFile.Name()
+
+				// Close block headers import source to be
+				// opened during import.
+				bFile.Close()
+
+				fFile, c5, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c5()
+					c4()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				fPath := fFile.Name()
+
+				// Close filter headers import source to be
+				// opened during import.
+				fFile.Close()
+
+				tCP := chaincfg.SimNetParams
+
+				ops := &ImportOptions{
+					BlockHeadersSource:      bPath,
+					FilterHeadersSource:     fPath,
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+					TargetChainParams:       tCP,
+					WriteBatchSizePerRegion: 128,
+				}
+
+				bIS := ops.createBlockHeaderImportSrc()
+				fIS := ops.createFilterHeaderImportSrc()
+
+				bHV := ops.createBlockHeaderValidator(bIS)
+				fHV := ops.createFilterHeaderValidator()
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					blockHeadersValidator:     bHV,
+					filterHeadersValidator:    fHV,
+					options:                   ops,
+				}
+
+				err = hImport.openSources()
+				require.NoError(t, err)
+
+				return prep{
+					hImport: hImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "block header mismatch at height 2",
+		},
+		{
+			name: "ErrorOnInvalidFilterHeadersInOverlapRegion",
+			region: headerRegion{
+				start:  0,
+				end:    3,
+				exists: true,
+				syncModes: syncModes{
+					verify: verifyBlockAndFilter,
+				},
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				c2 := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				bHS, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				fHS, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader, nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+				err = bHS.WriteHeaders(blkHdrsToWrite...)
+				require.NoError(t, err)
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs) - 1
+				filtHdrsToWrite := make(
+					[]headerfs.FilterHeader, nFHs-1,
+				)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+
+					// Deliberately and trivially malform
+					// the filter header at index 2 to
+					// evaluate the validation behavior.
+					if i == 2 {
+						invalidH := filtHdrsToWrite[i-1]
+						h.FilterHeader = invalidH
+					}
+					fH := h.FilterHeader
+					filtHdrsToWrite[i-1] = fH
+				}
+				err = fHS.WriteHeaders(filtHdrsToWrite...)
+				require.NoError(t, err)
+
+				bFile, c3, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				c4 := func() {
+					c3()
+					c2()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c4,
+						err:     err,
+					}
+				}
+				bPath := bFile.Name()
+
+				// Close block headers import source to be
+				// opened during import.
+				bFile.Close()
+
+				fFile, c5, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c5()
+					c4()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				fPath := fFile.Name()
+
+				// Close filter headers import source to be
+				// opened during import.
+				fFile.Close()
+
+				// Configure target chain parameters.
+				tCP := chaincfg.SimNetParams
+
+				ops := &ImportOptions{
+					BlockHeadersSource:      bPath,
+					FilterHeadersSource:     fPath,
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+					TargetChainParams:       tCP,
+					WriteBatchSizePerRegion: 128,
+				}
+
+				bIS := ops.createBlockHeaderImportSrc()
+				fIS := ops.createFilterHeaderImportSrc()
+
+				bHV := ops.createBlockHeaderValidator(bIS)
+				fHV := ops.createFilterHeaderValidator()
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					blockHeadersValidator:     bHV,
+					filterHeadersValidator:    fHV,
+					options:                   ops,
+				}
+
+				err = hImport.openSources()
+				require.NoError(t, err)
+
+				return prep{
+					hImport: hImport,
+					cleanup: cleanup,
+				}
+			},
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "filter header mismatch at height 2",
+		},
+		{
+			name: "ProcessOverlapRegionWithValidationWithNoErrors",
+			region: headerRegion{
+				start:  0,
+				end:    3,
+				exists: true,
+				syncModes: syncModes{
+					verify: verifyBlockAndFilter,
+				},
+			},
+			importResult: &ImportResult{},
+			prep: func() prep {
+				tempDir := t.TempDir()
+				c1 := func() {
+					os.RemoveAll(tempDir)
+				}
+
+				dbPath := filepath.Join(tempDir, "test.db")
+				db, err := walletdb.Create(
+					"bdb", dbPath, true, time.Second*10,
+				)
+				c2 := func() {
+					db.Close()
+					c1()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				bHS, err := headerfs.NewBlockHeaderStore(
+					tempDir, db, &chaincfg.SimNetParams,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				fHS, err := headerfs.NewFilterHeaderStore(
+					tempDir, db, headerfs.RegularFilter,
+					&chaincfg.SimNetParams, nil,
+				)
+				if err != nil {
+					return prep{
+						cleanup: c2,
+						err:     err,
+					}
+				}
+
+				// Prep block headers to write to the target
+				// headers store. Ignore the genesis block
+				// header since it was already written when
+				// creating the block header store.
+				nBHs := len(blockHdrs)
+				blkHdrsToWrite := make(
+					[]headerfs.BlockHeader, nBHs-1,
+				)
+				for i := 1; i < nBHs; i++ {
+					blockHdr := blockHdrs[i]
+					h, err := constructBlkHdr(
+						blockHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					bHValue := h.BlockHeader
+					blkHdrsToWrite[i-1] = bHValue
+				}
+				err = bHS.WriteHeaders(blkHdrsToWrite...)
+				require.NoError(t, err)
+
+				// Prep filter headers to write to the target
+				// headers store. Ignore the genesis filter
+				// header since it was already written when
+				// creating the filter header store.
+				nFHs := len(filterHdrs) - 1
+				filtHdrsToWrite := make(
+					[]headerfs.FilterHeader, nFHs-1,
+				)
+				for i := 1; i < nFHs; i++ {
+					filterHdr := filterHdrs[i]
+					h, err := constructFilterHdr(
+						filterHdr, uint32(i),
+					)
+					res := prep{
+						cleanup: c2,
+						err:     err,
+					}
+					if err != nil {
+						return res
+					}
+					fH := h.FilterHeader
+					filtHdrsToWrite[i-1] = fH
+				}
+				err = fHS.WriteHeaders(filtHdrsToWrite...)
+				require.NoError(t, err)
+
+				bFile, c3, err := setupFileWithHdrs(
+					headerfs.Block, true,
+				)
+				c4 := func() {
+					c3()
+					c2()
+				}
+				if err != nil {
+					return prep{
+						cleanup: c4,
+						err:     err,
+					}
+				}
+				bPath := bFile.Name()
+
+				// Close block headers import source to be
+				// opened during import.
+				bFile.Close()
+
+				fFile, c5, err := setupFileWithHdrs(
+					headerfs.RegularFilter, true,
+				)
+				cleanup := func() {
+					c5()
+					c4()
+				}
+				if err != nil {
+					return prep{
+						cleanup: cleanup,
+						err:     err,
+					}
+				}
+				fPath := fFile.Name()
+
+				// Close filter headers import source to be
+				// opened during import.
+				fFile.Close()
+
+				tCP := chaincfg.SimNetParams
+
+				ops := &ImportOptions{
+					BlockHeadersSource:      bPath,
+					FilterHeadersSource:     fPath,
+					TargetBlockHeaderStore:  bHS,
+					TargetFilterHeaderStore: fHS,
+					TargetChainParams:       tCP,
+					WriteBatchSizePerRegion: 128,
+				}
+
+				bIS := ops.createBlockHeaderImportSrc()
+				fIS := ops.createFilterHeaderImportSrc()
+
+				bHV := ops.createBlockHeaderValidator(bIS)
+				fHV := ops.createFilterHeaderValidator()
+
+				hImport := &headersImport{
+					blockHeadersImportSource:  bIS,
+					filterHeadersImportSource: fIS,
+					blockHeadersValidator:     bHV,
+					filterHeadersValidator:    fHV,
+					options:                   ops,
+				}
+
+				err = hImport.openSources()
+				require.NoError(t, err)
+
+				return prep{
+					hImport: hImport,
+					cleanup: cleanup,
+				}
+			},
+			verify: func(v verify) {
+				// Assert there are 4 headers in the overlap
+				// region and they are skipped.
+				require.Equal(
+					v.tc, len(blockHdrs)-1,
+					v.importResult.SkippedCount,
+				)
+
+				// Ensure no headers are added/processed.
+				require.Equal(
+					v.tc, 0, v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, 0, v.importResult.ProcessedCount,
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			prep := tc.prep()
+			t.Cleanup(prep.cleanup)
+			require.NoError(t, prep.err)
+			err := prep.hImport.processOverlapHeadersRegion(
 				ctx, tc.region, tc.importResult,
 			)
 			verify := verify{
