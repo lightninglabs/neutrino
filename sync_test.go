@@ -1058,20 +1058,19 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // headers. It then prepares header files for import by copying them and adding
 // the necessary metadata.
 //
-// The first part of the test creates a new Neutrino instance that imports
-// these headers from files without connecting to any peers. It verifies
-// that headers are correctly imported and the chain is properly synchronized
-// without network assistance.
+// The first part of the test creates a new Neutrino instance that imports these
+// headers from files without connecting to any peers. It verifies that headers
+// are correctly imported and the chain is properly synchronized without network
+// assistance.
 //
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
 // This tests that Neutrino correctly handles the case where header stores are
-// already populated, skipping the import process and continuing synchronization
-// from its current state.
+// already populated and continues synchronization from its current state.
 //
 // This test validates that the headers import mechanism works correctly both as
-// a way to bootstrap new nodes and when restarting existing nodes,
-// significantly improving sync performance in the former scenario.
+// a way to bootstrap neutrino nodes and significantly improving sync
+// performance.
 func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	rootCtx := context.Background()
 
@@ -1178,7 +1177,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 
 	// Create service with headers import but with no peers. This will test
 	// that the headers are imported correctly without network sync. No
-	// peers specified –  we want to test the import unctionality by itself.
+	// peers specified –  we want to test the import functionality by
+	// itself.
 	importConfig := neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
@@ -1209,17 +1209,15 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 
 	// Generate an additional 300 blocks on h1. This ensures that when we
 	// sync again, the client will need to fetch these new blocks from the
-	// network. Since the header stores are no longer empty after the first
-	// import, the import process should be skipped and Neutrino should
-	// continue syncing from its current state.
+	// network.
 	_, err = h1.Client.Generate(300)
 	require.NoError(t, err)
 	t.Log("Syncing again after generating more 300 blocks on h1")
 
 	// Create a new service configuration that includes both the headers
 	// import and a connection to h1. Since the stores already contain data
-	// from the previous import, the import operation should be skipped and
-	// synchronization should continue from the current state.
+	// from the previous import, synchronization should continue from the
+	// current state.
 	importConfig = neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
@@ -1233,21 +1231,20 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 		AddPeers: []string{h1.P2PAddress()},
 	}
 
-	importSvcToBeSkipped, err := neutrino.NewChainService(importConfig)
+	importSvcToBeSynced, err := neutrino.NewChainService(importConfig)
 	require.NoError(t, err)
 
 	// Start the service with p2p network connectivity.
-	importSvcToBeSkipped.Start(rootCtx)
-	defer importSvcToBeSkipped.Stop()
+	importSvcToBeSynced.Start(rootCtx)
+	defer importSvcToBeSynced.Stop()
 
-	// This test doesn't explicitly verify that the import is skipped, but
-	// demonstrates that the service can successfully sync to the chain tip
-	// after the database has already been populated with headers.
+	// This test demonstrates that the service can successfully sync to the
+	// chain tip after the database has already been populated with headers.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
 		h3:  nil,
-		svc: importSvcToBeSkipped,
+		svc: importSvcToBeSynced,
 	}
 	testInitialSync(testHarness, t)
 }

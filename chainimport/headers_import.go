@@ -182,28 +182,9 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	return importer, nil
 }
 
-// Import is a multi-pass algorithm that loads, validates, and processes headers
-// from the configured import sources into the target header stores. The Import
-// process is currently performed only if the target stores are completely empty
-// except for gensis block/filter header otherwise it is entirely skipped. On
-// first development iteration, it is designed to serve new users who don't yet
-// have headers data, or existing users who are willing to reset their headers
-// data.
+// Import is a multi-pass algorithm that loads, validates, and processes
+// headers from the configured import sources into the target header stores.
 func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
-	isFresh, err := h.isTargetFresh(
-		h.options.TargetBlockHeaderStore,
-		h.options.TargetFilterHeaderStore,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect if target stores "+
-			"are fresh import failed: %w", err)
-	}
-	if !isFresh {
-		log.Info("Skipping headers import: target header stores are " +
-			"not empty")
-		return &ImportResult{}, nil
-	}
-
 	result := &ImportResult{
 		StartTime: time.Now(),
 	}
@@ -325,50 +306,81 @@ func (h *headersImport) validateChainContinuity() error {
 			"tip: %w", err)
 	}
 
-	// Ensure that both target header stores have the same tip height.
-	// A mismatch indicates a divergence region that has not yet been
-	// processed. Once a resolution strategy is implemented, this check
-	// will no longer return an error, and the effective tip height will be
-	// defined as the minimum of the two.
+	// Take the minimum of the two heights as the effective chain tip height
+	// to handle the case where one store might be ahead in case of existent
+	// divergence region.
+	effectiveTipHeight := min(blockTipHeight, filterTipHeight)
 	if blockTipHeight != filterTipHeight {
-		return fmt.Errorf("divergence detected between target header "+
-			"store tip heights (block=%d, filter=%d)",
-			blockTipHeight, filterTipHeight)
+		log.Infof("Target header stores at different heights "+
+			"(block=%d, filter=%d), using effective tip height %d",
+			blockTipHeight, filterTipHeight, effectiveTipHeight)
 	}
 
 	importStartHeight := sourceMetadata.startHeight
 	importEndHeight := sourceMetadata.endHeight
 
-	// If import wants to start after height 1, we'd have a gap.
-	if importStartHeight > 1 {
-		return fmt.Errorf("target stores contain only genesis block "+
-			"(height 0) but import data starts at height %d, "+
-			"creating a gap", importStartHeight)
-	}
+	switch {
+	case importStartHeight > effectiveTipHeight+1:
+		// Import data doesn't start at the next height after the target
+		// tip height, there would be a gap in the chain.
+		return fmt.Errorf("import data starts at height %d but target "+
+			"tip is at %d, creating a gap", importStartHeight,
+			effectiveTipHeight)
 
-	// If import includes genesis block (starts at 0), verify it matches.
-	if importStartHeight == 0 {
-		if err := h.verifyHeadersAtTargetHeight(
-			importStartHeight, verifyBlockAndFilter,
-		); err != nil {
-			return fmt.Errorf("genesis header mismatch: %v", err)
-		}
-		log.Infof("Genesis headers verified, import data will extend " +
-			"chain from genesis")
-	} else {
-		// Import starts at height 1, which connects to genesis.
-		// Validate that the block header at height 1 from the import
-		// source connects with the previous header in the target block
-		// store.
+	case importStartHeight > effectiveTipHeight:
+		// Import data starts immediately after the target tip height.
+		// This is a forward extension.
 		if err := h.validateHeaderConnection(
 			importStartHeight, blockTipHeight, sourceMetadata,
 		); err != nil {
 			return fmt.Errorf("failed to validate header "+
 				"connection: %v", err)
 		}
+		log.Infof("Import headers data will extend chain from height "+
+			"%d", importStartHeight)
 
-		log.Info("Target stores contain only genesis block, import " +
-			"data will extend chain from height 1")
+	default:
+		// Import data starts before or at the target tip height. This
+		// means there is an overlap, so we need to verify compatibility
+		// using sampling approach for minimal processing time.
+
+		// First we need to determine the overlap range.
+		overlapStart := importStartHeight
+		overlapEnd := min(effectiveTipHeight, importEndHeight)
+
+		// Now we can verify headers at the start of the overlap range.
+		if err = h.verifyHeadersAtTargetHeight(
+			overlapStart, verifyBlockAndFilter,
+		); err != nil {
+			return err
+		}
+
+		// If overlap range is more than 1 header, we can also verify at
+		// the end.
+		if overlapEnd > overlapStart {
+			if err = h.verifyHeadersAtTargetHeight(
+				overlapEnd, verifyBlockAndFilter,
+			); err != nil {
+				return err
+			}
+		}
+
+		// Validate headers beyond the overlap region if there are any
+		// remaining headers to import.
+		if overlapEnd < importEndHeight {
+			// Ensure the first header from the import source exists
+			// the overlap range properly connects to the existing
+			// chain.
+			if err := h.validateHeaderConnection(
+				overlapEnd+1, blockTipHeight, sourceMetadata,
+			); err != nil {
+				return fmt.Errorf("failed to validate header "+
+					"connection: %v", err)
+			}
+
+			log.Infof("Import headers data will extend chain "+
+				"from height %d", overlapEnd+1)
+		}
 	}
 
 	log.Infof("Chain continuity validation successful: import data "+
@@ -979,32 +991,6 @@ func (h *headersImport) validateHeaderConnection(targetStartHeight,
 		prevHash)
 
 	return nil
-}
-
-// isTargetFresh checks if the target header stores are in their initial state,
-// meaning they contain only the genesis header (height 0).
-func (h *headersImport) isTargetFresh(
-	targetBlockHeaderStore headerfs.BlockHeaderStore,
-	targetFilterHeaderStore headerfs.FilterHeaderStore) (bool, error) {
-
-	// Get the chain tip from both target stores.
-	_, blockTipHeight, err := targetBlockHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target block header "+
-			"chain tip: %w", err)
-	}
-
-	_, filterTipHeight, err := targetFilterHeaderStore.ChainTip()
-	if err != nil {
-		return false, fmt.Errorf("failed to get target filter header "+
-			"chain tip: %w", err)
-	}
-
-	if blockTipHeight == 0 && filterTipHeight == 0 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 // openSources initializes and opens all required header import sources. It
