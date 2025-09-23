@@ -5335,190 +5335,6 @@ func TestHeaderProcessing(t *testing.T) {
 				"chain tip",
 		},
 
-		// ✅ Non-divergent cases (B = F).
-
-		/*
-			A:     [=========]
-			B: [=======]
-			F: [=======]
-		*/
-		{
-			name: "AAndBOverlap_AEndsAfterB",
-			prep: func() prep {
-				hM := &headerMetadata{
-					importMetadata: &importMetadata{
-						startHeight: 50,
-					},
-					endHeight: 90,
-				}
-
-				hIS := &mockHeaderImportSource{}
-				hIS.On("GetHeaderMetadata").Return(hM, nil)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(60), nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(60), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource: hIS,
-					options:                  ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			verify: func(v verify) {
-				dR := v.processingRegions.divergence
-				require.False(v.tc, dR.exists)
-
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  50,
-					end:    60,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-
-				nHR := v.processingRegions.newHeaders
-				nHRE := headerRegion{
-					start:  61,
-					end:    90,
-					exists: true,
-				}
-				require.Equal(v.tc, nHRE, nHR)
-			},
-		},
-
-		/*
-			A:     [=====]
-			B: [===========]
-			F: [===========]
-		*/
-		{
-			name: "BCompletelyOverlapsA",
-			prep: func() prep {
-				hM := &headerMetadata{
-					importMetadata: &importMetadata{
-						startHeight: 50,
-					},
-					endHeight: 70,
-				}
-
-				hIS := &mockHeaderImportSource{}
-				hIS.On("GetHeaderMetadata").Return(hM, nil)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(90), nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(90), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource: hIS,
-					options:                  ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			verify: func(v verify) {
-				dR := v.processingRegions.divergence
-				require.False(v.tc, dR.exists)
-
-				nHR := v.processingRegions.newHeaders
-				require.False(v.tc, nHR.exists)
-
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  50,
-					end:    70,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-			},
-		},
-
-		/*
-			A:         [======]
-			B: [======]
-			F: [======]
-		*/
-		{
-			name: "AAndBDoNotOverlap_AComesAfterB",
-			prep: func() prep {
-				hM := &headerMetadata{
-					importMetadata: &importMetadata{
-						startHeight: 51,
-					},
-					endHeight: 90,
-				}
-
-				hIS := &mockHeaderImportSource{}
-				hIS.On("GetHeaderMetadata").Return(hM, nil)
-
-				bHS := &headerfs.MockBlockHeaderStore{}
-				bHS.On("ChainTip").Return(
-					&wire.BlockHeader{}, uint32(50), nil,
-				)
-
-				fHS := &headerfs.MockFilterHeaderStore{}
-				fHS.On("ChainTip").Return(
-					&chainhash.Hash{}, uint32(50), nil,
-				)
-
-				ops := &ImportOptions{
-					TargetBlockHeaderStore:  bHS,
-					TargetFilterHeaderStore: fHS,
-				}
-
-				h := &headersImport{
-					blockHeadersImportSource: hIS,
-					options:                  ops,
-				}
-
-				return prep{
-					hImport: h,
-				}
-			},
-			verify: func(v verify) {
-				dR := v.processingRegions.divergence
-				require.False(v.tc, dR.exists)
-
-				oR := v.processingRegions.overlap
-				require.False(v.tc, oR.exists)
-
-				nHR := v.processingRegions.newHeaders
-				nHRE := headerRegion{
-					start:  51,
-					end:    90,
-					exists: true,
-				}
-				require.Equal(v.tc, nHRE, nHR)
-			},
-		},
-
 		// ⚠️ Divergent cases (B ≠ F), B & F start at same pos.
 
 		/*
@@ -5566,14 +5382,6 @@ func TestHeaderProcessing(t *testing.T) {
 			verify: func(v verify) {
 				nHR := v.processingRegions.newHeaders
 				require.False(v.tc, nHR.exists)
-
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  0,
-					end:    40,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
 
 				dR := v.processingRegions.divergence
 				dRE := headerRegion{
@@ -5628,14 +5436,6 @@ func TestHeaderProcessing(t *testing.T) {
 				}
 			},
 			verify: func(v verify) {
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  0,
-					end:    40,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-
 				dR := v.processingRegions.divergence
 				dRE := headerRegion{
 					start:  41,
@@ -5700,14 +5500,6 @@ func TestHeaderProcessing(t *testing.T) {
 				nHR := v.processingRegions.newHeaders
 				require.False(v.tc, nHR.exists)
 
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  0,
-					end:    40,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-
 				dR := v.processingRegions.divergence
 				dRE := headerRegion{
 					start:  41,
@@ -5764,14 +5556,6 @@ func TestHeaderProcessing(t *testing.T) {
 				nHR := v.processingRegions.newHeaders
 				require.False(v.tc, nHR.exists)
 
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  40,
-					end:    70,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-
 				dR := v.processingRegions.divergence
 				dRE := headerRegion{
 					start:  71,
@@ -5825,14 +5609,6 @@ func TestHeaderProcessing(t *testing.T) {
 				}
 			},
 			verify: func(v verify) {
-				oR := v.processingRegions.overlap
-				oRE := headerRegion{
-					start:  30,
-					end:    40,
-					exists: true,
-				}
-				require.Equal(v.tc, oRE, oR)
-
 				dR := v.processingRegions.divergence
 				dRE := headerRegion{
 					start:  41,

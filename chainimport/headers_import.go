@@ -19,9 +19,8 @@ const (
 	defaultWriteBatchSizePerRegion = 16384
 )
 
-// processingRegions currently contains regions to process. Those regions
-// overlap, divergence, and new headers region are all detected but only new
-// headers region is processed.
+// processingRegions contains regions to process. The divergence and new headers
+// regions are detected and processed.
 type processingRegions struct {
 	// importStartHeight defines the starting block height for the import
 	// process.
@@ -34,10 +33,6 @@ type processingRegions struct {
 	// effectiveTip represents the current chain tip height that is
 	// effective for processing.
 	effectiveTip uint32
-
-	// overlap contains the region of headers that overlap with the target
-	// chain.
-	overlap headerRegion
 
 	// divergence contains the region of headers that diverge from the
 	// target chain.
@@ -201,10 +196,6 @@ func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 	// TODO(mohamedawnallah): Process the divergence region. This includes
 	// strategy/strategies for handling divergence region that may exist in
 	// the target header stores while importing.
-
-	// TODO(mohamedawnallah): process the overlap region. This mainly
-	// includes a validation strategy for the overlap region between headers
-	// from import and target sources.
 
 	// Process new headers region.
 	// Add headers from the import source to the target stores, extending
@@ -400,9 +391,8 @@ func (h *headersImport) verifyHeadersAtTargetHeight(height uint32) error {
 // into non-overlapping regions with distinct processing logic, we can ensure
 // consistent application of import policies regardless of how many times the
 // operation is performed. The regions are:
-//  1. Overlap: Heights common to both source and targets
-//  2. Divergence: Heights where target stores differ within import range
-//  3. NewHeaders: Heights in source not yet in targets
+//  1. Divergence: Heights where target stores differ within import range
+//  2. NewHeaders: Heights in source not yet in targets
 //
 //nolint:lll
 func (h *headersImport) determineProcessingRegions() (*processingRegions, error) {
@@ -431,19 +421,7 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		effectiveTip:      effectiveTipHeight,
 	}
 
-	// 1. Overlap region.
-	// This region contains headers that exist in both the import source and
-	// target stores, from the start of the import range up to the effective
-	// tip height.
-	overlapStart := importStartHeight
-	overlapEnd := min(effectiveTipHeight, importEndHeight)
-	regions.overlap = headerRegion{
-		start:  overlapStart,
-		end:    overlapEnd,
-		exists: overlapStart <= overlapEnd,
-	}
-
-	// 2. Divergence region.
+	// 1. Divergence Headers region.
 	// This region contains headers where one store extends beyond the
 	// effective tip but still within the import range. It represents
 	// heights where targetblock and filter headers are out of sync and need
@@ -456,7 +434,7 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		exists: bTipHeight != fTipHeight && divergeStart <= divergeEnd,
 	}
 
-	// 3. New Headers region.
+	// 2. New Headers region.
 	// This region contains headers that are in the import source but not
 	// yet in either target store. They start one height beyond the highest
 	// tip of either store (ensuring no overlap with divergence region) and
@@ -464,10 +442,10 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 	// to both stores. It only exists if there are headers beyond both tips.
 	//
 	// Note: This region is supposed to be processed after handling the
-	// overlap, and divergence regions, ensuring that any potential
-	// inconsistencies in existing data are resolved before adding new
-	// headers. This sequential processing guarantees that new headers
-	// are only added on top of a verified and consistent chain state.
+	// divergence region, ensuring that any potential inconsistencies in
+	// existing data are resolved before adding new headers. This sequential
+	// processing guarantees that new headers are only added on top of a
+	// verified and consistent chain state.
 	newStart := max(bTipHeight, fTipHeight) + 1
 	newEnd := importEndHeight
 	regions.newHeaders = headerRegion{
