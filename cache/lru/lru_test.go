@@ -105,7 +105,7 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	c.Put(1, &sizeable{value: 1, size: 1})
 	c.Put(2, &sizeable{value: 2, size: 2})
 	c.Put(3, &sizeable{value: 3, size: 3})
-	require.Equal(t, c.size, uint64(6))
+	require.Equal(t, c.Size(), uint64(6))
 
 	// Insert element with size=capacity of cache.
 	c.Put(4, &sizeable{value: 4, size: 6})
@@ -326,7 +326,7 @@ func TestLoadAndDelete(t *testing.T) {
 
 	// The length should be 0.
 	require.Zero(t, c.Len())
-	require.Zero(t, c.size)
+	require.Zero(t, c.Size())
 }
 
 // TestRangeIteration checks that the `Range` method works as expected.
