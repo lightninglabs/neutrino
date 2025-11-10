@@ -26,4 +26,8 @@ type Cache[K comparable, V Value] interface {
 
 	// Len returns number of elements in the cache.
 	Len() int
+
+	// Size returns the total size of all elements in the cache. It uses
+	// the same units produced by V.Size().
+	Size() uint64
 }

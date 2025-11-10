@@ -282,3 +282,12 @@ func (c *Cache[K, V]) RangeFIFO(visitor func(K, V) bool) {
 		}
 	}
 }
+
+// Size returns the total size of all elements in the cache. It uses
+// the same units produced by V.Size().
+func (c *Cache[K, V]) Size() uint64 {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+
+	return c.size
+}
