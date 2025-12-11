@@ -115,6 +115,55 @@ func TestElementSizeCapacityEvictsEverything(t *testing.T) {
 	require.Equal(t, four, 4)
 }
 
+// TestCacheSizeTracksMutations ensures that Size mirrors the total bytes held
+// in the cache as items are inserted, evicted, replaced, and deleted.
+func TestCacheSizeTracksMutations(t *testing.T) {
+	t.Parallel()
+
+	// Initialize a cache with enough headroom to exercise evictions while
+	// still keeping multiple entries resident.
+	c := NewCache[int, *sizeable](5)
+
+	// assertSize is a helper to reduce boilerplate when checking Size().
+	assertSize := func(expected uint64) {
+		t.Helper()
+		require.Equal(t, expected, c.Size())
+	}
+
+	// The initial size is 0.
+	assertSize(0)
+
+	// Insert two entries whose combined size exactly matches the cache
+	// capacity and check that Size reflects the summed weight.
+	_, err := c.Put(1, &sizeable{value: 1, size: 2})
+	require.NoError(t, err)
+	assertSize(2)
+	_, err = c.Put(2, &sizeable{value: 2, size: 3})
+	require.NoError(t, err)
+	assertSize(5)
+
+	// Insert a third entry that forces the LRU element (key 1) out so the
+	// cache can stay within its capacity budget.
+	_, err = c.Put(3, &sizeable{value: 3, size: 2})
+	require.NoError(t, err)
+	assertSize(5)
+	_, err = c.Get(1)
+	require.ErrorIs(t, err, cache.ErrElementNotFound)
+
+	// Replacing an existing element with a smaller version should shrink
+	// the overall Size accounting accordingly.
+	_, err = c.Put(2, &sizeable{value: 20, size: 1})
+	require.NoError(t, err)
+	assertSize(3)
+
+	// Deleting an item should subtract its contribution and return the
+	// removed value to the caller.
+	val, ok := c.LoadAndDelete(3)
+	require.True(t, ok)
+	require.Equal(t, 3, val.value)
+	assertSize(1)
+}
+
 // TestCacheFailsInsertionSizeBiggerCapacity tests that the cache fails the
 // put operation when the element's size is bigger than it's capacity.
 func TestCacheFailsInsertionSizeBiggerCapacity(t *testing.T) {
