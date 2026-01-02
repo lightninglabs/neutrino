@@ -51,8 +51,8 @@ func (m *mockHeaderIterator) GetEndIndex() uint32 {
 	return args.Get(0).(uint32)
 }
 
-// GetBatchSize returns the configured batch size for this iterator.
+// GetBatchSize is a stub implementation required by the HeaderIterator interface.
+// Tests using this mock do not depend on batch size, so a zero value is sufficient.
 func (m *mockHeaderIterator) GetBatchSize() uint32 {
-	args := m.Called()
-	return args.Get(0).(uint32)
+    return 0
 }
