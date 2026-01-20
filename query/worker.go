@@ -150,9 +150,11 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 		// Wait for the correct response to be received from the peer,
 		// or an error happening.
 		var (
-			jobErr  error
-			timeout = time.NewTimer(job.timeout)
+			jobErr          error
+			timeout         = time.NewTimer(job.timeout)
+			keepaliveTicker = time.NewTicker(defaultKeepaliveInterval)
 		)
+		defer keepaliveTicker.Stop()
 
 	Loop:
 		for {
@@ -231,6 +233,12 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 
 				jobErr = ErrJobCanceled
 				break Loop
+
+			// Send keepalive ping to prevent disconnection while waiting
+			case <-keepaliveTicker.C:
+				log.Tracef("Worker %v sending keepalive ping for job %v",
+					peer.Addr(), job.Index())
+				peer.SendPing()
 
 			case <-quit:
 				return
