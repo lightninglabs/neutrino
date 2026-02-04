@@ -282,6 +282,49 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	return &bm, nil
 }
 
+// ResetHeaderState re-reads the chain tips from the header stores and
+// reinitializes the block manager's internal tracking state. This must be
+// called after headers have been imported into the stores outside of the
+// block manager (e.g., via chainimport) but before the block manager is
+// started, so that it begins syncing from the correct chain tip rather
+// than the stale state captured at construction time.
+func (b *blockManager) ResetHeaderState() error {
+	// Re-read the block header chain tip from the store.
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to read block header chain "+
+			"tip: %w", err)
+	}
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+	b.headerList.ResetHeaderState(headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	})
+	b.headerTip = height
+	b.headerTipHash = header.BlockHash()
+
+	// Re-read the filter header chain tip from the store.
+	_, b.filterHeaderTip, err = b.cfg.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to read filter header chain "+
+			"tip: %w", err)
+	}
+
+	// Ensure the filter header tip hash is set to the block hash at the
+	// filter tip height.
+	fh, err := b.cfg.BlockHeaders.FetchHeaderByHeight(b.filterHeaderTip)
+	if err != nil {
+		return fmt.Errorf("failed to fetch block header at filter "+
+			"tip height %d: %w", b.filterHeaderTip, err)
+	}
+	b.filterHeaderTipHash = fh.BlockHash()
+
+	log.Infof("Block manager header state reset: block tip=%d, "+
+		"filter tip=%d", height, b.filterHeaderTip)
+
+	return nil
+}
+
 // Start begins the core block handler which processes block and inv messages.
 func (b *blockManager) Start() {
 	// Already started?
