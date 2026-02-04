@@ -1680,6 +1680,17 @@ func (s *ChainService) Start(ctx context.Context) error {
 		if _, err := importer.Import(ctx); err != nil {
 			return err
 		}
+
+		// The block manager was constructed before the import ran,
+		// so its internal header tracking state (headerList,
+		// headerTip, filterHeaderTip, etc.) reflects the
+		// pre-import chain tips. Re-read the now-updated stores
+		// so the block manager starts syncing from the correct
+		// height rather than from genesis.
+		if err := s.blockManager.ResetHeaderState(); err != nil {
+			return fmt.Errorf("failed to reset block manager "+
+				"state after headers import: %w", err)
+		}
 	}
 
 	// Start the address manager and block manager, both of which are
