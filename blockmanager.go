@@ -2734,6 +2734,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.peer.Addr(), err)
+
+			hmsg.peer.Disconnect()
+
 			return
 		}
 	}
