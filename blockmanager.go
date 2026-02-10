@@ -441,6 +441,8 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.syncPeerMutex.Unlock()
 		header, height, err := b.cfg.BlockHeaders.ChainTip()
 		if err != nil {
+			log.Errorf("Unable to fetch chain tip for header "+
+				"list reset: %v", err)
 			return
 		}
 		b.headerList.ResetHeaderState(headerlist.Node{
