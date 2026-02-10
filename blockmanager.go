@@ -1973,6 +1973,13 @@ func (b *blockManager) blockHandler() {
 	defer b.wg.Done()
 
 	candidatePeers := list.New()
+
+	// stallTicker periodically retries header sync when we have no sync
+	// peer. This prevents the node from getting stuck when a sync peer
+	// disconnects and no new peers connect immediately.
+	stallTicker := time.NewTicker(retryTimeout)
+	defer stallTicker.Stop()
+
 out:
 	for {
 		// Now check peer messages and quit channels.
@@ -1994,6 +2001,11 @@ out:
 			default:
 				log.Warnf("Invalid message type in block "+
 					"handler: %T", msg)
+			}
+
+		case <-stallTicker.C:
+			if !b.BlockHeadersSynced() && b.SyncPeer() == nil {
+				b.startSync(candidatePeers)
 			}
 
 		case <-b.quit:
