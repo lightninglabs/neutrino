@@ -439,16 +439,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
-		header, height, err := b.cfg.BlockHeaders.ChainTip()
-		if err != nil {
-			log.Errorf("Unable to fetch chain tip for header "+
-				"list reset: %v", err)
-			return
-		}
-		b.headerList.ResetHeaderState(headerlist.Node{
-			Header: *header,
-			Height: int32(height),
-		})
+		b.resetHeaderListFromDisk()
 		b.startSync(peers)
 	}
 }
@@ -2635,20 +2626,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 
 				// Reset in-memory state to match the
 				// on-disk chain tip after the rollback.
-				header, height, err :=
-					b.cfg.BlockHeaders.ChainTip()
-				if err != nil {
-					log.Errorf("Unable to fetch chain "+
-						"tip for header list "+
-						"rollback: %v", err)
-				} else {
-					b.headerList.ResetHeaderState(
-						headerlist.Node{
-							Header: *header,
-							Height: int32(height),
-						},
-					)
-				}
+				b.resetHeaderListFromDisk()
 
 				hmsg.peer.Disconnect()
 
@@ -2720,16 +2698,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// Roll back the in-memory header list to match the
 			// on-disk state, since headers were already appended
 			// to headerList before the write attempt.
-			header, height, err := b.cfg.BlockHeaders.ChainTip()
-			if err != nil {
-				log.Errorf("Unable to fetch chain tip for "+
-					"header list rollback: %v", err)
-			} else {
-				b.headerList.ResetHeaderState(headerlist.Node{
-					Header: *header,
-					Height: int32(height),
-				})
-			}
+			b.resetHeaderListFromDisk()
 
 			// Disconnect the sync peer to trigger the recovery
 			// path in handleDonePeerMsg, which will reset state
@@ -2769,6 +2738,23 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	b.headerTipHash = *finalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
+}
+
+// resetHeaderListFromDisk resets the in-memory header list to match the
+// on-disk chain tip. This is used to restore consistency when a write to the
+// block header store fails after the in-memory list was already advanced.
+func (b *blockManager) resetHeaderListFromDisk() {
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		log.Errorf("Unable to fetch chain tip for header list "+
+			"rollback: %v", err)
+		return
+	}
+
+	b.headerList.ResetHeaderState(headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	})
 }
 
 // areHeadersConnected returns true if the passed block headers are connected to
