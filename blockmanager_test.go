@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -945,4 +946,104 @@ func TestHandleHeaders(t *testing.T) {
 	})
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
+}
+
+// failingBlockHeaderStore wraps a real BlockHeaderStore and returns an error
+// from WriteHeaders when configured to do so.
+type failingBlockHeaderStore struct {
+	headerfs.BlockHeaderStore
+
+	shouldFail bool
+}
+
+func (f *failingBlockHeaderStore) WriteHeaders(
+	hdrs ...headerfs.BlockHeader) error {
+
+	if f.shouldFail {
+		return errors.New("simulated write failure")
+	}
+
+	return f.BlockHeaderStore.WriteHeaders(hdrs...)
+}
+
+// TestHandleHeadersWriteFailure tests that when WriteHeaders fails, the block
+// manager properly recovers by resetting the in-memory header list to match
+// the on-disk chain tip and disconnecting the sync peer.
+func TestHandleHeadersWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	// Wrap the real header store so we can inject WriteHeaders failures.
+	failStore := &failingBlockHeaderStore{
+		BlockHeaderStore: hdrStore,
+	}
+	bm.cfg.BlockHeaders = failStore
+
+	fakePeer, err := peer.NewOutboundPeer(&peer.Config{}, "fake:123")
+	require.NoError(t, err)
+
+	assertPeerDisconnected := func(shouldBeDisconnected bool) {
+		refValue := reflect.ValueOf(fakePeer).Elem()
+		disconnected := refValue.FieldByName("disconnect").Int()
+
+		if shouldBeDisconnected {
+			require.EqualValues(t, 1, disconnected)
+		} else {
+			require.EqualValues(t, 0, disconnected)
+		}
+	}
+
+	harness, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, harness.TearDown())
+	})
+
+	err = harness.SetUp(false, 0)
+	require.NoError(t, err)
+
+	blockHashes, err := harness.Client.Generate(200)
+	require.NoError(t, err)
+
+	hmsg := &headersMsg{
+		headers: &wire.MsgHeaders{
+			Headers: make([]*wire.BlockHeader, len(blockHashes)),
+		},
+		peer: &ServerPeer{
+			Peer: fakePeer,
+		},
+	}
+
+	for i := range blockHashes {
+		header, err := harness.Client.GetBlockHeader(blockHashes[i])
+		require.NoError(t, err)
+
+		hmsg.headers.Headers[i] = header
+	}
+
+	// Record the chain tip before feeding headers.
+	_, tipHeightBefore, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+
+	// Enable write failures and feed the valid headers.
+	failStore.shouldFail = true
+	bm.handleHeadersMsg(hmsg)
+
+	// The peer should be disconnected due to the write failure.
+	assertPeerDisconnected(true)
+
+	// The in-memory header list should be rolled back to the on-disk
+	// chain tip (genesis at height 0).
+	backNode := bm.headerList.Back()
+	require.NotNil(t, backNode)
+	require.Equal(t, int32(tipHeightBefore), backNode.Height)
+
+	// The on-disk chain tip should be unchanged (still at genesis).
+	_, tipHeightAfter, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, tipHeightBefore, tipHeightAfter)
 }
