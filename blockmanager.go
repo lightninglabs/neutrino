@@ -2157,7 +2157,15 @@ func (b *blockManager) startSync(peers *list.List) {
 
 		// With our stop hash selected, we'll kick off the sync from
 		// this peer with an initial GetHeaders message.
-		_ = b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
+		err = b.SyncPeer().PushGetHeadersMsg(locator, stopHash)
+		if err != nil {
+			log.Warnf("Failed to send initial getheaders to "+
+				"peer %s: %v", bestPeer.Addr(), err)
+
+			b.syncPeerMutex.Lock()
+			b.syncPeer = nil
+			b.syncPeerMutex.Unlock()
+		}
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}
