@@ -2628,9 +2628,29 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			}
 			err = b.cfg.BlockHeaders.WriteHeaders(hdrs)
 			if err != nil {
-				log.Criticalf("Couldn't write block to "+
-					"database: %s", err)
-				// Should we panic here?
+				log.Errorf("Couldn't write reorg block "+
+					"header to database: %s", err)
+
+				// Reset in-memory state to match the
+				// on-disk chain tip after the rollback.
+				header, height, err :=
+					b.cfg.BlockHeaders.ChainTip()
+				if err != nil {
+					log.Errorf("Unable to fetch chain "+
+						"tip for header list "+
+						"rollback: %v", err)
+				} else {
+					b.headerList.ResetHeaderState(
+						headerlist.Node{
+							Header: *header,
+							Height: int32(height),
+						},
+					)
+				}
+
+				hmsg.peer.Disconnect()
+
+				return
 			}
 
 			b.headerList.ResetHeaderState(headerlist.Node{
