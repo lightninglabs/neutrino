@@ -2694,6 +2694,26 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		err := b.cfg.BlockHeaders.WriteHeaders(headerWriteBatch...)
 		if err != nil {
 			log.Errorf("Unable to write block headers: %v", err)
+
+			// Roll back the in-memory header list to match the
+			// on-disk state, since headers were already appended
+			// to headerList before the write attempt.
+			header, height, err := b.cfg.BlockHeaders.ChainTip()
+			if err != nil {
+				log.Errorf("Unable to fetch chain tip for "+
+					"header list rollback: %v", err)
+			} else {
+				b.headerList.ResetHeaderState(headerlist.Node{
+					Header: *header,
+					Height: int32(height),
+				})
+			}
+
+			// Disconnect the sync peer to trigger the recovery
+			// path in handleDonePeerMsg, which will reset state
+			// and start a new sync.
+			hmsg.peer.Disconnect()
+
 			return
 		}
 	}
