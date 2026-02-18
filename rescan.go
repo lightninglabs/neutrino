@@ -507,6 +507,13 @@ func (rs *rescanState) rescan() error {
 		// TODO(roasbeef): add exponential back-off
 		blockRetryInterval = time.Millisecond * 100
 		blockRetryQueue    = newBlockRetryQueue()
+
+		// catchupRetryInterval is the interval used to retry block
+		// processing errors during catchup mode (e.g. timeouts
+		// fetching blocks or filters from peers). This uses a longer
+		// interval than blockRetryInterval since it typically
+		// indicates broader network issues.
+		catchupRetryInterval = 5 * time.Second
 	)
 
 	// We'll need to keep track of whether we are current with the chain in
@@ -751,8 +758,23 @@ rescanLoop:
 				uint32(nextHeight),
 			)
 			if err != nil {
-				return err
+				log.Errorf("Failed to get header for "+
+					"height %v, retrying in %v: %v",
+					nextHeight, catchupRetryInterval,
+					err)
+
+				select {
+				case <-time.After(catchupRetryInterval):
+				case <-ro.quit:
+					return ErrRescanExit
+				}
+				continue rescanLoop
 			}
+
+			// Save the current state so we can restore it
+			// if notifying the block fails.
+			prevHeader := rs.curHeader
+			prevStamp := rs.curStamp
 
 			rs.curHeader = *header
 			rs.curStamp.Height++
@@ -766,7 +788,26 @@ rescanLoop:
 
 			err = rs.notifyBlock()
 			if err != nil {
-				return err
+				// Restore the state to before we
+				// attempted to process this block so
+				// that it will be retried on the next
+				// iteration.
+				rs.curHeader = prevHeader
+				rs.curStamp = prevStamp
+
+				log.Errorf("Failed to process block "+
+					"%d (%s) during catchup, "+
+					"retrying in %v: %v",
+					nextHeight,
+					header.BlockHash(),
+					catchupRetryInterval, err)
+
+				select {
+				case <-time.After(catchupRetryInterval):
+				case <-ro.quit:
+					return ErrRescanExit
+				}
+				continue rescanLoop
 			}
 		}
 	}
