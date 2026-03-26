@@ -434,9 +434,10 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 		// Call the get checkpointed cf headers method with the
 		// checkpoints we created to start the test.
-		bm.getCheckpointedCFHeaders(
+		err = bm.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
+		require.NoError(t, err)
 
 		// Finally make sure the filter header tip is what we expect.
 		tip, tipHeight, err := cfStore.ChainTip()
@@ -660,8 +661,10 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		}()
 
 		// Start the test by calling the get checkpointed cf headers
-		// method with the checkpoints we created.
-		bm.getCheckpointedCFHeaders(
+		// method with the checkpoints we created. This test
+		// deliberately sends invalid intervals, so the function may
+		// return an error from the query dispatcher.
+		_ = bm.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 	}
@@ -802,6 +805,13 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		mBlockHeaderStore.On("FetchHeaderByHeight", targetIndex).Return(
 			&blockHeader, nil,
+		)
+
+		// fetchFilterFromAllPeers now validates that the block hash
+		// still exists in the header store before querying peers.
+		targetHash := blockHeader.BlockHash()
+		mBlockHeaderStore.On("FetchHeader", &targetHash).Return(
+			&blockHeader, targetIndex, nil,
 		)
 
 		// We set up the mock queryAllPeers to only respond according to
@@ -945,4 +955,256 @@ func TestHandleHeaders(t *testing.T) {
 	})
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
+}
+
+// TestGetCFHeadersReorgRecovery tests that getCFHeadersForAllPeers returns
+// errReorgDetected when the chain tip changes during the query, which happens
+// when a reorg occurs while filter headers are being fetched. This is a
+// regression test for https://github.com/lightninglabs/neutrino/issues/338.
+func TestGetCFHeadersReorgRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Create two different chain tips to simulate a reorg.
+	chainATip := &wire.BlockHeader{
+		Nonce: 0xaa,
+	}
+	chainBTip := &wire.BlockHeader{
+		Nonce: 0xbb,
+	}
+
+	fType := wire.GCSFilterRegular
+	startHeight := uint32(100)
+
+	// Set up mock block header store that returns chain A tip first, then
+	// chain B tip on the second call (simulating a reorg mid-query).
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+
+	// First ChainTip call returns chain A (used to construct the query).
+	mBlockHeaderStore.On("ChainTip").Return(
+		chainATip, startHeight, nil,
+	).Once()
+
+	// Second ChainTip call returns chain B (post-query validation detects
+	// the reorg).
+	mBlockHeaderStore.On("ChainTip").Return(
+		chainBTip, startHeight, nil,
+	).Once()
+
+	// Track whether queryAllPeers was called with a stale hash.
+	queryCalled := false
+	queryAllPeers := func(
+		queryMsg wire.Message,
+		checkResponse func(sp *ServerPeer, resp wire.Message,
+			quit chan<- struct{}, peerQuit chan<- struct{}),
+		options ...QueryOption) {
+
+		queryCalled = true
+	}
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders:  mBlockHeaderStore,
+			queryAllPeers: queryAllPeers,
+		},
+	}
+
+	// Call getCFHeadersForAllPeers — it should detect the reorg and
+	// return errReorgDetected.
+	_, _, err := bm.getCFHeadersForAllPeers(startHeight, fType)
+	require.ErrorIs(t, err, errReorgDetected)
+
+	// The query should have been issued (we detect the reorg after).
+	require.True(t, queryCalled)
+
+	mBlockHeaderStore.AssertExpectations(t)
+}
+
+// TestFetchFilterReorgRecovery tests that fetchFilterFromAllPeers returns
+// errReorgDetected when the target block hash has been rolled back due to a
+// reorg. This is a regression test for
+// https://github.com/lightninglabs/neutrino/issues/338.
+func TestFetchFilterReorgRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Create a block hash that will be "reorged away".
+	reorgedBlock := wire.BlockHeader{
+		Nonce: 0xdead,
+	}
+	reorgedHash := reorgedBlock.BlockHash()
+
+	fType := wire.GCSFilterRegular
+	targetHeight := uint32(100)
+
+	// Set up mock that returns an error for FetchHeader, simulating the
+	// block being rolled back.
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+	mBlockHeaderStore.On("FetchHeader", &reorgedHash).Return(
+		nil, uint32(0), fmt.Errorf("header not found"),
+	)
+
+	// queryAllPeers should NOT be called since we detect the reorg before
+	// sending any queries.
+	queryCalled := false
+	queryAllPeers := func(
+		queryMsg wire.Message,
+		checkResponse func(sp *ServerPeer, resp wire.Message,
+			quit chan<- struct{}, peerQuit chan<- struct{}),
+		options ...QueryOption) {
+
+		queryCalled = true
+	}
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders:  mBlockHeaderStore,
+			queryAllPeers: queryAllPeers,
+		},
+	}
+
+	_, err := bm.fetchFilterFromAllPeers(
+		targetHeight, reorgedHash, fType,
+	)
+	require.ErrorIs(t, err, errReorgDetected)
+
+	// The query should NOT have been issued since we detected the reorg
+	// before sending.
+	require.False(t, queryCalled)
+
+	mBlockHeaderStore.AssertExpectations(t)
+}
+
+// TestGetCheckptsReorgRecovery tests that getCheckpts returns errReorgDetected
+// when the checkpoint stop hash has been rolled back due to a reorg. This is a
+// regression test for https://github.com/lightninglabs/neutrino/issues/338.
+func TestGetCheckptsReorgRecovery(t *testing.T) {
+	t.Parallel()
+
+	// Create a block hash that will be "reorged away".
+	reorgedBlock := wire.BlockHeader{
+		Nonce: 0xbeef,
+	}
+	reorgedHash := reorgedBlock.BlockHash()
+
+	fType := wire.GCSFilterRegular
+
+	// Set up mock that returns an error for FetchHeader, simulating the
+	// block being rolled back.
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+	mBlockHeaderStore.On("FetchHeader", &reorgedHash).Return(
+		nil, uint32(0), fmt.Errorf("header not found"),
+	)
+
+	// queryAllPeers should NOT be called.
+	queryCalled := false
+	queryAllPeers := func(
+		queryMsg wire.Message,
+		checkResponse func(sp *ServerPeer, resp wire.Message,
+			quit chan<- struct{}, peerQuit chan<- struct{}),
+		options ...QueryOption) {
+
+		queryCalled = true
+	}
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders:  mBlockHeaderStore,
+			queryAllPeers: queryAllPeers,
+		},
+	}
+
+	_, err := bm.getCheckpts(&reorgedHash, fType)
+	require.ErrorIs(t, err, errReorgDetected)
+
+	// The query should NOT have been issued.
+	require.False(t, queryCalled)
+
+	mBlockHeaderStore.AssertExpectations(t)
+}
+
+// TestGetCheckpointedCFHeadersReorgNoPanic tests that
+// getCheckpointedCFHeaders returns an error instead of panicking when the block
+// header store can't serve a header at a checkpoint height because it was
+// rolled back during a reorg. This is a regression test for
+// https://github.com/lightninglabs/neutrino/issues/338.
+func TestGetCheckpointedCFHeadersReorgNoPanic(t *testing.T) {
+	t.Parallel()
+
+	fType := wire.GCSFilterRegular
+
+	// Set up a filter header store mock with a tip at height 0.
+	filterTip := chainhash.Hash{}
+	mFilterHeaderStore := &headerfs.MockFilterHeaderStore{}
+	mFilterHeaderStore.On("ChainTip").Return(
+		&filterTip, uint32(0), nil,
+	)
+
+	// Create checkpoints. We need at least one checkpoint so the function
+	// tries to fetch headers.
+	checkpoints := make([]*chainhash.Hash, 2)
+	for i := range checkpoints {
+		h := chainhash.Hash{}
+		h[0] = byte(i + 1)
+		checkpoints[i] = &h
+	}
+
+	// Set up block header store mock. The function will try to fetch a
+	// block header at the end of the checkpoint range. With 2 checkpoints
+	// and maxCFCheckptsPerQuery=2, the first (and only) query requests
+	// endHeightRange = 2 * wire.CFCheckptInterval = 2000.
+	endHeightRange := uint32(len(checkpoints)) * wire.CFCheckptInterval
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+	mBlockHeaderStore.On(
+		"FetchHeaderByHeight", endHeightRange,
+	).Return(
+		nil, fmt.Errorf("header not found: chain rolled back"),
+	)
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders:     mBlockHeaderStore,
+			RegFilterHeaders: mFilterHeaderStore,
+		},
+	}
+
+	// This should return errReorgDetected instead of panicking.
+	err := bm.getCheckpointedCFHeaders(
+		checkpoints, mFilterHeaderStore, fType,
+	)
+	require.ErrorIs(t, err, errReorgDetected)
+
+	mBlockHeaderStore.AssertExpectations(t)
+	mFilterHeaderStore.AssertExpectations(t)
+}
+
+// TestDetectBadPeersReorgRecovery tests that detectBadPeers propagates
+// errReorgDetected when the target block has been rolled back. This is a
+// regression test for https://github.com/lightninglabs/neutrino/issues/338.
+func TestDetectBadPeersReorgRecovery(t *testing.T) {
+	t.Parallel()
+
+	fType := wire.GCSFilterRegular
+	targetHeight := uint32(100)
+
+	// The block at targetHeight has been rolled back.
+	mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
+	mBlockHeaderStore.On(
+		"FetchHeaderByHeight", targetHeight,
+	).Return(
+		nil, fmt.Errorf("header not found"),
+	)
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders: mBlockHeaderStore,
+		},
+	}
+
+	// detectBadPeers should propagate the error from FetchHeaderByHeight.
+	headers := map[string]*wire.MsgCFHeaders{
+		"peer1:1": {},
+	}
+	_, err := bm.detectBadPeers(headers, targetHeight, 0, fType)
+	require.Error(t, err)
+
+	mBlockHeaderStore.AssertExpectations(t)
 }
