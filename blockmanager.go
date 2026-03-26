@@ -5,6 +5,7 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -47,6 +48,11 @@ const (
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
 var zeroHash chainhash.Hash
+
+// errReorgDetected is returned when a chain reorg is detected during a
+// filter-related query, indicating the caller should retry with updated chain
+// state.
+var errReorgDetected = errors.New("reorg detected during filter query")
 
 // newPeerMsg signifies a newly connected peer to the block handler.
 type newPeerMsg struct {
@@ -569,7 +575,29 @@ waitForHeaders:
 
 			log.Debugf("Getting filter checkpoints up to "+
 				"height=%v, hash=%v", bestHeight, bestHash)
-			allCFCheckpoints = b.getCheckpts(&bestHash, fType)
+
+			var checkptsErr error
+			allCFCheckpoints, checkptsErr = b.getCheckpts(
+				&bestHash, fType,
+			)
+			if checkptsErr != nil {
+				log.Warnf("Error fetching checkpoints: "+
+					"%v, trying again...", checkptsErr)
+
+				// If a reorg was detected, we need to
+				// re-snapshot the chain state since our
+				// bestHash may reference a rolled-back block.
+				if errors.Is(checkptsErr, errReorgDetected) {
+					goto waitForHeaders
+				}
+
+				select {
+				case <-time.After(retryTimeout):
+				case <-b.quit:
+					return
+				}
+				continue
+			}
 			if len(allCFCheckpoints) == 0 {
 				log.Warnf("Unable to fetch set of " +
 					"candidate checkpoints, trying again...")
@@ -616,9 +644,27 @@ waitForHeaders:
 	}
 
 	// Get all the headers up to the last known good checkpoint.
-	b.getCheckpointedCFHeaders(
+	if err = b.getCheckpointedCFHeaders(
 		goodCheckpoints, store, fType,
-	)
+	); err != nil {
+		log.Warnf("Failed to get checkpointed cfheaders: %v", err)
+
+		select {
+		case <-time.After(retryTimeout):
+		case <-b.quit:
+			return
+		}
+
+		// If a reorg was detected, we need to clear stale
+		// checkpoints and re-snapshot chain state from scratch.
+		// For other errors (query failures, store issues), we
+		// can retry with the same checkpoints.
+		if errors.Is(err, errReorgDetected) {
+			allCFCheckpoints = nil
+			goto waitForHeaders
+		}
+		goto waitForHeaders
+	}
 
 	// Now we check the headers again. If the block headers are not yet
 	// current, then we go back to the loop waiting for them to finish.
@@ -682,6 +728,14 @@ waitForHeaders:
 			log.Debugf("couldn't get uncheckpointed headers for "+
 				"%v: %v", fType, err)
 
+			// If a reorg was detected, we need to go back to
+			// waiting for headers to re-snapshot the chain
+			// state, as our current view may reference blocks
+			// that no longer exist.
+			if errors.Is(err, errReorgDetected) {
+				goto waitForHeaders
+			}
+
 			select {
 			case <-time.After(retryTimeout):
 			case <-b.quit:
@@ -735,7 +789,12 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 
 	// Query all peers for the responses.
 	startHeight := filtHeight + 1
-	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
+	headers, numHeaders, err := b.getCFHeadersForAllPeers(
+		startHeight, fType,
+	)
+	if err != nil {
+		return err
+	}
 
 	// Ban any peer that responds with the wrong prev filter header.
 	for peer, msg := range headers {
@@ -926,16 +985,22 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
-// matches the checkpoints up to the tip of the store.
-func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store headerfs.FilterHeaderStore, fType wire.FilterType) {
+// matches the checkpoints up to the tip of the store. If a reorg is detected
+// (e.g., a block header at a checkpoint height is no longer available),
+// errReorgDetected is returned.
+//
+//nolint:unparam
+func (b *blockManager) getCheckpointedCFHeaders(
+	checkpoints []*chainhash.Hash,
+	store headerfs.FilterHeaderStore,
+	fType wire.FilterType) error {
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic(fmt.Sprintf("failed getting chaintip from filter "+
-			"store: %v", err))
+		return fmt.Errorf("failed getting chaintip from filter "+
+			"store: %w", err)
 	}
 
 	initialFilterHeader := curHeader
@@ -997,8 +1062,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			panic(fmt.Sprintf("failed getting block header at "+
-				"height %v: %v", endHeightRange, err))
+			// If we can't fetch the header at this height, the
+			// chain was likely rolled back due to a reorg.
+			log.Infof("Failed to get block header at height "+
+				"%v (reorg likely): %v", endHeightRange, err)
+
+			return errReorgDetected
 		}
 		stopHash := stopHeader.BlockHash()
 
@@ -1020,7 +1089,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
-		return
+		return nil
 	}
 
 	log.Infof("Attempting to query for %v cfheader batches", batchesCount)
@@ -1056,11 +1125,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		case err := <-errChan:
 			switch {
 			case err == query.ErrWorkManagerShuttingDown:
-				return
+				return nil
 			case err != nil:
 				log.Errorf("Query finished with error before "+
 					"all responses received: %v", err)
-				return
+				return err
 			}
 
 			// The query did finish successfully, but continue to
@@ -1069,7 +1138,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			continue
 
 		case <-b.quit:
-			return
+			return nil
 		}
 
 		checkPointIndex := stopHashes[r.StopHash]
@@ -1165,6 +1234,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			break
 		}
 	}
+
+	return nil
 }
 
 // writeCFHeadersMsg writes a cfheaders message to the specified store. It
@@ -1432,7 +1503,12 @@ func (b *blockManager) resolveConflict(
 	// which ones are valid.
 	// TODO(halseth): check if peer serves headers that matches its checkpoints
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
-	headers, numHeaders := b.getCFHeadersForAllPeers(startHeight, fType)
+	headers, numHeaders, err := b.getCFHeadersForAllPeers(
+		startHeight, fType,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Make sure we're working off the same baseline. Otherwise, we want to
 	// go back and get checkpoints again.
@@ -1558,9 +1634,12 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 
 	// Fetch filters from the peers in question.
 	// TODO(halseth): query only peers from headers map.
-	filtersFromPeers := b.fetchFilterFromAllPeers(
+	filtersFromPeers, err := b.fetchFilterFromAllPeers(
 		targetHeight, header.BlockHash(), fType,
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	var badPeers []string
 	for peer, msg := range headers {
@@ -1767,26 +1846,30 @@ func resolveFilterMismatchFromBlock(block *wire.MsgBlock,
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
 // returns a map of responses from all peers. The second return value is the
-// number for cfheaders in each response.
+// number for cfheaders in each response. If a reorg is detected during the
+// query, errReorgDetected is returned.
 func (b *blockManager) getCFHeadersForAllPeers(height uint32,
-	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int) {
+	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int, error) {
 
 	// Create the map we're returning.
 	headers := make(map[string]*wire.MsgCFHeaders)
 
 	// Get the header we expect at either the tip of the block header store
 	// or at the end of the maximum-size response message, whichever is
-	// larger.
+	// larger. We snapshot the chain tip hash so we can detect reorgs after
+	// the query completes.
 	stopHeader, stopHeight, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		return nil, 0
+		return nil, 0, err
 	}
+	tipHash := stopHeader.BlockHash()
+
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
 		stopHeader, err = b.cfg.BlockHeaders.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
 		)
 		if err != nil {
-			return nil, 0
+			return nil, 0, err
 		}
 
 		// We'll make sure we also update our stopHeight so we know how
@@ -1821,16 +1904,44 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 		},
 	)
 
-	return headers, numHeaders
+	// After the query, check if the chain tip changed (indicating a reorg
+	// occurred while we were querying). If so, our stopHash may reference
+	// a block the peer no longer has, which would cause them to disconnect
+	// us per BIP 157.
+	currentTip, _, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return nil, 0, err
+	}
+	if currentTip.BlockHash() != tipHash {
+		log.Infof("Reorg detected during cfheaders query, retrying "+
+			"with updated chain state (old_tip=%v, new_tip=%v)",
+			tipHash, currentTip.BlockHash())
+
+		return nil, 0, errReorgDetected
+	}
+
+	return headers, numHeaders, nil
 }
 
 // fetchFilterFromAllPeers attempts to fetch a filter for the target filter
 // type and blocks from all peers connected to the block manager. This method
 // returns a map which allows the caller to match a peer to the filter it
-// responded with.
+// responded with. If the target block has been rolled back due to a reorg,
+// errReorgDetected is returned.
 func (b *blockManager) fetchFilterFromAllPeers(
 	height uint32, blockHash chainhash.Hash,
-	filterType wire.FilterType) map[string]*gcs.Filter {
+	filterType wire.FilterType) (map[string]*gcs.Filter, error) {
+
+	// Before querying peers, verify the block hash still exists in our
+	// header store. If it was rolled back during a reorg, we must not
+	// send this hash to peers as they will disconnect us per BIP 157.
+	_, _, err := b.cfg.BlockHeaders.FetchHeader(&blockHash)
+	if err != nil {
+		log.Infof("Block hash %v no longer in header store, "+
+			"reorg likely occurred", blockHash)
+
+		return nil, fmt.Errorf("%w: %v", errReorgDetected, err)
+	}
 
 	// We'll use this map to collate all responses we receive from each
 	// peer.
@@ -1878,13 +1989,25 @@ func (b *blockManager) fetchFilterFromAllPeers(
 		},
 	)
 
-	return filterResponses
+	return filterResponses, nil
 }
 
 // getCheckpts runs a query for cfcheckpts against all peers and returns a map
-// of responses.
+// of responses. If the target block has been rolled back due to a reorg,
+// errReorgDetected is returned.
 func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
-	fType wire.FilterType) map[string][]*chainhash.Hash {
+	fType wire.FilterType) (map[string][]*chainhash.Hash, error) {
+
+	// Before querying peers, verify the lastHash block still exists in our
+	// header store. If it was rolled back during a reorg, we must not send
+	// this hash to peers as they will disconnect us per BIP 157.
+	_, _, err := b.cfg.BlockHeaders.FetchHeader(lastHash)
+	if err != nil {
+		log.Infof("Checkpoint stop hash %v no longer in header "+
+			"store, reorg likely occurred", lastHash)
+
+		return nil, fmt.Errorf("%w: %v", errReorgDetected, err)
+	}
 
 	checkpoints := make(map[string][]*chainhash.Hash)
 	getCheckptMsg := wire.NewMsgGetCFCheckpt(fType, lastHash)
@@ -1904,7 +2027,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 			}
 		},
 	)
-	return checkpoints
+	return checkpoints, nil
 }
 
 // checkCFCheckptSanity checks whether all peers which have responded agree.
