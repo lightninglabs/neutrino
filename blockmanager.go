@@ -1217,8 +1217,8 @@ func (b *blockManager) getCheckpointedCFHeaders(
 			// the next message.
 			curHeader, curHeight, err = b.writeCFHeadersMsg(r, store)
 			if err != nil {
-				panic(fmt.Sprintf("couldn't write "+
-					"cfheaders msg: %v", err))
+				return fmt.Errorf("couldn't write "+
+					"cfheaders msg: %w", err)
 			}
 
 			// Update the next interval to write to reflect our
