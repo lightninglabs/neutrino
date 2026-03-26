@@ -23,6 +23,7 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1207,4 +1208,165 @@ func TestDetectBadPeersReorgRecovery(t *testing.T) {
 	require.Error(t, err)
 
 	mBlockHeaderStore.AssertExpectations(t)
+}
+
+// TestWriteCFHeadersMsgErrorNoPanic tests that writeCFHeadersMsg returns an
+// error to the caller instead of panicking when the underlying filter header
+// store fails. We verify that this error propagates through
+// getCheckpointedCFHeaders, which previously panicked on write failures. The
+// caller (cfHandler) handles this by retrying via goto waitForHeaders.
+func TestWriteCFHeadersMsgErrorNoPanic(t *testing.T) {
+	t.Parallel()
+
+	// We'll test writeCFHeadersMsg directly with a mock store that fails
+	// on WriteHeaders.
+	errStoreFailed := fmt.Errorf("simulated store write failure")
+
+	// Create a filter header with the expected tip matching the
+	// PrevFilterHeader in our message.
+	prevHeader := chainhash.Hash{0x01}
+
+	// Set up a mock filter header store. ChainTip returns the prev header
+	// (so the alignment check passes), then WriteHeaders fails.
+	mFilterStore := &headerfs.MockFilterHeaderStore{}
+	mFilterStore.On("ChainTip").Return(
+		&prevHeader, uint32(1000), nil,
+	)
+	mFilterStore.On(
+		"WriteHeaders",
+		mock.AnythingOfType("[]headerfs.FilterHeader"),
+	).Return(errStoreFailed)
+
+	// Set up a mock block header store for FetchHeaderAncestors (needed
+	// by writeCFHeadersMsg to match filter headers to block headers).
+	blockHeader := wire.BlockHeader{Nonce: 0x42}
+	blockHash := blockHeader.BlockHash()
+	mBlockStore := &headerfs.MockBlockHeaderStore{}
+	mBlockStore.On(
+		"FetchHeaderAncestors", uint32(0), &blockHash,
+	).Return(
+		[]wire.BlockHeader{blockHeader}, uint32(1001), nil,
+	)
+
+	bm := &blockManager{
+		cfg: &blockManagerCfg{
+			BlockHeaders: mBlockStore,
+		},
+	}
+
+	// Construct a minimal CFHeaders message with one filter hash.
+	filterHash := chainhash.Hash{0x02}
+	msg := &wire.MsgCFHeaders{
+		FilterType:       wire.GCSFilterRegular,
+		StopHash:         blockHash,
+		PrevFilterHeader: prevHeader,
+		FilterHashes:     []*chainhash.Hash{&filterHash},
+	}
+
+	// writeCFHeadersMsg should return the store error, not panic.
+	_, _, err := bm.writeCFHeadersMsg(msg, mFilterStore)
+	require.ErrorIs(t, err, errStoreFailed)
+
+	mFilterStore.AssertExpectations(t)
+	mBlockStore.AssertExpectations(t)
+}
+
+// TestGetCheckpointedCFHeadersWriteError tests that getCheckpointedCFHeaders
+// returns an error (instead of panicking) when writeCFHeadersMsg encounters a
+// store write failure mid-sync. The caller (cfHandler) can then retry by
+// jumping back to waitForHeaders. This is a regression test that verifies the
+// panic in the write path has been replaced with proper error propagation.
+func TestGetCheckpointedCFHeadersWriteError(t *testing.T) {
+	t.Parallel()
+
+	// Use the real stores so we get the full query pipeline.
+	bm, hdrStore, cfStore, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	// Generate headers and write block headers.
+	genesisBlockHeader, _, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	require.NoError(t, err)
+
+	hdrs, err := generateHeaders(
+		genesisBlockHeader, genesisFilterHeader, nil,
+	)
+	require.NoError(t, err)
+
+	err = hdrStore.WriteHeaders(hdrs.blockHeaders[1:]...)
+	require.NoError(t, err)
+
+	// Set up the query dispatcher to deliver valid responses, but advance
+	// the filter header store's tip before the write happens. We do this
+	// by writing a mismatched filter header to the store in between the
+	// response being validated and being written, which causes
+	// writeCFHeadersMsg's alignment check to fail.
+	firstCall := true
+	bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+		requests []*query.Request,
+		options ...query.QueryOption) chan error {
+
+		var msgs []wire.Message
+		for _, q := range requests {
+			msgs = append(msgs, q.Req)
+		}
+
+		responses, genErr := generateResponses(msgs, hdrs)
+		if genErr != nil {
+			errChan := make(chan error, 1)
+			errChan <- genErr
+			return errChan
+		}
+
+		errChan := make(chan error, 1)
+		go func() {
+			for i := range responses {
+				resp := *responses[i]
+
+				// On the first query invocation, write a bogus
+				// filter header to the store so that the
+				// alignment check in writeCFHeadersMsg fails.
+				// This simulates a store corruption or
+				// concurrent modification.
+				if firstCall {
+					firstCall = false
+					bh := hdrs.blockHeaders[1]
+					fh := chainhash.Hash{0xff}
+					bogus := headerfs.FilterHeader{
+						HeaderHash: bh.BlockHash(),
+						FilterHash: fh,
+						Height:     1,
+					}
+					_ = cfStore.WriteHeaders(bogus)
+				}
+
+				requests[i].HandleResp(
+					msgs[i], &resp, "",
+				)
+			}
+			errChan <- nil
+		}()
+
+		return errChan
+	}
+
+	// Drain block notifications so we don't block.
+	go func() {
+		for {
+			select {
+			case <-bm.blockNtfnChan:
+			case <-bm.quit:
+				return
+			}
+		}
+	}()
+
+	// getCheckpointedCFHeaders should return an error from the
+	// writeCFHeadersMsg path rather than panicking.
+	err = bm.getCheckpointedCFHeaders(
+		hdrs.checkpoints, cfStore, wire.GCSFilterRegular,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cfheaders")
 }
