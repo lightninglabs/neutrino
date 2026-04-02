@@ -61,6 +61,18 @@ func (s *StateCurrent) ProcessEvent(_ context.Context, event RescanEvent,
 func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 	env *Environment) (*StateTransition, error) {
 
+	blockHash := event.Header.BlockHash()
+
+	// Duplicate delivery of the block at our current tip can happen when a
+	// previously failed block notification is retried after the block was
+	// already recovered through another path, such as rewind+sync. Treat it
+	// as an idempotent no-op rather than an ordering error.
+	if event.Height == uint32(s.CurStamp.Height) &&
+		blockHash == s.CurStamp.Hash {
+
+		return &StateTransition{NextState: s}, nil
+	}
+
 	// Validate the block connects to our current tip.
 	if event.Header.PrevBlock != s.CurStamp.Hash {
 		return nil, fmt.Errorf("block at height %d has prev hash "+
@@ -68,7 +80,6 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 			event.Header.PrevBlock, s.CurStamp.Hash)
 	}
 
-	blockHash := event.Header.BlockHash()
 	newStamp := headerfs.BlockStamp{
 		Hash:   blockHash,
 		Height: int32(event.Height),
@@ -113,14 +124,16 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 	// this for every block to advance its sync state. This matches
 	// the old notifyBlockWithFilter which calls
 	// OnFilteredBlockConnected for every block.
+	headerCopy := event.Header
 	outbox = append(outbox, FilteredBlockOutbox{
 		Height:      int32(event.Height),
-		Header:      &event.Header,
+		Header:      &headerCopy,
 		RelevantTxs: relevantTxs,
 	})
 
 	// Also emit the simpler block connected notification.
 	outbox = append(outbox, BlockConnectedOutbox{
+		Header:    &headerCopy,
 		Hash:      blockHash,
 		Height:    int32(event.Height),
 		Timestamp: event.Header.Timestamp.Unix(),
@@ -182,8 +195,12 @@ func (s *StateCurrent) handleAddWatch(
 		return nil, err
 	}
 
-	// If a rewind is requested, cancel subscription and rewind.
-	if event.RewindTo != nil {
+	// Only rewind if the requested target is actually below our current
+	// height. A no-op or future rewind target should behave like a plain
+	// watch-list update and keep the current subscription intact.
+	if event.RewindTo != nil &&
+		int32(*event.RewindTo) < s.CurStamp.Height {
+
 		return &StateTransition{
 			NextState: &StateRewinding{
 				CurStamp:     s.CurStamp,

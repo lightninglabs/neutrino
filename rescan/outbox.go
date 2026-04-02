@@ -31,6 +31,9 @@ func (FilteredBlockOutbox) outboxEventSealed() {}
 // BlockConnectedOutbox signals that a block was connected but contained no
 // relevant transactions. The wallet uses this to advance its sync state.
 type BlockConnectedOutbox struct {
+	// Header is the exact block header processed by the FSM.
+	Header *wire.BlockHeader
+
 	// Hash is the block hash.
 	Hash chainhash.Hash
 
