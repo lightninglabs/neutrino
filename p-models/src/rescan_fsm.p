@@ -296,6 +296,13 @@ machine RescanFSM {
 
             header = payload.1;
 
+            // A stale retry of the block already at our current tip can
+            // arrive after that block was recovered through another path,
+            // such as rewind + sync. Treat it as an idempotent no-op.
+            if (payload.0 == cur_height && header.hash == cur_hash) {
+                return;
+            }
+
             // Validate chain link.
             assert header.prev_block == cur_hash,
                 format("Current: block at {0} has prev_block {1} expected {2}", payload.0, header.prev_block, cur_hash);

@@ -1,12 +1,17 @@
-// actor.p - Actor wrapper modeling self-tell interleaving and subscription
-// bridge.
+// actor.p - Actor wrapper modeling mailbox serialization, self-tell
+// interleaving, and the subscription bridge.
 //
-// This machine models the RescanActor from actor.go. Its primary purpose in
-// the P model is to expose the self-tell pattern to P's nondeterministic
-// scheduler: when the FSM emits eSelfTellOutbox, the actor converts it to
-// eActorSelfTell sent to itself. P's mailbox semantics mean this event
-// competes with any pending eActorAddWatchAddrs from external callers,
-// exercising all possible interleavings.
+// This machine models the RescanActor from actor.go after the migration onto
+// the real lnd actor runtime. The important abstraction is unchanged: start,
+// stop, add-watch requests, self-tells, and subscription bridge notifications
+// all flow through one mailbox and are serialized by the actor runtime.
+//
+// Its primary purpose in the P model is to expose the same self-tell pattern
+// to P's nondeterministic scheduler: when the FSM emits eSelfTellOutbox, the
+// actor converts it to eActorSelfTell sent to itself. P's mailbox semantics
+// mean this event competes with any pending eActorAddWatchAddrs from external
+// callers or bridge-delivered block notifications, exercising the same
+// interleavings as the real runtime.
 
 // =============================================================================
 // Actor External Events
@@ -19,6 +24,20 @@ event eActorStop;
 
 // Internal self-tell: dispatched back through the actor's own mailbox.
 event eActorSelfTell;
+
+// Internal mailbox event emitted when the subscription bridge dies
+// unexpectedly and the actor needs to recover by re-subscribing.
+event eActorSubscriptionClosed;
+
+// =============================================================================
+// Actor Callback Dispatch Events (announced for monitors)
+// =============================================================================
+
+// The real actor dispatches both filtered and plain disconnect callbacks for a
+// BlockDisconnectedOutbox. These callback edges are wrapper-level behavior, so
+// we model them explicitly at the actor layer.
+event eFilteredBlockDisconnectedCallback: (Height, BlockHash);
+event eBlockDisconnectedCallback: (Height, BlockHash);
 
 // =============================================================================
 // Actor Observation Events (sent to test observer)
@@ -42,6 +61,7 @@ machine RescanActor {
     var chain: machine;
     var observer: machine;
     var sub_active: bool;
+    var last_known_height: Height;
 
     start state Active {
         entry (init: RescanActorInit) {
@@ -49,6 +69,7 @@ machine RescanActor {
             chain = init.chain;
             observer = init.observer;
             sub_active = false;
+            last_known_height = 0;
         }
 
         // =====================================================================
@@ -67,9 +88,9 @@ machine RescanActor {
         // =====================================================================
         // External API: AddWatchAddrs
         // =====================================================================
-        // In the Go code, AddWatchAddrs spawns a goroutine that calls
-        // sendAndDispatch. Here, the P scheduler naturally interleaves
-        // this with any pending self-tells.
+        // In the real Go code, AddWatchAddrs is an Ask against the actor
+        // mailbox. Here, the P scheduler naturally interleaves it with any
+        // pending self-tells or bridge-delivered notifications.
 
         on eActorAddWatchAddrs do (payload: (set[AddrID], Height)) {
             send fsm, eAddWatchAddrsEvent, payload;
@@ -108,6 +129,8 @@ machine RescanActor {
         }
 
         on eBlockConnectedOutbox do (payload: (Height, BlockHash)) {
+            last_known_height = payload.0;
+
             if (observer != default(machine)) {
                 send observer, eObservedBlockConnected, payload;
             }
@@ -115,6 +138,15 @@ machine RescanActor {
 
         on eBlockDisconnectedOutbox do
             (payload: (Height, BlockHash)) {
+
+            if (payload.0 > 0) {
+                last_known_height = payload.0 - 1;
+            } else {
+                last_known_height = 0;
+            }
+
+            announce eFilteredBlockDisconnectedCallback, payload;
+            announce eBlockDisconnectedCallback, payload;
 
             if (observer != default(machine)) {
                 send observer, eObservedBlockDisconnected, payload;
@@ -141,6 +173,7 @@ machine RescanActor {
 
         on eStartSubscriptionOutbox do (height: Height) {
             sub_active = true;
+            last_known_height = height;
             send chain, eChainSubscribe, (this, height);
 
             if (observer != default(machine)) {
@@ -156,6 +189,14 @@ machine RescanActor {
 
             if (observer != default(machine)) {
                 send observer, eObservedCancelSubscription;
+            }
+        }
+
+        on eActorSubscriptionClosed do {
+            if (sub_active) {
+                sub_active = false;
+                send chain, eChainSubscribe, (this, last_known_height);
+                sub_active = true;
             }
         }
 

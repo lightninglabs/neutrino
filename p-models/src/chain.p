@@ -41,6 +41,15 @@ event eChainFilterMatchResp: (bool, seq[AbstractTx]);
 // block is delivered as a BlockConnectedEvent notification.
 event eChainExtendBlock: BlockContent;
 
+// Disconnects the current tip. If a subscriber is active, the chain delivers a
+// BlockDisconnectedEvent for the old tip and rewinds the tip to the previous
+// block.
+event eChainDisconnectTip;
+
+// Simulates the subscription bridge dying unexpectedly while the chain
+// advances by one block before the actor can recover.
+event eChainCloseSubscriptionAndExtendBlock: BlockContent;
+
 // =============================================================================
 // Subscription Events
 // =============================================================================
@@ -173,6 +182,45 @@ machine MockChain {
             if (sub_active) {
                 send subscriber, eBlockConnectedEvent,
                     (bc.header.height, bc.header);
+            }
+        }
+
+        on eChainDisconnectTip do {
+            var disconnected: BlockContent;
+            var chain_tip: BlockContent;
+
+            assert tip_height > 0,
+                "MockChain: cannot disconnect genesis tip";
+
+            disconnected = blocks_by_height[tip_height];
+            chain_tip = blocks_by_height[tip_height - 1];
+
+            tip_height = chain_tip.header.height;
+            tip_hash = chain_tip.header.hash;
+
+            if (sub_active) {
+                send subscriber, eBlockDisconnectedEvent,
+                    (
+                        disconnected.header.height,
+                        disconnected.header,
+                        chain_tip.header
+                    );
+            }
+        }
+
+        on eChainCloseSubscriptionAndExtendBlock do (bc: BlockContent) {
+            var closed_subscriber: machine;
+
+            closed_subscriber = subscriber;
+            sub_active = false;
+
+            blocks_by_height[bc.header.height] = bc;
+            blocks_by_hash[bc.header.hash] = bc;
+            tip_height = bc.header.height;
+            tip_hash = bc.header.hash;
+
+            if (closed_subscriber != default(machine)) {
+                send closed_subscriber, eActorSubscriptionClosed;
             }
         }
 
