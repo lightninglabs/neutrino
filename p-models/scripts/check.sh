@@ -75,7 +75,9 @@ run_model \
 for testcase in tcBasicSync tcAddWatchRewind tcRewindComplete tcSubLifecycle \
     tcBatchBoundary tcStopInit tcChainExtension tcRewindWithinRewind \
     tcRapidRewindCycles tcSelfTellInterleaving tcSubscriptionNewBlocks \
-    tcConcurrentAddWatch tcRewindToGenesis; do
+    tcConcurrentAddWatch tcRewindToGenesis tcSubscriptionClosureRecovery \
+    tcSubscriptionDisconnectReattach tcStopCurrent tcNoOpRewindCurrent \
+    tcReplayCurrentTipAfterRecovery; do
     run_model "rescan ${testcase}" "${PROJECT_DIR}/rescan.pproj" \
         "RescanFSMModels.dll" "$testcase"
 done
