@@ -38,8 +38,11 @@ done
 echo ""
 echo "=== Running Actor interleaving tests (1000 schedules each) ==="
 
-for tc in tcSelfTellInterleaving tcSubscriptionNewBlocks tcConcurrentAddWatch \
-          tcRewindToGenesis; do
+for tc in tcSelfTellInterleaving tcSubscriptionNewBlocks \
+          tcSubscriptionClosureRecovery tcConcurrentAddWatch \
+          tcSubscriptionDisconnectReattach tcRewindToGenesis \
+          tcStopCurrent tcNoOpRewindCurrent \
+          tcReplayCurrentTipAfterRecovery; do
     echo "  > ${tc}"
     p check "${DLL}" -tc "${tc}" -s 1000 2>&1 | grep -E "Found|Explored"
 done

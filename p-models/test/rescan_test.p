@@ -694,7 +694,287 @@ machine TestSubscriptionNewBlocks {
 }
 
 // =============================================================================
-// Test 9: Concurrent AddWatchAddrs from Multiple Senders
+// Test 9: Disconnect + Reattach Through Subscription Bridge
+// =============================================================================
+
+machine TestSubscriptionDisconnectReattach {
+    var chain_m: MockChain;
+    var fsm_m: RescanFSM;
+    var actor_m: RescanActor;
+    var chain_data: seq[BlockContent];
+    var block_four: BlockContent;
+    var height_four_seen: int;
+    var disconnects_seen: int;
+
+    start state Init {
+        entry {
+            chain_data = BuildLinearChain(3);
+            block_four = (
+                header = (hash = 5, prev_block = 4, height = 4),
+                txs = default(seq[AbstractTx])
+            );
+
+            chain_m = new MockChain((
+                observer = this,
+                blocks = chain_data,
+                tip_height = 3
+            ));
+
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 0,
+                start_hash = 1,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+
+            actor_m = new RescanActor((
+                fsm = fsm_m,
+                chain = chain_m,
+                observer = this
+            ));
+
+            height_four_seen = 0;
+            disconnects_seen = 0;
+
+            send actor_m, eActorStart;
+        }
+
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            send chain_m, eChainExtendBlock, block_four;
+            goto WaitingForFirstAttach;
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+    }
+
+    state WaitingForFirstAttach {
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            if (payload.0 == 4) {
+                height_four_seen = height_four_seen + 1;
+                send chain_m, eChainDisconnectTip;
+                goto WaitingForDisconnect;
+            }
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state WaitingForDisconnect {
+        on eObservedBlockDisconnected do
+            (payload: (Height, BlockHash)) {
+
+            disconnects_seen = disconnects_seen + 1;
+            assert payload.0 == 4,
+                format("expected disconnect at 4, got {0}", payload.0);
+
+            send chain_m, eChainExtendBlock, block_four;
+            goto WaitingForReattach;
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state WaitingForReattach {
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            if (payload.0 == 4) {
+                height_four_seen = height_four_seen + 1;
+
+                assert disconnects_seen == 1,
+                    format("expected 1 disconnect before reattach, got {0}",
+                        disconnects_seen);
+                assert height_four_seen == 2,
+                    format("expected height 4 to be attached twice, got {0}",
+                        height_four_seen);
+                goto Done;
+            }
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state Done {
+        ignore eObservedFilteredBlock, eObservedBlockConnected,
+               eObservedBlockDisconnected, eObservedRescanFinished,
+               eObservedStartSubscription, eObservedCancelSubscription,
+               eObservedSelfTell, eObservedRescanProgress,
+               eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMCancelSubscription, eObsFSMRescanFinished,
+               eObsFSMSelfTell, eBlockConnectedEvent;
+    }
+}
+
+// =============================================================================
+// Test 10: Subscription Closure Recovery
+// =============================================================================
+
+machine TestSubscriptionClosureRecovery {
+    var chain_m: MockChain;
+    var fsm_m: RescanFSM;
+    var actor_m: RescanActor;
+    var chain_data: seq[BlockContent];
+    var block_four: BlockContent;
+
+    start state Init {
+        entry {
+            chain_data = BuildLinearChain(3);
+            block_four = (
+                header = (hash = 5, prev_block = 4, height = 4),
+                txs = default(seq[AbstractTx])
+            );
+
+            chain_m = new MockChain((
+                observer = this,
+                blocks = chain_data,
+                tip_height = 3
+            ));
+
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 0,
+                start_hash = 1,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+
+            actor_m = new RescanActor((
+                fsm = fsm_m,
+                chain = chain_m,
+                observer = this
+            ));
+
+            send actor_m, eActorStart;
+        }
+
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            send chain_m, eChainCloseSubscriptionAndExtendBlock,
+                block_four;
+            goto WaitingForRecovery;
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+    }
+
+    state WaitingForRecovery {
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            assert payload.0 == 4,
+                format("expected recovered backlog block at 4, got {0}",
+                    payload.0);
+            goto Done;
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state Done {
+        ignore eObservedFilteredBlock, eObservedBlockConnected,
+               eObservedBlockDisconnected, eObservedRescanFinished,
+               eObservedStartSubscription, eObservedCancelSubscription,
+               eObservedSelfTell, eObservedRescanProgress,
+               eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMCancelSubscription, eObsFSMRescanFinished,
+               eObsFSMSelfTell, eBlockConnectedEvent;
+    }
+}
+
+// =============================================================================
+// Test 11: Concurrent AddWatchAddrs from Multiple Senders
 // =============================================================================
 // Two external callers send AddWatchAddrs to the actor simultaneously with
 // different rewind targets. Verifies that both addresses end up in the watch
@@ -1301,6 +1581,402 @@ machine TestRapidRewindCycles {
 }
 
 // =============================================================================
+// Test 13: Stop From Current Cancels Subscription
+// =============================================================================
+
+machine TestStopFromCurrent {
+    var chain_m: MockChain;
+    var fsm_m: RescanFSM;
+    var actor_m: RescanActor;
+    var chain_data: seq[BlockContent];
+    var stop_sent: bool;
+
+    start state Init {
+        entry {
+            chain_data = BuildLinearChain(5);
+
+            chain_m = new MockChain((
+                observer = this,
+                blocks = chain_data,
+                tip_height = 5
+            ));
+
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 0,
+                start_hash = 1,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+
+            actor_m = new RescanActor((
+                fsm = fsm_m,
+                chain = chain_m,
+                observer = this
+            ));
+
+            stop_sent = false;
+
+            send actor_m, eActorStart;
+        }
+
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            if (!stop_sent) {
+                stop_sent = true;
+                send actor_m, eActorStop;
+            }
+        }
+
+        on eObservedCancelSubscription do {
+            assert stop_sent,
+                "subscription cancel observed before stop";
+            goto Done;
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+
+        // Also absorb raw FSM observer events (FSM sends to us).
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+    }
+
+    state Done {
+        ignore eObservedFilteredBlock, eObservedBlockConnected,
+               eObservedBlockDisconnected, eObservedRescanFinished,
+               eObservedStartSubscription, eObservedCancelSubscription,
+               eObservedSelfTell, eObservedRescanProgress,
+               eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMCancelSubscription, eObsFSMRescanFinished,
+               eObsFSMSelfTell, eBlockConnectedEvent;
+    }
+}
+
+// =============================================================================
+// Test 14: No-Op Rewind While Current Does Not Restart Subscription
+// =============================================================================
+
+machine TestNoOpRewindCurrent {
+    var chain_m: MockChain;
+    var fsm_m: RescanFSM;
+    var actor_m: RescanActor;
+    var chain_data: seq[BlockContent];
+    var update_sent: bool;
+
+    start state Init {
+        entry {
+            chain_data = BuildLinearChain(3);
+
+            chain_m = new MockChain((
+                observer = this,
+                blocks = chain_data,
+                tip_height = 3
+            ));
+
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 0,
+                start_hash = 1,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+
+            actor_m = new RescanActor((
+                fsm = fsm_m,
+                chain = chain_m,
+                observer = this
+            ));
+
+            update_sent = false;
+
+            send actor_m, eActorStart;
+        }
+
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            var addr_set: set[AddrID];
+            var new_block: BlockContent;
+            var header: BlockHeader;
+
+            if (!update_sent) {
+                update_sent = true;
+
+                // Rewind target equals current height, so this should
+                // behave like a plain watch-list update.
+                addr_set = default(set[AddrID]);
+                addr_set += (55);
+                send actor_m, eActorAddWatchAddrs, (addr_set, 3);
+
+                // Extend the chain. If the subscription remained
+                // active, the actor should process this block without
+                // any cancel/restart cycle.
+                header = (hash = 5, prev_block = 4, height = 4);
+                new_block = (
+                    header = header,
+                    txs = default(seq[AbstractTx])
+                );
+                send chain_m, eChainExtendBlock, new_block;
+
+                goto WaitingForBlock;
+            }
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedSelfTell do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+    }
+
+    state WaitingForBlock {
+        on eObservedCancelSubscription do {
+            assert false,
+                "no-op rewind while current must not cancel subscription";
+        }
+
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            assert payload.0 == 4,
+                format("expected next block at 4, got {0}",
+                    payload.0);
+            goto Done;
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedRescanFinished do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObservedBlockDisconnected do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state Done {
+        ignore eObservedFilteredBlock, eObservedBlockConnected,
+               eObservedBlockDisconnected, eObservedRescanFinished,
+               eObservedStartSubscription, eObservedCancelSubscription,
+               eObservedSelfTell, eObservedRescanProgress,
+               eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMCancelSubscription, eObsFSMRescanFinished,
+               eObsFSMSelfTell, eBlockConnectedEvent;
+    }
+}
+
+// =============================================================================
+// Test 15: Replayed Current-Tip Block Is Ignored
+// =============================================================================
+
+machine TestReplayCurrentTipAfterRecovery {
+    var chain_m: MockChain;
+    var fsm_m: RescanFSM;
+    var actor_m: RescanActor;
+    var chain_data: seq[BlockContent];
+    var first_finished: bool;
+    var replay_sent: bool;
+    var block_four: BlockContent;
+
+    start state Init {
+        entry {
+            chain_data = BuildLinearChain(3);
+            block_four = (
+                header = (hash = 5, prev_block = 4, height = 4),
+                txs = default(seq[AbstractTx])
+            );
+
+            chain_m = new MockChain((
+                observer = this,
+                blocks = chain_data,
+                tip_height = 3
+            ));
+
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 0,
+                start_hash = 1,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+
+            actor_m = new RescanActor((
+                fsm = fsm_m,
+                chain = chain_m,
+                observer = this
+            ));
+
+            first_finished = false;
+            replay_sent = false;
+
+            send actor_m, eActorStart;
+        }
+
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            if (!first_finished) {
+                first_finished = true;
+                send chain_m, eChainExtendBlock, block_four;
+                goto WaitingForInitialTipAdvance;
+            }
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+    }
+
+    state WaitingForInitialTipAdvance {
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            var addr_set: set[AddrID];
+
+            if (payload.0 == 4) {
+                addr_set = default(set[AddrID]);
+                addr_set += (77);
+                send actor_m, eActorAddWatchAddrs, (addr_set, 2);
+                goto WaitingForRecoveredCurrent;
+            }
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state WaitingForRecoveredCurrent {
+        on eObservedRescanFinished do
+            (payload: (Height, BlockHash)) {
+
+            var block_five: BlockContent;
+
+            if (!replay_sent && payload.0 == 4) {
+                replay_sent = true;
+
+                // Model a stale retry re-delivering the block that is
+                // already our current tip. The actor receives the replay
+                // through the same bridge edge used by chain notifications.
+                send actor_m, eBlockConnectedEvent,
+                    (block_four.header.height, block_four.header);
+
+                block_five = (
+                    header = (hash = 6, prev_block = 5, height = 5),
+                    txs = default(seq[AbstractTx])
+                );
+                send chain_m, eChainExtendBlock, block_five;
+
+                goto WaitingForNextBlock;
+            }
+        }
+
+        on eObservedFilteredBlock do { }
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state WaitingForNextBlock {
+        on eObservedFilteredBlock do
+            (payload: (Height, seq[AbstractTx])) {
+
+            assert payload.0 == 5,
+                format("expected next forward block at 5, got {0}",
+                    payload.0);
+            goto Done;
+        }
+
+        on eObservedBlockConnected do { }
+        on eObservedBlockDisconnected do { }
+        on eObservedRescanFinished do { }
+        on eObservedStartSubscription do { }
+        on eObservedCancelSubscription do { }
+        on eObservedSelfTell do { }
+        on eObservedRescanProgress do { }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMBlockDisconnected do { }
+        on eObsFSMStartSubscription do { }
+        on eObsFSMCancelSubscription do { }
+        on eObsFSMRescanFinished do { }
+        on eObsFSMSelfTell do { }
+        on eBlockConnectedEvent do { }
+    }
+
+    state Done {
+        ignore eObservedFilteredBlock, eObservedBlockConnected,
+               eObservedBlockDisconnected, eObservedRescanFinished,
+               eObservedStartSubscription, eObservedCancelSubscription,
+               eObservedSelfTell, eObservedRescanProgress,
+               eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMCancelSubscription, eObsFSMRescanFinished,
+               eObsFSMSelfTell, eBlockConnectedEvent;
+    }
+}
+
+// =============================================================================
 // Test Declarations
 // =============================================================================
 
@@ -1335,17 +2011,33 @@ test tcStopInit [main=TestStopFromInitializing]:
 
 test tcSelfTellInterleaving [main=TestSelfTellInterleaving]:
     assert NoMissedTransaction, MonotonicProgress, SubscriptionLifecycle,
-           FSMStateTransitionValidity
+           DisconnectCallbackPairing, FSMStateTransitionValidity
     in { MockChain, RescanFSM, RescanActor, TestSelfTellInterleaving };
 
 test tcSubscriptionNewBlocks [main=TestSubscriptionNewBlocks]:
     assert MonotonicProgress, SubscriptionLifecycle,
-           FilteredBlockForEveryBlock, FSMStateTransitionValidity
+           FilteredBlockForEveryBlock, DisconnectCallbackPairing,
+           FSMStateTransitionValidity
     in { MockChain, RescanFSM, RescanActor, TestSubscriptionNewBlocks };
+
+test tcSubscriptionClosureRecovery
+    [main=TestSubscriptionClosureRecovery]:
+    assert MonotonicProgress, FilteredBlockForEveryBlock,
+           DisconnectCallbackPairing, FSMStateTransitionValidity
+    in { MockChain, RescanFSM, RescanActor, TestSubscriptionClosureRecovery };
+
+test tcSubscriptionDisconnectReattach
+    [main=TestSubscriptionDisconnectReattach]:
+    assert MonotonicProgress, SubscriptionLifecycle,
+           FilteredBlockForEveryBlock, DisconnectCallbackPairing,
+           FSMStateTransitionValidity
+    in { MockChain, RescanFSM, RescanActor,
+         TestSubscriptionDisconnectReattach };
 
 test tcConcurrentAddWatch [main=TestConcurrentAddWatch]:
     assert NoMissedTransaction, MonotonicProgress, RewindCompleteness,
-           SubscriptionLifecycle, FSMStateTransitionValidity
+           SubscriptionLifecycle, DisconnectCallbackPairing,
+           FSMStateTransitionValidity
     in { MockChain, RescanFSM, RescanActor, TestConcurrentAddWatch };
 
 test tcChainExtension [main=TestChainExtensionDuringSync]:
@@ -1360,10 +2052,26 @@ test tcRewindWithinRewind [main=TestRewindWithinRewind]:
 
 test tcRewindToGenesis [main=TestRewindToGenesis]:
     assert NoMissedTransaction, MonotonicProgress, RewindCompleteness,
-           SubscriptionLifecycle, FSMStateTransitionValidity
+           SubscriptionLifecycle, DisconnectCallbackPairing,
+           FSMStateTransitionValidity
     in { MockChain, RescanFSM, RescanActor, TestRewindToGenesis };
 
 test tcRapidRewindCycles [main=TestRapidRewindCycles]:
     assert NoMissedTransaction, MonotonicProgress, RewindCompleteness,
            SubscriptionLifecycle, FSMStateTransitionValidity
     in { MockChain, RescanFSM, TestRapidRewindCycles };
+
+test tcStopCurrent [main=TestStopFromCurrent]:
+    assert SubscriptionLifecycle, DisconnectCallbackPairing,
+           FSMStateTransitionValidity
+    in { MockChain, RescanFSM, RescanActor, TestStopFromCurrent };
+
+test tcNoOpRewindCurrent [main=TestNoOpRewindCurrent]:
+    assert MonotonicProgress, SubscriptionLifecycle,
+           DisconnectCallbackPairing, FSMStateTransitionValidity
+    in { MockChain, RescanFSM, RescanActor, TestNoOpRewindCurrent };
+
+test tcReplayCurrentTipAfterRecovery [main=TestReplayCurrentTipAfterRecovery]:
+    assert MonotonicProgress, SubscriptionLifecycle,
+           DisconnectCallbackPairing, FSMStateTransitionValidity
+    in { MockChain, RescanFSM, RescanActor, TestReplayCurrentTipAfterRecovery };
