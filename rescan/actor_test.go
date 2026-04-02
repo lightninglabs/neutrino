@@ -15,6 +15,91 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type invalidTestAddress struct{}
+
+func (invalidTestAddress) String() string { return "invalid-test-address" }
+
+func (invalidTestAddress) EncodeAddress() string {
+	return "invalid-test-address"
+}
+
+func (invalidTestAddress) ScriptAddress() []byte { return nil }
+
+func (invalidTestAddress) IsForNet(*chaincfg.Params) bool { return true }
+
+func newActorReceiveHarness(t *testing.T) *RescanActor {
+	t.Helper()
+
+	chain := newMockChain(3)
+	genesisHash := chain.ChainParams().GenesisHash
+	genesisHeader := &chain.ChainParams().GenesisBlock.Header
+
+	actor := NewRescanActor(ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash:   *genesisHash,
+			Height: 0,
+		},
+		StartHeader: *genesisHeader,
+		StartTime:   time.Time{},
+		BatchSize:   100,
+	})
+
+	actor.fsm.Start()
+	t.Cleanup(func() {
+		actor.cancel()
+		actor.fsm.Stop()
+	})
+
+	return actor
+}
+
+// TestRescanActorReceiveProcessNextBlock exercises the actor behavior directly,
+// independent of the runtime mailbox, to verify message-to-FSM translation.
+func TestRescanActorReceiveProcessNextBlock(t *testing.T) {
+	actor := newActorReceiveHarness(t)
+
+	result := actor.Receive(t.Context(), &processNextBlockMsg{})
+	require.True(t, result.IsOk())
+
+	stateResult := actor.Receive(t.Context(), &currentStateReq{})
+	require.True(t, stateResult.IsOk())
+
+	resp, ok := stateResult.UnwrapOr(nil).(*currentStateResp)
+	require.True(t, ok)
+	_, ok = resp.State.(*StateSyncing)
+	require.True(t, ok, "expected StateSyncing, got %T", resp.State)
+}
+
+// TestRescanActorReceiveAddWatchAddrs exercises the actor behavior directly to
+// verify the typed actor message updates FSM state as expected.
+func TestRescanActorReceiveAddWatchAddrs(t *testing.T) {
+	actor := newActorReceiveHarness(t)
+
+	addr, err := btcutil.NewAddressPubKeyHash(
+		chainhash.HashB([]byte("receive-test"))[:20],
+		&chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	result := actor.Receive(
+		t.Context(), newAddWatchAddrsMsg(
+			[]btcutil.Address{addr}, nil, nil,
+		),
+	)
+	require.True(t, result.IsOk())
+
+	stateResult := actor.Receive(t.Context(), &currentStateReq{})
+	require.True(t, stateResult.IsOk())
+
+	resp, ok := stateResult.UnwrapOr(nil).(*currentStateResp)
+	require.True(t, ok)
+
+	state, ok := resp.State.(*StateInitializing)
+	require.True(t, ok, "expected StateInitializing, got %T", resp.State)
+	require.Len(t, state.Watch.Addrs, 1)
+}
+
 // TestRescanActorLifecycle tests the full actor lifecycle: create, start,
 // sync, and stop.
 func TestRescanActorLifecycle(t *testing.T) {
@@ -129,6 +214,37 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 
 	actor.Stop()
 	actor.WaitForShutdown()
+}
+
+// TestRescanActorAddWatchAddrsPropagatesError verifies that mailbox-backed
+// AddWatchAddrs requests surface FSM errors to the caller.
+func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
+	chain := newMockChain(1)
+
+	genesisHash := chain.ChainParams().GenesisHash
+	genesisHeader := &chain.ChainParams().GenesisBlock.Header
+
+	actor := NewRescanActor(ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash:   *genesisHash,
+			Height: 0,
+		},
+		StartHeader: *genesisHeader,
+		StartTime:   time.Time{},
+		BatchSize:   100,
+	})
+
+	actor.Start()
+	t.Cleanup(func() {
+		actor.Stop()
+		actor.WaitForShutdown()
+	})
+
+	err := actor.AddWatchAddrs(
+		[]btcutil.Address{invalidTestAddress{}}, nil, nil,
+	)
+	require.Error(t, err)
 }
 
 // TestRescanActorWithTxMatch tests that the actor correctly reports
