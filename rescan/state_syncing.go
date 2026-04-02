@@ -176,14 +176,16 @@ func (s *StateSyncing) processNextBatch(
 		// Always emit filtered block connected for the wallet
 		// to advance its sync state. This matches the old
 		// notifyBlockWithFilter behavior.
+		headerCopy := *header
 		outbox = append(outbox, FilteredBlockOutbox{
 			Height:      int32(nextHeight),
-			Header:      header,
+			Header:      &headerCopy,
 			RelevantTxs: relevantTxs,
 		})
 
 		// Also emit the simpler block connected notification.
 		outbox = append(outbox, BlockConnectedOutbox{
+			Header:    &headerCopy,
 			Hash:      blockHash,
 			Height:    int32(nextHeight),
 			Timestamp: header.Timestamp.Unix(),
