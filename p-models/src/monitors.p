@@ -86,11 +86,12 @@ spec NoMissedTransaction observes
 // Monitor 2: MonotonicProgress
 // =============================================================================
 // During forward sync (Syncing and Current states), FilteredBlockOutbox
-// heights must be monotonically increasing. The monitor resets when
-// transitioning out of Rewinding.
+// heights must be monotonically increasing. The monitor resets when the
+// forward-progress window is rewound, either by an explicit rewind transition
+// or by a disconnected block in Current.
 
 spec MonotonicProgress observes
-    eFilteredBlockOutbox, eFSMStateChange
+    eFilteredBlockOutbox, eBlockDisconnectedOutbox, eFSMStateChange
 {
     var last_forward_height: Height;
     var in_rewind: bool;
@@ -122,6 +123,15 @@ spec MonotonicProgress observes
                     format("MonotonicProgress violated: height {0} <= prev {1}", payload.0, last_forward_height);
                 last_forward_height = payload.0;
             }
+        }
+
+        on eBlockDisconnectedOutbox do
+            (payload: (Height, BlockHash)) {
+
+            // A disconnect rewinds the forward-progress window even if we
+            // remain in Current. The next connected block may legitimately
+            // re-use the same height after the reorg is processed.
+            last_forward_height = -1;
         }
     }
 }
@@ -333,6 +343,50 @@ spec FSMStateTransitionValidity observes eFSMStateChange {
                     payload.0, payload.1);
 
             current_state = payload.1;
+        }
+    }
+}
+
+// =============================================================================
+// Monitor 8: DisconnectCallbackPairing
+// =============================================================================
+// The actor wrapper must dispatch both disconnect callbacks for the same block
+// and in the same order as the Go implementation:
+//   1. filtered disconnect callback
+//   2. plain block disconnect callback
+
+spec DisconnectCallbackPairing observes
+    eFilteredBlockDisconnectedCallback, eBlockDisconnectedCallback
+{
+    var filtered_pending: bool;
+    var pending_height: Height;
+    var pending_hash: BlockHash;
+
+    start state Monitoring {
+        entry {
+            filtered_pending = false;
+        }
+
+        on eFilteredBlockDisconnectedCallback do
+            (payload: (Height, BlockHash)) {
+
+            assert !filtered_pending,
+                format("DisconnectCallbackPairing: filtered disconnect for {0} arrived before prior pair completed", payload.0);
+
+            filtered_pending = true;
+            pending_height = payload.0;
+            pending_hash = payload.1;
+        }
+
+        on eBlockDisconnectedCallback do
+            (payload: (Height, BlockHash)) {
+
+            assert filtered_pending,
+                format("DisconnectCallbackPairing: block disconnect for {0} without prior filtered disconnect", payload.0);
+            assert payload.0 == pending_height && payload.1 == pending_hash,
+                format("DisconnectCallbackPairing: filtered disconnect ({0}, {1}) paired with block disconnect ({2}, {3})", pending_height, pending_hash, payload.0, payload.1);
+
+            filtered_pending = false;
         }
     }
 }
