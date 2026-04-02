@@ -1,0 +1,11 @@
+# 2026/04/01 17:16:12.344729 [TestPropertySyncNeverMissesTx] [rapid] draw numEmpty: 1
+# 2026/04/01 17:16:12.344741 [TestPropertySyncNeverMissesTx] [rapid] draw batchSize: 3
+# 2026/04/01 17:16:12.344825 [TestPropertySyncNeverMissesTx] INVARIANT VIOLATED: transaction paying watched address was not reported via FilteredBlockOutbox
+# 
+v0.4.8#17748098857739070588
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
