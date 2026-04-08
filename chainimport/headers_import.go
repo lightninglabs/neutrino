@@ -19,6 +19,8 @@ const (
 	defaultWriteBatchSizePerRegion = 16384
 )
 
+var defaultHTTPClient = newHTTPClient()
+
 // processingRegions contains regions to process. The divergence and new headers
 // regions are detected and processed.
 type processingRegions struct {
@@ -1124,6 +1126,12 @@ type ImportOptions struct {
 	// ValidationFlags specifies the behavior flags used during header
 	// validation. It defaults to BFNone.
 	ValidationFlags blockchain.BehaviorFlags
+
+	// HttpClient is an optional HTTP client to use for downloading headers
+	// from HTTP(s) sources. When set, this client is used instead of the
+	// default http.Client. This allows consumers to inject a
+	// proxy-configured client (e.g., SOCKS5 for Tor).
+	HttpClient HttpClient
 }
 
 // validate checks that all required fields in import options are properly set
@@ -1148,8 +1156,9 @@ func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
 		// The empty string ("") URI passed will be replaced by the
 		// temporary file name once the file has been downloaded from
 		// the HTTP source.
+		httpClient := options.httpClient()
 		return newHTTPHeaderImportSource(
-			options.BlockHeadersSource, newHTTPClient(),
+			options.BlockHeadersSource, httpClient,
 			newFileHeaderImportSource("", newBlockHeader),
 		)
 	}
@@ -1165,8 +1174,9 @@ func (options *ImportOptions) createBlockHeaderImportSrc() HeaderImportSource {
 func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
 	// Check if the filter headers source is a HTTP(s) URI.
 	if strings.HasPrefix(options.FilterHeadersSource, "http") {
+		httpClient := options.httpClient()
 		return newHTTPHeaderImportSource(
-			options.FilterHeadersSource, newHTTPClient(),
+			options.FilterHeadersSource, httpClient,
 			newFileHeaderImportSource("", newFilterHeader),
 		)
 	}
@@ -1192,6 +1202,15 @@ func (options *ImportOptions) createBlockHeaderValidator(
 // headers.
 func (options *ImportOptions) createFilterHeaderValidator() HeadersValidator {
 	return newFilterHeadersImportSourceValidator(options.TargetChainParams)
+}
+
+// httpClient returns the configured HttpClient or falls back to a shared
+// default one.
+func (options *ImportOptions) httpClient() HttpClient {
+	if options.HttpClient != nil {
+		return options.HttpClient
+	}
+	return defaultHTTPClient
 }
 
 // ImportResult contains statistics about a header import operation.

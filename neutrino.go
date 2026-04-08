@@ -661,6 +661,12 @@ type HeadersImportConfig struct {
 	// ValidationFlags specifies the behavior flags used during header
 	// validation. It defaults to BFNone.
 	ValidationFlags blockchain.BehaviorFlags
+
+	// HttpClient is an optional HTTP client for downloading headers from
+	// HTTP(s) sources. When set, this client is used instead of the
+	// default http.Client. This allows consumers to inject a
+	// proxy-configured client (e.g., SOCKS5 for Tor).
+	HttpClient chainimport.HttpClient
 }
 
 // peerSubscription holds a peer subscription which we'll notify about any
@@ -1672,6 +1678,7 @@ func (s *ChainService) Start(ctx context.Context) error {
 			TargetFilterHeaderStore: s.RegFilterHeaders,
 			ValidationFlags:         s.headersImport.ValidationFlags,
 			WriteBatchSizePerRegion: s.headersImport.WriteBatchSizePerRegion,
+			HttpClient:              s.headersImport.HttpClient,
 		}
 		importer, err := chainimport.NewHeadersImport(&options)
 		if err != nil {
