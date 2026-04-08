@@ -87,3 +87,56 @@ func TestParseIPNet(t *testing.T) {
 		}
 	}
 }
+
+func TestParseIPNetOnionV3(t *testing.T) {
+	t.Parallel()
+
+	host := "yov4edh4vgbgywplxuxv4esroksz2brb64fdtjbryc5wbo43wtlbsiad.onion"
+
+	ipNet, err := ParseIPNet(
+		net.JoinHostPort(host, "38333"), nil,
+	)
+	if err != nil {
+		t.Fatalf("unable to parse onion v3 address: %v", err)
+	}
+
+	if ipNet == nil || ipNet.IP == nil || ipNet.IP.To16() == nil {
+		t.Fatalf("expected ipv6 network for onion v3, got: %#v", ipNet)
+	}
+
+	if !reflect.DeepEqual(ipNet.Mask, defaultIPv6Mask) {
+		t.Fatalf("expected mask %#v, got %#v",
+			defaultIPv6Mask, ipNet.Mask)
+	}
+}
+
+func TestParseIPNetOnionStableAcrossPortVariants(t *testing.T) {
+	t.Parallel()
+
+	host := "yov4edh4vgbgywplxuxv4esroksz2brb64fdtjbryc5wbo43wtlbsiad.onion"
+
+	withPort, err := ParseIPNet(net.JoinHostPort(host, "38333"), nil)
+	if err != nil {
+		t.Fatalf("unable to parse onion host with port: %v", err)
+	}
+
+	withoutPort, err := ParseIPNet(host, nil)
+	if err != nil {
+		t.Fatalf("unable to parse onion host without port: %v", err)
+	}
+
+	if withPort.String() != withoutPort.String() {
+		t.Fatalf("expected stable onion mapping: "+
+			"withPort=%s withoutPort=%s",
+			withPort.String(), withoutPort.String())
+	}
+}
+
+func TestParseIPNetRejectsInvalidOnion(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseIPNet("invalid.onion:8333", nil)
+	if err == nil {
+		t.Fatal("expected invalid onion hostname to fail")
+	}
+}
