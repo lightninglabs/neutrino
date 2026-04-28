@@ -63,6 +63,8 @@ type Store interface {
 	// the given duration. A reason can also be provided to note why the IP
 	// network is being banned. The record will exist until a call to Status
 	// is made after the ban expiration.
+	//
+	// Deprecated: use BanKey.
 	BanIPNet(*net.IPNet, Reason, time.Duration) error
 
 	// BanKey creates a ban record for a typed ban key within the store for
@@ -70,12 +72,16 @@ type Store interface {
 	BanKey(*Key, Reason, time.Duration) error
 
 	// Status returns the ban status for a given IP network.
+	//
+	// Deprecated: use StatusKey.
 	Status(*net.IPNet) (Status, error)
 
 	// StatusKey returns the ban status for a given typed ban key.
 	StatusKey(*Key) (Status, error)
 
 	// UnbanIPNet removes the ban imposed on the specified peer.
+	//
+	// Deprecated: use UnbanKey.
 	UnbanIPNet(ipNet *net.IPNet) error
 
 	// UnbanKey removes the ban imposed on the specified typed ban key.
