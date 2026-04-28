@@ -54,6 +54,18 @@ func encodeKey(w io.Writer, key *Key) error {
 
 		return encodeIPNet(w, ipNet)
 
+	case NetworkTorV3:
+		if len(key.Addr) != torV3KeySize || len(key.Mask) != 0 {
+			return ErrUnsupportedIP
+		}
+
+		if _, err := w.Write([]byte{byte(key.Net)}); err != nil {
+			return err
+		}
+
+		_, err := w.Write(key.Addr)
+		return err
+
 	default:
 		return ErrUnsupportedIP
 	}
@@ -109,6 +121,17 @@ func decodeKey(r io.Reader) (*Key, error) {
 		}
 
 		return keyFromIPNet(ipNet)
+
+	case NetworkTorV3:
+		key := &Key{
+			Net:  NetworkTorV3,
+			Addr: make([]byte, torV3KeySize),
+		}
+		if _, err := io.ReadFull(r, key.Addr); err != nil {
+			return nil, err
+		}
+
+		return key, nil
 
 	default:
 		return nil, ErrUnsupportedIP

@@ -56,8 +56,8 @@ type Status struct {
 
 // Store is the store responsible for maintaining records of banned peer
 // identities. IP callers can continue to use IP networks to coalesce multiple
-// addresses that are likely to be correlated, while typed keys provide an
-// extensible on-disk representation.
+// addresses that are likely to be correlated, while overlay networks use typed
+// keys.
 type Store interface {
 	// BanIPNet creates a ban record for the IP network within the store for
 	// the given duration. A reason can also be provided to note why the IP

@@ -201,6 +201,13 @@ func TestKeySerialization(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "torv3",
+			key: &Key{
+				Net:  NetworkTorV3,
+				Addr: testTorV3PubKey,
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -217,4 +224,22 @@ func TestKeySerialization(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestTorV3KeyEncodingBytes ensures that Tor v3 keys retain their expected
+// on-disk encoding.
+func TestTorV3KeyEncodingBytes(t *testing.T) {
+	t.Parallel()
+
+	key := &Key{
+		Net:  NetworkTorV3,
+		Addr: testTorV3PubKey,
+	}
+
+	expected := append([]byte{0x02}, testTorV3PubKey...)
+
+	var b bytes.Buffer
+	err := encodeKey(&b, key)
+	require.NoError(t, err)
+	require.Equal(t, expected, b.Bytes())
 }

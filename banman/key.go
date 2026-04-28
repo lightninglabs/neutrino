@@ -17,6 +17,9 @@ const (
 
 	// NetworkIPv6 represents an IPv6 address and mask.
 	NetworkIPv6 Network = 1
+
+	// NetworkTorV3 represents a Tor v3 pubkey without a mask.
+	NetworkTorV3 Network = 2
 )
 
 // String returns the human-readable name of a network.
@@ -28,12 +31,15 @@ func (n Network) String() string {
 	case NetworkIPv6:
 		return "ipv6"
 
+	case NetworkTorV3:
+		return "torv3"
+
 	default:
 		return fmt.Sprintf("network(%d)", n)
 	}
 }
 
-// Key identifies a banned peer address.
+// Key identifies a banned peer address or overlay network identity.
 type Key struct {
 	// Net describes which address family is used by the key.
 	Net Network
