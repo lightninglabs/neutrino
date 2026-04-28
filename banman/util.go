@@ -22,12 +22,7 @@ var (
 //
 // NOTE: This assumes that the address has already been resolved.
 func ParseIPNet(addr string, mask net.IPMask) (*net.IPNet, error) {
-	// If the address includes a port, we'll remove it.
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Address doesn't include a port.
-		host = addr
-	}
+	host := parseHost(addr)
 
 	// Parse the IP from the host to ensure it is supported.
 	ip := net.ParseIP(host)
@@ -45,4 +40,20 @@ func ParseIPNet(addr string, mask net.IPMask) (*net.IPNet, error) {
 	}
 
 	return &net.IPNet{IP: ip.Mask(mask), Mask: mask}, nil
+}
+
+// parseHost extracts the host from an address, ignoring the port when present.
+// It also strips IPv6 brackets so bracketed hosts behave the same with and
+// without an explicit port.
+func parseHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+
+	return host
 }

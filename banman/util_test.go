@@ -4,6 +4,8 @@ import (
 	"net"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestParseIPNet ensures that we can parse different combinations of
@@ -86,4 +88,22 @@ func TestParseIPNet(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestParseIPNetBracketedIPv6WithoutPort ensures bracketed IPv6 addresses are
+// parsed consistently with and without an explicit port.
+func TestParseIPNetBracketedIPv6WithoutPort(t *testing.T) {
+	t.Parallel()
+
+	addrWithoutPort := "[2001:db8:a0b:12f0::1]"
+	addrWithPort := "[2001:db8:a0b:12f0::1]:8333"
+
+	ipNetWithoutPort, err := ParseIPNet(addrWithoutPort, nil)
+	require.NoError(t, err)
+
+	ipNetWithPort, err := ParseIPNet(addrWithPort, nil)
+	require.NoError(t, err)
+
+	require.True(t, ipNetWithoutPort.IP.Equal(ipNetWithPort.IP))
+	require.Equal(t, ipNetWithPort.Mask, ipNetWithoutPort.Mask)
 }
