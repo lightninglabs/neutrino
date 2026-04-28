@@ -5,40 +5,28 @@ import (
 	"net"
 )
 
-// ipType represents the different types of IP addresses supported by the
-// BanStore interface.
-type ipType = byte
-
-const (
-	// ipv4 represents an IP address of type IPv4.
-	ipv4 ipType = 0
-
-	// ipv6 represents an IP address of type IPv6.
-	ipv6 ipType = 1
-)
-
 // encodeIPNet serializes the IP network into the given reader.
 func encodeIPNet(w io.Writer, ipNet *net.IPNet) error {
-	// Determine the appropriate IP type for the IP address contained in the
+	// Determine the appropriate network for the IP address contained in the
 	// network.
 	var (
-		ip     []byte
-		ipType ipType
+		ip      []byte
+		network Network
 	)
 	switch {
 	case ipNet.IP.To4() != nil:
 		ip = ipNet.IP.To4()
-		ipType = ipv4
+		network = NetworkIPv4
 	case ipNet.IP.To16() != nil:
 		ip = ipNet.IP.To16()
-		ipType = ipv6
+		network = NetworkIPv6
 	default:
 		return ErrUnsupportedIP
 	}
 
-	// Write the IP type first in order to properly identify it when
+	// Write the network first in order to properly identify it when
 	// deserializing it, followed by the IP itself and its mask.
-	if _, err := w.Write([]byte{ipType}); err != nil {
+	if _, err := w.Write([]byte{byte(network)}); err != nil {
 		return err
 	}
 	if _, err := w.Write(ip); err != nil {
@@ -51,33 +39,78 @@ func encodeIPNet(w io.Writer, ipNet *net.IPNet) error {
 	return nil
 }
 
+// encodeKey serializes a ban key into the given writer.
+func encodeKey(w io.Writer, key *Key) error {
+	if key == nil {
+		return ErrUnsupportedIP
+	}
+
+	switch key.Net {
+	case NetworkIPv4, NetworkIPv6:
+		ipNet, err := keyToIPNet(key)
+		if err != nil {
+			return err
+		}
+
+		return encodeIPNet(w, ipNet)
+
+	default:
+		return ErrUnsupportedIP
+	}
+}
+
 // decodeIPNet deserialized an IP network from the given reader.
 func decodeIPNet(r io.Reader) (*net.IPNet, error) {
-	// Read the IP address type and determine whether it is supported.
-	var ipType [1]byte
-	if _, err := r.Read(ipType[:]); err != nil {
+	var network [1]byte
+	if _, err := io.ReadFull(r, network[:]); err != nil {
 		return nil, err
 	}
 
+	return decodeIPNetWithNetwork(r, Network(network[0]))
+}
+
+// decodeIPNetWithNetwork deserializes an IP network after its family byte has
+// already been read.
+func decodeIPNetWithNetwork(r io.Reader, network Network) (*net.IPNet, error) {
 	var ipLen int
-	switch ipType[0] {
-	case ipv4:
+	switch network {
+	case NetworkIPv4:
 		ipLen = net.IPv4len
-	case ipv6:
+	case NetworkIPv6:
 		ipLen = net.IPv6len
 	default:
 		return nil, ErrUnsupportedIP
 	}
 
-	// Once we have the type and its corresponding length, attempt to read
-	// it and its mask.
 	ip := make([]byte, ipLen)
-	if _, err := r.Read(ip); err != nil {
+	if _, err := io.ReadFull(r, ip); err != nil {
 		return nil, err
 	}
 	mask := make([]byte, ipLen)
-	if _, err := r.Read(mask); err != nil {
+	if _, err := io.ReadFull(r, mask); err != nil {
 		return nil, err
 	}
+
 	return &net.IPNet{IP: ip, Mask: mask}, nil
+}
+
+// decodeKey deserializes a ban key from the given reader.
+func decodeKey(r io.Reader) (*Key, error) {
+	var network [1]byte
+	if _, err := io.ReadFull(r, network[:]); err != nil {
+		return nil, err
+	}
+
+	switch Network(network[0]) {
+	case NetworkIPv4, NetworkIPv6:
+		ipNet, err := decodeIPNetWithNetwork(r, Network(network[0]))
+		if err != nil {
+			return nil, err
+		}
+
+		return keyFromIPNet(ipNet)
+
+	default:
+		return nil, ErrUnsupportedIP
+	}
 }

@@ -1,6 +1,7 @@
 package banman
 
 import (
+	"bytes"
 	"net"
 )
 
@@ -22,24 +23,12 @@ var (
 //
 // NOTE: This assumes that the address has already been resolved.
 func ParseIPNet(addr string, mask net.IPMask) (*net.IPNet, error) {
-	host := parseHost(addr)
-
-	// Parse the IP from the host to ensure it is supported.
-	ip := net.ParseIP(host)
-	switch {
-	case ip.To4() != nil:
-		if mask == nil {
-			mask = defaultIPv4Mask
-		}
-	case ip.To16() != nil:
-		if mask == nil {
-			mask = defaultIPv6Mask
-		}
-	default:
-		return nil, ErrUnsupportedIP
+	key, err := parseIPKey(parseHost(addr), mask)
+	if err != nil {
+		return nil, err
 	}
 
-	return &net.IPNet{IP: ip.Mask(mask), Mask: mask}, nil
+	return keyToIPNet(key)
 }
 
 // parseHost extracts the host from an address, ignoring the port when present.
@@ -56,4 +45,47 @@ func parseHost(addr string) string {
 	}
 
 	return host
+}
+
+// parseIPKey parses an IPv4 or IPv6 host into a typed ban key.
+func parseIPKey(host string, mask net.IPMask) (*Key, error) {
+	ip := net.ParseIP(host)
+	switch {
+	case ip.To4() != nil:
+		ip = ip.To4()
+		if mask == nil {
+			mask = defaultIPv4Mask
+		}
+
+		maskedIP := ip.Mask(mask)
+		if maskedIP == nil {
+			return nil, ErrUnsupportedIP
+		}
+
+		return &Key{
+			Net:  NetworkIPv4,
+			Addr: bytes.Clone(maskedIP),
+			Mask: bytes.Clone([]byte(mask)),
+		}, nil
+
+	case ip.To16() != nil:
+		ip = ip.To16()
+		if mask == nil {
+			mask = defaultIPv6Mask
+		}
+
+		maskedIP := ip.Mask(mask)
+		if maskedIP == nil {
+			return nil, ErrUnsupportedIP
+		}
+
+		return &Key{
+			Net:  NetworkIPv6,
+			Addr: bytes.Clone(maskedIP),
+			Mask: bytes.Clone([]byte(mask)),
+		}, nil
+
+	default:
+		return nil, ErrUnsupportedIP
+	}
 }

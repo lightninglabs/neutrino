@@ -131,3 +131,45 @@ func TestBanStore(t *testing.T) {
 	// We would now check that ipNet1 is indeed unbanned.
 	checkBanStore(ipNet1, false, 0, 0)
 }
+
+// TestBanStoreKey ensures that the BanStore's key-based APIs correctly
+// persist IP address bans.
+func TestBanStoreKey(t *testing.T) {
+	t.Parallel()
+
+	banStore, cleanUp := createTestBanStore(t)
+	defer cleanUp()
+
+	key := &banman.Key{
+		Net:  banman.NetworkIPv4,
+		Addr: []byte{0x7f, 0x00, 0x00, 0x01},
+		Mask: []byte{0xff, 0xff, 0xff, 0xff},
+	}
+
+	err := banStore.BanKey(
+		key, banman.InvalidFilterHeader, time.Second,
+	)
+	require.NoError(t, err)
+
+	status, err := banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.True(t, status.Banned)
+	require.Equal(t, banman.InvalidFilterHeader, status.Reason)
+	require.LessOrEqual(t, time.Until(status.Expiration), time.Second)
+
+	<-time.After(time.Second)
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+
+	err = banStore.BanKey(
+		key, banman.InvalidFilterHeaderCheckpoint, time.Hour,
+	)
+	require.NoError(t, err)
+	require.NoError(t, banStore.UnbanKey(key))
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+}

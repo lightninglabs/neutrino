@@ -23,14 +23,14 @@ var (
 	// banBucket is the main index in which we keep track of IP networks and
 	// their absolute expiration time.
 	//
-	// The key is the IP network host and the value is the absolute
+	// The key is the encoded ban key and the value is the absolute
 	// expiration time.
 	banBucket = []byte("ban-index")
 
-	// reasonBucket is an index in which we keep track of why an IP network
-	// was banned.
+	// reasonBucket is an index in which we keep track of why a peer
+	// identity was banned.
 	//
-	// The key is the IP network and the value is the Reason.
+	// The key is the encoded ban key and the value is the Reason.
 	reasonBucket = []byte("reason-index")
 
 	// ErrCorruptedStore is an error returned when we attempt to locate any
@@ -54,9 +54,10 @@ type Status struct {
 	Expiration time.Time
 }
 
-// Store is the store responsible for maintaining records of banned IP networks.
-// It uses IP networks, rather than single IP addresses, in order to coalesce
-// multiple IP addresses that are likely to be correlated.
+// Store is the store responsible for maintaining records of banned peer
+// identities. IP callers can continue to use IP networks to coalesce multiple
+// addresses that are likely to be correlated, while typed keys provide an
+// extensible on-disk representation.
 type Store interface {
 	// BanIPNet creates a ban record for the IP network within the store for
 	// the given duration. A reason can also be provided to note why the IP
@@ -64,11 +65,21 @@ type Store interface {
 	// is made after the ban expiration.
 	BanIPNet(*net.IPNet, Reason, time.Duration) error
 
+	// BanKey creates a ban record for a typed ban key within the store for
+	// the given duration.
+	BanKey(*Key, Reason, time.Duration) error
+
 	// Status returns the ban status for a given IP network.
 	Status(*net.IPNet) (Status, error)
 
+	// StatusKey returns the ban status for a given typed ban key.
+	StatusKey(*Key) (Status, error)
+
 	// UnbanIPNet removes the ban imposed on the specified peer.
 	UnbanIPNet(ipNet *net.IPNet) error
+
+	// UnbanKey removes the ban imposed on the specified typed ban key.
+	UnbanKey(*Key) error
 }
 
 // NewStore returns a Store backed by a database.
@@ -115,6 +126,19 @@ func newBanStore(db walletdb.DB) (*banStore, error) {
 // being banned. The record will exist until a call to Status is made after the
 // ban expiration.
 func (s *banStore) BanIPNet(ipNet *net.IPNet, reason Reason, duration time.Duration) error {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return err
+	}
+
+	return s.BanKey(key, reason, duration)
+}
+
+// BanKey creates a ban record for the typed ban key within the store for the
+// given duration.
+func (s *banStore) BanKey(key *Key, reason Reason,
+	duration time.Duration) error {
+
 	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		banStore := tx.ReadWriteBucket(banStoreBucket)
 		if banStore == nil {
@@ -129,18 +153,27 @@ func (s *banStore) BanIPNet(ipNet *net.IPNet, reason Reason, duration time.Durat
 			return ErrCorruptedStore
 		}
 
-		var ipNetBuf bytes.Buffer
-		if err := encodeIPNet(&ipNetBuf, ipNet); err != nil {
-			return fmt.Errorf("unable to encode %v: %v", ipNet, err)
+		k, err := serializeKey(key)
+		if err != nil {
+			return err
 		}
-		k := ipNetBuf.Bytes()
 
-		return addBannedIPNet(banIndex, reasonIndex, k, reason, duration)
+		return addBannedKey(banIndex, reasonIndex, k, reason, duration)
 	})
 }
 
 // UnbanIPNet removes a ban record for the IP network within the store.
 func (s *banStore) UnbanIPNet(ipNet *net.IPNet) error {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return err
+	}
+
+	return s.UnbanKey(key)
+}
+
+// UnbanKey removes a ban record for the typed ban key within the store.
+func (s *banStore) UnbanKey(key *Key) error {
 	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		banStore := tx.ReadWriteBucket(banStoreBucket)
 		if banStore == nil {
@@ -157,36 +190,43 @@ func (s *banStore) UnbanIPNet(ipNet *net.IPNet) error {
 			return ErrCorruptedStore
 		}
 
-		var ipNetBuf bytes.Buffer
-		if err := encodeIPNet(&ipNetBuf, ipNet); err != nil {
-			return fmt.Errorf("unable to encode %v: %v", ipNet,
-				err)
+		k, err := serializeKey(key)
+		if err != nil {
+			return err
 		}
 
-		k := ipNetBuf.Bytes()
-
-		return removeBannedIPNet(banIndex, reasonIndex, k)
+		return removeBannedKey(banIndex, reasonIndex, k)
 	})
 
 	return err
 }
 
-// addBannedIPNet adds an entry to the ban store for the given IP network.
-func addBannedIPNet(banIndex, reasonIndex walletdb.ReadWriteBucket,
-	ipNetKey []byte, reason Reason, duration time.Duration) error {
+// addBannedKey adds an entry to the ban store for the given ban key.
+func addBannedKey(banIndex, reasonIndex walletdb.ReadWriteBucket,
+	key []byte, reason Reason, duration time.Duration) error {
 
 	var v [8]byte
 	banExpiration := time.Now().Add(duration)
 	byteOrder.PutUint64(v[:], uint64(banExpiration.Unix()))
 
-	if err := banIndex.Put(ipNetKey, v[:]); err != nil {
+	if err := banIndex.Put(key, v[:]); err != nil {
 		return err
 	}
-	return reasonIndex.Put(ipNetKey, []byte{byte(reason)})
+	return reasonIndex.Put(key, []byte{byte(reason)})
 }
 
 // Status returns the ban status for a given IP network.
 func (s *banStore) Status(ipNet *net.IPNet) (Status, error) {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return Status{}, err
+	}
+
+	return s.StatusKey(key)
+}
+
+// StatusKey returns the ban status for a given typed ban key.
+func (s *banStore) StatusKey(key *Key) (Status, error) {
 	var banStatus Status
 	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		banStore := tx.ReadWriteBucket(banStoreBucket)
@@ -202,18 +242,17 @@ func (s *banStore) Status(ipNet *net.IPNet) (Status, error) {
 			return ErrCorruptedStore
 		}
 
-		var ipNetBuf bytes.Buffer
-		if err := encodeIPNet(&ipNetBuf, ipNet); err != nil {
-			return fmt.Errorf("unable to encode %v: %v", ipNet, err)
+		k, err := serializeKey(key)
+		if err != nil {
+			return err
 		}
-		k := ipNetBuf.Bytes()
 
 		status := fetchStatus(banIndex, reasonIndex, k)
 
-		// If the IP network's ban duration has expired, we can remove
-		// its entry from the store.
+		// If the ban duration has expired, we can remove its entry
+		// from the store.
 		if !time.Now().Before(status.Expiration) {
-			return removeBannedIPNet(banIndex, reasonIndex, k)
+			return removeBannedKey(banIndex, reasonIndex, k)
 		}
 
 		banStatus = status
@@ -244,13 +283,22 @@ func fetchStatus(banIndex, reasonIndex walletdb.ReadWriteBucket,
 	}
 }
 
-// removeBannedIPNet removes all references to a banned IP network within the
-// ban store.
-func removeBannedIPNet(banIndex, reasonIndex walletdb.ReadWriteBucket,
-	ipNetKey []byte) error {
+// removeBannedKey removes all references to a banned key within the ban store.
+func removeBannedKey(banIndex, reasonIndex walletdb.ReadWriteBucket,
+	key []byte) error {
 
-	if err := banIndex.Delete(ipNetKey); err != nil {
+	if err := banIndex.Delete(key); err != nil {
 		return err
 	}
-	return reasonIndex.Delete(ipNetKey)
+	return reasonIndex.Delete(key)
+}
+
+// serializeKey encodes a typed ban key into its on-disk representation.
+func serializeKey(key *Key) ([]byte, error) {
+	var keyBuf bytes.Buffer
+	if err := encodeKey(&keyBuf, key); err != nil {
+		return nil, fmt.Errorf("unable to encode %v: %v", key, err)
+	}
+
+	return keyBuf.Bytes(), nil
 }
