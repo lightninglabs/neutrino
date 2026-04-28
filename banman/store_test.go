@@ -73,7 +73,7 @@ func TestBanStore(t *testing.T) {
 			t.Fatalf("expected %v to not be banned", ipNet)
 		}
 
-		if banned {
+		if !banned {
 			return
 		}
 
