@@ -115,11 +115,17 @@ func New(cfg EstimatorConfig) *Estimator {
 		peers:           cfg.Peers,
 		halfLifeNanos:   int64(hl),
 		minBlocksA:      min,
-		staleWindow:     DefaultStaleWindow,
-		coldStartMult:   DefaultColdStartMult,
-		coldConfidence:  DefaultColdConfidence,
-		relayFloorPct:   0.75, // 75th-pct peer feefilter
-		confDensityNorm: 20,   // target effective sample count
+		staleWindow:    DefaultStaleWindow,
+		coldStartMult:  DefaultColdStartMult,
+		coldConfidence: DefaultColdConfidence,
+		relayFloorPct:  0.75, // 75th-pct peer feefilter
+		// With a 30-minute half-life and 10-minute block interval the
+		// EWMA effective sample count asymptotes at
+		// 1/(1-exp(-blockInterval/halfLife)) ≈ 3.5. We use 5 as the
+		// target for full density credit so a few recent samples
+		// produce a reasonable density score without overstating
+		// the window.
+		confDensityNorm: 5,
 		nowFn:           time.Now,
 	}
 }

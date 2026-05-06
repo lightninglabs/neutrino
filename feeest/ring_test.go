@@ -3,13 +3,33 @@ package feeest
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightninglabs/neutrino/feedb"
 	"github.com/stretchr/testify/require"
 )
 
+// mkSample returns a FeeSample with a zero BlockHash. Suitable for tests that
+// do not exercise hash-based deduplication.
 func mkSample(h uint32) feedb.FeeSample {
 	return feedb.FeeSample{
 		Height:      h,
+		Timestamp:   int64(h) * 600,
+		TotalFees:   uint64(h * 1000),
+		TotalWeight: 4_000_000,
+	}
+}
+
+// mkHashedSample returns a FeeSample with a unique BlockHash derived from the
+// height. Used by tests that exercise addIfNew deduplication.
+func mkHashedSample(h uint32) feedb.FeeSample {
+	var hash chainhash.Hash
+	hash[0] = byte(h)
+	hash[1] = byte(h >> 8)
+	hash[2] = byte(h >> 16)
+	hash[3] = byte(h >> 24)
+	return feedb.FeeSample{
+		Height:      h,
+		BlockHash:   hash,
 		Timestamp:   int64(h) * 600,
 		TotalFees:   uint64(h * 1000),
 		TotalWeight: 4_000_000,
@@ -95,6 +115,38 @@ func TestRingPruneAfterWrap(t *testing.T) {
 	require.Len(t, got, 2)
 	require.Equal(t, uint32(3), got[0].Height)
 	require.Equal(t, uint32(5), got[1].Height)
+}
+
+// TestRingAddIfNewIdempotent verifies that addIfNew deduplicates by block hash
+// and that the check-and-add is atomic (two calls with the same hash only
+// insert one entry).
+func TestRingAddIfNewIdempotent(t *testing.T) {
+	t.Parallel()
+	r := newRing(5)
+
+	s := mkHashedSample(1)
+	require.True(t, r.addIfNew(s), "first add should return true")
+	require.Equal(t, 1, r.len())
+
+	require.False(t, r.addIfNew(s), "second add with same hash should return false")
+	require.Equal(t, 1, r.len(), "ring size must not grow on duplicate")
+
+	// Different hash should still be added.
+	require.True(t, r.addIfNew(mkHashedSample(2)))
+	require.Equal(t, 2, r.len())
+}
+
+// TestRingAddIfNewAfterWrap confirms dedup still works when the ring has
+// wrapped around and the duplicate is not the most-recently-written entry.
+func TestRingAddIfNewAfterWrap(t *testing.T) {
+	t.Parallel()
+	r := newRing(3)
+	for h := uint32(1); h <= 4; h++ { // wraps: ring holds 2,3,4
+		r.add(mkHashedSample(h))
+	}
+	// height 3 is still in the ring even after the wrap.
+	require.False(t, r.addIfNew(mkHashedSample(3)), "duplicate in wrapped ring")
+	require.Equal(t, 3, r.len())
 }
 
 // TestRingZeroCapacityCoercedToOne ensures the constructor doesn't panic on

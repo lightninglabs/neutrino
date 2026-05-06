@@ -42,6 +42,30 @@ func (r *ring) add(s feedb.FeeSample) {
 	}
 }
 
+// addIfNew inserts the sample only if no existing entry has the same block
+// hash. It returns true if the sample was inserted, false if a duplicate was
+// found and the call was a no-op.
+//
+// The check-and-add is atomic under the ring's mutex, which prevents two
+// concurrent Observe calls for the same block from both inserting a copy.
+// The scan is O(r.size) but the ring is small (<=144 entries by default).
+func (r *ring) addIfNew(s feedb.FeeSample) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := 0; i < r.size; i++ {
+		idx := (r.head - r.size + i + r.cap) % r.cap
+		if r.data[idx].BlockHash == s.BlockHash {
+			return false
+		}
+	}
+	r.data[r.head] = s
+	r.head = (r.head + 1) % r.cap
+	if r.size < r.cap {
+		r.size++
+	}
+	return true
+}
+
 // snapshot returns a copy of the current contents in chronological order
 // (oldest first). Empty ring returns nil.
 func (r *ring) snapshot() []feedb.FeeSample {

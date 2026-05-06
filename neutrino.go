@@ -1804,6 +1804,9 @@ func (s *ChainService) Stop() error {
 	if s.persistToDisk {
 		s.filterBatchWriter.Stop()
 	}
+	if s.FeeSampler != nil {
+		s.FeeSampler.Stop()
+	}
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)

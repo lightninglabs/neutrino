@@ -2,7 +2,7 @@ package feeest
 
 import (
 	"errors"
-	"sync"
+	"math"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil"
@@ -33,9 +33,14 @@ type Sampler struct {
 	params    *chaincfg.Params
 	retention uint32
 
-	// gcMu serialises the retention-window GC walk; we don't want
-	// concurrent Observe calls each spawning their own purge.
-	gcMu sync.Mutex
+	// gcTrigger is a size-1 channel that coalesces GC requests. The
+	// background gcWorker drains it. Non-blocking sends skip scheduling
+	// when a purge is already pending, avoiding goroutine pile-up when
+	// bulk-fetching blocks that are all above the retention horizon.
+	gcTrigger chan uint32
+
+	// quit is closed by Stop() to shut down the background GC worker.
+	quit chan struct{}
 }
 
 // SamplerConfig configures a new Sampler.
@@ -58,7 +63,7 @@ type SamplerConfig struct {
 
 // NewSampler builds a Sampler and warm-loads the in-memory ring from the
 // store. A failure to warm-load is logged but not fatal; the ring will refill
-// from new observations.
+// from new observations. Callers must call Stop() when they are done.
 func NewSampler(cfg SamplerConfig) (*Sampler, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("feeest: nil store")
@@ -81,7 +86,11 @@ func NewSampler(cfg SamplerConfig) (*Sampler, error) {
 		ring:      newRing(ringSize),
 		params:    cfg.Params,
 		retention: retention,
+		gcTrigger: make(chan uint32, 1),
+		quit:      make(chan struct{}),
 	}
+
+	go s.gcWorker()
 
 	// Warm-load the ring from disk. Samples are returned newest-first, so
 	// reverse them when adding to preserve chronological order.
@@ -98,9 +107,37 @@ func NewSampler(cfg SamplerConfig) (*Sampler, error) {
 	return s, nil
 }
 
+// Stop shuts down the background GC worker. It must be called when the Sampler
+// is no longer needed (e.g., from ChainService.Stop).
+func (s *Sampler) Stop() {
+	close(s.quit)
+}
+
+// gcWorker is the single background goroutine that executes retention-window
+// purges. It reads cutoff heights from gcTrigger, which is a buffered
+// channel of size 1. Sends from Observe are non-blocking, so only one
+// purge is ever pending at a time regardless of how many blocks land.
+func (s *Sampler) gcWorker() {
+	for {
+		select {
+		case cutoff := <-s.gcTrigger:
+			if err := s.store.PurgeBefore(cutoff); err != nil {
+				log.Warnf("Pruning fee samples before h=%d: %v",
+					cutoff, err)
+			}
+		case <-s.quit:
+			return
+		}
+	}
+}
+
 // Observe processes a block, computes a FeeSample and persists it. The block
 // must have been sanity-checked by the caller; observation does not validate
 // the block. height is the block's height in the active chain.
+//
+// Observe is idempotent: if the ring already contains a sample for the block's
+// hash, the call is a no-op. This prevents concurrent GetBlock calls for the
+// same block from double-counting the sample in the estimator window.
 //
 // Errors are logged and swallowed: fee sampling is best-effort and must not
 // disrupt the caller.
@@ -111,27 +148,27 @@ func (s *Sampler) Observe(block *btcutil.Block, height uint32) {
 		return
 	}
 
-	s.ring.add(sample)
+	// addIfNew returns false if the ring already holds a sample for this
+	// block hash, making Observe idempotent under concurrent fetches.
+	if !s.ring.addIfNew(sample) {
+		log.Tracef("Skipping duplicate fee sample h=%d hash=%s",
+			height, sample.BlockHash)
+		return
+	}
 
 	if err := s.store.PutSample(&sample); err != nil {
 		log.Warnf("Persisting fee sample h=%d: %v", height, err)
 		return
 	}
 
-	// Trigger a GC walk if this sample advanced the tip past the
-	// retention horizon. Cheap when there is nothing to delete.
+	// Schedule a GC pass if this sample advanced the tip past the
+	// retention horizon. A non-blocking send coalesces concurrent
+	// triggers into a single pending purge.
 	if height > s.retention {
-		go s.gcTo(height - s.retention)
-	}
-}
-
-// gcTo deletes samples older than cutoff. Runs in its own goroutine; the
-// gcMu serialises so concurrent Observes don't pile up purges.
-func (s *Sampler) gcTo(cutoff uint32) {
-	s.gcMu.Lock()
-	defer s.gcMu.Unlock()
-	if err := s.store.PurgeBefore(cutoff); err != nil {
-		log.Warnf("Pruning fee samples before h=%d: %v", cutoff, err)
+		select {
+		case s.gcTrigger <- height - s.retention:
+		default:
+		}
 	}
 }
 
@@ -151,6 +188,13 @@ func computeSample(block *btcutil.Block, height uint32,
 	if block == nil {
 		return feedb.FeeSample{}, errors.New("nil block")
 	}
+	// CalcBlockSubsidy takes int32. Bitcoin's practical halving schedule
+	// puts current heights well inside int32 range, but guard against
+	// the theoretical overflow at height > 2^31-1.
+	if height > math.MaxInt32 {
+		return feedb.FeeSample{}, errors.New("block height overflows int32")
+	}
+
 	msg := block.MsgBlock()
 	if len(msg.Transactions) == 0 {
 		return feedb.FeeSample{}, errors.New("block has no transactions")
@@ -164,10 +208,10 @@ func computeSample(block *btcutil.Block, height uint32,
 
 	subsidy := blockchain.CalcBlockSubsidy(int32(height), params)
 
-	// A coinbase paying less than the subsidy is invalid, but some
-	// regtest blocks paying exactly the subsidy carry zero fees. Both
-	// degenerate cases produce a zero-fee, "empty" sample that the
-	// estimator drops at aggregation time.
+	// Miners may claim less than the full coinbase reward. When that
+	// happens coinbaseValue <= subsidy, which yields zero fees. That
+	// observation is valid (zero-fee block) and carries the FlagEmpty
+	// flag so the estimator ignores it for signal purposes.
 	var totalFees uint64
 	if coinbaseValue > subsidy {
 		totalFees = uint64(coinbaseValue - subsidy)
