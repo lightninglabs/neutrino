@@ -10,6 +10,8 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/chainimport"
 	"github.com/lightninglabs/neutrino/chanutils"
+	"github.com/lightninglabs/neutrino/feedb"
+	"github.com/lightninglabs/neutrino/feeest"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
@@ -47,4 +49,6 @@ func UseLogger(logger btclog.Logger) {
 	filterdb.UseLogger(logger)
 	chanutils.UseLogger(logger)
 	chainimport.UseLogger(logger)
+	feedb.UseLogger(logger)
+	feeest.UseLogger(logger)
 }
