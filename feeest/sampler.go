@@ -156,6 +156,10 @@ func (s *Sampler) Observe(block *btcutil.Block, height uint32) {
 		return
 	}
 
+	log.Debugf("Fee sample h=%d hash=%s rate=%d sat/kW fees=%d weight=%d flags=%d",
+		height, sample.BlockHash, sample.FeeRatePerKW(),
+		sample.TotalFees, sample.TotalWeight, sample.Flags)
+
 	if err := s.store.PutSample(&sample); err != nil {
 		log.Warnf("Persisting fee sample h=%d: %v", height, err)
 		return

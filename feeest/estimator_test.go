@@ -295,18 +295,80 @@ func TestClampTarget(t *testing.T) {
 	require.Equal(t, uint32(24), clampTarget(99))
 }
 
-// TestSetHalfLife updates the EWMA tunable atomically.
-func TestSetHalfLife(t *testing.T) {
+// TestSetHalfLifeClamped verifies SetHalfLife clamps to [min, max].
+func TestSetHalfLifeClamped(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
 	est, _ := newTestEstimator(t, nil, now)
-	require.Equal(t, DefaultHalfLife, est.HalfLife())
 
 	est.SetHalfLife(time.Hour)
 	require.Equal(t, time.Hour, est.HalfLife())
 
 	est.SetHalfLife(0) // ignored
 	require.Equal(t, time.Hour, est.HalfLife())
+
+	est.SetHalfLife(time.Second) // below min → clamped to DefaultMinHalfLife
+	require.Equal(t, DefaultMinHalfLife, est.HalfLife())
+
+	est.SetHalfLife(24 * time.Hour) // above max → clamped to DefaultMaxHalfLife
+	require.Equal(t, DefaultMaxHalfLife, est.HalfLife())
+}
+
+// TestAdaptiveHalfLifeShortensOnVolatility confirms the half-life shrinks when
+// recent samples are more volatile than prior samples.
+func TestAdaptiveHalfLifeShortensOnVolatility(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	est, sampler := newTestEstimator(t, nil, now)
+	est.SetHalfLife(DefaultHalfLife)
+	est.minBlocksA = 3 // lower threshold so we need fewer samples
+
+	// Prior window: stable ~2.5 sat/kW (same rate).
+	for i := 0; i < 6; i++ {
+		addSample(sampler, uint32(100+i),
+			now.Add(-time.Duration(DefaultHalfLife+time.Duration(i)*10*time.Minute)),
+			10_000, 4_000_000)
+	}
+
+	// Recent window: high variance (alternating 1 sat/kW and 20 sat/kW).
+	for i := 0; i < 6; i++ {
+		fees := uint64(4_000) // ~1 sat/kW
+		if i%2 == 0 {
+			fees = 80_000 // ~20 sat/kW
+		}
+		addSample(sampler, uint32(110+i),
+			now.Add(-time.Duration(i)*5*time.Minute),
+			fees, 4_000_000)
+	}
+
+	// Trigger an estimate so maybeAdaptHalfLife runs.
+	est.Estimate(6)
+
+	// Half-life should have shortened below the default.
+	require.Less(t, est.HalfLife(), DefaultHalfLife,
+		"half-life should shorten on high-volatility window")
+}
+
+// TestCurrentStats returns a populated Stats snapshot without full estimation.
+func TestCurrentStats(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	est, sampler := newTestEstimator(t, []SatPerKW{1000}, now)
+
+	s := est.CurrentStats()
+	require.Equal(t, 0, s.SampleCount)
+	require.False(t, s.WarmWindow)
+	require.Equal(t, SatPerKW(1000), s.RelayFloor)
+
+	for i := 0; i < DefaultMinBlocksA; i++ {
+		addSample(sampler, uint32(100+i),
+			now.Add(-time.Duration(i+1)*5*time.Minute),
+			10_000, 4_000_000)
+	}
+
+	s = est.CurrentStats()
+	require.Equal(t, DefaultMinBlocksA, s.SampleCount)
+	require.True(t, s.WarmWindow)
 }
 
 // withErr is a tiny helper used to thread (Estimate, error) through one-line
