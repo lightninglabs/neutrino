@@ -13,6 +13,7 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/sqldb"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -47,4 +48,5 @@ func UseLogger(logger btclog.Logger) {
 	filterdb.UseLogger(logger)
 	chanutils.UseLogger(logger)
 	chainimport.UseLogger(logger)
+	sqldb.UseLogger(logger)
 }

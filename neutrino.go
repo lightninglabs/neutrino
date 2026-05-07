@@ -32,6 +32,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/sqldb"
 )
 
 // These are exported variables so they can be changed by users.
@@ -556,8 +557,20 @@ type Config struct {
 	DataDir string
 
 	// Database is an *open* database instance that we'll use to storm
-	// indexes of the chain.
+	// indexes of the chain. Mutually exclusive with SQLConfig: exactly
+	// one of the two must be set when calling NewChainService.
 	Database walletdb.DB
+
+	// SQLConfig, when non-nil, switches all persistent stores
+	// (block headers, filter headers, filter DB, ban store) to a
+	// SQLite or PostgreSQL backend. Mutually exclusive with Database.
+	SQLConfig *sqldb.Config
+
+	// LegacyImport, when non-nil, declares legacy walletdb + flat-file
+	// state to be imported into the SQL backend on first start. The
+	// import runs exactly once, recorded in the neutrino_migrations
+	// table at version 2. Ignored when SQLConfig is nil.
+	LegacyImport *sqldb.LegacyDataSource
 
 	// ChainParams is the chain that we're running on.
 	ChainParams chaincfg.Params
@@ -706,6 +719,7 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
+	sqlBackend           *sqldb.Backend
 	workManager          query.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
 
@@ -729,6 +743,18 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	// Validate that the caller provided exactly one of the two supported
+	// persistent backends. This is checked before any other side effect
+	// so misconfigurations fail fast.
+	switch {
+	case cfg.Database != nil && cfg.SQLConfig != nil:
+		return nil, errors.New("neutrino: cfg.Database and " +
+			"cfg.SQLConfig are mutually exclusive")
+	case cfg.Database == nil && cfg.SQLConfig == nil:
+		return nil, errors.New("neutrino: one of cfg.Database " +
+			"or cfg.SQLConfig must be set")
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout
@@ -791,7 +817,29 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	})
 
 	var err error
-	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+
+	// If the caller opted into the SQL backend, open it now (running the
+	// schema migrations and any registered legacy import) and inject the
+	// resulting per-domain TransactionExecutors into each store below.
+	if cfg.SQLConfig != nil {
+		s.sqlBackend, err = sqldb.NewBackend(
+			cfg.DataDir, cfg.SQLConfig,
+			sqldb.MakeLegacyImportMigration(cfg.LegacyImport),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to open SQL "+
+				"backend: %w", err)
+		}
+	}
+
+	if s.sqlBackend != nil {
+		s.FilterDB, err = filterdb.NewSQLFilterStore(
+			context.Background(), s.sqlBackend.FilterTxer,
+			cfg.ChainParams,
+		)
+	} else {
+		s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -831,16 +879,32 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		)
 	}
 
-	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
-		cfg.DataDir, cfg.Database, &cfg.ChainParams,
-	)
+	if s.sqlBackend != nil {
+		s.BlockHeaders, err = headerfs.NewSQLBlockHeaderStore(
+			context.Background(), s.sqlBackend.HeaderTxer,
+			&cfg.ChainParams,
+		)
+	} else {
+		s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
+			cfg.DataDir, cfg.Database, &cfg.ChainParams,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
-		&cfg.ChainParams, cfg.AssertFilterHeader,
-	)
+
+	if s.sqlBackend != nil {
+		s.RegFilterHeaders, err = headerfs.NewSQLFilterHeaderStore(
+			context.Background(), s.sqlBackend.HeaderTxer,
+			headerfs.RegularFilter, &cfg.ChainParams,
+			cfg.AssertFilterHeader,
+		)
+	} else {
+		s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
+			cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+			&cfg.ChainParams, cfg.AssertFilterHeader,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +1051,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
-	s.banStore, err = banman.NewStore(cfg.Database)
+	if s.sqlBackend != nil {
+		s.banStore, err = banman.NewSQLStore(s.sqlBackend.BanTxer)
+	} else {
+		s.banStore, err = banman.NewStore(cfg.Database)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
 	}
@@ -1750,6 +1818,19 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	// Release the SQL backend connection if one was opened. This must
+	// happen after all background goroutines exit so no one is using
+	// the backend mid-shutdown.
+	if s.sqlBackend != nil {
+		if err := s.sqlBackend.Close(); err != nil {
+			log.Errorf("error closing sql backend: %v", err)
+			if returnErr == nil {
+				returnErr = err
+			}
+		}
+	}
+
 	return returnErr
 }
 
