@@ -26,12 +26,13 @@ const LatestSchemaVersion = 1
 // of SQL and programmatic migrations). Each entry in MigrationSet.Descriptors
 // counts toward this bound; downgrade protection refuses to start when the
 // on-disk version exceeds this constant.
-const LatestMigrationVersion = 1
+const LatestMigrationVersion = 2
 
 // MigrationSet returns the canonical migration set for the neutrino SQL
 // backend. The optional makeProgrammatic argument lets callers register
-// in-code migrations alongside the embedded schema migrations. Pass nil
-// when no programmatic migrations are wired.
+// in-code migrations such as the legacy walletdb -> SQL data import. Pass
+// nil to skip the legacy import; in that case the programmatic-only v2
+// migration is recorded as applied with no body run.
 func MigrationSet(makeProgrammatic func(*sqldbv2.BaseDB) (
 	map[uint]migrate.ProgrammaticMigrEntry, error)) sqldbv2.MigrationSet {
 
@@ -46,6 +47,11 @@ func MigrationSet(makeProgrammatic func(*sqldbv2.BaseDB) (
 				Name:          "init",
 				Version:       1,
 				SchemaVersion: 1,
+			},
+			{
+				Name:          "legacy_import",
+				Version:       2,
+				SchemaVersion: 2,
 			},
 		},
 	}
