@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -48,6 +49,13 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 // BanStatus of IP networks.
 func TestBanStore(t *testing.T) {
 	t.Parallel()
+
+	synctest.Test(t, testBanStore)
+}
+
+// testBanStore uses virtual time so whole-second expiration is deterministic.
+func testBanStore(t *testing.T) {
+	t.Helper()
 
 	// We'll start by creating our test BanStore backed by a boltdb
 	// instance.
