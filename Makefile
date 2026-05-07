@@ -82,6 +82,10 @@ unit-race: btcd
 	@$(call print, "Running unit race tests.")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race
 
+unit-postgres: btcd
+	@$(call print, "Running unit tests against PostgreSQL backend.")
+	$(GOLIST) | $(XARGS) env $(GOTEST) -tags=test_db_postgres
+
 # =========
 # UTILITIES
 # =========
@@ -112,6 +116,7 @@ clean:
 	unit \
 	unit-cover \
 	unit-race \
+	unit-postgres \
 	fmt \
 	lint \
 	clean

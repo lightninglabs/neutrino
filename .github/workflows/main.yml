@@ -71,6 +71,7 @@ jobs:
         unit_type:
           - unit-cover
           - unit-race
+          - unit-postgres
     steps:
       - name: git checkout
         uses: actions/checkout@v4
