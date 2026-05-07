@@ -61,3 +61,87 @@ spending input, and block height in which the spending transaction was seen.
 ### Stopping the client
 Calling `Stop` on the `ChainService` client allows the user to stop the client;
 the method doesn't return until the `ChainService` is cleanly shut down.
+
+## Storage backends
+Neutrino supports two persistent storage backends. They are mutually exclusive
+and the caller selects exactly one when calling `NewChainService`.
+
+### `walletdb` (default, legacy)
+Pre-existing deployments pass an open `walletdb.DB` (bbolt) handle via
+`Config.Database`. Block headers and filter headers are stored in append-only
+flat files alongside the bbolt database; ban records and compact filters live
+inside the bbolt database. This is the historical backend and remains fully
+supported.
+
+```go
+db, _ := walletdb.Create("bdb", filepath.Join(dataDir, "neutrino.db"), true, 10*time.Second)
+cs, err := neutrino.NewChainService(neutrino.Config{
+    DataDir:     dataDir,
+    Database:    db,
+    ChainParams: chaincfg.MainNetParams,
+})
+```
+
+### SQL (`SQLite` or `PostgreSQL`)
+Setting `Config.SQLConfig` switches all persistent stores
+(`headerfs.BlockHeaderStore`, `headerfs.FilterHeaderStore`,
+`filterdb.FilterDatabase`, `banman.Store`) to a single SQL database. The
+schema is managed via `golang-migrate`; downgrade protection refuses to start
+when the on-disk version exceeds the binary's `LatestMigrationVersion`.
+
+```go
+import (
+    "github.com/lightninglabs/neutrino/sqldb"
+    sqldbv2 "github.com/lightningnetwork/lnd/sqldb/v2"
+)
+
+cs, err := neutrino.NewChainService(neutrino.Config{
+    DataDir:     dataDir,
+    ChainParams: chaincfg.MainNetParams,
+    SQLConfig: &sqldb.Config{
+        Backend: sqldb.BackendSqlite,
+        Sqlite:  &sqldbv2.SqliteConfig{},
+    },
+})
+```
+
+The PostgreSQL backend takes a DSN instead:
+
+```go
+SQLConfig: &sqldb.Config{
+    Backend: sqldb.BackendPostgres,
+    Postgres: &sqldbv2.PostgresConfig{
+        Dsn: "postgres://user:pass@host:5432/neutrino?sslmode=disable",
+    },
+},
+```
+
+### Migrating from `walletdb` to SQL
+On first start with `SQLConfig` set, neutrino can auto-import the legacy
+`block_headers.bin` + `reg_filter_headers.bin` flat files and the existing
+`walletdb` ban/filter buckets into the SQL tables. Provide the legacy state
+via `Config.LegacyImport`:
+
+```go
+legacyDB, _ := walletdb.Open("bdb", filepath.Join(dataDir, "neutrino.db"), true, 10*time.Second)
+
+cs, err := neutrino.NewChainService(neutrino.Config{
+    DataDir:     dataDir,
+    ChainParams: chaincfg.MainNetParams,
+    SQLConfig: &sqldb.Config{
+        Backend: sqldb.BackendSqlite,
+        Sqlite:  &sqldbv2.SqliteConfig{},
+    },
+    LegacyImport: &sqldb.LegacyDataSource{
+        DB:      legacyDB,
+        DataDir: dataDir,
+        Params:  &chaincfg.MainNetParams,
+    },
+})
+```
+
+After verification the legacy `block_headers.bin` and `reg_filter_headers.bin`
+are renamed to `*.bak`. The `walletdb` file is left in place; operators may
+delete it manually after confirming the SQL state. The migration is recorded
+exactly once in the `neutrino_migrations` tracking table at version 2; if the
+process crashes mid-import, the next start re-runs the import from scratch.
