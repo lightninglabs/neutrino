@@ -1,0 +1,3 @@
+-- 000002_legacy_import: programmatic-only migration. The actual import
+-- logic lives in neutrino/sqldb/migrate_legacy.go and runs when the SQL
+-- backend is constructed with a LegacyDataSource.
