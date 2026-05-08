@@ -14,7 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func createTestDatabase(t *testing.T) FilterDatabase {
+// nonBatchDB embeds a walletdb.DB while shadowing any Batch method on the
+// underlying value. It lets tests exercise the PutFilters fallback path used
+// by backends that satisfy walletdb.DB but not walletdb.BatchDB.
+type nonBatchDB struct {
+	walletdb.DB
+}
+
+// createTestWalletDB creates a temporary bdb-backed walletdb.DB that is
+// cleaned up when the test finishes.
+func createTestWalletDB(t *testing.T) walletdb.DB {
 	tempDir := t.TempDir()
 
 	db, err := walletdb.Create(
@@ -25,6 +34,19 @@ func createTestDatabase(t *testing.T) FilterDatabase {
 		require.NoError(t, db.Close())
 	})
 
+	return db
+}
+
+// createTestDatabase creates a FilterDatabase backed by a fresh temporary
+// bdb walletdb instance for use in tests.
+func createTestDatabase(t *testing.T) FilterDatabase {
+	return createTestDatabaseWithDB(t, createTestWalletDB(t))
+}
+
+// createTestDatabaseWithDB wraps the given walletdb.DB in a FilterDatabase so
+// that tests can supply a custom backend, for example one that hides
+// optional interfaces such as walletdb.BatchDB.
+func createTestDatabaseWithDB(t *testing.T, db walletdb.DB) FilterDatabase {
 	filterDB, err := New(db, chaincfg.SimNetParams)
 	require.NoError(t, err)
 
@@ -75,7 +97,24 @@ func genRandFilter(t *testing.T, numElements uint32) *gcs.Filter {
 // TestFilterStorage test writing to and reading from the filter DB.
 func TestFilterStorage(t *testing.T) {
 	database := createTestDatabase(t)
+	assertFilterStorage(t, database)
+}
 
+// TestFilterStorageWithoutBatch tests writing filters to a database that
+// supports normal read/write transactions, but not batched transactions.
+func TestFilterStorageWithoutBatch(t *testing.T) {
+	db := createTestWalletDB(t)
+
+	// Wrapping the bdb handle hides its Batch method and gives us the same
+	// interface shape as walletdb backends that do not implement BatchDB.
+	database := createTestDatabaseWithDB(t, &nonBatchDB{DB: db})
+	assertFilterStorage(t, database)
+}
+
+// assertFilterStorage runs the filter store round-trip assertions against
+// the provided FilterDatabase: it generates random regular filters, writes
+// them via PutFilters, and verifies they can be read back.
+func assertFilterStorage(t *testing.T, database FilterDatabase) {
 	// We'll generate a random block hash to create our test filters
 	// against.
 	var randHash chainhash.Hash
