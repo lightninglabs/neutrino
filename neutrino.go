@@ -28,6 +28,8 @@ import (
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/chainimport"
 	"github.com/lightninglabs/neutrino/chanutils"
+	"github.com/lightninglabs/neutrino/feedb"
+	"github.com/lightninglabs/neutrino/feeest"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
@@ -626,6 +628,21 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// DisableFeeEstimator turns off block-fee sampling and the on-chain
+	// fee-rate estimator. When true, EstimateFeeRate returns an error and
+	// no FeeStore is initialised. RelayFeePerKW remains available because
+	// it depends only on per-peer BIP133 feefilter messages.
+	DisableFeeEstimator bool
+
+	// FeeSampleRingSize is the in-memory ring buffer capacity (in
+	// samples) used by the estimator. Zero falls back to
+	// feeest.DefaultRingSize.
+	FeeSampleRingSize int
+
+	// FeeSampleRetention is the on-disk retention window in blocks for
+	// fee samples. Zero falls back to feeest.DefaultRetentionBlocks.
+	FeeSampleRetention uint32
 }
 
 // HeadersImportConfig contains configuration options for importing headers
@@ -683,6 +700,19 @@ type ChainService struct { // nolint:maligned
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders headerfs.FilterHeaderStore
 	persistToDisk    bool
+
+	// FeeStore persists per-block fee samples observed by the chain
+	// service. May be nil when fee estimation is disabled.
+	FeeStore feedb.FeeSampleStore
+
+	// FeeSampler observes blocks fetched via GetBlock and feeds samples
+	// to FeeStore. May be nil when fee estimation is disabled.
+	FeeSampler *feeest.Sampler
+
+	// FeeEstimator answers EstimateFeeRate queries from the rolling
+	// sample window and the peer feefilter floor. May be nil when fee
+	// estimation is disabled.
+	FeeEstimator *feeest.Estimator
 
 	headersImport *HeadersImportConfig
 
@@ -843,6 +873,34 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	// Initialise the fee sampler and estimator unless the caller has
+	// opted out. The store, sampler and estimator are wired together so
+	// every block fetched via GetBlock is observed automatically.
+	if !cfg.DisableFeeEstimator {
+		feeStore, err := feedb.New(cfg.Database)
+		if err != nil {
+			return nil, fmt.Errorf("unable to initialise fee "+
+				"store: %w", err)
+		}
+		s.FeeStore = feeStore
+
+		s.FeeSampler, err = feeest.NewSampler(feeest.SamplerConfig{
+			Store:     feeStore,
+			Params:    &s.chainParams,
+			RingSize:  cfg.FeeSampleRingSize,
+			Retention: cfg.FeeSampleRetention,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("unable to initialise fee "+
+				"sampler: %w", err)
+		}
+
+		s.FeeEstimator = feeest.New(feeest.EstimatorConfig{
+			Sampler: s.FeeSampler,
+			Peers:   peerFeeRater{cs: &s},
+		})
 	}
 
 	bm, err := newBlockManager(&blockManagerCfg{
@@ -1746,6 +1804,9 @@ func (s *ChainService) Stop() error {
 	if s.persistToDisk {
 		s.filterBatchWriter.Stop()
 	}
+	if s.FeeSampler != nil {
+		s.FeeSampler.Stop()
+	}
 
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
@@ -1768,6 +1829,95 @@ func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
 		}
 	}
 	return nil
+}
+
+// witnessScaleFactor is the wu-per-vbyte scaling, used to convert the
+// sat/kvB rate carried in BIP133 feefilter messages into the sat/kW unit the
+// estimator works with.
+const witnessScaleFactor = 4
+
+// PeerFeeFilters returns a snapshot of the BIP133 feefilter rates currently
+// advertised by connected peers, converted from sat/kvB to sat/kW. Peers
+// that have not advertised a feefilter (or advertised zero) are skipped.
+//
+// This implements the feeest.PeerFeeRater interface so the estimator can
+// derive the network's relay-floor in real time without needing its own
+// peer-state tracking.
+func (s *ChainService) PeerFeeFilters() []feeest.SatPerKW {
+	peers := s.Peers()
+	out := make([]feeest.SatPerKW, 0, len(peers))
+	for _, p := range peers {
+		ff := atomic.LoadInt64(&p.feeFilter)
+		if ff <= 0 {
+			continue
+		}
+		out = append(out, feeest.SatPerKW(ff/witnessScaleFactor))
+	}
+	return out
+}
+
+// RelayFeePerKW returns the current network relay floor derived from
+// connected peers' BIP133 feefilter advertisements. Returns 0 with a nil
+// error when no peers are connected or none have advertised a feefilter.
+//
+// Unlike EstimateFeeRate, this method works regardless of whether the fee
+// estimator is enabled: the data feeding it is collected as part of normal
+// peer state.
+func (s *ChainService) RelayFeePerKW() feeest.SatPerKW {
+	rates := s.PeerFeeFilters()
+	if len(rates) == 0 {
+		return 0
+	}
+
+	// Use the median to avoid a single griefing peer dragging the floor
+	// in either direction. The estimator uses the 75th percentile when
+	// it constructs its own floor, but for a generic relay-floor query
+	// the median is the conservative choice.
+	idx := len(rates) / 2
+	// Partial sort to find the median; len is small (≤ MaxPeers).
+	for i := 0; i <= idx; i++ {
+		minIdx := i
+		for j := i + 1; j < len(rates); j++ {
+			if rates[j] < rates[minIdx] {
+				minIdx = j
+			}
+		}
+		rates[i], rates[minIdx] = rates[minIdx], rates[i]
+	}
+	return rates[idx]
+}
+
+// ErrFeeEstimatorDisabled is returned by EstimateFeeRate when the chain
+// service was constructed with DisableFeeEstimator set.
+var ErrFeeEstimatorDisabled = errors.New("fee estimator disabled")
+
+// EstimateFeeRate returns a fee-rate recommendation (in sat/kW) for the
+// requested confirmation target, plus a confidence score in [0, 1] and
+// metadata about the inputs used. Supported targets are 1, 3, 6, and 24
+// blocks; other values clamp to the nearest supported target.
+//
+// Callers should treat results with Confidence below ~0.4 as a signal to
+// consult an external estimator if available; the cold-start path returns a
+// fixed 0.10 confidence so it is unambiguously distinguishable from a
+// well-supported answer.
+func (s *ChainService) EstimateFeeRate(target uint32) (feeest.Estimate,
+	error) {
+
+	if s.FeeEstimator == nil {
+		return feeest.Estimate{}, ErrFeeEstimatorDisabled
+	}
+	return s.FeeEstimator.Estimate(target), nil
+}
+
+// peerFeeRater is a small adapter that lets the estimator depend on a narrow
+// interface (PeerFeeFilters) without taking the whole ChainService as a
+// dependency. Used at construction time so the import graph stays acyclic.
+type peerFeeRater struct {
+	cs *ChainService
+}
+
+func (p peerFeeRater) PeerFeeFilters() []feeest.SatPerKW {
+	return p.cs.PeerFeeFilters()
 }
 
 // RescanChainSource is a wrapper type around the ChainService struct that will

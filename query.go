@@ -945,6 +945,15 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
+	// Hand the block to the fee sampler if one is configured. We only
+	// observe on the network-fetched path; cache hits earlier in this
+	// function were observed when they were originally fetched, so
+	// re-sampling them would over-weight a single block. Errors from the
+	// sampler are best-effort and do not affect the caller.
+	if s.FeeSampler != nil {
+		s.FeeSampler.Observe(foundBlock, height)
+	}
+
 	return foundBlock, nil
 }
 
