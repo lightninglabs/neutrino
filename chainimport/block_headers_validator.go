@@ -239,6 +239,7 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 			height:    int32(ancestorHeight),
 			bits:      ancestor.Bits,
 			timestamp: ancestor.Timestamp.Unix(),
+			validator: l.validator,
 		}
 	}
 
@@ -259,12 +260,16 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		height:    int32(ancestorHeight),
 		bits:      importBlockAncestor.BlockHeader.Bits,
 		timestamp: importBlockAncestor.BlockHeader.Timestamp.Unix(),
+		validator: l.validator,
 	}
 }
 
 // Parent returns the parent header context.
 func (l *lightHeaderCtx) Parent() blockchain.HeaderCtx {
-	return nil
+	if l.height <= 0 {
+		return nil
+	}
+	return l.RelativeAncestorCtx(1)
 }
 
 // lightChainCtx implements the blockchain.ChainCtx interface.
