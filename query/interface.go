@@ -18,6 +18,10 @@ const (
 	// defaultNumRetries is the default number of times that a query job
 	// will be retried.
 	defaultNumRetries = 2
+
+	// defaultKeepaliveInterval is interval to send keepalive ping while
+	// waiting for response
+	defaultKeepaliveInterval = 10 * time.Second
 )
 
 // queries are a set of options that can be modified per-query, unlike global
@@ -184,4 +188,8 @@ type Peer interface {
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
 	OnDisconnect() <-chan struct{}
+
+	// SendPing sends a ping message to the peer to keep the connection alive.
+	// This is used as a keepalive mechanism while waiting for responses to queries.
+	SendPing()
 }
