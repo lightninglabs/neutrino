@@ -1,0 +1,12 @@
+<Project>
+  <ProjectName>RescanFSMModels</ProjectName>
+  <InputFiles>
+    <PFile>src/types.p</PFile>
+    <PFile>src/chain.p</PFile>
+    <PFile>src/rescan_fsm.p</PFile>
+    <PFile>src/actor.p</PFile>
+    <PFile>src/monitors.p</PFile>
+    <PFile>test/rescan_test.p</PFile>
+  </InputFiles>
+  <OutputDir>PGenerated</OutputDir>
+</Project>
