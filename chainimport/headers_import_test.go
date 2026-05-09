@@ -7778,3 +7778,58 @@ func constructFilterHdr(filterHeaderHex string,
 
 	return fH, nil
 }
+
+// TestImportOptionsHttpClient verifies that ImportOptions.httpClient() returns
+// the injected client when set, and falls back to a default client otherwise.
+func TestImportOptionsHttpClient(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ReturnsInjectedClient", func(t *testing.T) {
+		customClient := &mockHTTPClient{}
+		opts := &ImportOptions{
+			HttpClient: customClient,
+		}
+		got := opts.httpClient()
+		require.Equal(t, customClient, got,
+			"httpClient() should return the injected client")
+	})
+
+	t.Run("FallsBackToDefault", func(t *testing.T) {
+		opts := &ImportOptions{}
+		got := opts.httpClient()
+		gotAgain := opts.httpClient()
+
+		require.NotNil(t, got,
+			"httpClient() should return a non-nil default client")
+		_, ok := got.(*http.Client)
+		require.True(t, ok,
+			"default client should be *http.Client")
+		require.Same(t, got, gotAgain,
+			"httpClient() should return a shared default client")
+	})
+
+	t.Run("HTTPSourceUsesInjectedClient", func(t *testing.T) {
+		customClient := &mockHTTPClient{}
+		blockHeadersURL := "https://example.com/block-headers"
+		filterHeadersURL := "https://example.com/filter-headers"
+		opts := &ImportOptions{
+			BlockHeadersSource:  blockHeadersURL,
+			FilterHeadersSource: filterHeadersURL,
+			HttpClient:          customClient,
+		}
+
+		blockSrc := opts.createBlockHeaderImportSrc()
+		httpSrc, ok := blockSrc.(*httpHeaderImportSource)
+		require.True(t, ok,
+			"block source should be httpHeaderImportSource")
+		require.Equal(t, customClient, httpSrc.httpClient,
+			"block HTTP source should use the injected client")
+
+		filterSrc := opts.createFilterHeaderImportSrc()
+		httpFilterSrc, ok := filterSrc.(*httpHeaderImportSource)
+		require.True(t, ok,
+			"filter source should be httpHeaderImportSource")
+		require.Equal(t, customClient, httpFilterSrc.httpClient,
+			"filter HTTP source should use the injected client")
+	})
+}
