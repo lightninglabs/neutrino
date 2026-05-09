@@ -5,6 +5,8 @@ import (
 	"net"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestIPNetSerialization ensures that we can serialize different supported IP
@@ -104,4 +106,140 @@ func TestIPNetSerialization(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestIPNetEncodingBytes ensures that IPv4 and IPv6 networks retain their
+// current on-disk encoding.
+func TestIPNetEncodingBytes(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		ipNet   *net.IPNet
+		encoded []byte
+	}{
+		{
+			name: "ipv4",
+			ipNet: &net.IPNet{
+				IP:   net.ParseIP("172.217.6.46"),
+				Mask: net.IPv4Mask(0xff, 0xff, 0x00, 0x00),
+			},
+			encoded: []byte{
+				0x00,
+				0xac, 0xd9, 0x06, 0x2e,
+				0xff, 0xff, 0x00, 0x00,
+			},
+		},
+		{
+			name: "ipv6",
+			ipNet: &net.IPNet{
+				IP: net.ParseIP("2001:db8:a0b:12f0::1"),
+				Mask: net.IPMask([]byte{
+					0xff, 0xff, 0x00, 0x00, 0x00, 0xff,
+					0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x00,
+				}),
+			},
+			encoded: []byte{
+				0x01,
+				0x20, 0x01, 0x0d, 0xb8,
+				0x0a, 0x0b, 0x12, 0xf0,
+				0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x01,
+				0xff, 0xff, 0x00, 0x00,
+				0x00, 0xff, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		success := t.Run(testCase.name, func(t *testing.T) {
+			var b bytes.Buffer
+			err := encodeIPNet(&b, testCase.ipNet)
+			require.NoError(t, err)
+			require.Equal(t, testCase.encoded, b.Bytes())
+		})
+		if !success {
+			return
+		}
+	}
+}
+
+// TestKeySerialization ensures that typed ban keys round trip through the
+// codec.
+func TestKeySerialization(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		key  *Key
+	}{
+		{
+			name: "ipv4",
+			key: &Key{
+				Net:  NetworkIPv4,
+				Addr: []byte{0xac, 0xd9, 0x06, 0x2e},
+				Mask: []byte{0xff, 0xff, 0x00, 0x00},
+			},
+		},
+		{
+			name: "ipv6",
+			key: &Key{
+				Net: NetworkIPv6,
+				Addr: []byte{
+					0x20, 0x01, 0x0d, 0xb8,
+					0x0a, 0x0b, 0x12, 0xf0,
+					0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x01,
+				},
+				Mask: []byte{
+					0xff, 0xff, 0x00, 0x00, 0x00, 0xff,
+					0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x00,
+				},
+			},
+		},
+		{
+			name: "torv3",
+			key: &Key{
+				Net:  NetworkTorV3,
+				Addr: testTorV3PubKey,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		success := t.Run(testCase.name, func(t *testing.T) {
+			var b bytes.Buffer
+			err := encodeKey(&b, testCase.key)
+			require.NoError(t, err)
+
+			key, err := decodeKey(&b)
+			require.NoError(t, err)
+			require.Equal(t, testCase.key, key)
+		})
+		if !success {
+			return
+		}
+	}
+}
+
+// TestTorV3KeyEncodingBytes ensures that Tor v3 keys retain their expected
+// on-disk encoding.
+func TestTorV3KeyEncodingBytes(t *testing.T) {
+	t.Parallel()
+
+	key := &Key{
+		Net:  NetworkTorV3,
+		Addr: testTorV3PubKey,
+	}
+
+	expected := append([]byte{0x02}, testTorV3PubKey...)
+
+	var b bytes.Buffer
+	err := encodeKey(&b, key)
+	require.NoError(t, err)
+	require.Equal(t, expected, b.Bytes())
 }
