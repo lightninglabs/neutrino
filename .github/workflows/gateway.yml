@@ -1,0 +1,32 @@
+name: gateway
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [review_requested, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: ${{ github.event_name != 'issue_comment' || github.event.issue.pull_request != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GATEWAY_REVIEW_MODE: multi
+    steps:
+      - uses: lightninglabs/gateway/.github/actions/review@v0.3.0-beta
+        with:
+          event_name:      ${{ github.event_name }}
+          event_action:    ${{ github.event.action }}
+          repo:            ${{ github.repository }}
+          pr_number:       ${{ github.event.issue.number || github.event.pull_request.number }}
+          actor:           ${{ github.event.sender.login }}
+          comment_body:    ${{ github.event.comment.body }}
+          comment_id:      ${{ github.event.comment.id }}
+          installation_id: 131566347
+          app_id:                  ${{ secrets.GATEWAY_APP_ID }}
+          private_key:             ${{ secrets.GATEWAY_PRIVATE_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
