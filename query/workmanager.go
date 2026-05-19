@@ -119,8 +119,24 @@ type peerWorkManager struct {
 	// workers will be sent.
 	jobResults chan *jobResult
 
+	// progressWakes is the channel onto which per-batch idle-timer
+	// callbacks post wake events. The workDispatcher's outer select reads
+	// from this channel so an idle timeout cancels its batch in real
+	// time, independent of whether any jobResult happens to be in flight.
+	progressWakes chan progressWake
+
 	quit chan struct{}
 	wg   sync.WaitGroup
+}
+
+// progressWake is the message a batch's idle timer callback posts onto
+// peerWorkManager.progressWakes when the configured ProgressTimeout has
+// elapsed without a successful query completing. The generation counter lets
+// the dispatcher safely ignore wakes from a timer that was already Reset by
+// the time the dispatcher observed the event.
+type progressWake struct {
+	batchNum uint64
+	gen      uint64
 }
 
 // Compile time check to ensure peerWorkManager satisfies the WorkManager interface.
@@ -130,10 +146,11 @@ var _ WorkManager = (*peerWorkManager)(nil)
 // implementation.
 func NewWorkManager(cfg *Config) WorkManager {
 	return &peerWorkManager{
-		cfg:        cfg,
-		newBatches: make(chan *batch),
-		jobResults: make(chan *jobResult),
-		quit:       make(chan struct{}),
+		cfg:           cfg,
+		newBatches:    make(chan *batch),
+		jobResults:    make(chan *jobResult),
+		progressWakes: make(chan progressWake, 16),
+		quit:          make(chan struct{}),
 	}
 }
 
@@ -185,10 +202,72 @@ func (w *peerWorkManager) workDispatcher() {
 	type batchProgress struct {
 		noRetryMax bool
 		maxRetries uint8
-		timeout    <-chan time.Time
+
+		// timeout is the hard wall-clock deadline for the whole
+		// batch. It is nil when the caller set Timeout(0), meaning no
+		// hard deadline is enforced.
+		timeout <-chan time.Time
+
+		// progressTimer is the per-batch idle timer set by
+		// ProgressTimeout. It is reset whenever a query in this batch
+		// completes successfully, and fires if no successful query
+		// completes within progressTimeout. nil when the option is
+		// not set.
+		//
+		// The timer is built with time.AfterFunc so its callback can
+		// post a wake event onto w.progressWakes, where the outer
+		// dispatch select observes it directly. Without that wake
+		// path, the cancel would be deferred until the next jobResult
+		// happened to arrive, which is not guaranteed in the
+		// zero-peer or all-workers-parked cases.
+		progressTimer   *time.Timer
+		progressTimeout time.Duration
+
+		// progressGen is incremented on every timer re-arm. The
+		// generation is captured in the timer's callback closure, so
+		// a wake event from a timer that was already Reset (and
+		// whose callback ran before the dispatcher could observe the
+		// Reset) is harmlessly identified as stale and dropped.
+		progressGen uint64
+
 		rem        int
 		errChan    chan error
 		cancelChan chan struct{}
+	}
+
+	// stopTimers releases any pending timer resources held by a batch.
+	// Safe to call on a batch whose timers were never started. Any wake
+	// event still in flight from a fired callback will be filtered out
+	// by the dispatcher via the currentBatches map lookup.
+	stopTimers := func(b *batchProgress) {
+		if b.progressTimer != nil {
+			b.progressTimer.Stop()
+		}
+	}
+
+	// armProgressTimer creates (or re-creates) the idle timer on the
+	// given batch. The previous timer, if any, is Stop'd; any wake event
+	// its callback may have already posted carries the old generation
+	// and will be ignored when the dispatcher processes it.
+	armProgressTimer := func(b *batchProgress, batchNum uint64) {
+		if b.progressTimeout == 0 {
+			return
+		}
+		if b.progressTimer != nil {
+			b.progressTimer.Stop()
+		}
+		b.progressGen++
+		gen := b.progressGen
+		bn := batchNum
+		b.progressTimer = time.AfterFunc(b.progressTimeout, func() {
+			select {
+			case w.progressWakes <- progressWake{
+				batchNum: bn,
+				gen:      gen,
+			}:
+			case <-w.quit:
+			}
+		})
 	}
 
 	// We set up a batch index counter to keep track of batches that still
@@ -202,6 +281,7 @@ func (w *peerWorkManager) workDispatcher() {
 	defer func() {
 		for _, b := range currentBatches {
 			b.errChan <- ErrWorkManagerShuttingDown
+			stopTimers(b)
 		}
 	}()
 
@@ -298,6 +378,37 @@ Loop:
 				r.Run(w.jobResults, w.quit)
 			}()
 
+		// A batch's idle (progress) timer fired. Cancel the batch in
+		// real time without waiting for the next jobResult, which is
+		// not guaranteed to ever arrive in the zero-peer or all-
+		// workers-parked cases.
+		case wake := <-w.progressWakes:
+			bp, ok := currentBatches[wake.batchNum]
+			if !ok {
+				// Batch was completed or canceled between
+				// the timer firing and us observing it.
+				continue Loop
+			}
+			if wake.gen != bp.progressGen {
+				// Stale wake from a timer that was already
+				// re-armed on progress; the current
+				// generation will deliver its own wake when
+				// the new window elapses.
+				continue Loop
+			}
+
+			bp.errChan <- ErrQueryTimeout
+			stopTimers(bp)
+			delete(currentBatches, wake.batchNum)
+
+			if bp.cancelChan != nil {
+				close(bp.cancelChan)
+			}
+
+			log.Warnf("Batch %v idle timeout after %v with no "+
+				"successful queries", wake.batchNum,
+				bp.progressTimeout)
+
 		// A new result came back.
 		case result := <-w.jobResults:
 			log.Tracef("Result for job %v received from peer %v "+
@@ -330,6 +441,11 @@ Loop:
 				continue Loop
 			}
 
+			// progressed is set in the success branch and consumed
+			// after the timeout select to drive the idle-timer
+			// reset.
+			progressed := false
+
 			switch {
 			// If the query ended because it was canceled, drop it.
 			case result.err == ErrJobCanceled:
@@ -342,6 +458,7 @@ Loop:
 				// batch's error channel.  We do this since a
 				// cancellation applies to the whole batch.
 				batch.errChan <- result.err
+				stopTimers(batch)
 				delete(currentBatches, batchNum)
 
 				log.Debugf("Canceled batch %v", batchNum)
@@ -381,6 +498,7 @@ Loop:
 					// Return the error and cancel the
 					// batch.
 					batch.errChan <- result.err
+					stopTimers(batch)
 					delete(currentBatches, batchNum)
 
 					log.Debugf("Canceled batch %v",
@@ -416,6 +534,24 @@ Loop:
 
 			// Otherwise, we got a successful result and update the
 			// status of the batch this query is a part of.
+			//
+			// We re-arm the idle timer at the bottom of this arm
+			// (after the hard-timeout select), not here. Two
+			// reasons: (1) symmetry with the batch-completion
+			// paths below, which all call stopTimers before
+			// returning; (2) we don't want to allocate a fresh
+			// AfterFunc if the hard cap has already fired and
+			// we're about to delete the batch. Ordering relative
+			// to the hard-timeout select is otherwise not
+			// load-bearing: a wake from the previous idle window
+			// that is still in flight on w.progressWakes carries
+			// the old progressGen, and is filtered out as stale
+			// by the gen check in the outer dispatch select
+			// (see the w.progressWakes arm above). Stale wakes
+			// are intentionally dropped — a successful result
+			// proves the batch made progress, so even a race
+			// between an in-flight wake and a fresh result
+			// resolves in favor of "batch continues".
 			default:
 				// Reward the peer for the successful query.
 				w.cfg.Ranking.Reward(result.peer.Addr())
@@ -431,19 +567,27 @@ Loop:
 				// it finished, and delete it.
 				if batch.rem == 0 {
 					batch.errChan <- nil
+					stopTimers(batch)
 					delete(currentBatches, batchNum)
 
 					log.Tracef("Batch %v done",
 						batchNum)
 					continue Loop
 				}
+
+				progressed = true
 			}
 
-			// If the total timeout for this batch has passed,
-			// return an error.
+			// If the hard wall-clock timeout for this batch has
+			// fired, return an error and cancel any remaining
+			// queries. The progress (idle) timeout is observed
+			// directly by the outer dispatch select via
+			// w.progressWakes, so it does not need to be checked
+			// here.
 			select {
 			case <-batch.timeout:
 				batch.errChan <- ErrQueryTimeout
+				stopTimers(batch)
 				delete(currentBatches, batchNum)
 
 				// When deleting the particular batch
@@ -462,7 +606,19 @@ Loop:
 				log.Warnf("Batch %v timed out",
 					batchNum)
 
+				continue Loop
+
 			default:
+			}
+
+			// The batch is still alive and made progress. Re-arm
+			// the idle timer. We construct a fresh time.AfterFunc
+			// (and a fresh callback closure carrying a new
+			// generation) so that any wake event already in
+			// flight from the previous timer is harmlessly
+			// identified as stale via the generation counter.
+			if progressed {
+				armProgressTimer(batch, batchNum)
 			}
 
 		// A new batch of queries where scheduled.
@@ -489,16 +645,25 @@ Loop:
 				queryIndex++
 			}
 
-			currentBatches[batchIndex] = &batchProgress{
-				noRetryMax: batch.options.noRetryMax,
-				maxRetries: batch.options.numRetries,
-				timeout: time.After(
-					batch.options.timeout,
-				),
-				rem:        len(batch.requests),
-				errChan:    batch.errChan,
-				cancelChan: cancelChan,
+			// A zero timeout disables the hard wall-clock deadline
+			// entirely; the batch must then be bounded by
+			// ProgressTimeout or external cancellation.
+			var hardTimeout <-chan time.Time
+			if batch.options.timeout > 0 {
+				hardTimeout = time.After(batch.options.timeout)
 			}
+
+			bp := &batchProgress{
+				noRetryMax:      batch.options.noRetryMax,
+				maxRetries:      batch.options.numRetries,
+				timeout:         hardTimeout,
+				progressTimeout: batch.options.progressTimeout,
+				rem:             len(batch.requests),
+				errChan:         batch.errChan,
+				cancelChan:      cancelChan,
+			}
+			armProgressTimer(bp, batchIndex)
+			currentBatches[batchIndex] = bp
 			batchIndex++
 
 		case <-w.quit:
