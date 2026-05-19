@@ -95,6 +95,15 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 		prevElem = &b.chain[b.tailPtr]
 	}
 
+	// With a maxSize of one, the only slot in the backing array is the
+	// same slot we're about to overwrite. Leaving prevElem pointing at it
+	// would make the new node's prev pointer reference itself, creating a
+	// cycle that any backwards traversal (Prev, Ancestor) would follow
+	// indefinitely. Force prev to nil in that case.
+	if b.maxSize == 1 {
+		prevElem = nil
+	}
+
 	// As we're adding to the chain, we'll increment the tail pointer and
 	// clamp it down to the max size.
 	b.tailPtr++
@@ -123,8 +132,11 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 
 	// Now that we've inserted this new element, we'll set the prev pointer
 	// to the prior element. If this is the first element, then we'll just
-	// set the nil value again.
+	// set the nil value again. We also reset any stale skip-list ancestor
+	// from a wrapped-over slot before rebuilding it from prev.
 	b.chain[chainIndex].prev = prevElem
+	b.chain[chainIndex].ancestor = nil
+	b.chain[chainIndex].buildAncestor()
 
 	// Finally, we'll increment the length of the chain, and clamp down the
 	// size if needed to the max possible length.

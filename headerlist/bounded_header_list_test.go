@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
+	"pgregory.net/rapid"
 )
 
 // TestBoundedMemoryChainEmptyList tests the expected functionality of an empty
@@ -179,6 +180,213 @@ func TestBoundedMemoryChainPrevIteration(t *testing.T) {
 			t.Fatalf("expected %v, got %v",
 				spew.Sdump(nextNode.Prev()),
 				spew.Sdump(iterNode))
+		}
+	}
+}
+
+// TestBoundedMemoryChainAncestor ensures that skip-list ancestor lookups return
+// the expected nodes, including after the bounded chain wraps.
+func TestBoundedMemoryChainAncestor(t *testing.T) {
+	t.Parallel()
+
+	memChain := NewBoundedMemoryChain(100)
+	for i := 0; i < 100; i++ {
+		memChain.PushBack(Node{
+			Height: int32(i),
+		})
+	}
+
+	tip := memChain.Back()
+	for i := 0; i < 100; i++ {
+		ancestor := tip.Ancestor(int32(i))
+		if ancestor == nil {
+			t.Fatalf("expected ancestor at height %v", i)
+		}
+		if ancestor.Height != int32(i) {
+			t.Fatalf("expected ancestor height %v, got %v",
+				i, ancestor.Height)
+		}
+	}
+
+	wrappedChain := NewBoundedMemoryChain(5)
+	for i := 0; i < 20; i++ {
+		wrappedChain.PushBack(Node{
+			Height: int32(i),
+		})
+	}
+
+	tip = wrappedChain.Back()
+	for i := 15; i < 20; i++ {
+		ancestor := tip.Ancestor(int32(i))
+		if ancestor == nil {
+			t.Fatalf("expected ancestor at height %v", i)
+		}
+		if ancestor.Height != int32(i) {
+			t.Fatalf("expected ancestor height %v, got %v",
+				i, ancestor.Height)
+		}
+	}
+
+	if ancestor := tip.Ancestor(14); ancestor != nil {
+		t.Fatalf("unexpected pruned ancestor: %v", ancestor.Height)
+	}
+}
+
+// TestBoundedMemoryChainAncestorRapid uses property-based testing to confirm
+// that skip-list ancestor lookups agree with a naive linear walk across many
+// random chain shapes, including wrap-around configurations.
+func TestBoundedMemoryChainAncestorRapid(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		capacity := rapid.IntRange(1, 512).Draw(t, "capacity")
+		startHeight := rapid.IntRange(0, 100000).Draw(t, "start_height")
+		appendCount := rapid.IntRange(1, 2048).Draw(t, "append_count")
+
+		memChain := NewBoundedMemoryChain(uint32(capacity))
+		for i := 0; i < appendCount; i++ {
+			memChain.PushBack(Node{
+				Height: int32(startHeight + i),
+			})
+		}
+
+		assertAncestorsMatchLinearWalk(t, memChain)
+	})
+}
+
+// TestBoundedMemoryChainAncestorResetRapid is a property-based test that
+// covers the post-reset path: after ResetHeaderState the chain seeds a new
+// genesis at an arbitrary height, and subsequent PushBacks must still produce
+// ancestor pointers that agree with a linear prev walk.
+func TestBoundedMemoryChainAncestorResetRapid(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		capacity := rapid.IntRange(1, 512).Draw(t, "capacity")
+		beforeReset := rapid.IntRange(1, 2048).Draw(t, "before_reset")
+		resetHeight := rapid.IntRange(0, 100000).Draw(t, "reset_height")
+		afterReset := rapid.IntRange(0, 2048).Draw(t, "after_reset")
+
+		memChain := NewBoundedMemoryChain(uint32(capacity))
+		for i := 0; i < beforeReset; i++ {
+			memChain.PushBack(Node{
+				Height: int32(i),
+			})
+		}
+
+		memChain.ResetHeaderState(Node{
+			Height: int32(resetHeight),
+		})
+		for i := 1; i <= afterReset; i++ {
+			memChain.PushBack(Node{
+				Height: int32(resetHeight + i),
+			})
+		}
+
+		assertAncestorsMatchLinearWalk(t, memChain)
+	})
+}
+
+// assertAncestorsMatchLinearWalk fails the test if Node.Ancestor disagrees
+// with a linear walk along prev pointers for any target height in or near the
+// current chain bounds.
+func assertAncestorsMatchLinearWalk(t rapid.TB, chain *BoundedMemoryChain) {
+	t.Helper()
+
+	tip := chain.Back()
+	if tip == nil {
+		return
+	}
+
+	front := chain.Front()
+	minHeight := front.Height - 2
+	maxHeight := tip.Height + 2
+	for h := minHeight; h <= maxHeight; h++ {
+		targetHeight := h
+		expected := linearAncestor(tip, targetHeight)
+		actual := tip.Ancestor(targetHeight)
+
+		if expected == nil {
+			if actual != nil {
+				t.Fatalf("expected no ancestor at height %v, "+
+					"got %v", targetHeight, actual.Height)
+			}
+
+			continue
+		}
+
+		if actual == nil {
+			t.Fatalf("expected ancestor at height %v", targetHeight)
+		}
+		if actual.Height != expected.Height {
+			t.Fatalf("expected ancestor height %v, got %v",
+				expected.Height, actual.Height)
+		}
+	}
+}
+
+// linearAncestor returns the ancestor at the given height by walking prev
+// pointers from tip one node at a time. It serves as the reference oracle
+// against which the skip-list implementation is compared.
+func linearAncestor(tip *Node, height int32) *Node {
+	for tip != nil && tip.Height != height {
+		tip = tip.Prev()
+	}
+
+	return tip
+}
+
+// BenchmarkBoundedMemoryChainAncestor measures skip-list ancestor lookup cost
+// over a fixed spread of target heights, including small, mid-range, and tip
+// targets that exercise different skip patterns.
+func BenchmarkBoundedMemoryChainAncestor(b *testing.B) {
+	memChain := NewBoundedMemoryChain(10000)
+	for i := 0; i < 10000; i++ {
+		memChain.PushBack(Node{
+			Height: int32(i),
+		})
+	}
+
+	tip := memChain.Back()
+	targets := []int32{0, 1, 17, 499, 999, 2016, 4096, 8191, 9999}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		for _, target := range targets {
+			ancestor := tip.Ancestor(target)
+			if ancestor == nil || ancestor.Height != target {
+				b.Fatalf("unexpected ancestor at "+
+					"height %v", target)
+			}
+		}
+	}
+}
+
+// BenchmarkBoundedMemoryChainPrevWalk is the baseline counterpart to
+// BenchmarkBoundedMemoryChainAncestor: it answers the same lookups using only
+// the prev pointer so the two can be compared head-to-head.
+func BenchmarkBoundedMemoryChainPrevWalk(b *testing.B) {
+	memChain := NewBoundedMemoryChain(10000)
+	for i := 0; i < 10000; i++ {
+		memChain.PushBack(Node{
+			Height: int32(i),
+		})
+	}
+
+	tip := memChain.Back()
+	targets := []int32{0, 1, 17, 499, 999, 2016, 4096, 8191, 9999}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		for _, target := range targets {
+			iter := tip
+			for iter != nil && iter.Height != target {
+				iter = iter.Prev()
+			}
+			if iter == nil || iter.Height != target {
+				b.Fatalf("unexpected ancestor at "+
+					"height %v", target)
+			}
 		}
 	}
 }
