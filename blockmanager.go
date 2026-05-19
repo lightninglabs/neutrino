@@ -2989,6 +2989,12 @@ type lightHeaderCtx struct {
 
 	store      headerfs.BlockHeaderStore
 	headerList headerlist.Chain
+
+	// node, if non-nil, is the headerList node corresponding to this
+	// header. When set, RelativeAncestorCtx will use the node's skip-list
+	// pointer for O(log n) ancestor lookups instead of walking back from
+	// the chain tip on every call.
+	node *headerlist.Node
 }
 
 // newLightHeaderCtx returns an instance of a lightHeaderCtx to be used when
@@ -3053,26 +3059,27 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		err      error
 	)
 
-	// We'll first consult the headerList to see if the ancestor can be
-	// found there. If that fails, we'll look up the header in the header
-	// store.
-	iterNode := l.headerList.Back()
-
-	// Keep looping until iterNode is nil or the ancestor height is
-	// encountered.
-	for iterNode != nil {
-		if iterNode.Height == ancestorHeight {
-			// We've found the ancestor.
-			ancestor = &iterNode.Header
-			break
+	// We'll first attempt to resolve the ancestor through the headerList's
+	// skip-list. When we already know the current node, we can jump
+	// straight from it; otherwise we anchor on the chain tip and let
+	// Ancestor short-circuit if the target is in range.
+	var ancestorNode *headerlist.Node
+	if l.node != nil {
+		ancestorNode = l.node.Ancestor(ancestorHeight)
+	} else if l.headerList != nil {
+		backNode := l.headerList.Back()
+		if backNode != nil {
+			ancestorNode = backNode.Ancestor(ancestorHeight)
 		}
-
-		// We haven't hit the ancestor header yet, so we'll go back one.
-		iterNode = iterNode.Prev()
 	}
 
+	if ancestorNode != nil {
+		ancestor = &ancestorNode.Header
+	}
+
+	// If the ancestor has already aged out of the in-memory headerList,
+	// fall back to the on-disk header store.
 	if ancestor == nil {
-		// Lookup the ancestor in the header store.
 		ancestor, err = l.store.FetchHeaderByHeight(
 			uint32(ancestorHeight),
 		)
@@ -3081,7 +3088,13 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		}
 	}
 
-	return newLightHeaderCtx(
+	// Carry the resolved headerList node into the returned context so
+	// that any further ancestor walks from it can keep using the
+	// skip-list rather than walking from the tip again.
+	ancestorCtx := newLightHeaderCtx(
 		ancestorHeight, ancestor, l.store, l.headerList,
 	)
+	ancestorCtx.node = ancestorNode
+
+	return ancestorCtx
 }
