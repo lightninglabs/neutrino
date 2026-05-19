@@ -27,6 +27,12 @@ var (
 	// current block hash of the best known chain that the headers for
 	// regular filter are synced to.
 	regFilterTip = []byte("regular")
+
+	// indexSubBucketsReady is the marker key stored in the header index
+	// root bucket once all hash-prefix sub-buckets have been
+	// pre-created. Its presence lets newHeaderIndex skip the bulk
+	// sub-bucket creation step on subsequent process starts.
+	indexSubBucketsReady = []byte("index-sub-buckets-ready")
 )
 
 var (
@@ -137,10 +143,16 @@ func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) 
 	// necessary for functioning of the index. If these buckets has already
 	// been created, then we can exit early.
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		_, err := tx.CreateTopLevelBucket(indexBucket)
-		return err
+		rootBucket, err := tx.CreateTopLevelBucket(indexBucket)
+		if err == walletdb.ErrBucketExists {
+			rootBucket = tx.ReadWriteBucket(indexBucket)
+		} else if err != nil {
+			return err
+		}
+
+		return ensureIndexSubBuckets(rootBucket)
 	})
-	if err != nil && err != walletdb.ErrBucketExists {
+	if err != nil {
 		return nil, err
 	}
 
@@ -148,6 +160,30 @@ func newHeaderIndex(db walletdb.DB, indexType HeaderType) (*headerIndex, error) 
 		db:        db,
 		indexType: indexType,
 	}, nil
+}
+
+// ensureIndexSubBuckets pre-creates the full set of hash-prefix sub-buckets
+// used by the header index. The index sharding scheme stores each header
+// under a sub-bucket keyed by the first numSubBucketBytes of its hash, so
+// creating all 2^(8*numSubBucketBytes) buckets up-front lets the hot
+// addHeaders path do a cheap lookup instead of a CreateBucketIfNotExists call
+// per header. The marker key indexSubBucketsReady gates re-running this loop
+// on subsequent startups.
+func ensureIndexSubBuckets(rootBucket walletdb.ReadWriteBucket) error {
+	if rootBucket.Get(indexSubBucketsReady) != nil {
+		return nil
+	}
+
+	var prefix [numSubBucketBytes]byte
+	for i := 0; i <= 0xffff; i++ {
+		binary.BigEndian.PutUint16(prefix[:], uint16(i))
+		_, err := rootBucket.CreateBucketIfNotExists(prefix[:])
+		if err != nil {
+			return err
+		}
+	}
+
+	return rootBucket.Put(indexSubBucketsReady, []byte{1})
 }
 
 // headerEntry is an internal type that's used to quickly map a (height, hash)
@@ -217,8 +253,37 @@ func (h *headerIndex) addHeaders(batch headerBatch) error {
 			chainTipHeight uint32
 		)
 
+		// Since the batch is sorted by hash, consecutive entries tend
+		// to share the same sub-bucket prefix. We cache the last
+		// resolved sub-bucket and prefix so that we only re-resolve
+		// when the prefix changes, avoiding a NestedReadWriteBucket
+		// call per header. The required sub-buckets are pre-created in
+		// newHeaderIndex via ensureIndexSubBuckets, so a missing
+		// sub-bucket here is a hard error.
+		var (
+			subBucket        walletdb.ReadWriteBucket
+			currentSubPrefix []byte
+		)
+
 		for _, header := range batch {
-			if err := putHeaderEntry(rootBucket, header); err != nil {
+			prefix := header.hash[0:numSubBucketBytes]
+			if !bytes.Equal(currentSubPrefix, prefix) {
+				subBucket = rootBucket.NestedReadWriteBucket(
+					prefix,
+				)
+				if subBucket == nil {
+					return fmt.Errorf("missing header "+
+						"index sub-bucket %x", prefix)
+				}
+
+				currentSubPrefix = append(
+					currentSubPrefix[:0], prefix...,
+				)
+			}
+
+			if err := putHeaderEntryInBucket(
+				subBucket, header,
+			); err != nil {
 				return err
 			}
 
@@ -384,6 +449,15 @@ func putHeaderEntry(rootBucket walletdb.ReadWriteBucket,
 	if err != nil {
 		return err
 	}
+
+	return putHeaderEntryInBucket(subBucket, header)
+}
+
+// putHeaderEntryInBucket writes a single header entry into an already
+// resolved sub-bucket. It is the inner half of putHeaderEntry and lets hot
+// callers (like addHeaders) reuse a cached sub-bucket across many entries.
+func putHeaderEntryInBucket(subBucket walletdb.ReadWriteBucket,
+	header headerEntry) error {
 
 	var heightBytes [4]byte
 	binary.BigEndian.PutUint32(heightBytes[:], header.height)
