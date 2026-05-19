@@ -1568,6 +1568,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 				BlockHeadersSource:      blockHeadersPath,
 				FilterHeadersSource:     filterHeadersPath,
 				WriteBatchSizePerRegion: batch,
+				ValidationFlags:         blockchain.BFFastAdd,
 			}
 
 			// Get initial CPU time for measuring CPU usage during
