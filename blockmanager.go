@@ -1086,8 +1086,39 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 	// Hand the queries to the work manager, and consume the verified
 	// responses as they come back.
+	//
+	// A cfheader batch can hold hundreds of sub-requests (one per
+	// CFCheckptInterval; growing with chain length), so we bound it on
+	// two axes. ProgressTimeout is the primary gate: as long as some
+	// peer answers a request within the window the batch keeps running,
+	// and we abort if the peer pool goes silent. Timeout is a generous
+	// hard ceiling that caps total runtime; without it a single peer
+	// trickling one response every (progressTimeout - epsilon) could
+	// keep the idle timer alive for hours and amplify a slow-peer
+	// attack.
+	//
+	// perRequestBudget matches the work manager's per-query upper
+	// bound (maxQueryTimeout = 32s), so a healthy worker pool can run
+	// each sub-request through one full retry-doubling cycle before
+	// the cap fires. The 60s floor ensures the trailing single-batch
+	// sync near tip still has runway (the pre-PR default was 30s);
+	// without it, batchesCount=1 would give a 32s cap that is tighter
+	// than progressTimeout itself. The trickle-defeat invariant —
+	// progressTimeout < perRequestBudget — is preserved: an attacker
+	// trickling responses just under the idle window cannot accumulate
+	// more than progressTimeout per request, which is strictly less
+	// than the per-request budget.
+	const (
+		perRequestBudget = 32 * time.Second
+		hardCapFloor     = 60 * time.Second
+	)
+	hardCap := time.Duration(batchesCount) * perRequestBudget
+	if hardCap < hardCapFloor {
+		hardCap = hardCapFloor
+	}
 	errChan := b.cfg.QueryDispatcher.Query(
 		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
+		query.Timeout(hardCap), query.ProgressTimeout(30*time.Second),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
