@@ -84,8 +84,8 @@ func startWorkManager(t *testing.T, numWorkers int) (WorkManager,
 		NewWorker: func(peer Peer) Worker {
 			m := &mockWorker{
 				peer:    peer,
-				nextJob: make(chan *queryJob),
-				results: make(chan *jobResult),
+				nextJob: make(chan *queryJob, maxJobs),
+				results: make(chan *jobResult, maxJobs),
 			}
 			workerChan <- m
 			return m
@@ -205,7 +205,7 @@ func TestWorkManagerWorkDispatcherFailures(t *testing.T) {
 	for i := 0; i < numQueries; i++ {
 		q := &Request{}
 		queries[i] = q
-		scheduledJobs[i] = make(chan sched)
+		scheduledJobs[i] = make(chan sched, maxJobs)
 	}
 
 	// For each worker, spin up a goroutine that will forward the job it
@@ -387,7 +387,7 @@ func TestWorkManagerCancelBatch(t *testing.T) {
 // TestWorkManagerWorkRankingScheduling checks that the work manager schedules
 // jobs among workers according to the peer ranking.
 func TestWorkManagerWorkRankingScheduling(t *testing.T) {
-	const numQueries = 4
+	const numQueries = 4 * maxJobs
 	const numWorkers = 8
 
 	workMgr, workers := startWorkManager(t, numWorkers)
@@ -414,7 +414,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 	var jobs []*queryJob
 	for i := 0; i < numQueries; i++ {
 		select {
-		case job := <-workers[i].nextJob:
+		case job := <-workers[i/maxJobs].nextJob:
 			if job.index != uint64(i) {
 				t.Fatalf("unexpected job")
 			}
@@ -449,7 +449,7 @@ func TestWorkManagerWorkRankingScheduling(t *testing.T) {
 	// Go backwards, and succeed the queries.
 	for i := numQueries - 1; i >= 0; i-- {
 		select {
-		case workers[i].results <- &jobResult{
+		case workers[i/maxJobs].results <- &jobResult{
 			job: jobs[i],
 			err: nil,
 		}:

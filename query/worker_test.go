@@ -86,7 +86,7 @@ func makeJob() *queryJob {
 }
 
 type testCtx struct {
-	nextJob    chan<- *queryJob
+	worker     Worker
 	jobResults chan *jobResult
 	peer       *mockPeer
 	workerDone chan struct{}
@@ -101,7 +101,7 @@ func startWorker() (*testCtx, error) {
 		subscriptions: make(chan chan wire.Message),
 		quit:          make(chan struct{}),
 	}
-	results := make(chan *jobResult)
+	results := make(chan *jobResult, maxJobs)
 	quit := make(chan struct{})
 
 	wk := NewWorker(peer)
@@ -123,7 +123,7 @@ func startWorker() (*testCtx, error) {
 	peer.responses = sub
 
 	return &testCtx{
-		nextJob:    wk.NewJob(),
+		worker:     wk,
 		jobResults: results,
 		peer:       peer,
 		workerDone: done,
@@ -144,7 +144,7 @@ func TestWorkerIgnoreMsgs(t *testing.T) {
 	task := makeJob()
 
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -215,7 +215,7 @@ func TestWorkerTimeout(t *testing.T) {
 
 	// Give the worker the new job.
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -253,7 +253,7 @@ func TestWorkerTimeout(t *testing.T) {
 
 	// It will immediately attempt to fetch another task.
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -272,7 +272,7 @@ func TestWorkerDisconnect(t *testing.T) {
 	// Give the worker a new job.
 	task := makeJob()
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -312,7 +312,7 @@ func TestWorkerDisconnect(t *testing.T) {
 
 	// No more jobs should be accepted by the worker after it has exited.
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 		t.Fatalf("exited worker did pick up job")
 	default:
 	}
@@ -342,7 +342,7 @@ func TestWorkerProgress(t *testing.T) {
 	task.timeout = taskTimeout
 
 	select {
-	case ctx.nextJob <- task:
+	case ctx.worker.NewJob() <- task:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("did not pick up job")
 	}
@@ -421,7 +421,7 @@ func TestWorkerJobCanceled(t *testing.T) {
 	canceled := false
 	for i := 0; i < 2; i++ {
 		select {
-		case ctx.nextJob <- task:
+		case ctx.worker.NewJob() <- task:
 		case <-time.After(1 * time.Second):
 			t.Fatalf("did not pick up job")
 		}
