@@ -282,6 +282,49 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	return &bm, nil
 }
 
+// ResetHeaderState re-reads the chain tips from the header stores and
+// reinitializes the block manager's internal tracking state. This must be
+// called after headers have been imported into the stores outside of the
+// block manager (e.g., via chainimport) but before the block manager is
+// started, so that it begins syncing from the correct chain tip rather
+// than the stale state captured at construction time.
+func (b *blockManager) ResetHeaderState() error {
+	// Re-read the block header chain tip from the store.
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to read block header chain "+
+			"tip: %w", err)
+	}
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+	b.headerList.ResetHeaderState(headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	})
+	b.headerTip = height
+	b.headerTipHash = header.BlockHash()
+
+	// Re-read the filter header chain tip from the store.
+	_, b.filterHeaderTip, err = b.cfg.RegFilterHeaders.ChainTip()
+	if err != nil {
+		return fmt.Errorf("failed to read filter header chain "+
+			"tip: %w", err)
+	}
+
+	// Ensure the filter header tip hash is set to the block hash at the
+	// filter tip height.
+	fh, err := b.cfg.BlockHeaders.FetchHeaderByHeight(b.filterHeaderTip)
+	if err != nil {
+		return fmt.Errorf("failed to fetch block header at filter "+
+			"tip height %d: %w", b.filterHeaderTip, err)
+	}
+	b.filterHeaderTipHash = fh.BlockHash()
+
+	log.Infof("Block manager header state reset: block tip=%d, "+
+		"filter tip=%d", height, b.filterHeaderTip)
+
+	return nil
+}
+
 // Start begins the core block handler which processes block and inv messages.
 func (b *blockManager) Start() {
 	// Already started?
@@ -2946,6 +2989,12 @@ type lightHeaderCtx struct {
 
 	store      headerfs.BlockHeaderStore
 	headerList headerlist.Chain
+
+	// node, if non-nil, is the headerList node corresponding to this
+	// header. When set, RelativeAncestorCtx will use the node's skip-list
+	// pointer for O(log n) ancestor lookups instead of walking back from
+	// the chain tip on every call.
+	node *headerlist.Node
 }
 
 // newLightHeaderCtx returns an instance of a lightHeaderCtx to be used when
@@ -3010,26 +3059,27 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		err      error
 	)
 
-	// We'll first consult the headerList to see if the ancestor can be
-	// found there. If that fails, we'll look up the header in the header
-	// store.
-	iterNode := l.headerList.Back()
-
-	// Keep looping until iterNode is nil or the ancestor height is
-	// encountered.
-	for iterNode != nil {
-		if iterNode.Height == ancestorHeight {
-			// We've found the ancestor.
-			ancestor = &iterNode.Header
-			break
+	// We'll first attempt to resolve the ancestor through the headerList's
+	// skip-list. When we already know the current node, we can jump
+	// straight from it; otherwise we anchor on the chain tip and let
+	// Ancestor short-circuit if the target is in range.
+	var ancestorNode *headerlist.Node
+	if l.node != nil {
+		ancestorNode = l.node.Ancestor(ancestorHeight)
+	} else if l.headerList != nil {
+		backNode := l.headerList.Back()
+		if backNode != nil {
+			ancestorNode = backNode.Ancestor(ancestorHeight)
 		}
-
-		// We haven't hit the ancestor header yet, so we'll go back one.
-		iterNode = iterNode.Prev()
 	}
 
+	if ancestorNode != nil {
+		ancestor = &ancestorNode.Header
+	}
+
+	// If the ancestor has already aged out of the in-memory headerList,
+	// fall back to the on-disk header store.
 	if ancestor == nil {
-		// Lookup the ancestor in the header store.
 		ancestor, err = l.store.FetchHeaderByHeight(
 			uint32(ancestorHeight),
 		)
@@ -3038,7 +3088,13 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		}
 	}
 
-	return newLightHeaderCtx(
+	// Carry the resolved headerList node into the returned context so
+	// that any further ancestor walks from it can keep using the
+	// skip-list rather than walking from the tip again.
+	ancestorCtx := newLightHeaderCtx(
 		ancestorHeight, ancestor, l.store, l.headerList,
 	)
+	ancestorCtx.node = ancestorNode
+
+	return ancestorCtx
 }
