@@ -4672,6 +4672,327 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 	}
 }
 
+// TestLightHeaderCtxParent tests that lightHeaderCtx.Parent() correctly
+// delegates to RelativeAncestorCtx(1) instead of returning nil. This is
+// critical for CalcPastMedianTime to compute the median of the last 11 blocks
+// rather than using only a single timestamp.
+func TestLightHeaderCtxParent(t *testing.T) {
+	t.Parallel()
+
+	// Build a sequence of 15 block headers with known timestamps.
+	// We use simnet params for easy PoW satisfaction.
+	const numHeaders = 15
+	headers := make([]*blockHeader, numHeaders)
+	baseTime := time.Unix(1700000000, 0)
+
+	for i := 0; i < numHeaders; i++ {
+		hdr := &wire.BlockHeader{
+			Version:   0x20000000,
+			Bits:      chaincfg.SimNetParams.PowLimitBits,
+			Timestamp: baseTime.Add(time.Duration(i) * time.Minute),
+		}
+		if i > 0 {
+			prevHash := headers[i-1].BlockHeader.BlockHash()
+			hdr.PrevBlock = prevHash
+		}
+		headers[i] = &blockHeader{
+			BlockHeader: headerfs.BlockHeader{
+				BlockHeader: hdr,
+				Height:      uint32(i),
+			},
+		}
+	}
+
+	// Create a mock import source that returns headers by index. The
+	// source's metadata starts at height 0, so index == absolute height.
+	mockSource := &mockHeaderImportSource{}
+	mockSource.On("GetHeaderMetadata").Return(
+		&headerMetadata{
+			importMetadata: &importMetadata{startHeight: 0},
+			headersCount:   numHeaders,
+		}, nil,
+	)
+	for i := 0; i < numHeaders; i++ {
+		mockSource.On("GetHeader", uint32(i)).Return(
+			headers[i], nil,
+		)
+	}
+
+	// Create a mock block header store that returns "not found" for all
+	// heights, forcing fallback to the import source.
+	mockStore := &headerfs.MockBlockHeaderStore{}
+	mockStore.On(
+		"FetchHeaderByHeight", mock.AnythingOfType("uint32"),
+	).Return(nil, fmt.Errorf("not found"))
+
+	validator := &blockHeadersImportSourceValidator{
+		targetChainParams:        chaincfg.SimNetParams,
+		targetBlockHeaderStore:   mockStore,
+		blockHeadersImportSource: mockSource,
+	}
+
+	t.Run("ParentReturnsNilAtHeightZero", func(t *testing.T) {
+		ctx := &lightHeaderCtx{
+			height:    0,
+			bits:      headers[0].BlockHeader.Bits,
+			timestamp: headers[0].BlockHeader.Timestamp.Unix(),
+			validator: validator,
+		}
+		require.Nil(t, ctx.Parent())
+	})
+
+	t.Run("ParentReturnsAncestorAtHeightOne", func(t *testing.T) {
+		ctx := &lightHeaderCtx{
+			height:    1,
+			bits:      headers[1].BlockHeader.Bits,
+			timestamp: headers[1].BlockHeader.Timestamp.Unix(),
+			validator: validator,
+		}
+		parent := ctx.Parent()
+		require.NotNil(t, parent)
+		require.Equal(t, int32(0), parent.Height())
+		require.Equal(
+			t, headers[0].BlockHeader.Timestamp.Unix(),
+			parent.Timestamp(),
+		)
+	})
+
+	t.Run("ParentChainWalksBackMultipleLevels", func(t *testing.T) {
+		// Start at height 12 and walk back through Parent() calls.
+		// This verifies the validator field is properly propagated
+		// through returned lightHeaderCtx instances.
+		ctx := &lightHeaderCtx{
+			height:    12,
+			bits:      headers[12].BlockHeader.Bits,
+			timestamp: headers[12].BlockHeader.Timestamp.Unix(),
+			validator: validator,
+		}
+
+		// Walk back 11 levels (needed for median time calculation).
+		current := blockchain.HeaderCtx(ctx)
+		for i := 0; i < 11; i++ {
+			parent := current.Parent()
+			require.NotNil(t, parent, "Parent() returned nil "+
+				"at depth %d", i+1)
+			expectedHeight := int32(12 - (i + 1))
+			require.Equal(t, expectedHeight, parent.Height())
+			current = parent
+		}
+
+		// At height 1, parent should be height 0.
+		require.Equal(t, int32(1), current.Height())
+		parent := current.Parent()
+		require.NotNil(t, parent)
+		require.Equal(t, int32(0), parent.Height())
+
+		// At height 0, parent should be nil.
+		require.Nil(t, parent.Parent())
+	})
+}
+
+// TestValidatePairWithNonMonotonicTimestamps tests that ValidatePair correctly
+// accepts block headers where a block's timestamp is earlier than its
+// predecessor but still after the median of the last 11 blocks. This scenario
+// is common on mainnet and signet, and previously failed because Parent()
+// returned nil, causing CalcPastMedianTime to use only one timestamp.
+func TestValidatePairWithNonMonotonicTimestamps(t *testing.T) {
+	t.Parallel()
+
+	// Build a chain of 15 headers. All timestamps increase except the
+	// last one, which goes backwards relative to its predecessor but
+	// remains after the median of the previous 11 timestamps.
+	const numHeaders = 15
+	headers := make([]*blockHeader, numHeaders)
+	baseTime := time.Unix(1700000000, 0)
+
+	for i := 0; i < numHeaders; i++ {
+		ts := baseTime.Add(time.Duration(i) * 10 * time.Minute)
+
+		// Make the last header's timestamp go backwards by 5 minutes
+		// relative to its predecessor. The median of the previous 11
+		// timestamps (from index 3 to 13) is at index 8, which is
+		// 80 minutes after baseTime. The last header at index 14 gets
+		// timestamp = 130 - 5 = 125 minutes, well after 80 min.
+		if i == numHeaders-1 {
+			prevTs := baseTime.Add(
+				time.Duration(i-1) * 10 * time.Minute,
+			)
+			ts = prevTs.Add(-5 * time.Minute)
+		}
+
+		hdr := &wire.BlockHeader{
+			// Use version 0x20000000 (BIP 9 versionbits) to
+			// pass the block version enforcement check.
+			Version:   0x20000000,
+			Bits:      chaincfg.SimNetParams.PowLimitBits,
+			Timestamp: ts,
+		}
+		if i > 0 {
+			prevHash := headers[i-1].BlockHeader.BlockHash()
+			hdr.PrevBlock = prevHash
+		}
+		headers[i] = &blockHeader{
+			BlockHeader: headerfs.BlockHeader{
+				BlockHeader: hdr,
+				Height:      uint32(i),
+			},
+		}
+	}
+
+	// Create mock import source returning all headers by index. The
+	// source's metadata starts at height 0, so index == absolute height.
+	mockSource := &mockHeaderImportSource{}
+	mockSource.On("GetHeaderMetadata").Return(
+		&headerMetadata{
+			importMetadata: &importMetadata{startHeight: 0},
+			headersCount:   numHeaders,
+		}, nil,
+	)
+	for i := 0; i < numHeaders; i++ {
+		mockSource.On("GetHeader", uint32(i)).Return(
+			headers[i], nil,
+		)
+	}
+
+	// Mock store returns "not found" so ancestor lookup falls through
+	// to import source.
+	mockStore := &headerfs.MockBlockHeaderStore{}
+	mockStore.On(
+		"FetchHeaderByHeight", mock.AnythingOfType("uint32"),
+	).Return(nil, fmt.Errorf("not found"))
+
+	// Validate with BFNone (no BFFastAdd) -- this exercises the median
+	// time check in CheckBlockHeaderContext that previously failed.
+	validator := newBlockHeadersImportSourceValidator(
+		chaincfg.SimNetParams, mockStore,
+		blockchain.BFNone, mockSource,
+	)
+
+	// The pair (header[13], header[14]) should pass: header[14] has a
+	// timestamp before header[13] but after the median of headers[3..13].
+	err := validator.ValidatePair(
+		headers[numHeaders-2], headers[numHeaders-1],
+	)
+	require.NoError(t, err, "ValidatePair should accept a block whose "+
+		"timestamp is before its predecessor but after the median "+
+		"of the last 11 blocks")
+}
+
+// TestRelativeAncestorCtxNonZeroStartHeight tests that RelativeAncestorCtx
+// correctly translates absolute target heights into import-source indices
+// when the import source begins at a non-zero start height. Without this
+// translation, the validator would request the wrong index from the import
+// source, returning either an out-of-range error or a header from
+// importStartHeight blocks ahead of the desired ancestor.
+func TestRelativeAncestorCtxNonZeroStartHeight(t *testing.T) {
+	t.Parallel()
+
+	// The import source begins at absolute target height 100, covering
+	// heights 100..114 (15 headers total). Index i in the source maps to
+	// absolute height 100 + i.
+	const (
+		numHeaders  = 15
+		startHeight = uint32(100)
+	)
+	headers := make([]*blockHeader, numHeaders)
+	baseTime := time.Unix(1700000000, 0)
+
+	for i := 0; i < numHeaders; i++ {
+		hdr := &wire.BlockHeader{
+			Version:   0x20000000,
+			Bits:      chaincfg.SimNetParams.PowLimitBits,
+			Timestamp: baseTime.Add(time.Duration(i) * time.Minute),
+		}
+		if i > 0 {
+			prevHash := headers[i-1].BlockHeader.BlockHash()
+			hdr.PrevBlock = prevHash
+		}
+		headers[i] = &blockHeader{
+			BlockHeader: headerfs.BlockHeader{
+				BlockHeader: hdr,
+				Height:      startHeight + uint32(i),
+			},
+		}
+	}
+
+	// The mock import source returns metadata with startHeight=100. Each
+	// GetHeader(index) returns the header whose absolute height is
+	// startHeight+index.
+	mockSource := &mockHeaderImportSource{}
+	mockSource.On("GetHeaderMetadata").Return(
+		&headerMetadata{
+			importMetadata: &importMetadata{startHeight: startHeight},
+			headersCount:   numHeaders,
+		}, nil,
+	)
+	for i := 0; i < numHeaders; i++ {
+		mockSource.On("GetHeader", uint32(i)).Return(
+			headers[i], nil,
+		)
+	}
+
+	// The target store has no headers for the import range, forcing the
+	// fallback to the import source.
+	mockStore := &headerfs.MockBlockHeaderStore{}
+	mockStore.On(
+		"FetchHeaderByHeight", mock.AnythingOfType("uint32"),
+	).Return(nil, fmt.Errorf("not found"))
+
+	validator := &blockHeadersImportSourceValidator{
+		targetChainParams:        chaincfg.SimNetParams,
+		targetBlockHeaderStore:   mockStore,
+		blockHeadersImportSource: mockSource,
+	}
+
+	t.Run("ParentResolvesAcrossNonZeroOffset", func(t *testing.T) {
+		// Walk back from absolute height 110 to height 100, asserting
+		// each parent maps to the correct header by checking both the
+		// height and the timestamp (which is unique per header).
+		ctx := blockchain.HeaderCtx(&lightHeaderCtx{
+			height:    int32(startHeight + 10),
+			bits:      headers[10].BlockHeader.Bits,
+			timestamp: headers[10].BlockHeader.Timestamp.Unix(),
+			validator: validator,
+		})
+		for depth := 1; depth <= 10; depth++ {
+			parent := ctx.Parent()
+			require.NotNil(t, parent, "Parent() returned nil at "+
+				"depth %d", depth)
+
+			expectHeight := int32(startHeight) +
+				int32(10-depth)
+			require.Equal(t, expectHeight, parent.Height())
+
+			// Verify the right header was fetched: index = height -
+			// startHeight, so the timestamp must match the header
+			// at that index, not at the raw absolute height.
+			expectTs := headers[10-depth].BlockHeader.Timestamp.
+				Unix()
+			require.Equal(t, expectTs, parent.Timestamp(),
+				"parent at depth %d returned wrong "+
+					"timestamp; likely an off-by-"+
+					"startHeight index bug", depth)
+
+			ctx = parent
+		}
+	})
+
+	t.Run("AncestorBelowImportRangeReturnsNil", func(t *testing.T) {
+		// Asking for an ancestor at absolute height < startHeight
+		// should return nil, since the import source doesn't have it
+		// and the target store reports "not found".
+		ctx := &lightHeaderCtx{
+			height:    int32(startHeight + 2),
+			bits:      headers[2].BlockHeader.Bits,
+			timestamp: headers[2].BlockHeader.Timestamp.Unix(),
+			validator: validator,
+		}
+		// Distance 5 from height 102 yields ancestorHeight 97, which
+		// is below the import source's startHeight of 100.
+		require.Nil(t, ctx.RelativeAncestorCtx(5))
+	})
+}
+
 // TestHeaderValidationOnSequentialBlockHeaders tests the header validation on
 // sequential block headers. It checks that the header is validated correctly.
 func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {

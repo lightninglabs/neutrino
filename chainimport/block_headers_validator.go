@@ -227,10 +227,6 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 
 	ancestorHeight := uint32(math.Max(0, float64(l.height-distance)))
 
-	ancestorIndex := targetHeightToImportSourceIndex(
-		ancestorHeight, 0,
-	)
-
 	// Lookup the ancestor in the target store.
 	targetStore := l.validator.targetBlockHeaderStore
 	ancestor, err := targetStore.FetchHeaderByHeight(ancestorHeight)
@@ -239,10 +235,29 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 			height:    int32(ancestorHeight),
 			bits:      ancestor.Bits,
 			timestamp: ancestor.Timestamp.Unix(),
+			validator: l.validator,
 		}
 	}
 
-	// Fallback to import source if ancestor not found in target store.
+	// Fallback to the import source. Import sources are indexed starting
+	// at 0, but index 0 corresponds to the absolute target height stored
+	// in the source's metadata. Convert the absolute ancestor height to
+	// the equivalent import source index before fetching.
+	metadata, err := l.validator.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return nil
+	}
+
+	// If the ancestor's absolute height lies before the import source's
+	// first header, the ancestor isn't reachable from this validator.
+	if ancestorHeight < metadata.startHeight {
+		return nil
+	}
+
+	ancestorIndex := targetHeightToImportSourceIndex(
+		ancestorHeight, metadata.startHeight,
+	)
+
 	importAncestor, err := l.validator.blockHeadersImportSource.GetHeader(
 		ancestorIndex,
 	)
@@ -259,12 +274,16 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		height:    int32(ancestorHeight),
 		bits:      importBlockAncestor.BlockHeader.Bits,
 		timestamp: importBlockAncestor.BlockHeader.Timestamp.Unix(),
+		validator: l.validator,
 	}
 }
 
 // Parent returns the parent header context.
 func (l *lightHeaderCtx) Parent() blockchain.HeaderCtx {
-	return nil
+	if l.height <= 0 {
+		return nil
+	}
+	return l.RelativeAncestorCtx(1)
 }
 
 // lightChainCtx implements the blockchain.ChainCtx interface.
