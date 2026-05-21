@@ -243,7 +243,8 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 	// at 0, but index 0 corresponds to the absolute target height stored
 	// in the source's metadata. Convert the absolute ancestor height to
 	// the equivalent import source index before fetching.
-	metadata, err := l.validator.blockHeadersImportSource.GetHeaderMetadata()
+	src := l.validator.blockHeadersImportSource
+	metadata, err := src.GetHeaderMetadata()
 	if err != nil {
 		return nil
 	}
