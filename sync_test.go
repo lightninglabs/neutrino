@@ -720,6 +720,14 @@ func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]b
 }
 
 func testRescanResults(harness *neutrinoHarness, t *testing.T) {
+	// This subtest reorgs the chain multiple times and waits for the
+	// rescan to catch up, which can be slow under -race on busy CI
+	// machines. Give every waitForSync call in this function the longer
+	// timeout instead of only the final one further down.
+	origSyncTimeout := syncTimeout
+	syncTimeout *= 2
+	defer func() { syncTimeout = origSyncTimeout }()
+
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2. This will reorg the chain, including the
 	// transactions broadcast earlier, so we'll have to check that the
@@ -818,9 +826,6 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync h1 and h2: %s", err)
 	}
 
-	// We increase the timeout because running on Travis with race
-	// detection enabled can make this pretty slow.
-	syncTimeout *= 2
 	err = waitForSync(t, harness.svc, harness.h1)
 	if err != nil {
 		checkErrChan(t, errChan)
