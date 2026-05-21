@@ -23,9 +23,23 @@ const (
 // queries are a set of options that can be modified per-query, unlike global
 // options.
 type queryOptions struct {
-	// timeout specifies the total time a query is allowed to
-	// be retried before it will fail.
+	// timeout specifies the total wall-clock time a batch is allowed to
+	// run before it is canceled. This is a hard deadline measured from
+	// batch submission. A value of zero means no hard deadline is
+	// enforced and the batch must rely on progressTimeout (or external
+	// cancellation) to terminate.
 	timeout time.Duration
+
+	// progressTimeout, when non-zero, enables a per-batch idle timer that
+	// is reset every time a query in the batch completes successfully.
+	// The batch is canceled if no successful query completes within this
+	// duration. This is intended for long batches (e.g. cfheader sync)
+	// where the total runtime cannot be bounded ahead of time but a
+	// stalled peer pool should still abort the batch promptly.
+	//
+	// progressTimeout composes with timeout: if both are set, whichever
+	// fires first cancels the batch.
+	progressTimeout time.Duration
 
 	// encoding lets the query know which encoding to use when queueing
 	// messages to a peer.
@@ -83,11 +97,41 @@ func NoRetryMax() QueryOption {
 	}
 }
 
-// Timeout is a query option that specifies the total time a query is allowed
-// to be tried before it is failed.
+// Timeout is a query option that specifies the total wall-clock time a batch
+// is allowed to run before it is canceled. A negative or zero value preserves
+// the historical "fire immediately" semantics of time.After(d) for d <= 0: the
+// batch is canceled on the next dispatch tick. To run a batch without a hard
+// wall-clock bound, do not call Timeout at all — the package default
+// (defaultQueryTimeout) is used — or rely on ProgressTimeout combined with
+// external cancellation.
 func Timeout(timeout time.Duration) QueryOption {
 	return func(qo *queryOptions) {
+		// Normalize non-positive values to a 1ns deadline. Pre-PR,
+		// Timeout(0) produced time.After(0), which fires immediately;
+		// any external consumer passing an uninitialized
+		// time.Duration relied on that fail-fast behaviour. We
+		// preserve it explicitly here so that "no deadline" can never
+		// be requested by accident — it must be requested by simply
+		// not calling Timeout.
+		if timeout <= 0 {
+			qo.timeout = 1
+			return
+		}
 		qo.timeout = timeout
+	}
+}
+
+// ProgressTimeout is a query option that enables a per-batch idle timer. The
+// timer is reset every time a query in the batch completes successfully; if
+// no successful query completes within the given duration, the batch is
+// canceled with ErrQueryTimeout. A value of zero disables the idle timer
+// (the default).
+//
+// ProgressTimeout composes with Timeout: if both are set, whichever fires
+// first cancels the batch.
+func ProgressTimeout(timeout time.Duration) QueryOption {
+	return func(qo *queryOptions) {
+		qo.progressTimeout = timeout
 	}
 }
 

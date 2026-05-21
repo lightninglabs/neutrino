@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"testing"
@@ -623,5 +624,386 @@ func TestWorkManagerTimeOutBatch(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("next job not received")
 		}
+	}
+}
+
+// TestWorkManagerProgressTimeoutResets verifies that a batch configured with
+// ProgressTimeout keeps running as long as queries continue to complete
+// successfully within the idle window — even when the batch's total runtime
+// far exceeds the idle window.
+func TestWorkManagerProgressTimeoutResets(t *testing.T) {
+	const numQueries = 10
+	const progressTimeout = 150 * time.Millisecond
+	const stepInterval = 50 * time.Millisecond
+
+	wm, workers := startWorkManager(t, 1)
+	wk := workers[0]
+
+	var queries []*Request
+	for i := 0; i < numQueries; i++ {
+		queries = append(queries, &Request{})
+	}
+
+	// Use a generous hard deadline so the idle timer is the effective
+	// bound — Timeout normalizes non-positive values to fire-fast, so
+	// "effectively unbounded" must be expressed as a value well past
+	// the test's runtime budget.
+	errChan := wm.Query(
+		queries, Timeout(time.Hour),
+		ProgressTimeout(progressTimeout),
+	)
+
+	// Feed one successful result every stepInterval. Total runtime is
+	// numQueries*stepInterval = 500ms, well over the 150ms idle window —
+	// any failure here means the idle timer was not being reset on
+	// successful progress.
+	for i := 0; i < numQueries; i++ {
+		var job *queryJob
+		select {
+		case job = <-wk.nextJob:
+		case err := <-errChan:
+			t.Fatalf("did not expect on errChan, got: %v", err)
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+
+		time.Sleep(stepInterval)
+
+		select {
+		case wk.results <- &jobResult{job: job, err: nil}:
+		case err := <-errChan:
+			t.Fatalf("did not expect on errChan, got: %v", err)
+		case <-time.After(time.Second):
+			t.Fatalf("result not handled")
+		}
+	}
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatalf("nothing received on errChan")
+	}
+}
+
+// TestWorkManagerProgressTimeoutFires verifies that a batch configured with
+// ProgressTimeout is canceled when no successful query completes within the
+// idle window, and that all in-flight and queued queries are signaled via
+// internalCancelChan.
+func TestWorkManagerProgressTimeoutFires(t *testing.T) {
+	const numQueries = 50
+	const numWorkers = 10
+	const progressTimeout = 200 * time.Millisecond
+
+	wm, workers := startWorkManager(t, numWorkers)
+	mergeChan := mergeWorkChannels(workers)
+
+	var queries []*Request
+	for i := 0; i < numQueries; i++ {
+		queries = append(queries, &Request{})
+	}
+
+	errChan := wm.Query(
+		queries, Timeout(time.Hour),
+		ProgressTimeout(progressTimeout),
+	)
+
+	// Collect the jobs dispatched to the active workers. We never feed
+	// a result, so the idle timer should fire after progressTimeout.
+	activeQueries := make([]queryJobWithWorkerIndex, 0, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case jq := <-mergeChan:
+			activeQueries = append(activeQueries, jq)
+		case <-errChan:
+			t.Fatalf("did not expect on errChan yet")
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+	}
+
+	// The batch cancel is delivered when the workmanager processes the
+	// next result, so feed one to nudge it after the idle window
+	// elapses. That result is discarded with the "batch already
+	// canceled" log line but triggers the timeout select.
+	time.Sleep(progressTimeout + 50*time.Millisecond)
+
+	workerIndex := activeQueries[0].worker
+	workers[workerIndex].results <- &jobResult{
+		job: activeQueries[0].job,
+		err: nil,
+	}
+
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, ErrQueryTimeout)
+	case <-time.After(time.Second):
+		t.Fatalf("expected errChan to signal idle timeout")
+	}
+
+	// All remaining in-flight queries should observe their
+	// internalCancelChan close.
+	for i := 1; i < numWorkers; i++ {
+		job := activeQueries[i].job
+		select {
+		case <-job.internalCancelChan:
+			workers[i].results <- &jobResult{job: job, err: nil}
+		case <-time.After(time.Second):
+			t.Fatalf("expected internalCancelChan to close")
+		}
+	}
+
+	// Any still-queued jobs should also see internalCancelChan close.
+	for i := numWorkers; i < numQueries; i++ {
+		select {
+		case res := <-mergeChan:
+			select {
+			case <-res.job.internalCancelChan:
+				workers[res.worker].results <- &jobResult{
+					job: res.job,
+					err: nil,
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("expected internalCancelChan " +
+					"close on queued job")
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("next job not received")
+		}
+	}
+}
+
+// TestWorkManagerBothTimeouts verifies that when both Timeout and
+// ProgressTimeout are set, the hard wall-clock deadline still fires even when
+// the idle timer is constantly being reset by steady successes.
+func TestWorkManagerBothTimeouts(t *testing.T) {
+	const numQueries = 1000
+	const hardTimeout = 300 * time.Millisecond
+	const idleTimeout = 5 * time.Second // Effectively never fires.
+
+	wm, workers := startWorkManager(t, 1)
+	wk := workers[0]
+
+	var queries []*Request
+	for i := 0; i < numQueries; i++ {
+		queries = append(queries, &Request{})
+	}
+
+	errChan := wm.Query(
+		queries, Timeout(hardTimeout), ProgressTimeout(idleTimeout),
+	)
+
+	start := time.Now()
+
+	// Feed successes one per ~10ms — total natural runtime is ~10s,
+	// far longer than the 300ms hard deadline. The hard timeout must
+	// fire despite the idle timer being constantly reset.
+	stop := make(chan struct{})
+	go func() {
+		for {
+			var job *queryJob
+			select {
+			case job = <-wk.nextJob:
+			case <-stop:
+				return
+			}
+			select {
+			case wk.results <- &jobResult{job: job, err: nil}:
+			case <-stop:
+				return
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	select {
+	case err := <-errChan:
+		elapsed := time.Since(start)
+		require.ErrorIs(t, err, ErrQueryTimeout)
+		require.GreaterOrEqual(t, elapsed, hardTimeout)
+		require.Less(t, elapsed, hardTimeout+500*time.Millisecond,
+			"hard timeout fired far too late")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("hard timeout did not fire")
+	}
+}
+
+// TestWorkManagerProgressTimeoutZeroPeers is the regression test for the
+// "progress timer never observed" bug. It dispatches a batch when no workers
+// are connected. With the timer wired into the dispatcher's outer select via
+// w.progressWakes, the batch must still be canceled with ErrQueryTimeout when
+// the idle window elapses, even though no jobResult will ever be produced
+// (there are no workers to produce one). Without that wake path, the batch
+// would hang until the workmanager itself is torn down.
+func TestWorkManagerProgressTimeoutZeroPeers(t *testing.T) {
+	const progressTimeout = 200 * time.Millisecond
+
+	// Build the workmanager directly without announcing any peers, so
+	// there are zero workers. This is the configuration that exposes
+	// the bug.
+	peerChan := make(chan Peer)
+	workerChan := make(chan *mockWorker, 1)
+	wm := NewWorkManager(&Config{
+		ConnectedPeers: func() (<-chan Peer, func(), error) {
+			return peerChan, func() {}, nil
+		},
+		NewWorker: func(peer Peer) Worker {
+			m := &mockWorker{
+				peer:    peer,
+				nextJob: make(chan *queryJob),
+				results: make(chan *jobResult),
+			}
+			workerChan <- m
+			return m
+		},
+		Ranking: &mockPeerRanking{},
+	})
+	require.NoError(t, wm.Start())
+	defer func() {
+		require.NoError(t, wm.Stop())
+	}()
+
+	// Schedule a one-shot batch with a hard deadline well past the
+	// idle window; the idle timer is the effective bound. Crucially,
+	// no peer is announced, so no worker is created, so no jobResult
+	// will ever arrive.
+	queries := []*Request{{}}
+	start := time.Now()
+	errChan := wm.Query(
+		queries, Timeout(time.Hour),
+		ProgressTimeout(progressTimeout),
+	)
+
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, ErrQueryTimeout)
+		elapsed := time.Since(start)
+		require.GreaterOrEqual(t, elapsed, progressTimeout)
+		require.Less(t, elapsed, progressTimeout+time.Second,
+			"idle timer fired far too late under zero-peer "+
+				"conditions")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("batch hung past idle window with no workers; " +
+			"progress timer is not being observed by the " +
+			"dispatcher's outer select")
+	}
+}
+
+// TestWorkManagerProgressTimeoutFailuresDontReset verifies that failed
+// results do not reset the idle timer — only successful completions count as
+// progress. A batch where every result is a failure (rescheduled forever via
+// NoRetryMax) must still be canceled by the idle timer.
+func TestWorkManagerProgressTimeoutFailuresDontReset(t *testing.T) {
+	const numWorkers = 4
+	const progressTimeout = 250 * time.Millisecond
+
+	wm, workers := startWorkManager(t, numWorkers)
+	mergeChan := mergeWorkChannels(workers)
+
+	var queries []*Request
+	for i := 0; i < numWorkers; i++ {
+		queries = append(queries, &Request{})
+	}
+
+	errChan := wm.Query(
+		queries, Timeout(time.Hour), NoRetryMax(),
+		ProgressTimeout(progressTimeout),
+	)
+
+	// Continuously feed failures back. NoRetryMax means jobs are
+	// rescheduled indefinitely; failures must not decrement batch.rem
+	// and must not reset the idle timer.
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case res := <-mergeChan:
+				select {
+				case workers[res.worker].results <- &jobResult{
+					job: res.job,
+					err: ErrQueryTimeout,
+				}:
+				case <-stop:
+					return
+				}
+			}
+		}
+	}()
+	defer close(stop)
+
+	start := time.Now()
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, ErrQueryTimeout)
+		elapsed := time.Since(start)
+		require.GreaterOrEqual(t, elapsed, progressTimeout)
+		require.Less(t, elapsed, progressTimeout+time.Second,
+			"idle timeout fired far too late")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("idle timeout did not fire despite no progress")
+	}
+}
+
+// TestWorkManagerTimeoutNonPositiveNormalized verifies that Timeout(0) and
+// Timeout(d<0) are normalized to a fire-fast deadline. This preserves the
+// pre-PR semantics of time.After(d) for d<=0 (fires immediately) so external
+// consumers passing an uninitialized or computed-negative time.Duration get
+// the historical fail-fast behaviour, not a silently unbounded batch.
+func TestWorkManagerTimeoutNonPositiveNormalized(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -1 * time.Second},
+		{"min int64", time.Duration(math.MinInt64)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wm, workers := startWorkManager(t, 1)
+			wk := workers[0]
+
+			// Submit a 2-query batch with a non-positive Timeout.
+			// After normalization the deadline is 1ns, already
+			// expired by the time the first jobResult is
+			// delivered. Two queries (not one) is important: a
+			// single-query batch completes on the success branch
+			// before the hard-timeout select is reached, so we
+			// need at least one query still outstanding when the
+			// inner select runs.
+			errChan := wm.Query(
+				[]*Request{{}, {}}, Timeout(tc.d),
+			)
+
+			var job *queryJob
+			select {
+			case job = <-wk.nextJob:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("worker did not receive job")
+			}
+			select {
+			case wk.results <- &jobResult{job: job, err: nil}:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("result not consumed")
+			}
+
+			select {
+			case err := <-errChan:
+				require.ErrorIs(t, err, ErrQueryTimeout,
+					"non-positive Timeout was not "+
+						"normalized to a fire-fast "+
+						"deadline")
+			case <-time.After(2 * time.Second):
+				t.Fatalf("Timeout(%v) did not fire", tc.d)
+			}
+		})
 	}
 }
