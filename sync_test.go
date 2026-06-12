@@ -1097,7 +1097,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1176,7 +1176,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err = walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1283,7 +1283,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 	defer os.RemoveAll(exportDir)
 
 	exportDB, err := walletdb.Create(
-		"bdb", exportDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", exportDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 
@@ -1348,7 +1348,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 	defer os.RemoveAll(svcDir)
 
 	svcDB, err := walletdb.Create(
-		"bdb", svcDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", svcDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer svcDB.Close()
@@ -1469,7 +1469,7 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1551,7 +1551,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 			tempDir := b.TempDir()
 			dbPath := filepath.Join(tempDir, "test.db")
 			db, err := walletdb.Create(
-				"bdb", dbPath, true, time.Second*10,
+				"bdb", dbPath, true, time.Second*10, false,
 			)
 			require.NoError(b, err)
 			defer db.Close()

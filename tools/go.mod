@@ -1,9 +1,9 @@
 module github.com/lightninglabs/neutrino/tools
 
-go 1.25
+go 1.25.11
 
 require (
-	github.com/btcsuite/btcd v0.26.0-beta.rc1
+	github.com/btcsuite/btcd v0.26.0
 	github.com/golangci/golangci-lint v1.64.6
 	github.com/ory/go-acc v0.2.8
 	github.com/rinchsan/gosimports v0.1.5

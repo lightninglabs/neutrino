@@ -27,7 +27,7 @@ func createTestWalletDB(t *testing.T) walletdb.DB {
 	tempDir := t.TempDir()
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/test.db", true, time.Second*10,
+		"bdb", tempDir+"/test.db", true, time.Second*10, false,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

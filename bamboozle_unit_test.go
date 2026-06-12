@@ -526,7 +526,7 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	if err != nil {
 		t.Fatalf("Error opening DB: %s", err)

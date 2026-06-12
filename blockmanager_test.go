@@ -60,7 +60,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	// Set up the block and filter header stores.
 	tempDir := t.TempDir()
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error opening DB: %s", err)

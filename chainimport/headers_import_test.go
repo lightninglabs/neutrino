@@ -140,7 +140,8 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				c2 := func() {
 					db.Close()
@@ -314,7 +315,8 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				c2 := func() {
 					db.Close()
@@ -471,6 +473,7 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			prep := tc.prep()
+			require.NoError(t, prep.err)
 			importResult, err := prep.hImport.Import(ctx)
 			verify := verify{
 				tc:           t,
@@ -5931,7 +5934,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6100,7 +6104,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6247,7 +6252,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6343,7 +6349,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6711,7 +6718,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -7116,7 +7124,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -7795,7 +7804,8 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
