@@ -96,6 +96,11 @@ type blockManagerCfg struct {
 	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
 
+	// DisconnectPeer disconnects the given peer without banning it. We use
+	// this for peers that did not respond to a follow-up query, since a
+	// missing response is not proof that the peer served invalid data.
+	DisconnectPeer func(addr string) error
+
 	// GetBlock fetches a block from the p2p network.
 	GetBlock func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 
@@ -802,24 +807,18 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 		if checkForCFHeaderMismatch(headers, i) {
 			targetHeight := startHeight + uint32(i)
 
-			badPeers, err := b.detectBadPeers(
+			invalidPeers, unresponsivePeers, err := b.detectBadPeers(
 				headers, targetHeight, uint32(i), fType,
 			)
 			if err != nil {
 				return err
 			}
 
-			log.Warnf("Banning %v peers due to invalid filter "+
-				"headers", len(badPeers))
-
-			for _, peer := range badPeers {
-				err := b.cfg.BanPeer(
-					peer, banman.InvalidFilterHeader,
-				)
-				if err != nil {
-					log.Errorf("Unable to ban peer %v: %v",
-						peer, err)
-				}
+			actedOn := b.banAndDisconnect(
+				invalidPeers, unresponsivePeers,
+				banman.InvalidFilterHeader,
+			)
+			for _, peer := range actedOn {
 				delete(headers, peer)
 			}
 		}
@@ -1529,24 +1528,18 @@ func (b *blockManager) resolveConflict(
 			// block as well.
 			targetHeight := startHeight + uint32(i)
 
-			badPeers, err := b.detectBadPeers(
+			invalidPeers, unresponsivePeers, err := b.detectBadPeers(
 				headers, targetHeight, uint32(i), fType,
 			)
 			if err != nil {
 				return nil, err
 			}
 
-			log.Warnf("Banning %v peers due to invalid filter "+
-				"headers", len(badPeers))
-
-			for _, peer := range badPeers {
-				err := b.cfg.BanPeer(
-					peer, banman.InvalidFilterHeader,
-				)
-				if err != nil {
-					log.Errorf("Unable to ban peer %v: %v",
-						peer, err)
-				}
+			actedOn := b.banAndDisconnect(
+				invalidPeers, unresponsivePeers,
+				banman.InvalidFilterHeader,
+			)
+			for _, peer := range actedOn {
 				delete(headers, peer)
 				delete(checkpoints, peer)
 			}
@@ -1554,16 +1547,15 @@ func (b *blockManager) resolveConflict(
 	}
 
 	// Any mismatches have now been thrown out. Delete any checkpoint
-	// lists that don't have matching headers, as these are peers that
-	// didn't respond, and ban them from future queries.
+	// lists that don't have matching headers. These are peers that did not
+	// respond, which is not proof that they served invalid data, so we
+	// disconnect them instead of banning them.
 	for peer := range checkpoints {
 		if _, ok := headers[peer]; !ok {
-			err := b.cfg.BanPeer(
-				peer, banman.InvalidFilterHeaderCheckpoint,
-			)
+			err := b.cfg.DisconnectPeer(peer)
 			if err != nil {
-				log.Errorf("Unable to ban peer %v: %v", peer,
-					err)
+				log.Errorf("Unable to disconnect peer %v: %v",
+					peer, err)
 			}
 			delete(checkpoints, peer)
 		}
@@ -1616,18 +1608,61 @@ func checkForCFHeaderMismatch(headers map[string]*wire.MsgCFHeaders,
 	return false
 }
 
+// banAndDisconnect bans every peer that served verified invalid filter data
+// using the given reason, and disconnects (without banning) every peer that
+// did not respond to a follow-up query. It returns all peers that were acted
+// on so the caller can drop them from its working maps.
+func (b *blockManager) banAndDisconnect(invalidPeers,
+	unresponsivePeers []string, banReason banman.Reason) []string {
+
+	if len(invalidPeers) > 0 {
+		log.Warnf("Banning %v peers due to invalid filters",
+			len(invalidPeers))
+	}
+	for _, peer := range invalidPeers {
+		err := b.cfg.BanPeer(peer, banReason)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peer, err)
+		}
+	}
+
+	if len(unresponsivePeers) > 0 {
+		log.Warnf("Disconnecting %v unresponsive peers without ban",
+			len(unresponsivePeers))
+	}
+	for _, peer := range unresponsivePeers {
+		err := b.cfg.DisconnectPeer(peer)
+		if err != nil {
+			log.Errorf("Unable to disconnect peer %v: %v", peer,
+				err)
+		}
+	}
+
+	actedOn := make([]string, 0, len(invalidPeers)+len(unresponsivePeers))
+	actedOn = append(actedOn, invalidPeers...)
+	actedOn = append(actedOn, unresponsivePeers...)
+
+	return actedOn
+}
+
 // detectBadPeers fetches filters and the block at the given height to attempt
-// to detect which peers are serving bad filters.
+// to detect which peers are serving bad filters. It returns two separate sets
+// of peers. invalidPeers are peers that we verified served invalid filter
+// data, and should be banned. unresponsivePeers are peers that did not answer
+// the follow-up filter query. A missing response is not proof that a peer
+// served invalid data, so those peers should be disconnected rather than
+// banned.
 func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	targetHeight, filterIndex uint32,
-	fType wire.FilterType) ([]string, error) {
+	fType wire.FilterType) (invalidPeers, unresponsivePeers []string,
+	err error) {
 
 	log.Warnf("Detected cfheader mismatch at height=%v!!!", targetHeight)
 
 	// Get the block header for this height.
 	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(targetHeight)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Fetch filters from the peers in question.
@@ -1636,15 +1671,18 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 		targetHeight, header.BlockHash(), fType,
 	)
 
-	var badPeers []string
 	for peer, msg := range headers {
 		filter, ok := filtersFromPeers[peer]
 
-		// If a peer did not respond, ban it immediately.
+		// If a peer did not respond, we have not proven that it served
+		// invalid data. We still drop it from this round so it cannot
+		// stall our sync by only answering header queries, but we mark
+		// it unresponsive so the caller disconnects it instead of
+		// banning it.
 		if !ok {
 			log.Warnf("Peer %v did not respond to filter "+
-				"request, considering bad", peer)
-			badPeers = append(badPeers, peer)
+				"request, disconnecting without ban", peer)
+			unresponsivePeers = append(unresponsivePeers, peer)
 			continue
 		}
 
@@ -1652,36 +1690,43 @@ func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 		// its filter hashes, ban it.
 		hash, err := builder.GetFilterHash(filter)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if hash != *msg.FilterHashes[filterIndex] {
 			log.Warnf("Peer %v serving filters not consistent "+
 				"with filter hashes, considering bad.", peer)
-			badPeers = append(badPeers, peer)
+			invalidPeers = append(invalidPeers, peer)
 		}
 	}
 
-	if len(badPeers) != 0 {
-		return badPeers, nil
+	// If we already found peers to act on, ban or disconnect them without
+	// doing the more expensive block-based reconciliation.
+	if len(invalidPeers) != 0 || len(unresponsivePeers) != 0 {
+		return invalidPeers, unresponsivePeers, nil
 	}
 
 	// If all peers responded with consistent filters and hashes, get the
 	// block and use it to detect who is serving bad filters.
 	block, err := b.cfg.GetBlock(header.BlockHash())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	log.Warnf("Attempting to reconcile cfheader mismatch amongst %v peers",
 		len(headers))
 
-	return resolveFilterMismatchFromBlock(
+	invalidPeers, err = resolveFilterMismatchFromBlock(
 		block.MsgBlock(), fType, filtersFromPeers,
 
 		// We'll require a strict majority of our peers to agree on
 		// filters.
 		(len(filtersFromPeers)+2)/2,
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return invalidPeers, unresponsivePeers, nil
 }
 
 // resolveFilterMismatchFromBlock will attempt to cross-reference each filter

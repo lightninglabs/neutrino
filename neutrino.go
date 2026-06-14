@@ -852,6 +852,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
+		DisconnectPeer:   s.DisconnectPeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
@@ -1123,6 +1124,20 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 			addr, err)
 	}
 	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
+}
+
+// DisconnectPeer disconnects the given peer without recording a ban. We use
+// this when a peer fails to respond to a follow-up query. A missing response
+// is not proof that the peer served invalid data, so we drop the connection
+// but do not apply a ban.
+func (s *ChainService) DisconnectPeer(addr string) error {
+	log.Warnf("Disconnecting peer %v without ban", addr)
+
+	if sp := s.PeerByAddr(addr); sp != nil {
+		sp.Disconnect()
+	}
+
+	return nil
 }
 
 // UnbanPeer connects and unbans a previously banned peer.
