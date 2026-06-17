@@ -6,13 +6,14 @@ require (
 	github.com/btcsuite/btcd/btcutil v1.1.5
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
 	github.com/btcsuite/btclog v0.0.0-20241003133417-09c4e92e319c
-	github.com/btcsuite/btclog/v2 v2.0.1-0.20250728225537-6090e87c6c5b
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.2.3
 	github.com/btcsuite/btcwallet/walletdb v1.3.5
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.0
 	github.com/davecgh/go-spew v1.1.1
 	github.com/golang-migrate/migrate/v4 v4.19.0
 	github.com/lightninglabs/neutrino/cache v1.1.2
+	github.com/lightningnetwork/lnd/actor v0.0.5
+	github.com/lightningnetwork/lnd/fn/v2 v2.0.8
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/lightningnetwork/lnd/sqldb/v2 v2.0.0-20260504151100-6fd5b7bb27d7
 	github.com/stretchr/testify v1.10.0
@@ -25,6 +26,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
 	github.com/aead/siphash v1.0.1 // indirect
+	github.com/btcsuite/btclog/v2 v2.0.1-0.20250728225537-6090e87c6c5b // indirect
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.0 // indirect
 	github.com/btcsuite/btcwallet/wallet/txsizes v1.1.0 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
@@ -56,7 +58,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
-	github.com/lightningnetwork/lnd/fn/v2 v2.0.8 // indirect
 	github.com/lightningnetwork/lnd/ticker v1.0.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
@@ -88,6 +89,6 @@ require (
 	modernc.org/sqlite v1.38.2 // indirect
 )
 
-go 1.25
+go 1.25.5
 
 replace github.com/golang-migrate/migrate/v4 => github.com/lightninglabs/migrate/v4 v4.18.2-9023d66a-fork-pr-2.0.20251211093704-71c1eef09789

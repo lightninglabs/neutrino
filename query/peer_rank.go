@@ -40,17 +40,18 @@ func NewPeerRanking() PeerRanking {
 // peer has no current score given, the default will be used.
 func (p *peerRanking) Order(peers []string) {
 	sort.Slice(peers, func(i, j int) bool {
-		score1, ok := p.rank[peers[i]]
-		if !ok {
-			score1 = defaultScore
-		}
-
-		score2, ok := p.rank[peers[j]]
-		if !ok {
-			score2 = defaultScore
-		}
-		return score1 < score2
+		return p.Score(peers[i]) < p.Score(peers[j])
 	})
+}
+
+// Score returns the current rank score for a peer. A lower score is better.
+func (p *peerRanking) Score(peer string) uint64 {
+	score, ok := p.rank[peer]
+	if !ok {
+		return defaultScore
+	}
+
+	return score
 }
 
 // AddPeer adds a new peer to the ranking, starting out with the default score.
