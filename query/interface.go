@@ -45,6 +45,29 @@ type queryOptions struct {
 	noRetryMax bool
 }
 
+// Options is an immutable snapshot of query options after applying all
+// functional options. It lets packages outside query implement the Dispatcher
+// interface without reaching into the legacy work manager internals.
+type Options struct {
+	// Timeout specifies the total time a query is allowed to be retried
+	// before it will fail.
+	Timeout time.Duration
+
+	// Encoding is the wire encoding used when queueing messages to a peer.
+	Encoding wire.MessageEncoding
+
+	// CancelChan is an optional channel that can be closed to indicate that
+	// the query should be canceled.
+	CancelChan <-chan struct{}
+
+	// NumRetries is the number of times a query should be retried before
+	// failing.
+	NumRetries uint8
+
+	// NoRetryMax disables the retry cap when set.
+	NoRetryMax bool
+}
+
 // QueryOption is a functional option argument to any of the network query
 // methods, such as GetBlock and GetCFilter (when that resorts to a network
 // query). These are always processed in order, with later options overriding
@@ -64,6 +87,21 @@ func defaultQueryOptions() *queryOptions {
 func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	for _, option := range options {
 		option(qo)
+	}
+}
+
+// ResolveOptions applies query options to the package defaults and returns an
+// exported snapshot for external Dispatcher implementations.
+func ResolveOptions(options ...QueryOption) Options {
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+
+	return Options{
+		Timeout:    qo.timeout,
+		Encoding:   qo.encoding,
+		CancelChan: qo.cancelChan,
+		NumRetries: qo.numRetries,
+		NoRetryMax: qo.noRetryMax,
 	}
 }
 
@@ -119,6 +157,33 @@ type Progress struct {
 	// used for the requests types where more than one response is
 	// expected.
 	Progressed bool
+}
+
+// IsNotFoundResponse returns true when resp explicitly says that the peer does
+// not have inventory requested by req. Query workers use this as a fast
+// retryable failure instead of waiting for the full per-peer timeout.
+func IsNotFoundResponse(req, resp wire.Message) bool {
+	notFound, ok := resp.(*wire.MsgNotFound)
+	if !ok {
+		return false
+	}
+
+	getData, ok := req.(*wire.MsgGetData)
+	if !ok {
+		return false
+	}
+
+	for _, requested := range getData.InvList {
+		for _, missing := range notFound.InvList {
+			if requested.Type == missing.Type &&
+				requested.Hash == missing.Hash {
+
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // Request is the main struct that defines a bitcoin network query to be sent to
@@ -180,6 +245,10 @@ type Peer interface {
 
 	// Addr returns the address of this peer.
 	Addr() string
+
+	// LastPingMicros returns the duration of the last ping round trip in
+	// microseconds. A zero value means no RTT sample is available yet.
+	LastPingMicros() int64
 
 	// OnDisconnect returns a channel that will be closed when this peer is
 	// disconnected.
