@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/querysync"
 )
@@ -21,6 +22,28 @@ var _ headersync.DispatchController = (*Controller)(nil)
 // New creates a querysync-backed header range dispatch controller.
 func New(manager *querysync.ManagerActor) *Controller {
 	return &Controller{manager: manager}
+}
+
+// NewRuntime creates a production headersync runtime that mirrors generic range
+// ownership through querysync's actor-backed scheduler. Header-specific
+// protocol details remain in headersync and blockmanager.
+func NewRuntime(tip headersync.ChainPoint,
+	checkpoints []chaincfg.Checkpoint,
+	mailboxSize int) (*headersync.Runtime, int) {
+
+	if mailboxSize <= 0 {
+		mailboxSize = 1
+	}
+
+	dispatchFSM := querysync.NewSchedulerFSM(querysync.DefaultConfig())
+	dispatchActor := querysync.NewManagerActor(dispatchFSM, mailboxSize)
+
+	return headersync.NewRuntime(tip, checkpoints, headersync.RuntimeConfig{
+		Config:        headersync.ProductionConfig(),
+		MailboxSize:   mailboxSize,
+		Dispatch:      New(dispatchActor),
+		DispatchActor: dispatchActor,
+	})
 }
 
 // AddPeer mirrors a header peer into the querysync scheduler.

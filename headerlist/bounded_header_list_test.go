@@ -182,3 +182,39 @@ func TestBoundedMemoryChainPrevIteration(t *testing.T) {
 		}
 	}
 }
+
+// TestBoundedMemoryChainAtHeight tests direct height lookup across ring
+// wrapping.
+func TestBoundedMemoryChainAtHeight(t *testing.T) {
+	t.Parallel()
+
+	memChain := NewBoundedMemoryChain(5)
+
+	for i := 0; i < 8; i++ {
+		memChain.PushBack(Node{
+			Height: int32(i),
+		})
+	}
+
+	for height := int32(0); height < 3; height++ {
+		if node, ok := memChain.AtHeight(height); ok {
+			t.Fatalf("height %v should be evicted, got %v",
+				height, node)
+		}
+	}
+
+	for height := int32(3); height < 8; height++ {
+		node, ok := memChain.AtHeight(height)
+		if !ok {
+			t.Fatalf("height %v should be retained", height)
+		}
+		if node.Height != height {
+			t.Fatalf("wrong node height: expected %v, got %v",
+				height, node.Height)
+		}
+	}
+
+	if node, ok := memChain.AtHeight(8); ok {
+		t.Fatalf("future height should not be found, got %v", node)
+	}
+}

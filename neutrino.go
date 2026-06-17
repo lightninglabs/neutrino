@@ -32,7 +32,8 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
-	queryworkmanager "github.com/lightninglabs/neutrino/querysync/workmanager"
+	"github.com/lightninglabs/neutrino/querysync"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
 )
 
@@ -52,7 +53,7 @@ var (
 
 	// UserAgentVersion is the user agent version and is used to help
 	// identify ourselves to other bitcoin peers.
-	UserAgentVersion = "0.12.0-beta"
+	UserAgentVersion = "0.16.2"
 
 	// Services describes the services that are supported by the server.
 	Services = wire.SFNodeWitness | wire.SFNodeCF
@@ -640,6 +641,16 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// QuerySchedulerTrace records model-owned scheduler actor events from
+	// the production query sync path. The trace can be replayed against the
+	// querysync model to validate dispatch, retry, cooldown, and work
+	// stealing invariants.
+	QuerySchedulerTrace *querysync.TraceRecorder
+
+	// QuerySchedulerEvents receives structured production query scheduler
+	// telemetry for live sync diagnostics and validation summaries.
+	QuerySchedulerEvents querysync.SchedulerEventSink
 }
 
 // HeadersImportConfig contains configuration options for importing headers
@@ -723,6 +734,7 @@ type ChainService struct { // nolint:maligned
 	sqlBackend           *sqldb.Backend
 	workManager          query.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
+	queryPeerQuarantine  map[string]time.Time
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -810,10 +822,22 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
+		queryPeerQuarantine: make(
+			map[string]time.Time,
+		),
 	}
-	s.workManager = queryworkmanager.NewWorkManager(&queryworkmanager.Config{
+	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
 		ConnectedPeers: s.ConnectedPeers,
-		Ranking:        query.NewPeerRanking(),
+		OnPeerUnresponsive: func(peer query.Peer) {
+			err := s.BanPeer(peer.Addr(), banman.NonResponsivePeer)
+			if err != nil {
+				log.Errorf("Unable to ban non-responsive peer "+
+					"%v: %v", peer.Addr(), err)
+			}
+		},
+		Ranking:         query.NewPeerRanking(),
+		SchedulerTrace:  cfg.QuerySchedulerTrace,
+		SchedulerEvents: cfg.QuerySchedulerEvents,
 	})
 
 	var err error
@@ -916,6 +940,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
+		QuarantinePeer:   s.QuarantinePeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
@@ -1193,6 +1218,52 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
 }
 
+// QuarantinePeer temporarily excludes one exact peer address from peer
+// subscriptions used by query dispatch. Unlike BanPeer, this does not ban the
+// peer's IP address, so multiple localhost or NAT-shared peers are not grouped
+// together.
+func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
+	until := time.Now().Add(duration)
+	log.Warnf("Quarantining peer %v until %s", addr,
+		until.Format(time.RFC3339))
+
+	select {
+	case s.query <- quarantinePeerMsg{
+		addr:  addr,
+		until: until,
+	}:
+	case <-s.quit:
+	}
+}
+
+func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {
+	if s.queryPeerQuarantine == nil {
+		s.queryPeerQuarantine = make(map[string]time.Time)
+	}
+
+	if current, ok := s.queryPeerQuarantine[addr]; ok &&
+		current.After(until) {
+
+		return
+	}
+
+	s.queryPeerQuarantine[addr] = until
+}
+
+func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
+	until, ok := s.queryPeerQuarantine[addr]
+	if !ok {
+		return false
+	}
+
+	if now.Before(until) {
+		return true
+	}
+
+	delete(s.queryPeerQuarantine, addr)
+	return false
+}
+
 // UnbanPeer connects and unbans a previously banned peer.
 func (s *ChainService) UnbanPeer(addr string, parmanent bool) error {
 	log.Infof("UnBanning peer %v", addr)
@@ -1432,6 +1503,10 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// Disconnect banned peers.
 	if s.IsBanned(sp.Addr()) {
+		sp.Disconnect()
+		return false
+	}
+	if s.peerQuarantined(sp.Addr(), time.Now()) {
 		sp.Disconnect()
 		return false
 	}
