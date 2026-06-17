@@ -1,0 +1,10 @@
+<Project>
+<ProjectName>NeutrinoHeaderSyncModels</ProjectName>
+<InputFiles>
+<PFile>src/header_sync.p</PFile>
+<PFile>src/header_transport.p</PFile>
+<PFile>test/header_sync_test.p</PFile>
+<PFile>test/header_transport_test.p</PFile>
+</InputFiles>
+<OutputDir>PGenerated</OutputDir>
+</Project>

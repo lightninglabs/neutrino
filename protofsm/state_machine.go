@@ -15,15 +15,15 @@ var (
 	// StateMachine that has been asked to stop.
 	ErrStateMachineShutdown = errors.New("state machine is shutting down")
 
-	// ErrNilInitialState occurs when a StateMachine is configured without an
-	// initial state.
+	// ErrNilInitialState occurs when a StateMachine is configured without
+	// an initial state.
 	ErrNilInitialState = errors.New("initial state must not be nil")
 )
 
 // EmittedEvent is a special type that can be emitted by a state transition.
-// Internal events are routed back into the same FSM. Outbox events are returned
-// to the caller so the actor that owns the FSM can dispatch them to other
-// actors, persistence sinks, trace recorders, or test harnesses.
+// Internal events are routed back into the same FSM. Outbox events are
+// returned to the caller so the actor that owns the FSM can dispatch them to
+// other actors, persistence sinks, trace recorders, or test harnesses.
 type EmittedEvent[Event any, Outbox any] struct {
 	// InternalEvent is an optional set of internal events that should be
 	// routed back into the state machine. This lets one external input
@@ -125,10 +125,11 @@ func NewStateMachine[Event any, Outbox any, Env any](
 		cfg.ErrorReporter = noopErrorReporter{}
 	}
 
+	stateEvents := fn.NewEventDistributor[State[Event, Outbox, Env]]()
 	return &StateMachine[Event, Outbox, Env]{
 		cfg:            cfg,
 		currentState:   cfg.InitialState,
-		newStateEvents: fn.NewEventDistributor[State[Event, Outbox, Env]](),
+		newStateEvents: stateEvents,
 	}, nil
 }
 
@@ -184,14 +185,16 @@ func (s *StateMachine[Event, Outbox, Env]) CurrentState() State[
 }
 
 // StateSubscriber represents an active state transition subscription.
-type StateSubscriber[Event any, Outbox any, Env any] *fn.EventReceiver[State[Event, Outbox, Env]]
+type StateSubscriber[
+	Event, Outbox, Env any,
+] *fn.EventReceiver[State[Event, Outbox, Env]]
 
 // RegisterStateEvents registers a new event listener that will be notified of
 // new state transitions.
-func (s *StateMachine[Event, Outbox, Env]) RegisterStateEvents() StateSubscriber[
-	Event, Outbox, Env] {
+func (s *StateMachine[E, O, Env]) RegisterStateEvents() StateSubscriber[
+	E, O, Env] {
 
-	subscriber := fn.NewEventReceiver[State[Event, Outbox, Env]](10)
+	subscriber := fn.NewEventReceiver[State[E, O, Env]](10)
 	s.newStateEvents.RegisterSubscriber(subscriber)
 
 	return subscriber
@@ -213,11 +216,11 @@ func (s *StateMachine[Event, Outbox, Env]) applyEvents(ctx context.Context,
 	currentState State[Event, Outbox, Env], newEvent Event) (
 	State[Event, Outbox, Env], []Outbox, error) {
 
-	eventQueue := fn.NewQueue(newEvent)
+	queue := fn.NewQueue(newEvent)
 	var outbox []Outbox
 
-	for nextEvent := eventQueue.Dequeue(); nextEvent.IsSome(); nextEvent = eventQueue.Dequeue() {
-		err := fn.MapOptionZ(nextEvent, func(event Event) error {
+	for next := queue.Dequeue(); next.IsSome(); next = queue.Dequeue() {
+		err := fn.MapOptionZ(next, func(event Event) error {
 			transition, err := currentState.ProcessEvent(
 				ctx, event, s.cfg.Env,
 			)
@@ -226,18 +229,25 @@ func (s *StateMachine[Event, Outbox, Env]) applyEvents(ctx context.Context,
 			}
 
 			if transition == nil || transition.NextState == nil {
-				return fmt.Errorf("state %v returned nil transition",
-					currentState)
+				return fmt.Errorf(
+					"state %v returned nil transition",
+					currentState,
+				)
 			}
 
 			err = fn.MapOptionZ(
 				transition.NewEvents,
 				func(events EmittedEvent[Event, Outbox]) error {
-					for _, internalEvent := range events.InternalEvent {
-						eventQueue.Enqueue(internalEvent)
+					internal := events.InternalEvent
+					for _, event := range internal {
+						queue.Enqueue(
+							event,
+						)
 					}
 
-					outbox = append(outbox, events.Outbox...)
+					outbox = append(
+						outbox,
+						events.Outbox...)
 
 					return nil
 				},

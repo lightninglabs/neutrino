@@ -51,8 +51,11 @@ func (t testState) IsTerminal() bool {
 	return t.terminal
 }
 
-func (t testState) ProcessEvent(_ context.Context, event testEvent,
-	env testEnv) (*StateTransition[testEvent, outboxEvent, testEnv], error) {
+func (t testState) ProcessEvent(
+	_ context.Context,
+	event testEvent,
+	env testEnv,
+) (*StateTransition[testEvent, outboxEvent, testEnv], error) {
 
 	switch event.(type) {
 	case stepEvent:
@@ -64,11 +67,12 @@ func (t testState) ProcessEvent(_ context.Context, event testEvent,
 		}, nil
 
 	case emitEvent:
+		outbox := []outboxEvent{{value: "emitting"}}
 		return &StateTransition[testEvent, outboxEvent, testEnv]{
 			NextState: testState{name: "emitting"},
 			NewEvents: fn.Some(EmittedEvent[testEvent, outboxEvent]{
 				InternalEvent: []testEvent{finishEvent{}},
-				Outbox:        []outboxEvent{{value: "emitting"}},
+				Outbox:        outbox,
 			}),
 		}, nil
 
@@ -106,7 +110,7 @@ func newTestStateMachine(t *testing.T) *StateMachine[
 	)
 	require.NoError(t, err)
 
-	machine.Start(context.Background())
+	machine.Start(t.Context())
 
 	return machine
 }
@@ -115,7 +119,7 @@ func TestStateMachineProcessesEvents(t *testing.T) {
 	machine := newTestStateMachine(t)
 	defer machine.Stop()
 
-	outbox, err := machine.ProcessEvent(context.Background(), stepEvent{})
+	outbox, err := machine.ProcessEvent(t.Context(), stepEvent{})
 	require.NoError(t, err)
 	require.Equal(t, []outboxEvent{{value: "stepped"}}, outbox)
 
@@ -130,7 +134,7 @@ func TestStateMachineProcessesInternalEvents(t *testing.T) {
 	sub := machine.RegisterStateEvents()
 	defer machine.RemoveStateSub(sub)
 
-	outbox, err := machine.ProcessEvent(context.Background(), emitEvent{})
+	outbox, err := machine.ProcessEvent(t.Context(), emitEvent{})
 	require.NoError(t, err)
 	require.Equal(t, []outboxEvent{
 		{value: "emitting"},
@@ -143,7 +147,7 @@ func TestStateMachineProcessesInternalEvents(t *testing.T) {
 }
 
 func TestStateMachineReportsErrors(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	errChan := make(chan error, 1)
@@ -182,6 +186,6 @@ func TestStateMachineRejectsEventsBeforeStart(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = machine.ProcessEvent(context.Background(), stepEvent{})
+	_, err = machine.ProcessEvent(t.Context(), stepEvent{})
 	require.ErrorIs(t, err, ErrStateMachineShutdown)
 }
