@@ -17,7 +17,7 @@ jobs:
     env:
       GATEWAY_REVIEW_MODE: multi
     steps:
-      - uses: lightninglabs/gateway/.github/actions/review@v0.4.2
+      - uses: lightninglabs/gateway-action@v0.4.2
         with:
           event_name:      ${{ github.event_name }}
           event_action:    ${{ github.event.action }}
