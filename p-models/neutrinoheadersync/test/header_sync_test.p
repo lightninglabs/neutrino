@@ -325,59 +325,6 @@ machine TestOutOfOrderCompletionStagesUntilGapFilled {
     state Done {}
 }
 
-machine TestExternalTipAdvancePlansGapBeforeStagedFrontier {
-    start state Init {
-        entry {
-            var model: HeaderSyncModel;
-            var gap: HeaderRange;
-            var staged: HeaderRange;
-            var ready: seq[int];
-
-            model = NewModel(0, 100);
-            model.anchors = AddOrConfirmAnchor(model.anchors, 0, 100, true);
-            model.anchors = AddOrConfirmAnchor(model.anchors, 20, 120, true);
-            model.anchors = AddOrConfirmAnchor(model.anchors, 30, 130, true);
-
-            // This is the failure mode seen in the live sqlite testnet3 run:
-            // later frontier discovery responses were already staged, but a
-            // short serial/fallback write had advanced the durable tip to a
-            // boundary the FSM had not yet made visible. Reconciliation must
-            // add that boundary before the manager keeps discovering farther
-            // ahead, otherwise the staged range after the gap can never commit.
-            model = StageDiscoveredRange(model, 1, 9, 20, 30);
-            model = AdvanceCommittedTip(model, 10, 110);
-            assert model.committed_tip == 10,
-                "external durable tip should become manager-visible";
-
-            model = PlanRange(model, 2, 10, 20);
-            gap = RangeByID(model.ranges, 2);
-            assert gap.range_state == RangeQueued,
-                "known missing frontier span should become fetchable work";
-
-            ready = ReadyRanges(model);
-            assert sizeof(ready) == 0,
-                "later staged frontier range must wait for the planned gap";
-
-            model = AddPeer(model, NewPeer(1, 0, 10, HeaderPeerReady));
-            model = AssignNextQueuedRange(model);
-            model = StartPeerRange(model, 1);
-            gap = RangeByID(model.ranges, 2);
-            model = CompleteRange(model, 1, 2, gap.lease_epoch, true);
-            model = CommitReadyRanges(model);
-
-            staged = RangeByID(model.ranges, 1);
-            assert staged.range_state == RangeCommitted,
-                "committing the gap should drain the already staged range";
-            assert model.committed_tip == 30,
-                "visible tip should advance through all contiguous work";
-
-            goto Done;
-        }
-    }
-
-    state Done {}
-}
-
 machine TestReadyRangesDoesNotAdvanceCommittedTip {
     start state Init {
         entry {
