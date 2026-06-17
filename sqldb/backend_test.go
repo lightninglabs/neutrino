@@ -85,4 +85,86 @@ func TestNewBackendSqlite(t *testing.T) {
 			return nil
 		}, sqldbv2.NoOpReset,
 	))
+
+	assertNoDuplicateHeaderHashIndex(t, backend, "block_headers")
+	assertNoDuplicateHeaderHashIndex(t, backend, "filter_headers")
+	assertSqliteChainPragmas(t, backend)
+}
+
+func assertNoDuplicateHeaderHashIndex(t *testing.T, backend *Backend,
+	tableName string) {
+
+	t.Helper()
+
+	db := backend.store.GetBaseDB().DB
+	rows, err := db.Query("PRAGMA index_list('" + tableName + "')")
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var indexNames []string
+	for rows.Next() {
+		var (
+			seq     int
+			name    string
+			unique  int
+			origin  string
+			partial int
+		)
+		require.NoError(
+			t, rows.Scan(&seq, &name, &unique, &origin, &partial),
+		)
+		indexNames = append(indexNames, name)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+
+	var hashIndexes []string
+	for _, name := range indexNames {
+		cols, err := db.Query("PRAGMA index_info('" + name + "')")
+		require.NoError(t, err)
+
+		var columns []string
+		for cols.Next() {
+			var (
+				cid     int
+				seqno   int
+				colName string
+			)
+			require.NoError(
+				t, cols.Scan(&seqno, &cid, &colName),
+			)
+			columns = append(columns, colName)
+		}
+		require.NoError(t, cols.Err())
+		require.NoError(t, cols.Close())
+
+		if len(columns) == 1 && columns[0] == "block_hash" {
+			hashIndexes = append(hashIndexes, name)
+		}
+	}
+
+	require.Len(t, hashIndexes, 1)
+	require.NotContains(t, hashIndexes, tableName+"_hash_idx")
+}
+
+func assertSqliteChainPragmas(t *testing.T, backend *Backend) {
+	t.Helper()
+
+	db := backend.store.GetBaseDB().DB
+	for pragma, expected := range map[string]int64{
+		"synchronous":          1,
+		"checkpoint_fullfsync": 0,
+		"wal_autocheckpoint":   50000,
+		"journal_size_limit":   268435456,
+		"temp_store":           2,
+		"cache_size":           -131072,
+		"mmap_size":            268435456,
+	} {
+		var got int64
+		require.NoError(
+			t, db.QueryRow("PRAGMA "+pragma).Scan(&got),
+			"pragma=%v", pragma,
+		)
+		require.Equal(t, expected, got, "pragma=%v", pragma)
+	}
 }
