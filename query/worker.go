@@ -17,8 +17,9 @@ var (
 	ErrPeerDisconnected = errors.New("peer disconnected")
 
 	// ErrPeerNotFound is returned if the peer explicitly reports that it
-	// does not have the requested inventory. This is retryable, but unlike a
-	// timeout it should fail fast so forked or lagging peers do not consume a
+	// does not have the requested inventory. This is retryable, but unlike
+	// a timeout it should fail fast so forked or lagging peers do not
+	// consume a
 	// full query timeout.
 	ErrPeerNotFound = errors.New("peer did not have requested data")
 

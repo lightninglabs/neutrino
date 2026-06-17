@@ -67,7 +67,8 @@ type Options struct {
 	// before it will fail.
 	Timeout time.Duration
 
-	// ProgressTimeout bounds idle time between successful requests in a batch.
+	// ProgressTimeout bounds idle time between successful requests in a
+	// batch.
 	ProgressTimeout time.Duration
 
 	// Encoding is the wire encoding used when queueing messages to a peer.
