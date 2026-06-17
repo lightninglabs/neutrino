@@ -54,7 +54,7 @@ func NewBackend(dataDir string, cfg *Config,
 	switch cfg.Backend {
 	case BackendSqlite:
 		dbPath := filepath.Join(dataDir, cfg.sqliteFilename())
-		s, err := sqldbv2.NewSqliteStore(cfg.Sqlite, dbPath)
+		s, err := sqldbv2.NewSqliteStore(cfg.sqliteConfig(), dbPath)
 		if err != nil {
 			return nil, fmt.Errorf("sqldb: open sqlite: %w", err)
 		}
@@ -77,7 +77,6 @@ func NewBackend(dataDir string, cfg *Config,
 	}
 
 	baseDB := store.GetBaseDB()
-
 	headerExec := sqldbv2.NewTransactionExecutor[HeaderQueries](
 		baseDB,
 		func(tx *sql.Tx) HeaderQueries {

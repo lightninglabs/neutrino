@@ -20,13 +20,13 @@ const trackingTable = "neutrino_migrations"
 
 // LatestSchemaVersion is the highest schema_version applied by an SQL
 // migration file under sqlc/migrations.
-const LatestSchemaVersion = 1
+const LatestSchemaVersion = 3
 
 // LatestMigrationVersion is the highest global migration version (the union
 // of SQL and programmatic migrations). Each entry in MigrationSet.Descriptors
 // counts toward this bound; downgrade protection refuses to start when the
 // on-disk version exceeds this constant.
-const LatestMigrationVersion = 2
+const LatestMigrationVersion = 3
 
 // MigrationSet returns the canonical migration set for the neutrino SQL
 // backend. The optional makeProgrammatic argument lets callers register
@@ -52,6 +52,11 @@ func MigrationSet(makeProgrammatic func(*sqldbv2.BaseDB) (
 				Name:          "legacy_import",
 				Version:       2,
 				SchemaVersion: 2,
+			},
+			{
+				Name:          "drop_duplicate_hash_indexes",
+				Version:       3,
+				SchemaVersion: 3,
 			},
 		},
 	}
