@@ -1249,6 +1249,139 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	testInitialSync(testHarness, t)
 }
 
+// TestNeutrinoImportThenP2PSync verifies that a single ChainService that
+// imports headers from files can also continue syncing new blocks via P2P
+// in the same session. This exercises the ResetHeaderState path: the block
+// manager is constructed (with an empty store) before Start() runs the
+// import, so its internal tracking state must be refreshed after import to
+// build correct P2P locators for the remaining chain.
+func TestNeutrinoImportThenP2PSync(t *testing.T) {
+	rootCtx := context.Background()
+
+	// Create a btcd SimNet node and generate an initial chain.
+	h1, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+	defer h1.TearDown()
+
+	err = h1.SetUp(false, 0)
+	require.NoError(t, err)
+
+	const initialBlocks = 800
+	_, err = h1.Client.Generate(initialBlocks)
+	require.NoError(t, err)
+
+	// Sync an export service to obtain header files.
+	exportDir := t.TempDir()
+	defer os.RemoveAll(exportDir)
+
+	exportDB, err := walletdb.Create(
+		"bdb", exportDir+"/filters.db", true, dbOpenTimeout,
+	)
+	require.NoError(t, err)
+
+	neutrino.MaxPeers = 1
+	neutrino.BanDuration = 5 * time.Second
+	neutrino.QueryPeerConnectTimeout = 10 * time.Second
+
+	exportSvc, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:     exportDir,
+		Database:    exportDB,
+		ChainParams: chaincfg.SimNetParams,
+		AddPeers:    []string{h1.P2PAddress()},
+	})
+	require.NoError(t, err)
+	exportSvc.Start(rootCtx)
+
+	err = waitForSync(t, exportSvc, h1)
+	require.NoError(t, err, "export service failed to sync")
+
+	// Copy the header files and add import metadata.
+	importDir := t.TempDir()
+	defer os.RemoveAll(importDir)
+
+	blockSrc := filepath.Join(exportDir, "block_headers.bin")
+	filterSrc := filepath.Join(exportDir, "reg_filter_headers.bin")
+	blockDst := filepath.Join(importDir, "block_headers.bin")
+	filterDst := filepath.Join(importDir, "reg_filter_headers.bin")
+
+	err = copyFile(blockSrc, blockDst)
+	require.NoError(t, err)
+	err = copyFile(filterSrc, filterDst)
+	require.NoError(t, err)
+
+	err = chainimport.AddHeadersImportMetadata(
+		blockDst, chaincfg.SimNetParams.Net, 0,
+		headerfs.Block, 0,
+	)
+	require.NoError(t, err)
+	err = chainimport.AddHeadersImportMetadata(
+		filterDst, chaincfg.SimNetParams.Net, 0,
+		headerfs.RegularFilter, 0,
+	)
+	require.NoError(t, err)
+
+	exportSvc.Stop()
+	require.NoError(t, exportDB.Close())
+
+	// Mine additional blocks AFTER the export, so the import files only
+	// cover [0, initialBlocks]. The service must fetch the rest via P2P.
+	const extraBlocks = 50
+	_, err = h1.Client.Generate(extraBlocks)
+	require.NoError(t, err)
+
+	// Create a fresh service with BOTH headers import AND a peer
+	// connection. This is the critical setup: the block manager is
+	// constructed in NewChainService (reading the empty store), then
+	// Start() runs the import (populating the store), then the block
+	// manager begins P2P sync. Without ResetHeaderState, the block
+	// manager would use a genesis locator and fail to fetch the
+	// remaining blocks.
+	svcDir := t.TempDir()
+	defer os.RemoveAll(svcDir)
+
+	svcDB, err := walletdb.Create(
+		"bdb", svcDir+"/filters.db", true, dbOpenTimeout,
+	)
+	require.NoError(t, err)
+	defer svcDB.Close()
+
+	svc, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:     svcDir,
+		Database:    svcDB,
+		ChainParams: chaincfg.SimNetParams,
+		AddPeers:    []string{h1.P2PAddress()},
+		HeadersImport: &neutrino.HeadersImportConfig{
+			BlockHeadersSource:      blockDst,
+			FilterHeadersSource:     filterDst,
+			ValidationFlags:         blockchain.BFFastAdd,
+			WriteBatchSizePerRegion: 64,
+		},
+	})
+	require.NoError(t, err)
+
+	svc.Start(rootCtx)
+	defer svc.Stop()
+
+	// The service should sync all the way to initialBlocks + extraBlocks
+	// by importing the first batch from file and fetching the rest via
+	// P2P.
+	err = waitForSync(t, svc, h1)
+	require.NoError(t, err, "service failed to sync after import + P2P")
+
+	// Verify the service reached the expected height.
+	best, err := svc.BestBlock()
+	require.NoError(t, err)
+
+	_, expectedHeight, err := h1.Client.GetBestBlock()
+	require.NoError(t, err)
+	require.Equal(
+		t, expectedHeight, best.Height,
+		"service height should match btcd tip",
+	)
+}
+
 // TestNeutrinoSyncWithoutHeadersImport tests the standard synchronization
 // behavior of Neutrino without using the headers import feature.
 func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
