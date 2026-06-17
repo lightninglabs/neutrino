@@ -17,9 +17,6 @@ CREATE TABLE IF NOT EXISTS block_headers (
     CONSTRAINT block_headers_hash_uniq UNIQUE (block_hash)
 );
 
-CREATE INDEX IF NOT EXISTS block_headers_hash_idx
-    ON block_headers (block_hash);
-
 -- filter_headers stores 32-byte filter header hashes keyed by height. The
 -- block_hash column is the bitcoin block hash this filter header corresponds
 -- to. There is no foreign key to block_headers because the two chains drift
@@ -30,9 +27,6 @@ CREATE TABLE IF NOT EXISTS filter_headers (
     filter_hash  BLOB   NOT NULL,
     CONSTRAINT filter_headers_block_hash_uniq UNIQUE (block_hash)
 );
-
-CREATE INDEX IF NOT EXISTS filter_headers_block_hash_idx
-    ON filter_headers (block_hash);
 
 -- regular_filters stores GCS regular filters keyed by block hash. A
 -- zero-length filter_bytes value is the legacy "nil filter" sentinel and is

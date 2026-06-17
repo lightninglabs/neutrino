@@ -28,6 +28,26 @@ type SQLBlockHeaderStore struct {
 	// blockmanager rely on: a ChainTip immediately following a
 	// successful WriteHeaders must observe the new tip.
 	mtx sync.RWMutex
+
+	// The SQL store backs lnd's ChainConn methods. During notifier startup
+	// lnd replays missed block epochs with sequential height/hash lookups,
+	// so keep a bounded read-through cache to collapse that scan into
+	// occasional range reads instead of one sqlite tx per height.
+	cacheMtx         sync.Mutex
+	headerCache      map[chainhash.Hash]cachedSQLBlockHeader
+	heightCache      map[uint32]chainhash.Hash
+	headerCacheOrder []chainhash.Hash
+	headerCacheNext  int
+}
+
+const (
+	sqlBlockHeaderReadCacheSize     = 8192
+	sqlBlockHeaderReadCachePrefetch = 2048
+)
+
+type cachedSQLBlockHeader struct {
+	header wire.BlockHeader
+	height uint32
 }
 
 // A compile-time check to ensure SQLBlockHeaderStore satisfies the
@@ -53,6 +73,114 @@ func NewSQLBlockHeaderStore(ctx context.Context, db sqldb.HeaderTx,
 	}
 
 	return store, nil
+}
+
+func (s *SQLBlockHeaderStore) cachedBlockHeader(hash *chainhash.Hash) (
+	*wire.BlockHeader, uint32, bool) {
+
+	s.cacheMtx.Lock()
+	defer s.cacheMtx.Unlock()
+
+	cachedHeader, ok := s.headerCache[*hash]
+	if !ok {
+		return nil, 0, false
+	}
+
+	header := cachedHeader.header
+	return &header, cachedHeader.height, true
+}
+
+func (s *SQLBlockHeaderStore) cachedBlockHeaderByHeight(height uint32) (
+	*wire.BlockHeader, bool) {
+
+	s.cacheMtx.Lock()
+	defer s.cacheMtx.Unlock()
+
+	hash, ok := s.heightCache[height]
+	if !ok {
+		return nil, false
+	}
+
+	cachedHeader, ok := s.headerCache[hash]
+	if !ok {
+		delete(s.heightCache, height)
+		return nil, false
+	}
+
+	header := cachedHeader.header
+	return &header, true
+}
+
+func (s *SQLBlockHeaderStore) rememberBlockHeader(height uint32,
+	header *wire.BlockHeader) {
+
+	hash := header.BlockHash()
+
+	s.cacheMtx.Lock()
+	defer s.cacheMtx.Unlock()
+
+	if s.headerCache == nil {
+		s.headerCache = make(
+			map[chainhash.Hash]cachedSQLBlockHeader,
+			sqlBlockHeaderReadCacheSize,
+		)
+		s.heightCache = make(
+			map[uint32]chainhash.Hash,
+			sqlBlockHeaderReadCacheSize,
+		)
+	}
+
+	cachedHeader := cachedSQLBlockHeader{
+		header: *header,
+		height: height,
+	}
+
+	if oldHash, ok := s.heightCache[height]; ok && oldHash != hash {
+		delete(s.headerCache, oldHash)
+	}
+
+	if _, ok := s.headerCache[hash]; ok {
+		s.headerCache[hash] = cachedHeader
+		s.heightCache[height] = hash
+		return
+	}
+
+	if len(s.headerCacheOrder) < sqlBlockHeaderReadCacheSize {
+		s.headerCacheOrder = append(s.headerCacheOrder, hash)
+	} else {
+		evictedHash := s.headerCacheOrder[s.headerCacheNext]
+		if evictedHeader, ok := s.headerCache[evictedHash]; ok {
+			delete(s.heightCache, evictedHeader.height)
+		}
+		delete(s.headerCache, evictedHash)
+
+		s.headerCacheOrder[s.headerCacheNext] = hash
+		s.headerCacheNext = (s.headerCacheNext + 1) %
+			sqlBlockHeaderReadCacheSize
+	}
+
+	s.headerCache[hash] = cachedHeader
+	s.heightCache[height] = hash
+}
+
+func (s *SQLBlockHeaderStore) clearBlockHeaderCache() {
+	s.cacheMtx.Lock()
+	defer s.cacheMtx.Unlock()
+
+	clear(s.headerCache)
+	clear(s.heightCache)
+	s.headerCacheOrder = s.headerCacheOrder[:0]
+	s.headerCacheNext = 0
+}
+
+func sqlBlockHeaderReadCachePrefetchEnd(height uint32) uint32 {
+	const maxUint32 = ^uint32(0)
+
+	if maxUint32-height < sqlBlockHeaderReadCachePrefetch-1 {
+		return maxUint32
+	}
+
+	return height + sqlBlockHeaderReadCachePrefetch - 1
 }
 
 // ensureGenesis writes the genesis block header row into block_headers if
@@ -146,24 +274,51 @@ func (s *SQLBlockHeaderStore) FetchHeaderByHeight(height uint32) (
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
+	if header, ok := s.cachedBlockHeaderByHeight(height); ok {
+		return header, nil
+	}
+
 	var (
 		header *wire.BlockHeader
 		ctx    = context.Background()
 	)
 	err := s.db.ExecTx(ctx, sqldbv2.ReadTxOpt(),
 		func(q sqldb.HeaderQueries) error {
-			raw, err := q.GetBlockHeaderByHeight(
-				ctx, int64(height),
+			rows, err := q.GetBlockHeaderRange(
+				ctx, sqlc.GetBlockHeaderRangeParams{
+					StartHeight: int64(height),
+					EndHeight: int64(
+						sqlBlockHeaderReadCachePrefetchEnd(
+							height,
+						),
+					),
+				},
 			)
-			if err != nil {
-				return mapHeaderNotFound(err)
-			}
-
-			h, err := decodeBlockHeader(raw)
 			if err != nil {
 				return err
 			}
-			header = h
+			if len(rows) == 0 {
+				return mapHeaderNotFound(sql.ErrNoRows)
+			}
+
+			for _, row := range rows {
+				h, err := decodeBlockHeader(row.RawHeader)
+				if err != nil {
+					return err
+				}
+
+				rowHeight := uint32(row.Height)
+				s.rememberBlockHeader(rowHeight, h)
+
+				if rowHeight == height {
+					header = h
+				}
+			}
+
+			if header == nil {
+				return mapHeaderNotFound(sql.ErrNoRows)
+			}
+
 			return nil
 		}, sqldbv2.NoOpReset)
 	if err != nil {
@@ -183,6 +338,10 @@ func (s *SQLBlockHeaderStore) FetchHeader(hash *chainhash.Hash) (
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
+	if header, height, ok := s.cachedBlockHeader(hash); ok {
+		return header, height, nil
+	}
+
 	var (
 		header *wire.BlockHeader
 		height uint32
@@ -201,6 +360,7 @@ func (s *SQLBlockHeaderStore) FetchHeader(hash *chainhash.Hash) (
 			}
 			header = h
 			height = uint32(row.Height)
+			s.rememberBlockHeader(height, h)
 			return nil
 		}, sqldbv2.NoOpReset)
 	if err != nil {
@@ -373,10 +533,12 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	defer s.mtx.Unlock()
 
 	ctx := context.Background()
-	return s.db.ExecTx(ctx, sqldbv2.WriteTxOpt(),
+	err := s.db.ExecTx(ctx, sqldbv2.WriteTxOpt(),
 		func(q sqldb.HeaderQueries) error {
-			var lastHash chainhash.Hash
-			var lastHeight uint32
+			var (
+				lastHash   chainhash.Hash
+				lastHeight uint32
+			)
 
 			for _, hdr := range hdrs {
 				var raw bytes.Buffer
@@ -408,6 +570,15 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 				},
 			)
 		}, sqldbv2.NoOpReset)
+	if err != nil {
+		return err
+	}
+
+	for _, hdr := range hdrs {
+		s.rememberBlockHeader(hdr.Height, hdr.BlockHeader)
+	}
+
+	return nil
 }
 
 // RollbackBlockHeaders deletes the n most recent headers and resets the
@@ -484,6 +655,9 @@ func (s *SQLBlockHeaderStore) RollbackBlockHeaders(n uint32) (*BlockStamp,
 	if err != nil {
 		return nil, err
 	}
+
+	s.clearBlockHeaderCache()
+
 	return &stamp, nil
 }
 
@@ -856,6 +1030,7 @@ func (s *SQLFilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 				if err != nil {
 					return err
 				}
+
 				tipHash = hdr.FilterHash
 				tipHeight = hdr.Height
 			}

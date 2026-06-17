@@ -31,8 +31,9 @@ type Config struct {
 	// Backend selects which SQL engine to instantiate.
 	Backend BackendType
 
-	// Sqlite must be populated when Backend == BackendSqlite. It is
-	// passed verbatim to the lnd sqldb/v2 SQLite store factory.
+	// Sqlite must be populated when Backend == BackendSqlite. Neutrino
+	// appends chain-store pragma defaults before passing it to the lnd
+	// sqldb/v2 SQLite store factory unless SkipSqliteChainPragmas is set.
 	Sqlite *sqldbv2.SqliteConfig
 
 	// Postgres must be populated when Backend == BackendPostgres. It is
@@ -48,6 +49,12 @@ type Config struct {
 	// from the legacy walletdb + flat-file state into the SQL backend.
 	// Useful for tests and for callers that have already migrated.
 	SkipLegacyMigration bool
+
+	// SkipSqliteChainPragmas leaves the supplied SQLite pragma options
+	// untouched. By default, neutrino applies a chain-data profile that
+	// favors fast, consistent rebuildable sync state over wallet-grade
+	// power-loss durability.
+	SkipSqliteChainPragmas bool
 }
 
 // Validate sanity-checks the SQL configuration. It returns a non-nil error if
@@ -90,4 +97,51 @@ func (c *Config) sqliteFilename() string {
 	}
 
 	return DefaultSqliteFilename
+}
+
+func (c *Config) sqliteConfig() *sqldbv2.SqliteConfig {
+	if c.SkipSqliteChainPragmas {
+		return c.Sqlite
+	}
+
+	cfg := *c.Sqlite
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = 1
+	}
+	if cfg.MaxIdleConnections == 0 {
+		cfg.MaxIdleConnections = 1
+	}
+	cfg.PragmaOptions = append(
+		append([]string(nil), c.Sqlite.PragmaOptions...),
+		defaultSqliteChainPragmas()...,
+	)
+
+	return &cfg
+}
+
+func defaultSqliteChainPragmas() []string {
+	return []string{
+		// WAL+NORMAL remains atomic and consistent and is safe across
+		// application crashes. A power loss may lose recent commits, but
+		// header/filter state can be redownloaded from peers.
+		"synchronous=NORMAL",
+
+		// sqldb/v2 currently hardcodes fullfsync=true in the SQLite DSN.
+		// Keep checkpoint_fullfsync disabled here so the chain profile is
+		// ready once sqldb/v2 grows a typed no-fullfsync knob.
+		"checkpoint_fullfsync=false",
+
+		// Keep WAL growth bounded without forcing tiny 1,000-page
+		// checkpoints during header/cfheader ingest.
+		"wal_autocheckpoint=50000",
+		"journal_size_limit=268435456",
+
+		// Initial sync is an append-heavy workload with frequent header
+		// lookups. Keep sqlite's temporary structures in memory and give
+		// the connection enough cache/mmap room to avoid unnecessary pager
+		// churn while preserving the on-disk format.
+		"temp_store=MEMORY",
+		"cache_size=-131072",
+		"mmap_size=268435456",
+	}
 }

@@ -122,6 +122,109 @@ func TestSQLBlockHeaderRollbackAtomic(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestSQLBlockHeaderReadThroughCache verifies the SQL-backed header store
+// caches the decoded header after a height lookup. lnd's missed-block scan
+// calls GetBlockHash(height) followed by GetBlockHeader(hash), so this keeps
+// the second lookup off the sqlite read path.
+func TestSQLBlockHeaderReadThroughCache(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLBlockHeaderStore(t)
+
+	chain := createTestBlockHeaderChain(10)
+	require.NoError(t, store.WriteHeaders(chain...))
+	store.clearBlockHeaderCache()
+
+	target := chain[5]
+	targetHash := target.BlockHash()
+
+	_, _, ok := store.cachedBlockHeader(&targetHash)
+	require.False(t, ok)
+
+	header, err := store.FetchHeaderByHeight(target.Height)
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(*target.BlockHeader, *header))
+
+	next := chain[6]
+	nextHash := next.BlockHash()
+	nextHeader, ok := store.cachedBlockHeaderByHeight(next.Height)
+	require.True(t, ok)
+	require.True(t, reflect.DeepEqual(*next.BlockHeader, *nextHeader))
+
+	cachedNextHeader, cachedNextHeight, ok := store.cachedBlockHeader(
+		&nextHash,
+	)
+	require.True(t, ok)
+	require.Equal(t, next.Height, cachedNextHeight)
+	require.True(t, reflect.DeepEqual(*next.BlockHeader, *cachedNextHeader))
+
+	cachedHeader, cachedHeight, ok := store.cachedBlockHeader(&targetHash)
+	require.True(t, ok)
+	require.Equal(t, target.Height, cachedHeight)
+	require.True(t, reflect.DeepEqual(*target.BlockHeader, *cachedHeader))
+
+	header, height, err := store.FetchHeader(&targetHash)
+	require.NoError(t, err)
+	require.Equal(t, target.Height, height)
+	require.True(t, reflect.DeepEqual(*target.BlockHeader, *header))
+}
+
+// TestSQLBlockHeaderReadCacheClearedOnRollback verifies rollback never leaves
+// stale cached headers available after the SQL rows have been removed.
+func TestSQLBlockHeaderReadCacheClearedOnRollback(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLBlockHeaderStore(t)
+
+	chain := createTestBlockHeaderChain(10)
+	require.NoError(t, store.WriteHeaders(chain...))
+	store.clearBlockHeaderCache()
+
+	tip := chain[len(chain)-1]
+	tipHash := tip.BlockHash()
+
+	_, err := store.FetchHeaderByHeight(tip.Height)
+	require.NoError(t, err)
+
+	_, _, ok := store.cachedBlockHeader(&tipHash)
+	require.True(t, ok)
+
+	_, err = store.RollbackLastBlock()
+	require.NoError(t, err)
+
+	_, _, ok = store.cachedBlockHeader(&tipHash)
+	require.False(t, ok)
+
+	_, _, err = store.FetchHeader(&tipHash)
+	require.Error(t, err)
+}
+
+// TestSQLFilterHeaderRollbackAtomic verifies that a failed filter header
+// batch does not leave any rows behind.
+func TestSQLFilterHeaderRollbackAtomic(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLFilterHeaderStore(t, nil)
+
+	chain := createTestFilterHeaderChain(10)
+	require.NoError(t, store.WriteHeaders(chain[:5]...))
+
+	collide := chain[3] // header hash already inserted at height 4.
+	collide.Height = chain[7].Height
+	bad := []FilterHeader{chain[5], collide}
+
+	err := store.WriteHeaders(bad...)
+	require.Error(t, err)
+
+	tip, height, err := store.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, chain[4].Height, height)
+	require.Equal(t, chain[4].FilterHash, *tip)
+
+	_, err = store.FetchHeaderByHeight(chain[5].Height)
+	require.Error(t, err)
+}
+
 // TestSQLBlockHeaderGenesisIdempotent verifies that constructing the SQL
 // block header store twice against the same database leaves a single
 // genesis row.
@@ -164,7 +267,7 @@ func TestSQLBlockHeaderFetchAncestors(t *testing.T) {
 	stop := chain[40].BlockHash()
 	headers, startHeight, err := store.FetchHeaderAncestors(10, &stop)
 	require.NoError(t, err)
-	require.Len(t, headers, 11)            // 10 ancestors + stop
+	require.Len(t, headers, 11) // 10 ancestors + stop
 	require.Equal(t, uint32(31), startHeight)
 	for i, h := range headers {
 		require.True(t, reflect.DeepEqual(*chain[31+i-1].BlockHeader,

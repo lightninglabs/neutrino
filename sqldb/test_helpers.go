@@ -25,7 +25,6 @@ func NewTestBackend(t *testing.T) *Backend {
 	})
 
 	baseDB := store.GetBaseDB()
-
 	headerExec := sqldbv2.NewTransactionExecutor[HeaderQueries](
 		baseDB,
 		func(tx *sql.Tx) HeaderQueries { return sqlc.New(tx) },
