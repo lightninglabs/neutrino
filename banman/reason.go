@@ -23,6 +23,10 @@ const (
 
 	// InvalidBlock signals that a peer served us a bad block.
 	InvalidBlock Reason = 5
+
+	// NonResponsivePeer signals that a peer repeatedly failed to answer
+	// assigned queries.
+	NonResponsivePeer Reason = 6
 )
 
 // String returns a human-readable description for the reason a peer was banned.
@@ -42,6 +46,9 @@ func (r Reason) String() string {
 
 	case InvalidBlock:
 		return "peer served an invalid block"
+
+	case NonResponsivePeer:
+		return "peer did not respond to queries"
 
 	default:
 		return "unknown reason"

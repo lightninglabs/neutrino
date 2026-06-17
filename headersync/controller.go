@@ -72,6 +72,7 @@ type AnchorHeadersResult struct {
 	Rejected  bool
 	Staged    bool
 	Reason    string
+	Err       error
 }
 
 // Controller owns production header-sync orchestration policy that is
@@ -358,6 +359,7 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	if err != nil {
 		result.Rejected = true
 		result.Reason = err.Error()
+		result.Err = err
 
 		return result, true, nil
 	}

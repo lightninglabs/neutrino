@@ -368,6 +368,7 @@ func TestControllerFinishAnchorHeadersRejectsInvalidResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.True(t, result.Rejected)
+	require.ErrorIs(t, result.Err, ErrRangeStartMismatch)
 	require.Contains(t, result.Reason, ErrRangeStartMismatch.Error())
 	require.False(t, session.AnchorActive("peer-a"))
 }

@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"container/list"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -51,6 +52,27 @@ func (m *mockDispatcher) Query(requests []*query.Request,
 	options ...query.QueryOption) chan error {
 
 	return m.query(requests, options...)
+}
+
+func TestShouldStartCheckpointedCFHeaderSync(t *testing.T) {
+	window := uint32(checkpointedCFHeaderSyncWindow)
+
+	require.False(t, shouldStartCheckpointedCFHeaderSync(0, 0, true))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(0, 1, true))
+	require.False(t, shouldStartCheckpointedCFHeaderSync(10, 9, true))
+
+	require.False(t, shouldStartCheckpointedCFHeaderSync(
+		0, window-1, false,
+	))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(
+		0, window, false,
+	))
+	require.False(t, shouldStartCheckpointedCFHeaderSync(
+		100, 100+window-1, false,
+	))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(
+		100, 100+window, false,
+	))
 }
 
 // setupBlockManager initialises a blockManager to be used in tests.
@@ -104,6 +126,107 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	}
 
 	return bm, hdrStore, cfStore, nil
+}
+
+func TestSyncPeerCandidateOrdering(t *testing.T) {
+	highHeight := syncPeerCandidate{
+		height: 100,
+		rtt:    500 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	lowHeight := syncPeerCandidate{
+		height: 99,
+		rtt:    10 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(highHeight, lowHeight))
+
+	fast := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	slow := syncPeerCandidate{
+		height: 100,
+		rtt:    200 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(fast, slow))
+
+	knownRTT := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	unknownRTT := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(knownRTT, unknownRTT))
+
+	addrA := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	addrB := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-b",
+	}
+	require.True(t, syncPeerOrdersBefore(addrA, addrB))
+}
+
+func newTestServerPeer(t *testing.T, addr string,
+	lastBlock int32) *ServerPeer {
+
+	pp, err := peer.NewOutboundPeer(&peer.Config{
+		ChainParams:      &chaincfg.SimNetParams,
+		Services:         wire.SFNodeNetwork,
+		UserAgentName:    "neutrino-test",
+		UserAgentVersion: "0.0.0",
+	}, addr)
+	require.NoError(t, err)
+
+	sp := &ServerPeer{
+		Peer: pp,
+	}
+	sp.UpdateLastBlockHeight(lastBlock)
+
+	return sp
+}
+
+func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSyncTimeout = time.Hour
+
+	var banned []string
+	bm.cfg.BanPeer = func(addr string, reason banman.Reason) error {
+		require.Equal(t, banman.NonResponsivePeer, reason)
+		banned = append(banned, addr)
+		return nil
+	}
+
+	slowPeer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	fastPeer := newTestServerPeer(t, "127.0.0.2:8333", 200)
+
+	peers := list.New()
+	peers.PushBack(slowPeer)
+
+	bm.startSync(peers)
+	require.Equal(t, slowPeer, bm.SyncPeer())
+
+	peers.PushBack(fastPeer)
+	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
+		peer:        slowPeer,
+		requestID:   bm.headerRequestID,
+		startHeight: 0,
+		timeout:     bm.headerSyncTimeout,
+	})
+
+	require.Equal(t, []string{slowPeer.Addr()}, banned)
+	require.Equal(t, fastPeer, bm.SyncPeer())
 }
 
 // headers wraps the different headers and filters used throughout the tests.

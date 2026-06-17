@@ -135,3 +135,36 @@ func (b *BoundedMemoryChain) PushBack(n Node) *Node {
 
 	return &b.chain[chainIndex]
 }
+
+// AtHeight returns the node at a height if it is still retained in the bounded
+// chain.
+//
+// NOTE: Part of the Chain interface.
+func (b *BoundedMemoryChain) AtHeight(height int32) (*Node, bool) {
+	if b.len == 0 || b.headPtr == -1 || b.tailPtr == -1 {
+		return nil, false
+	}
+
+	front := b.Front()
+	back := b.Back()
+	if front == nil || back == nil {
+		return nil, false
+	}
+
+	if height < front.Height || height > back.Height {
+		return nil, false
+	}
+
+	offset := height - front.Height
+	if offset < 0 || offset >= b.len {
+		return nil, false
+	}
+
+	index := (b.headPtr + offset) % b.maxSize
+	node := &b.chain[index]
+	if node.Height != height {
+		return nil, false
+	}
+
+	return node, true
+}
