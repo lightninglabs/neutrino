@@ -23,6 +23,10 @@ type Chain interface {
 	// PushBack will push a new entry to the end of the chain. The entry
 	// added to the chain is also returned in place.
 	PushBack(Node) *Node
+
+	// AtHeight returns the node at a height if it is still retained in the
+	// chain.
+	AtHeight(int32) (*Node, bool)
 }
 
 // Node is a node within the Chain. Each node stores a header as well as a

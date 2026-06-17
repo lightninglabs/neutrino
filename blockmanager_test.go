@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"container/list"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -22,6 +23,8 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/query"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +54,27 @@ func (m *mockDispatcher) Query(requests []*query.Request,
 	options ...query.QueryOption) chan error {
 
 	return m.query(requests, options...)
+}
+
+func TestShouldStartCheckpointedCFHeaderSync(t *testing.T) {
+	window := uint32(checkpointedCFHeaderSyncWindow)
+
+	require.False(t, shouldStartCheckpointedCFHeaderSync(0, 0, true))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(0, 1, true))
+	require.False(t, shouldStartCheckpointedCFHeaderSync(10, 9, true))
+
+	require.False(t, shouldStartCheckpointedCFHeaderSync(
+		0, window-1, false,
+	))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(
+		0, window, false,
+	))
+	require.False(t, shouldStartCheckpointedCFHeaderSync(
+		100, 100+window-1, false,
+	))
+	require.True(t, shouldStartCheckpointedCFHeaderSync(
+		100, 100+window, false,
+	))
 }
 
 // setupBlockManager initialises a blockManager to be used in tests.
@@ -104,6 +128,209 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	}
 
 	return bm, hdrStore, cfStore, nil
+}
+
+func TestSyncPeerCandidateOrdering(t *testing.T) {
+	highHeight := syncPeerCandidate{
+		height: 100,
+		rtt:    500 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	lowHeight := syncPeerCandidate{
+		height: 99,
+		rtt:    10 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(highHeight, lowHeight))
+
+	fast := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	slow := syncPeerCandidate{
+		height: 100,
+		rtt:    200 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(fast, slow))
+
+	knownRTT := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	unknownRTT := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(knownRTT, unknownRTT))
+
+	addrA := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	addrB := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-b",
+	}
+	require.True(t, syncPeerOrdersBefore(addrA, addrB))
+}
+
+func newTestServerPeer(t *testing.T, addr string,
+	lastBlock int32) *ServerPeer {
+
+	pp, err := peer.NewOutboundPeer(&peer.Config{
+		ChainParams:      &chaincfg.SimNetParams,
+		Services:         wire.SFNodeNetwork,
+		UserAgentName:    "neutrino-test",
+		UserAgentVersion: "0.0.0",
+	}, addr)
+	require.NoError(t, err)
+
+	sp := &ServerPeer{
+		Peer: pp,
+	}
+	sp.UpdateLastBlockHeight(lastBlock)
+
+	return sp
+}
+
+// TestHeaderAnchorDiscoveryUsesDurableTip verifies that discovery never mixes
+// a store height with a hash from an older blockmanager notification snapshot.
+func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
+	t.Parallel()
+
+	bm, store, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSync.Start(t.Context())
+	t.Cleanup(bm.headerSync.Stop)
+
+	genesis, _, err := store.ChainTip()
+	require.NoError(t, err)
+	header := wire.BlockHeader{
+		PrevBlock: genesis.BlockHash(),
+		Nonce:     1,
+	}
+	require.NoError(t, store.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &header,
+		Height:      1,
+	}))
+
+	// The durable tip has advanced, while headerTipHash still identifies
+	// genesis. A request must take both boundary fields from the store.
+	require.Equal(t, genesis.BlockHash(), bm.headerTipHash)
+	stopHash := chainhash.Hash{1}
+	bm.nextCheckpoint = &chaincfg.Checkpoint{
+		Height: 3001,
+		Hash:   &stopHash,
+	}
+	sp := newTestServerPeer(t, "127.0.0.1:18333", 3001)
+	peers := list.New()
+	peers.PushBack(sp)
+
+	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3001))
+	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	require.True(t, ok)
+	require.Equal(t, uint32(1), request.StartHeight)
+	require.Equal(t, header.BlockHash(), request.StartHash)
+}
+
+// TestPrunedAnchorResponseKeepsTip checks that a late, already-known response
+// cannot republish an older hash after its anchor request has been pruned.
+func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
+	t.Parallel()
+
+	bm, store, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSync.Start(t.Context())
+	t.Cleanup(func() {
+		bm.headerSync.Stop()
+		if bm.headerSyncTimer != nil {
+			bm.headerSyncTimer.Stop()
+		}
+	})
+
+	genesis, _, err := store.ChainTip()
+	require.NoError(t, err)
+	first := wire.BlockHeader{PrevBlock: genesis.BlockHash(), Nonce: 1}
+	second := wire.BlockHeader{PrevBlock: first.BlockHash(), Nonce: 2}
+	require.NoError(t, store.WriteHeaders(
+		headerfs.BlockHeader{BlockHeader: &first, Height: 1},
+		headerfs.BlockHeader{BlockHeader: &second, Height: 2},
+	))
+	bm.headerList.PushBack(headerlist.Node{Header: first, Height: 1})
+	bm.headerList.PushBack(headerlist.Node{Header: second, Height: 2})
+	bm.headerTip = 2
+	bm.headerTipHash = second.BlockHash()
+	stopHash := chainhash.Hash{1}
+	bm.nextCheckpoint = &chaincfg.Checkpoint{Height: 3002, Hash: &stopHash}
+	sp := newTestServerPeer(t, "127.0.0.1:18333", 3002)
+	bm.syncPeer = sp
+	peers := list.New()
+	peers.PushBack(sp)
+
+	bm.headerSync.Session().TrackAnchor(sp.Addr(), headersync.AnchorRequest{
+		StartHeight: 0,
+		StartHash:   genesis.BlockHash(),
+		StopHeight:  1,
+		StopHash:    first.BlockHash(),
+	})
+	require.Equal(t, 1, bm.headerSync.Session().PruneAnchorsAtOrBefore(2))
+	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+		peer: sp,
+		headers: &wire.MsgHeaders{
+			Headers: []*wire.BlockHeader{&first},
+		},
+	})
+
+	require.Equal(t, uint32(2), bm.headerTip)
+	require.Equal(t, second.BlockHash(), bm.headerTipHash)
+	tip, height, err := store.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), height)
+	require.Equal(t, second.BlockHash(), tip.BlockHash())
+
+	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3002))
+	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	require.True(t, ok)
+	require.Equal(t, height, request.StartHeight)
+	require.Equal(t, tip.BlockHash(), request.StartHash)
+}
+
+func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSyncTimeout = time.Hour
+
+	var banned []string
+	bm.cfg.BanPeer = func(addr string, reason banman.Reason) error {
+		require.Equal(t, banman.NonResponsivePeer, reason)
+		banned = append(banned, addr)
+		return nil
+	}
+
+	slowPeer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	fastPeer := newTestServerPeer(t, "127.0.0.2:8333", 200)
+
+	peers := list.New()
+	peers.PushBack(slowPeer)
+
+	bm.startSync(peers)
+	require.Equal(t, slowPeer, bm.SyncPeer())
+
+	peers.PushBack(fastPeer)
+	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
+		peer:        slowPeer,
+		requestID:   bm.headerRequestID,
+		startHeight: 0,
+		timeout:     bm.headerSyncTimeout,
+	})
+
+	require.Equal(t, []string{slowPeer.Addr()}, banned)
+	require.Equal(t, fastPeer, bm.SyncPeer())
 }
 
 // headers wraps the different headers and filters used throughout the tests.
