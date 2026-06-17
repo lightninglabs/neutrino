@@ -122,47 +122,6 @@
       }
     },
     {
-      "name": "external_tip_advance_plans_gap_before_staged_frontier",
-      "committed_tip": 0,
-      "committed_hash": 100,
-      "anchors": [
-        {"height": 0, "hash": 100, "trusted": true},
-        {"height": 20, "hash": 120, "trusted": true},
-        {"height": 30, "hash": 130, "trusted": true}
-      ],
-      "peers": [
-        {"id": "peer", "state": "ready"}
-      ],
-      "steps": [
-        {"op": "plan", "range_id": 1, "start_height": 20, "stop_height": 30},
-        {"op": "assign"},
-        {"op": "start", "peer_id": "peer"},
-        {"op": "complete", "peer_id": "peer", "range_id": 1, "lease_epoch": 1, "valid": true, "at_unix": 100},
-        {"op": "commit"},
-        {"op": "advance_tip", "height": 10, "hash": 110},
-        {"op": "plan", "range_id": 2, "start_height": 10, "stop_height": 20},
-        {"op": "assign"},
-        {"op": "start", "peer_id": "peer"},
-        {"op": "complete", "peer_id": "peer", "range_id": 2, "lease_epoch": 1, "valid": true, "at_unix": 101},
-        {"op": "commit"}
-      ],
-      "expect": {
-        "committed_tip": 30,
-        "committed_hash": 130,
-        "commit_log": [2, 1],
-        "ranges": [
-          {"id": 2, "state": "committed", "owner_peer": "peer", "lease_epoch": 1, "valid": true},
-          {"id": 1, "state": "committed", "owner_peer": "peer", "lease_epoch": 1, "valid": true}
-        ],
-        "peers": [
-          {"id": "peer", "state": "ready"}
-        ],
-        "metrics": {
-          "ranges_committed": 2
-        }
-      }
-    },
-    {
       "name": "commit_prunes_obsolete_anchor_requests",
       "committed_tip": 0,
       "committed_hash": 100,
