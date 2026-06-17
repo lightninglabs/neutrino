@@ -32,6 +32,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/query"
+	queryworkmanager "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
 )
 
@@ -810,9 +811,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
 	}
-	s.workManager = query.NewWorkManager(&query.Config{
+	s.workManager = queryworkmanager.NewWorkManager(&queryworkmanager.Config{
 		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
 		Ranking:        query.NewPeerRanking(),
 	})
 
