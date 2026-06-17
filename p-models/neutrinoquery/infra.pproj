@@ -1,0 +1,8 @@
+<Project>
+<ProjectName>NeutrinoQueryModels</ProjectName>
+<InputFiles>
+<PFile>src/query_scheduler.p</PFile>
+<PFile>test/query_scheduler_test.p</PFile>
+</InputFiles>
+<OutputDir>PGenerated</OutputDir>
+</Project>

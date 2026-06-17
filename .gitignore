@@ -31,3 +31,7 @@ coverage.txt
 
 # go workspace
 go.work
+
+# P model generated artifacts.
+/PGenerated/
+/PCheckerOutput/
