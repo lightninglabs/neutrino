@@ -119,12 +119,10 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	if _, ok, err := c.manager.AddAnchor(ctx, tip.Height, tip.Hash,
-		true); err != nil {
-
+	if _, err := c.manager.AdvanceCommittedTip(
+		ctx, tip.Height, tip.Hash,
+	); err != nil {
 		return CheckpointRangePlan{}, err
-	} else if !ok {
-		return CheckpointRangePlan{}, nil
 	}
 
 	if _, ok, err := c.manager.AddAnchor(ctx, stop.Height, stop.Hash,
@@ -150,6 +148,37 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		Span:              span,
 		MaxRangeHeaders:   c.cfg.MaxRangeHeaders,
 	}, nil
+}
+
+// PlanFrontierRanges plans any already-known confirmed frontier spans after
+// the current persisted block-header tip. This is the recovery path for
+// discovery that learned anchors out of order: missing spans can be fetched as
+// normal range work while later staged ranges wait for ordered commit.
+func (c *Controller) PlanFrontierRanges(ctx context.Context,
+	tip ChainPoint, bestHeight uint32) (PlanRangesResult, error) {
+
+	if c == nil || c.manager == nil {
+		return PlanRangesResult{}, nil
+	}
+	if tip.Height >= bestHeight {
+		return PlanRangesResult{}, nil
+	}
+
+	if _, err := c.manager.AdvanceCommittedTip(
+		ctx, tip.Height, tip.Hash,
+	); err != nil {
+		return PlanRangesResult{}, err
+	}
+
+	result, err := c.manager.PlanConfirmedAnchorRanges(
+		ctx, c.session.NextRangeID(), tip.Height, bestHeight,
+	)
+	if err != nil {
+		return result, err
+	}
+	c.session.SetNextRangeID(result.NextID)
+
+	return result, nil
 }
 
 // AnchorDiscoverySpan returns the next span that needs anchor discovery before

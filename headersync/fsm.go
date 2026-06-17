@@ -48,6 +48,51 @@ func (h *HeaderSyncFSM) CommittedHash() Hash {
 	return h.committedHash
 }
 
+// AdvanceCommittedTip reconciles the FSM with a block-header tip that was
+// persisted outside the staged headersync commit path. Production can still
+// fall back to the legacy serial writer in a few edge cases; when that writer
+// advances the database tip, the scheduler must treat the new tip as committed
+// before planning additional frontier work.
+func (h *HeaderSyncFSM) AdvanceCommittedTip(height uint32,
+	hash Hash) bool {
+
+	if height < h.committedTip {
+		return false
+	}
+	if height == h.committedTip {
+		h.AddOrConfirmAnchor(height, hash, true)
+		h.committedHash = hash
+
+		return false
+	}
+
+	h.committedTip = height
+	h.committedHash = hash
+	h.AddOrConfirmAnchor(height, hash, true)
+
+	for id, rng := range h.ranges {
+		switch {
+		case rng.StopHeight <= height:
+			h.detachRangeFromPeers(id)
+			rng.OwnerPeer = NoPeer
+			rng.State = RangeCommitted
+			rng.Valid = true
+			rng.StagedAt = time.Time{}
+			h.ranges[id] = rng
+
+		case rng.StartHeight < height:
+			h.detachRangeFromPeers(id)
+			rng.OwnerPeer = NoPeer
+			rng.State = RangeStale
+			rng.Valid = false
+			rng.StagedAt = time.Time{}
+			h.ranges[id] = rng
+		}
+	}
+
+	return true
+}
+
 // Metrics returns the current counters.
 func (h *HeaderSyncFSM) Metrics() Metrics {
 	return h.metrics

@@ -154,6 +154,40 @@ func TestControllerFrontierDiscoverySpan(t *testing.T) {
 	require.Equal(t, Hash{}, span.StopHash)
 }
 
+func TestControllerPlanFrontierRangesFillsGapBeforeStagedRanges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	manager := NewManagerActor(newTestFSM(0, 100), 8)
+	manager.Start(ctx)
+	defer manager.Stop()
+
+	addManagerAnchor(t, ctx, manager, 20, 120)
+	addManagerAnchor(t, ctx, manager, 30, 130)
+	_, ok, err := manager.StageDiscoveredRange(
+		ctx, 1, "peer-a", 20, 30, time.Now(),
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	session := NewSession()
+	session.SetNextRangeID(2)
+	controller := NewController(manager, session, DefaultConfig())
+	plan, err := controller.PlanFrontierRanges(
+		ctx, ChainPoint{Height: 10, Hash: testHash(110)}, 30,
+	)
+	require.NoError(t, err)
+	require.Len(t, plan.Ranges, 1)
+	require.EqualValues(t, 10, plan.Ranges[0].StartHeight)
+	require.EqualValues(t, 20, plan.Ranges[0].StopHeight)
+	require.EqualValues(t, 3, session.NextRangeID())
+
+	commit, err := manager.CommitReadyRanges(ctx)
+	require.NoError(t, err)
+	require.Empty(t, commit.Committed)
+	require.EqualValues(t, 10, commit.TipHeight)
+}
+
 func TestControllerFrontierLookaheadSpan(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxRangeHeaders = 5

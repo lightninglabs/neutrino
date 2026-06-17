@@ -162,6 +162,9 @@ func runBridgeStep(fsm *HeaderSyncFSM, session *Session,
 			step.Height, hashFromBridge(step.Hash), step.Trusted,
 		)
 
+	case "advance_tip":
+		fsm.AdvanceCommittedTip(step.Height, hashFromBridge(step.Hash))
+
 	case "track_anchor":
 		session.TrackAnchor(step.PeerID, AnchorRequest{
 			StartHeight: step.StartHeight,

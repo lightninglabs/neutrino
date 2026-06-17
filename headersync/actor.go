@@ -64,6 +64,22 @@ type AddAnchorResp struct {
 	OK     bool
 }
 
+// AdvanceCommittedTipMsg moves the manager-visible committed tip to a header
+// tip already persisted by the block manager.
+type AdvanceCommittedTipMsg struct {
+	managerMessage
+
+	Height uint32
+	Hash   Hash
+}
+
+// AdvanceCommittedTipResp reports whether the committed tip changed.
+type AdvanceCommittedTipResp struct {
+	managerResponse
+
+	Advanced bool
+}
+
 // AnchorsMsg asks the manager for the currently known anchor set.
 type AnchorsMsg struct {
 	managerMessage
@@ -351,6 +367,11 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 		)
 
 		return respond(&AddAnchorResp{Anchor: anchor, OK: ok})
+
+	case *AdvanceCommittedTipMsg:
+		advanced := env.fsm.AdvanceCommittedTip(m.Height, m.Hash)
+
+		return respond(&AdvanceCommittedTipResp{Advanced: advanced})
 
 	case *AnchorsMsg:
 		return respond(&AnchorsResp{Anchors: env.fsm.Anchors()})
@@ -833,6 +854,27 @@ func (m *ManagerActor) AddAnchor(ctx context.Context, height uint32,
 	}
 
 	return anchorResp.Anchor, anchorResp.OK, nil
+}
+
+// AdvanceCommittedTip asks the manager to reconcile its committed tip with a
+// block-header tip that has already been persisted by the block manager.
+func (m *ManagerActor) AdvanceCommittedTip(ctx context.Context, height uint32,
+	hash Hash) (bool, error) {
+
+	resp, err := m.ask(ctx, &AdvanceCommittedTipMsg{
+		Height: height,
+		Hash:   hash,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	advanceResp, ok := resp.(*AdvanceCommittedTipResp)
+	if !ok {
+		return false, unexpectedManagerResp(resp)
+	}
+
+	return advanceResp.Advanced, nil
 }
 
 // Anchors asks the manager actor for the current known anchors.

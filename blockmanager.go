@@ -2625,54 +2625,80 @@ func (b *blockManager) armHeaderSyncAnchorTimeout(peer *ServerPeer,
 }
 
 func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
-	if b.headerSync.Controller() == nil || b.nextCheckpoint == nil {
+	if b.headerSync.Controller() == nil {
 		return 0, nil
 	}
 
-	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		return 0, err
 	}
-
-	stopHeight := uint32(b.nextCheckpoint.Height)
-	if height >= stopHeight || bestHeight < stopHeight {
-		return 0, nil
+	tip := headersync.ChainPoint{
+		Height: height,
+		Hash:   header.BlockHash(),
 	}
 
+	var (
+		ranges []headersync.HeaderRange
+		span   uint32
+		max    uint32
+		wait   bool
+	)
 	ctx, cancel := b.headerSyncOpCtx()
 	defer cancel()
 
-	plan, err := b.headerSync.Controller().PlanCheckpointRanges(
-		ctx,
-		headersync.ChainPoint{
-			Height: height,
-			Hash:   b.headerTipHash,
-		},
-		headersync.ChainPoint{
-			Height: stopHeight,
-			Hash:   *b.nextCheckpoint.Hash,
-		},
-		bestHeight,
-	)
-	if err != nil {
-		return 0, err
+	if b.nextCheckpoint == nil {
+		if height >= bestHeight {
+			return 0, nil
+		}
+
+		plan, err := b.headerSync.Controller().PlanFrontierRanges(
+			ctx, tip, bestHeight,
+		)
+		if err != nil {
+			return 0, err
+		}
+		ranges = plan.Ranges
+	} else {
+		stopHeight := uint32(b.nextCheckpoint.Height)
+		if height >= stopHeight || bestHeight < stopHeight {
+			return 0, nil
+		}
+
+		plan, err := b.headerSync.Controller().PlanCheckpointRanges(
+			ctx, tip,
+			headersync.ChainPoint{
+				Height: stopHeight,
+				Hash:   *b.nextCheckpoint.Hash,
+			},
+			bestHeight,
+		)
+		if err != nil {
+			return 0, err
+		}
+
+		ranges = plan.Ranges
+		span = plan.Span
+		max = plan.MaxRangeHeaders
+		wait = plan.WaitingForAnchors
 	}
-	if len(plan.Ranges) == 0 {
-		if plan.WaitingForAnchors {
+
+	if len(ranges) == 0 {
+		if wait {
 			log.Debugf("headersync waiting for confirmed anchors "+
 				"height=%d checkpoint=%d span=%d max_headers=%d",
-				height, stopHeight, plan.Span, plan.MaxRangeHeaders)
+				height, b.nextCheckpoint.Height, span, max)
 		}
 		return 0, nil
 	}
 
-	for _, rng := range plan.Ranges {
+	for _, rng := range ranges {
 		log.Infof("headersync range_planned range_id=%d start_height=%d "+
 			"stop_height=%d stop_hash=%s", rng.ID, rng.StartHeight,
 			rng.StopHeight, rng.StopHash)
 	}
 
-	return len(plan.Ranges), nil
+	return len(ranges), nil
 }
 
 func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
@@ -2806,7 +2832,7 @@ func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 	}
 	b.recoverHeaderSyncPeers(peers)
 
-	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	header, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		log.Warnf("headersync unable to get chain tip for frontier "+
 			"discovery: %v", err)
@@ -2820,7 +2846,7 @@ func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 		ctx,
 		headersync.ChainPoint{
 			Height: height,
-			Hash:   b.headerTipHash,
+			Hash:   header.BlockHash(),
 		},
 		bestHeight,
 	)
@@ -3885,6 +3911,7 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 		return nil
 	}
 
+	commitRanges := make([]headerSyncRangeCommit, 0, len(ready))
 	for _, rangeID := range ready {
 		staged, ok := b.headerSync.Session().StagedRange(rangeID)
 		if !ok {
@@ -3901,14 +3928,25 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 				rangeID)
 		}
 
-		if err := b.commitHeaderSyncRangeHeaders(
-			rng, staged.Headers, staged.PeerID,
-		); err != nil {
-			return err
-		}
+		commitRanges = append(commitRanges, headerSyncRangeCommit{
+			Range:  rng,
+			Staged: staged,
+		})
 	}
 
-	commitResult, err := b.headerSync.Controller().CommitReadyRanges(ctx)
+	if _, err := b.commitHeaderSyncRangeHeaders(commitRanges); err != nil {
+		return err
+	}
+
+	// Persistence and header validation can legitimately consume the short
+	// actor-operation deadline under heavy sqlite write pressure. Once the
+	// headers are durably written and the visible tip has advanced, use a
+	// fresh actor context so the FSM cannot lag behind the block manager
+	// just because the pre-write context expired.
+	commitCtx, commitCancel := b.headerSyncOpCtx()
+	defer commitCancel()
+
+	commitResult, err := b.headerSync.Controller().CommitReadyRanges(commitCtx)
 	if err != nil {
 		return err
 	}
@@ -3927,57 +3965,215 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	return nil
 }
 
-func (b *blockManager) commitHeaderSyncRangeHeaders(rng headersync.HeaderRange,
-	headers []*wire.BlockHeader, peerID string) error {
+type headerSyncRangeCommit struct {
+	Range  headersync.HeaderRange
+	Staged headersync.StagedRange
+}
 
-	if len(headers) == 0 {
-		return headersync.ErrNoHeaders
+type headerSyncVerifiedCheckpoint struct {
+	Height  int32
+	Hash    chainhash.Hash
+	PeerID  string
+	RangeID headersync.RangeID
+}
+
+type headerSyncPreparedCommit struct {
+	Headers             []headerfs.BlockHeader
+	Nodes               []headerlist.Node
+	VerifiedCheckpoints []headerSyncVerifiedCheckpoint
+	FinalHeight         int32
+	FinalHash           chainhash.Hash
+	NextCheckpoint      *chaincfg.Checkpoint
+}
+
+// headerSyncValidationChain overlays headers prepared in the current commit
+// batch on top of the long-lived header cache. Contextual validation can then
+// see freshly prepared parents without losing access to older cached ancestors.
+type headerSyncValidationChain struct {
+	base    headerlist.Chain
+	pending *headerlist.BoundedMemoryChain
+}
+
+func newHeaderSyncValidationChain(base headerlist.Chain,
+	seed headerlist.Node) *headerSyncValidationChain {
+
+	pending := headerlist.NewBoundedMemoryChain(numMaxMemHeaders)
+	pending.ResetHeaderState(seed)
+
+	return &headerSyncValidationChain{
+		base:    base,
+		pending: pending,
+	}
+}
+
+func (h *headerSyncValidationChain) ResetHeaderState(n headerlist.Node) {
+	h.pending.ResetHeaderState(n)
+}
+
+func (h *headerSyncValidationChain) Back() *headerlist.Node {
+	if back := h.pending.Back(); back != nil {
+		return back
 	}
 
-	headerWriteBatch := make([]headerfs.BlockHeader, 0, len(headers))
-	var (
-		finalHash   *chainhash.Hash
-		finalHeight int32
+	return h.base.Back()
+}
+
+func (h *headerSyncValidationChain) Front() *headerlist.Node {
+	return h.base.Front()
+}
+
+func (h *headerSyncValidationChain) PushBack(
+	n headerlist.Node) *headerlist.Node {
+
+	return h.pending.PushBack(n)
+}
+
+func (h *headerSyncValidationChain) AtHeight(
+	height int32) (*headerlist.Node, bool) {
+
+	if node, ok := h.pending.AtHeight(height); ok {
+		return node, true
+	}
+
+	return h.base.AtHeight(height)
+}
+
+func (b *blockManager) commitHeaderSyncRangeHeaders(
+	ranges []headerSyncRangeCommit) (headerSyncPreparedCommit, error) {
+
+	var prepared headerSyncPreparedCommit
+	if len(ranges) == 0 {
+		return prepared, nil
+	}
+
+	totalHeaders := 0
+	for _, commitRange := range ranges {
+		totalHeaders += len(commitRange.Staged.Headers)
+	}
+	if totalHeaders == 0 {
+		return prepared, headersync.ErrNoHeaders
+	}
+
+	prepared.Headers = make([]headerfs.BlockHeader, 0, totalHeaders)
+	prepared.Nodes = make([]headerlist.Node, 0, totalHeaders)
+	prepared.NextCheckpoint = b.nextCheckpoint
+
+	prevNodeEl := b.headerList.Back()
+	if prevNodeEl == nil {
+		return prepared, fmt.Errorf("header list missing previous element")
+	}
+
+	prevHash := prevNodeEl.Header.BlockHash()
+	prevHeight := prevNodeEl.Height
+	prevHeader := prevNodeEl.Header
+
+	validationList := newHeaderSyncValidationChain(
+		b.headerList, *prevNodeEl,
 	)
 
-	for _, blockHeader := range headers {
-		blockHash := blockHeader.BlockHash()
-		finalHash = &blockHash
+	for _, commitRange := range ranges {
+		rng := commitRange.Range
+		headers := commitRange.Staged.Headers
+		peerID := commitRange.Staged.PeerID
 
-		prevNodeEl := b.headerList.Back()
-		if prevNodeEl == nil {
-			return fmt.Errorf("header list missing previous element")
+		if len(headers) == 0 {
+			return prepared, headersync.ErrNoHeaders
 		}
 
-		prevHash := prevNodeEl.Header.BlockHash()
-		if !prevHash.IsEqual(&blockHeader.PrevBlock) {
-			return fmt.Errorf("headersync staged range_id=%d does not "+
-				"connect to current tip hash=%s prev=%s",
-				rng.ID, prevHash, blockHeader.PrevBlock)
+		var rangeFinalHeight int32
+		for _, blockHeader := range headers {
+			blockHash := blockHeader.BlockHash()
+			if !prevHash.IsEqual(&blockHeader.PrevBlock) {
+				return prepared, fmt.Errorf("headersync staged "+
+					"range_id=%d does not connect to current "+
+					"tip hash=%s prev=%s", rng.ID, prevHash,
+					blockHeader.PrevBlock)
+			}
+
+			if err := b.checkHeaderSanity(
+				blockHeader, false, prevHeight, &prevHeader,
+				validationList,
+			); err != nil {
+				return prepared, fmt.Errorf("headersync "+
+					"range_id=%d header sanity failed: %w",
+					rng.ID, err)
+			}
+
+			node := headerlist.Node{
+				Header: *blockHeader,
+				Height: prevHeight + 1,
+			}
+			rangeFinalHeight = node.Height
+
+			prepared.Headers = append(prepared.Headers,
+				headerfs.BlockHeader{
+					BlockHeader: blockHeader,
+					Height:      uint32(node.Height),
+				},
+			)
+			prepared.Nodes = append(prepared.Nodes, node)
+			validationList.PushBack(node)
+
+			if prepared.NextCheckpoint != nil &&
+				node.Height == prepared.NextCheckpoint.Height {
+
+				if !blockHash.IsEqual(prepared.NextCheckpoint.Hash) {
+					return prepared, fmt.Errorf("headersync "+
+						"checkpoint mismatch height=%d "+
+						"got=%s want=%s peer=%s",
+						node.Height, blockHash,
+						prepared.NextCheckpoint.Hash,
+						peerID)
+				}
+
+				prepared.VerifiedCheckpoints = append(
+					prepared.VerifiedCheckpoints,
+					headerSyncVerifiedCheckpoint{
+						Height:  node.Height,
+						Hash:    blockHash,
+						PeerID:  peerID,
+						RangeID: rng.ID,
+					},
+				)
+				prepared.NextCheckpoint = b.findNextHeaderCheckpoint(
+					node.Height,
+				)
+			}
+
+			prepared.FinalHash = blockHash
+			prepared.FinalHeight = node.Height
+			prevHash = blockHash
+			prevHeight = node.Height
+			prevHeader = node.Header
 		}
 
-		prevNodeHeight := prevNodeEl.Height
-		prevNodeHeader := prevNodeEl.Header
-		if err := b.checkHeaderSanity(
-			blockHeader, false, prevNodeHeight, &prevNodeHeader,
-		); err != nil {
-			return fmt.Errorf("headersync range_id=%d header sanity "+
-				"failed: %w", rng.ID, err)
+		if rangeFinalHeight != int32(rng.StopHeight) {
+			return prepared, fmt.Errorf("headersync range_id=%d "+
+				"final_height=%d stop_height=%d", rng.ID,
+				rangeFinalHeight, rng.StopHeight)
 		}
+	}
 
-		node := headerlist.Node{
-			Header: *blockHeader,
-			Height: prevNodeEl.Height + 1,
-		}
-		finalHeight = node.Height
+	log.Tracef("headersync writing range_batch=%d header_count=%d",
+		len(ranges), len(prepared.Headers))
+	writeStart := time.Now()
+	if err := b.cfg.BlockHeaders.WriteHeaders(prepared.Headers...); err != nil {
+		return prepared, fmt.Errorf("unable to write headersync "+
+			"range_batch=%d: %w", len(ranges), err)
+	}
+	writeElapsed := time.Since(writeStart)
 
-		headerWriteBatch = append(headerWriteBatch, headerfs.BlockHeader{
-			BlockHeader: blockHeader,
-			Height:      uint32(node.Height),
-		})
+	verifiedByHeight := make(
+		map[int32]headerSyncVerifiedCheckpoint,
+		len(prepared.VerifiedCheckpoints),
+	)
+	for _, checkpoint := range prepared.VerifiedCheckpoints {
+		verifiedByHeight[checkpoint.Height] = checkpoint
+	}
 
+	for _, node := range prepared.Nodes {
 		b.blkHeaderProgressLogger.LogBlockHeight(
-			blockHeader.Timestamp, node.Height,
+			node.Header.Timestamp, node.Height,
 		)
 
 		e := b.headerList.PushBack(node)
@@ -3985,43 +4181,28 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(rng headersync.HeaderRange,
 			b.startHeader = e
 		}
 
-		if b.nextCheckpoint != nil &&
-			node.Height == b.nextCheckpoint.Height {
-
-			nodeHash := node.Header.BlockHash()
-			if !nodeHash.IsEqual(b.nextCheckpoint.Hash) {
-				return fmt.Errorf("headersync checkpoint mismatch "+
-					"height=%d got=%s want=%s peer=%s",
-					node.Height, nodeHash,
-					b.nextCheckpoint.Hash, peerID)
-			}
-
+		if checkpoint, ok := verifiedByHeight[node.Height]; ok {
 			log.Infof("headersync verified checkpoint height=%d "+
-				"hash=%s peer=%s range_id=%d", node.Height,
-				nodeHash, peerID, rng.ID)
-			b.nextCheckpoint = b.findNextHeaderCheckpoint(node.Height)
+				"hash=%s peer=%s range_id=%d", checkpoint.Height,
+				checkpoint.Hash, checkpoint.PeerID,
+				checkpoint.RangeID)
 		}
 	}
 
-	if finalHeight != int32(rng.StopHeight) {
-		return fmt.Errorf("headersync range_id=%d final_height=%d "+
-			"stop_height=%d", rng.ID, finalHeight, rng.StopHeight)
-	}
-
-	log.Tracef("headersync writing range_id=%d header_count=%d",
-		rng.ID, len(headerWriteBatch))
-	if err := b.cfg.BlockHeaders.WriteHeaders(headerWriteBatch...); err != nil {
-		return fmt.Errorf("unable to write headersync range_id=%d: %w",
-			rng.ID, err)
-	}
+	b.nextCheckpoint = prepared.NextCheckpoint
 
 	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(finalHeight)
-	b.headerTipHash = *finalHash
+	b.headerTip = uint32(prepared.FinalHeight)
+	b.headerTipHash = prepared.FinalHash
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
 
-	return nil
+	log.Debugf("headersync range_commit_batch ranges=%d headers=%d "+
+		"tip_height=%d tip_hash=%s write_elapsed=%v", len(ranges),
+		len(prepared.Headers), prepared.FinalHeight, prepared.FinalHash,
+		writeElapsed)
+
+	return prepared, nil
 }
 
 // handleHeadersMsg handles headers messages from all peers.
@@ -4093,7 +4274,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 			prevNodeHeader := prevNode.Header
 			err := b.checkHeaderSanity(
 				blockHeader, false, prevNodeHeight,
-				&prevNodeHeader,
+				&prevNodeHeader, nil,
 			)
 			if err != nil {
 				log.Warnf("Header doesn't pass sanity check: "+
@@ -4223,7 +4404,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 				err = b.checkHeaderSanity(
 					reorgHeader, true,
-					int32(prevNodeHeight), prevNodeHeader,
+					int32(prevNodeHeight), prevNodeHeader, nil,
 				)
 				if err != nil {
 					log.Warnf("Header doesn't pass sanity"+
@@ -4445,12 +4626,15 @@ func areHeadersConnected(headers []*wire.BlockHeader) bool {
 // checks.
 func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	reorgAttempt bool, prevNodeHeight int32,
-	prevNodeHeader *wire.BlockHeader) error {
+	prevNodeHeader *wire.BlockHeader, headerChain headerlist.Chain) error {
 
 	// Create the lightHeaderCtx for the blockHeader's parent.
 	hList := b.headerList
 	if reorgAttempt {
 		hList = b.reorgList
+	}
+	if headerChain != nil {
+		hList = headerChain
 	}
 
 	parentHeaderCtx := newLightHeaderCtx(
