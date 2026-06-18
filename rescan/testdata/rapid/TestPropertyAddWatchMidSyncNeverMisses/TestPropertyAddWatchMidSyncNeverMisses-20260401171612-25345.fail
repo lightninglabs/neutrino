@@ -1,0 +1,11 @@
+# 2026/04/01 17:16:12.348315 [TestPropertyAddWatchMidSyncNeverMisses] [rapid] draw numEmpty: 3
+# 2026/04/01 17:16:12.348336 [TestPropertyAddWatchMidSyncNeverMisses] [rapid] draw batchSize: 2
+# 2026/04/01 17:16:12.348553 [TestPropertyAddWatchMidSyncNeverMisses] INVARIANT VIOLATED: transaction paying watched address was not found after rewind — this is the race condition the FSM is designed to prevent
+# 
+v0.4.8#8004724503634817331
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1

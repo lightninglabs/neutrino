@@ -1537,6 +1537,12 @@ func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 	return s.broadcaster.Broadcast(tx)
 }
 
+// MarkAsConfirmed tells the broadcaster that a transaction has been confirmed
+// and no longer needs to be rebroadcast.
+func (s *ChainService) MarkAsConfirmed(txHash chainhash.Hash) {
+	s.broadcaster.MarkAsConfirmed(txHash)
+}
+
 // NewPeerConfig returns the configuration for the given ServerPeer.
 func NewPeerConfig(sp *ServerPeer) *peer.Config {
 	return &peer.Config{
