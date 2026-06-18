@@ -10,7 +10,9 @@
 //   * stealing increments the epoch so old responses become stale;
 //   * peers may complete ranges out of order;
 //   * completed ranges are staged before commit;
-//   * commits advance only through the next contiguous staged range.
+//   * commits advance only through the next contiguous staged range;
+//   * if a legacy/fallback writer already persisted headers, the model can
+//     reconcile the visible tip before planning more frontier work.
 
 enum HeaderPeerState {
     HeaderPeerReady,
@@ -137,6 +139,68 @@ fun NewModel(committed_tip: int, committed_hash: int): HeaderSyncModel {
         peers = default(seq[HeaderPeer]),
         commit_log = default(seq[int])
     );
+}
+
+// AdvanceCommittedTip models the production reconciliation path between the
+// pure scheduler and the durable block-header store. Most progress should come
+// from CommitReadyRanges, but during migration the block manager can still
+// persist a short serial fallback span. Once storage says the tip is already
+// ahead, the scheduler must not keep planning from its stale in-memory tip or
+// it can skip the newly persisted boundary and strand staged frontier ranges.
+fun AdvanceCommittedTip(model: HeaderSyncModel, height: int,
+    hash: int): HeaderSyncModel {
+
+    var i: int;
+    var range: HeaderRange;
+
+    if (height < model.committed_tip) {
+        return model;
+    }
+
+    model.anchors = AddOrConfirmAnchor(model.anchors, height, hash, true);
+    if (height == model.committed_tip) {
+        model.committed_hash = hash;
+        return model;
+    }
+
+    model.committed_tip = height;
+    model.committed_hash = hash;
+
+    i = 0;
+    while (i < sizeof(model.ranges)) {
+        range = model.ranges[i];
+        if (range.stop_height <= height) {
+            range = (
+                id = range.id,
+                start_height = range.start_height,
+                start_hash = range.start_hash,
+                stop_height = range.stop_height,
+                stop_hash = range.stop_hash,
+                lease_epoch = range.lease_epoch,
+                owner_peer = NoPeer(),
+                range_state = RangeCommitted,
+                valid = true
+            );
+            model.ranges = ReplaceRange(model.ranges, range);
+        } else if (range.start_height < height) {
+            range = (
+                id = range.id,
+                start_height = range.start_height,
+                start_hash = range.start_hash,
+                stop_height = range.stop_height,
+                stop_hash = range.stop_hash,
+                lease_epoch = range.lease_epoch,
+                owner_peer = NoPeer(),
+                range_state = RangeStale,
+                valid = false
+            );
+            model.ranges = ReplaceRange(model.ranges, range);
+        }
+
+        i = i + 1;
+    }
+
+    return model;
 }
 
 // AddOrConfirmAnchor is the anchor-discovery rule. Trusted checkpoints are

@@ -90,6 +90,34 @@ func TestReadyRangesDoesNotAdvanceCommittedTip(t *testing.T) {
 	require.EqualValues(t, 10, fsm.CommittedTip())
 }
 
+func TestAdvanceCommittedTipReconcilesExternalProgress(t *testing.T) {
+	fsm := newTestFSM(0, 100)
+	addTrustedAnchor(t, fsm, 0, 100)
+	addTrustedAnchor(t, fsm, 10, 110)
+	addTrustedAnchor(t, fsm, 20, 120)
+	addTrustedAnchor(t, fsm, 30, 130)
+	addPeer(t, fsm, "peer")
+	mustPlanRange(t, fsm, 1, 0, 10)
+	mustPlanRange(t, fsm, 2, 10, 20)
+	mustPlanRange(t, fsm, 3, 20, 30)
+	mustAssignRange(t, fsm)
+	started := mustStartRange(t, fsm, "peer")
+	require.EqualValues(t, 1, started.RangeID)
+
+	advanced := fsm.AdvanceCommittedTip(15, testHash(115))
+	require.True(t, advanced)
+	require.EqualValues(t, 15, fsm.CommittedTip())
+	require.Equal(t, testHash(115), fsm.CommittedHash())
+	require.False(t, fsm.rangeOverlaps(15, 20))
+
+	first, ok := fsm.ranges[1]
+	require.True(t, ok)
+	require.Equal(t, RangeCommitted, first.State)
+	second, ok := fsm.ranges[2]
+	require.True(t, ok)
+	require.Equal(t, RangeStale, second.State)
+}
+
 func TestStageDiscoveredRangeUsesConfirmedAnchors(t *testing.T) {
 	fsm := newTestFSM(0, 100)
 	fsm.SeedCommittedAnchor()
