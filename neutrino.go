@@ -1117,25 +1117,25 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 		}()
 	}()
 
-	ipNet, err := banman.ParseIPNet(addr, nil)
+	key, err := banman.ParseAddr(addr)
 	if err != nil {
-		return fmt.Errorf("unable to parse IP network for peer %v: %v",
-			addr, err)
+		return fmt.Errorf("unable to parse peer address for peer %v: "+
+			"%v", addr, err)
 	}
-	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
+	return s.banStore.BanKey(key, reason, BanDuration)
 }
 
 // UnbanPeer connects and unbans a previously banned peer.
 func (s *ChainService) UnbanPeer(addr string, parmanent bool) error {
 	log.Infof("UnBanning peer %v", addr)
 
-	ipNet, err := banman.ParseIPNet(addr, nil)
+	key, err := banman.ParseAddr(addr)
 	if err != nil {
-		return fmt.Errorf("unable to parse IP network for peer %v: %v",
-			addr, err)
+		return fmt.Errorf("unable to parse peer address for peer %v: "+
+			"%v", addr, err)
 	}
 
-	err = s.banStore.UnbanIPNet(ipNet)
+	err = s.banStore.UnbanKey(key)
 	if err != nil {
 		return fmt.Errorf("unable to unban peer: %v", err)
 	}
@@ -1145,13 +1145,13 @@ func (s *ChainService) UnbanPeer(addr string, parmanent bool) error {
 
 // IsBanned returns true if the peer is banned, and false otherwise.
 func (s *ChainService) IsBanned(addr string) bool {
-	ipNet, err := banman.ParseIPNet(addr, nil)
+	key, err := banman.ParseAddr(addr)
 	if err != nil {
-		log.Errorf("Unable to parse IP network for peer %v: %v", addr,
+		log.Errorf("Unable to parse peer address for peer %v: %v", addr,
 			err)
 		return false
 	}
-	banStatus, err := s.banStore.Status(ipNet)
+	banStatus, err := s.banStore.StatusKey(key)
 	if err != nil {
 		log.Errorf("Unable to determine ban status for peer %v: %v",
 			addr, err)
