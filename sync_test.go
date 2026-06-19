@@ -3,7 +3,6 @@ package neutrino_test
 import (
 	"bytes"
 	"compress/bzip2"
-	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -1078,7 +1077,7 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // a way to bootstrap neutrino nodes and significantly improving sync
 // performance.
 func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks.
 	h1, err := rpctest.New(
@@ -1262,7 +1261,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 // import, so its internal tracking state must be refreshed after import to
 // build correct P2P locators for the remaining chain.
 func TestNeutrinoImportThenP2PSync(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate an initial chain.
 	h1, err := rpctest.New(
@@ -1391,7 +1390,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 // TestNeutrinoSyncWithoutHeadersImport tests the standard synchronization
 // behavior of Neutrino without using the headers import feature.
 func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
@@ -1608,7 +1607,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 
 			b.ResetTimer()
 			startTime := time.Now()
-			ctx := context.Background()
+			ctx := b.Context()
 
 			importer, err := chainimport.NewHeadersImport(opts)
 			require.NoError(b, err)
