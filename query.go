@@ -830,6 +830,23 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		return nil, err
 	}
 
+	// If an HTTP block source is configured, try to fetch the block from
+	// there first. We only fall back to the P2P network below if the HTTP
+	// fetch (including its own retries) fails or returns a block that
+	// doesn't pass our validation. Caching happens here exactly as it does
+	// for the peer path, so the cache behaves identically regardless of
+	// where the block ultimately comes from.
+	if s.blockFetcher != nil {
+		block, err := s.fetchBlockFromSource(blockHash, height)
+		if err == nil {
+			s.cacheBlock(*inv, block)
+			return block, nil
+		}
+
+		log.Warnf("Unable to fetch block %v from HTTP source, falling "+
+			"back to peers: %v", blockHash, err)
+	}
+
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
 	_ = getData.AddInvVect(inv)
@@ -953,6 +970,34 @@ func (s *ChainService) cacheBlock(inv wire.InvVect, block *btcutil.Block) {
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
+}
+
+// fetchBlockFromSource downloads the block with the given hash from the
+// configured HTTP block source and runs it through the same consensus
+// validation we apply to blocks received from peers. Unlike the peer path, an
+// invalid block here only results in an error (so GetBlock falls back to the
+// network), as there's no peer to ban.
+func (s *ChainService) fetchBlockFromSource(blockHash chainhash.Hash,
+	height uint32) (*btcutil.Block, error) {
+
+	msgBlock, err := s.blockFetcher.FetchBlock(s.quit, blockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	block := btcutil.NewBlock(msgBlock)
+
+	// Only set height if btcutil hasn't automagically put one in.
+	if block.Height() == btcutil.BlockHeightUnknown {
+		block.SetHeight(int32(height))
+	}
+
+	if err := s.validateBlock(block); err != nil {
+		return nil, fmt.Errorf("block %v from HTTP source failed "+
+			"validation: %w", blockHash, err)
+	}
+
+	return block, nil
 }
 
 // sendTransaction sends a transaction to all peers. It returns an error if any
