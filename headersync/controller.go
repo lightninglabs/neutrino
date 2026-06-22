@@ -3,6 +3,7 @@ package headersync
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/btcsuite/btcd/wire"
@@ -29,6 +30,8 @@ type CheckpointRangePlan struct {
 type PeerCandidate struct {
 	ID     string
 	Height int32
+	Rank   int
+	RTT    time.Duration
 }
 
 // AnchorRequestPlan describes which peers should receive an anchor-discovery
@@ -336,6 +339,11 @@ func (c *Controller) PlanAnchorRequests(span AnchorRequest,
 
 		eligiblePeers = append(eligiblePeers, peer)
 	}
+	sort.SliceStable(eligiblePeers, func(i, j int) bool {
+		return peerCandidateOrdersBefore(
+			eligiblePeers[i], eligiblePeers[j],
+		)
+	})
 
 	plan := AnchorRequestPlan{
 		ActivePeers:   activePeers,
@@ -355,6 +363,20 @@ func (c *Controller) PlanAnchorRequests(span AnchorRequest,
 	plan.Peers = append(plan.Peers, eligiblePeers[:need]...)
 
 	return plan
+}
+
+func peerCandidateOrdersBefore(peer, candidate PeerCandidate) bool {
+	if peer.Rank != candidate.Rank {
+		return peer.Rank < candidate.Rank
+	}
+	if peerRTTOrdersBefore(peer.RTT, candidate.RTT) {
+		return true
+	}
+	if peerRTTOrdersBefore(candidate.RTT, peer.RTT) {
+		return false
+	}
+
+	return peer.ID < candidate.ID
 }
 
 // AnchorConfirmed returns true when an anchor can be used for range planning.

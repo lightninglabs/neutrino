@@ -618,11 +618,27 @@ func peerOrdersBefore(peer, candidate PeerSnapshot) bool {
 	if peer.Rank != candidate.Rank {
 		return peer.Rank < candidate.Rank
 	}
-	if peer.RTT != candidate.RTT {
-		return peer.RTT < candidate.RTT
+	if peerRTTOrdersBefore(peer.RTT, candidate.RTT) {
+		return true
+	}
+	if peerRTTOrdersBefore(candidate.RTT, peer.RTT) {
+		return false
 	}
 
 	return peer.ID < candidate.ID
+}
+
+func peerRTTOrdersBefore(peerRTT, candidateRTT time.Duration) bool {
+	switch {
+	case peerRTT > 0 && candidateRTT > 0 && peerRTT != candidateRTT:
+		return peerRTT < candidateRTT
+
+	case peerRTT > 0 && candidateRTT == 0:
+		return true
+
+	default:
+		return false
+	}
 }
 
 // StartPeerRange moves the next locally owned range into the peer active slot.

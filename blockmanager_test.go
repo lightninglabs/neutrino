@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"container/list"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -25,6 +26,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/sqldb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,27 +55,6 @@ func (m *mockDispatcher) Query(requests []*query.Request,
 	options ...query.QueryOption) chan error {
 
 	return m.query(requests, options...)
-}
-
-func TestShouldStartCheckpointedCFHeaderSync(t *testing.T) {
-	window := uint32(checkpointedCFHeaderSyncWindow)
-
-	require.False(t, shouldStartCheckpointedCFHeaderSync(0, 0, true))
-	require.True(t, shouldStartCheckpointedCFHeaderSync(0, 1, true))
-	require.False(t, shouldStartCheckpointedCFHeaderSync(10, 9, true))
-
-	require.False(t, shouldStartCheckpointedCFHeaderSync(
-		0, window-1, false,
-	))
-	require.True(t, shouldStartCheckpointedCFHeaderSync(
-		0, window, false,
-	))
-	require.False(t, shouldStartCheckpointedCFHeaderSync(
-		100, 100+window-1, false,
-	))
-	require.True(t, shouldStartCheckpointedCFHeaderSync(
-		100, 100+window, false,
-	))
 }
 
 func TestHeaderSyncValidationChain(t *testing.T) {
@@ -237,6 +218,120 @@ func TestCheckpointedCFHeadersBatchTimeoutScales(t *testing.T) {
 		t, checkpointedCFHeadersMaxBatchTimeout,
 		checkpointedCFHeadersBatchTimeout(hugeQueries),
 	)
+}
+
+func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
+	t.Parallel()
+
+	backend := sqldb.NewTestBackend(t)
+	ctx := context.Background()
+	blockStore, err := headerfs.NewSQLBlockHeaderStore(
+		ctx, backend.HeaderTxer, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewSQLFilterHeaderStore(
+		ctx, backend.HeaderTxer, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      chaincfg.SimNetParams,
+		BlockHeaders:     blockStore,
+		RegFilterHeaders: filterStore,
+		QueryDispatcher:  &mockDispatcher{},
+		TimeSource:       blockchain.NewMedianTime(),
+		BanPeer: func(string, banman.Reason) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	ntfnDone := make(chan struct{})
+	defer close(ntfnDone)
+	go func() {
+		for {
+			select {
+			case <-bm.blockNtfnChan:
+			case <-ntfnDone:
+				return
+			}
+		}
+	}()
+
+	const numHeaders = 3
+	blockHeaders := make([]headerfs.BlockHeader, 0, numHeaders)
+	prevHeader := &chaincfg.SimNetParams.GenesisBlock.Header
+	for height := uint32(1); height <= numHeaders; height++ {
+		header := &wire.BlockHeader{
+			Bits:      uint32(rand.Int31()),
+			Nonce:     uint32(rand.Int31()),
+			Timestamp: prevHeader.Timestamp.Add(time.Minute),
+			PrevBlock: prevHeader.BlockHash(),
+		}
+		blockHeaders = append(blockHeaders, headerfs.BlockHeader{
+			BlockHeader: header,
+			Height:      height,
+		})
+		prevHeader = header
+	}
+	require.NoError(t, blockStore.WriteHeaders(blockHeaders...))
+
+	prevFilterHeader, _, err := filterStore.ChainTip()
+	require.NoError(t, err)
+
+	filterHashValues := []chainhash.Hash{
+		chainhash.DoubleHashH([]byte("filter-1")),
+		chainhash.DoubleHashH([]byte("filter-2")),
+		chainhash.DoubleHashH([]byte("filter-3")),
+	}
+	filterHashes := make([]*chainhash.Hash, len(filterHashValues))
+	for i := range filterHashValues {
+		filterHashes[i] = &filterHashValues[i]
+	}
+
+	var expectedFilterHeaders []chainhash.Hash
+	lastFilterHeader := *prevFilterHeader
+	for _, filterHash := range filterHashes {
+		lastFilterHeader = chainhash.DoubleHashH(
+			append(filterHash[:], lastFilterHeader[:]...),
+		)
+		expectedFilterHeaders = append(
+			expectedFilterHeaders, lastFilterHeader,
+		)
+	}
+
+	stopHash := blockHeaders[len(blockHeaders)-1].BlockHash()
+	tip, tipHeight, err := bm.writeCFHeadersMsgs(
+		[]*wire.MsgCFHeaders{{
+			FilterType:       wire.GCSFilterRegular,
+			StopHash:         blockHeaders[1].BlockHash(),
+			PrevFilterHeader: *prevFilterHeader,
+			FilterHashes:     filterHashes[:2],
+		}, {
+			FilterType:       wire.GCSFilterRegular,
+			StopHash:         stopHash,
+			PrevFilterHeader: expectedFilterHeaders[1],
+			FilterHashes:     filterHashes[2:],
+		}},
+		filterStore,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(numHeaders), tipHeight)
+	require.Equal(t, expectedFilterHeaders[len(expectedFilterHeaders)-1], *tip)
+
+	for i, expected := range expectedFilterHeaders {
+		height := uint32(i + 1)
+		got, err := filterStore.FetchHeaderByHeight(height)
+		require.NoError(t, err)
+		require.Equal(t, expected, *got)
+	}
+
+	ancestors, startHeight, err := filterStore.FetchHeaderAncestors(
+		numHeaders-1, &stopHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), startHeight)
+	require.Equal(t, expectedFilterHeaders, ancestors)
 }
 
 func newTestServerPeer(t *testing.T, addr string,

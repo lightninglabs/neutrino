@@ -59,6 +59,21 @@ func NewBackend(dataDir string, cfg *Config,
 			return nil, fmt.Errorf("sqldb: open sqlite: %w", err)
 		}
 		store = s
+		if !cfg.SkipSqliteChainPragmas {
+			// lnd sqldb/v2 currently adds fullfsync=true to the DSN
+			// before appending caller-supplied pragmas, and modernc does
+			// not let the later duplicate fullfsync=false override it.
+			// Keep the rest of the chain profile in SqliteConfig
+			// PragmaOptions, but flip this one post-open until sqldb/v2
+			// grows a typed knob for the chain-store profile.
+			if _, err := s.GetBaseDB().DB.Exec(
+				"PRAGMA fullfsync=false",
+			); err != nil {
+				_ = closeStore(store)
+				return nil, fmt.Errorf("sqldb: disable sqlite "+
+					"fullfsync: %w", err)
+			}
+		}
 
 	case BackendPostgres:
 		s, err := sqldbv2.NewPostgresStore(cfg.Postgres)
@@ -77,11 +92,17 @@ func NewBackend(dataDir string, cfg *Config,
 	}
 
 	baseDB := store.GetBaseDB()
+	headerQueryFactory := func(tx *sql.Tx) HeaderQueries {
+		return sqlc.New(tx)
+	}
+	if cfg.Backend == BackendSqlite {
+		headerQueryFactory = func(tx *sql.Tx) HeaderQueries {
+			return NewSQLiteHeaderQueries(tx)
+		}
+	}
+
 	headerExec := sqldbv2.NewTransactionExecutor[HeaderQueries](
-		baseDB,
-		func(tx *sql.Tx) HeaderQueries {
-			return sqlc.New(tx)
-		},
+		baseDB, headerQueryFactory,
 	)
 
 	filterExec := sqldbv2.NewTransactionExecutor[FilterQueries](

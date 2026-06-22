@@ -104,13 +104,13 @@ func ValidateAnchorResponse(request AnchorRequest,
 	}
 
 	finalHeight := request.StartHeight + uint32(len(headers))
-	if finalHeight > request.StopHeight {
+	trustedStop := request.StopHash != (Hash{})
+	if finalHeight > request.StopHeight && trustedStop {
 		return AnchorResponse{}, fmt.Errorf("%w: final=%d stop=%d",
 			ErrRangeOvershoot, finalHeight, request.StopHeight)
 	}
 
 	finalHash := headers[len(headers)-1].BlockHash()
-	trustedStop := request.StopHash != (Hash{})
 	trusted := false
 	if finalHeight == request.StopHeight && trustedStop {
 		if finalHash != request.StopHash {

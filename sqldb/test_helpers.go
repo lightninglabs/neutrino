@@ -25,9 +25,17 @@ func NewTestBackend(t *testing.T) *Backend {
 	})
 
 	baseDB := store.GetBaseDB()
+	headerQueryFactory := func(tx *sql.Tx) HeaderQueries {
+		return sqlc.New(tx)
+	}
+	if _, ok := any(store).(*sqldbv2.SqliteStore); ok {
+		headerQueryFactory = func(tx *sql.Tx) HeaderQueries {
+			return NewSQLiteHeaderQueries(tx)
+		}
+	}
+
 	headerExec := sqldbv2.NewTransactionExecutor[HeaderQueries](
-		baseDB,
-		func(tx *sql.Tx) HeaderQueries { return sqlc.New(tx) },
+		baseDB, headerQueryFactory,
 	)
 	filterExec := sqldbv2.NewTransactionExecutor[FilterQueries](
 		baseDB,

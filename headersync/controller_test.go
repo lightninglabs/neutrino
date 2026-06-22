@@ -264,7 +264,7 @@ func TestControllerPlanAnchorRequestsFiltersPeers(t *testing.T) {
 	require.Equal(t, 2, plan.EligiblePeers)
 	require.Equal(t, 2, plan.RequiredPeers)
 	require.Len(t, plan.Peers, 1)
-	require.Equal(t, "next", plan.Peers[0].ID)
+	require.Equal(t, "extra", plan.Peers[0].ID)
 	require.True(t, plan.Active())
 }
 
@@ -320,6 +320,52 @@ func TestControllerPlanAnchorRequestsHedgesBeyondConfirmationCount(t *testing.T)
 	require.Equal(t, "peer-1", plan.Peers[0].ID)
 	require.Equal(t, "peer-2", plan.Peers[1].ID)
 	require.Equal(t, "peer-3", plan.Peers[2].ID)
+}
+
+func TestControllerPlanAnchorRequestsSortsByRankAndRTT(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AnchorConfirmationsRequired = 1
+	cfg.AnchorRequestFanout = 3
+
+	controller := NewController(nil, NewSession(), cfg)
+	plan := controller.PlanAnchorRequests(
+		AnchorRequest{
+			StartHeight: 0,
+			StartHash:   testHash(100),
+			StopHeight:  10,
+			StopHash:    testHash(110),
+		},
+		[]PeerCandidate{
+			{
+				ID:     "unknown-rtt",
+				Height: 10,
+				Rank:   0,
+			},
+			{
+				ID:     "low-rank",
+				Height: 10,
+				Rank:   -1,
+				RTT:    300 * time.Millisecond,
+			},
+			{
+				ID:     "fast",
+				Height: 10,
+				Rank:   0,
+				RTT:    50 * time.Millisecond,
+			},
+			{
+				ID:     "slow",
+				Height: 10,
+				Rank:   0,
+				RTT:    250 * time.Millisecond,
+			},
+		},
+	)
+
+	require.Len(t, plan.Peers, 3)
+	require.Equal(t, "low-rank", plan.Peers[0].ID)
+	require.Equal(t, "fast", plan.Peers[1].ID)
+	require.Equal(t, "slow", plan.Peers[2].ID)
 }
 
 func TestControllerFinishAnchorHeadersConfirmsDiscovery(t *testing.T) {

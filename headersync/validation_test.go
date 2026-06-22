@@ -125,6 +125,22 @@ func TestValidateAnchorResponseRejectsOvershoot(t *testing.T) {
 	require.True(t, errors.Is(err, ErrRangeOvershoot))
 }
 
+func TestValidateAnchorResponseAllowsZeroStopHashOvershoot(t *testing.T) {
+	start := testHash(100)
+	headers := makeTestHeaders(start, 3)
+	request := AnchorRequest{
+		StartHeight: 10,
+		StartHash:   start,
+		StopHeight:  12,
+	}
+
+	response, err := ValidateAnchorResponse(request, headers, 2000)
+	require.NoError(t, err)
+	require.EqualValues(t, 13, response.Height)
+	require.Equal(t, headers[2].BlockHash(), response.Hash)
+	require.False(t, response.Trusted)
+}
+
 func TestValidateAnchorResponseRejectsTooManyHeaders(t *testing.T) {
 	start := testHash(100)
 	headers := makeTestHeaders(start, 2)

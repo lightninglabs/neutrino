@@ -126,9 +126,10 @@ func defaultSqliteChainPragmas() []string {
 		// header/filter state can be redownloaded from peers.
 		"synchronous=NORMAL",
 
-		// sqldb/v2 currently hardcodes fullfsync=true in the SQLite DSN.
-		// Keep checkpoint_fullfsync disabled here so the chain profile is
-		// ready once sqldb/v2 grows a typed no-fullfsync knob.
+		// lnd's wallet-oriented sqlite default enables macOS F_FULLFSYNC.
+		// Neutrino's chain database is rebuildable, so avoid the extra
+		// flush cost during large initial syncs.
+		"fullfsync=false",
 		"checkpoint_fullfsync=false",
 
 		// Keep WAL growth bounded without forcing tiny 1,000-page

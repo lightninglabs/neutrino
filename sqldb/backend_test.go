@@ -153,6 +153,7 @@ func assertSqliteChainPragmas(t *testing.T, backend *Backend) {
 	db := backend.store.GetBaseDB().DB
 	for pragma, expected := range map[string]int64{
 		"synchronous":          1,
+		"fullfsync":            0,
 		"checkpoint_fullfsync": 0,
 		"wal_autocheckpoint":   50000,
 		"journal_size_limit":   268435456,

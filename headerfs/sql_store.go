@@ -538,6 +538,9 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 			var (
 				lastHash   chainhash.Hash
 				lastHeight uint32
+				rows       = make(
+					[]sqlc.InsertBlockHeaderParams, 0, len(hdrs),
+				)
 			)
 
 			for _, hdr := range hdrs {
@@ -547,19 +550,18 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 				}
 				hash := hdr.BlockHash()
 
-				err := q.InsertBlockHeader(
-					ctx, sqlc.InsertBlockHeaderParams{
-						Height:    int64(hdr.Height),
-						BlockHash: hash[:],
-						RawHeader: raw.Bytes(),
-					},
-				)
-				if err != nil {
-					return err
-				}
+				rows = append(rows, sqlc.InsertBlockHeaderParams{
+					Height:    int64(hdr.Height),
+					BlockHash: hash[:],
+					RawHeader: raw.Bytes(),
+				})
 
 				lastHash = hash
 				lastHeight = hdr.Height
+			}
+
+			if err := sqldb.InsertBlockHeaders(ctx, q, rows); err != nil {
+				return err
 			}
 
 			return q.UpsertChainTip(
@@ -1018,21 +1020,23 @@ func (s *SQLFilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 			var (
 				tipHash   chainhash.Hash
 				tipHeight uint32
+				rows      = make(
+					[]sqlc.InsertFilterHeaderParams, 0, len(hdrs),
+				)
 			)
 			for _, hdr := range hdrs {
-				err := q.InsertFilterHeader(
-					ctx, sqlc.InsertFilterHeaderParams{
-						Height:     int64(hdr.Height),
-						BlockHash:  hdr.HeaderHash[:],
-						FilterHash: hdr.FilterHash[:],
-					},
-				)
-				if err != nil {
-					return err
-				}
+				rows = append(rows, sqlc.InsertFilterHeaderParams{
+					Height:     int64(hdr.Height),
+					BlockHash:  hdr.HeaderHash[:],
+					FilterHash: hdr.FilterHash[:],
+				})
 
 				tipHash = hdr.FilterHash
 				tipHeight = hdr.Height
+			}
+
+			if err := sqldb.InsertFilterHeaders(ctx, q, rows); err != nil {
+				return err
 			}
 
 			return q.UpsertChainTip(

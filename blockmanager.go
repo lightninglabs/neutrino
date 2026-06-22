@@ -72,17 +72,37 @@ const (
 	// headerSyncActorMailboxSize bounds headersync actor mailboxes.
 	headerSyncActorMailboxSize = 128
 
+	// headerSyncBootstrapMinPeers is the minimum candidate peer set we try
+	// to collect before leasing the first header range. This avoids giving
+	// the genesis checkpoint range to the first peer that happens to connect
+	// when we have no RTT or response-quality samples yet.
+	headerSyncBootstrapMinPeers = 3
+
+	// headerSyncBootstrapMaxWait caps the cold-start admission delay so
+	// sparse networks can still sync from a single viable peer.
+	headerSyncBootstrapMaxWait = 2 * time.Second
+
 	// maxCFCheckptsPerQuery is the maximum number of filter header
 	// checkpoints we can query for within a single message over the wire.
 	maxCFCheckptsPerQuery = wire.MaxCFHeadersPerMsg / wire.CFCheckptInterval
 
-	// checkpointedCFHeaderSyncWindow is the block header lead we wait for
-	// before starting another checkpointed cfheader sync while block
-	// headers are still catching up. The headersync path commits small
-	// contiguous ranges quickly; waiting for a larger cfheader window keeps
-	// the filter header path from fragmenting initial sync into thousands
-	// of tiny batches.
-	checkpointedCFHeaderSyncWindow = 64 * wire.CFCheckptInterval
+	// maxCFHeadersMsgsPerWriteBatch caps how many contiguous cfheaders
+	// responses we commit in a single ordered store transaction. Each
+	// response carries up to wire.MaxCFHeadersPerMsg filter hashes, so this
+	// caps the hot initial-sync write at roughly 64k rows while avoiding
+	// thousands of tiny sqlite transactions.
+	maxCFHeadersMsgsPerWriteBatch = 32
+
+	// cfHeaderResponseQuorum is the number of matching cfheader responses
+	// we try to collect before ending an uncheckpointed cfheader broadcast
+	// query early. Waiting for every connected peer adds a fixed timeout
+	// floor per 2,000-header segment when some peers do not answer.
+	cfHeaderResponseQuorum = 3
+
+	// cfHeaderCollectTimeout is the fallback collection window for
+	// uncheckpointed cfheader broadcast queries when fewer than quorum peers
+	// respond. The normal fast path exits earlier as soon as quorum arrives.
+	cfHeaderCollectTimeout = 2 * time.Second
 
 	// checkpointedCFHeadersMinBatchTimeout is the minimum total timeout for
 	// checkpointed cfheader batch queries. The legacy default of 30s is too
@@ -103,25 +123,6 @@ const (
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
 var zeroHash chainhash.Hash
-
-// shouldStartCheckpointedCFHeaderSync returns true when the checkpointed
-// cfheader path has enough known block headers to do useful batched work. Once
-// block headers are current, any remaining lag is allowed to proceed so the
-// caller can finish the last partial interval or fall through to at-tip
-// uncheckpointed sync.
-func shouldStartCheckpointedCFHeaderSync(filterTip, headerTip uint32,
-	headersSynced bool) bool {
-
-	if filterTip >= headerTip {
-		return false
-	}
-
-	if headersSynced {
-		return true
-	}
-
-	return headerTip-filterTip >= checkpointedCFHeaderSyncWindow
-}
 
 // newPeerMsg signifies a newly connected peer to the block handler.
 type newPeerMsg struct {
@@ -158,6 +159,10 @@ type headerSyncTimeoutMsg struct {
 	leaseEpoch  uint64
 	anchor      bool
 }
+
+// headerSyncBootstrapMsg asks the block handler to retry initial header sync
+// after the cold-start peer admission window expires.
+type headerSyncBootstrapMsg struct{}
 
 // blockManagerCfg holds options and dependencies needed by the blockManager
 // during operation.
@@ -301,6 +306,9 @@ type blockManager struct { // nolint:maligned
 	headerSyncTimeout time.Duration
 	headerRequestID   uint64
 	headerSyncTimer   *time.Timer
+
+	headerSyncBootstrapFirstSeen time.Time
+	headerSyncBootstrapTimer     *time.Timer
 
 	headerSync *headersync.Runtime
 
@@ -846,19 +854,17 @@ func (b *blockManager) cfHandler() {
 	}
 
 waitForHeaders:
-	// We'll wait until the main header sync is either finished or the
-	// filter headers are lagging a useful checkpointed sync window behind
-	// the block headers, before we actually start to sync the set of
-	// cfheaders. We do this to avoid fragmenting initial sync into many
-	// tiny cfheader batches as headersync commits small ordered ranges.
+	// We'll wait until the main header sync is either finished or the filter
+	// headers are lagging at least a checkpoint interval behind the block
+	// headers, before we actually start to sync the set of cfheaders.
 	log.Infof("Waiting for more block headers, then will start "+
 		"cfheaders sync from height %v...", b.filterHeaderTip)
 
 	b.newHeadersSignal.L.Lock()
 	b.newFilterHeadersMtx.RLock()
-	for !shouldStartCheckpointedCFHeaderSync(
-		b.filterHeaderTip, b.headerTip, b.BlockHeadersSynced(),
-	) {
+	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip ||
+		b.BlockHeadersSynced()) {
+
 		b.newFilterHeadersMtx.RUnlock()
 		b.newHeadersSignal.Wait()
 
@@ -1468,53 +1474,95 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		// Add the verified response to our cache.
 		queryResponses[checkPointIndex] = r
 
-		// Then, we cycle through any cached messages, adding
-		// them to the batch and deleting them from the cache.
+		// Then, we cycle through any cached messages, collecting
+		// contiguous responses into bounded write batches. This preserves
+		// strict ordered commits while avoiding one sqlite transaction per
+		// 2,000-header cfheaders response.
 		for {
-			// If we don't yet have the next response, then
-			// we'll break out so we can wait for the peers
-			// to respond with this message.
-			r, ok := queryResponses[currentInterval]
-			if !ok {
+			writeBatch := make(
+				[]*wire.MsgCFHeaders, 0,
+				maxCFHeadersMsgsPerWriteBatch,
+			)
+			adjustedInitialRange := false
+
+			for len(writeBatch) < maxCFHeadersMsgsPerWriteBatch {
+				// If we don't yet have the next response, then
+				// we'll break out so we can wait for the peers
+				// to respond with this message.
+				r, ok := queryResponses[currentInterval]
+				if !ok {
+					break
+				}
+
+				// We have another response to write, so delete
+				// it from the cache and add it to the batch.
+				delete(queryResponses, currentInterval)
+
+				startHeight := currentInterval*
+					wire.CFCheckptInterval + 1
+
+				// If this is the very first range we've requested, we
+				// may already have a portion of the headers written to
+				// disk.
+				//
+				// TODO(roasbeef): can eventually special case handle
+				// this at the top
+				if !adjustedInitialRange &&
+					bytes.Equal(curHeader[:], initialFilterHeader[:]) {
+
+					// So we'll set the prev header to our best
+					// known header, and seek within the header
+					// range a bit so we don't write any duplicate
+					// headers.
+					r.PrevFilterHeader = *curHeader
+					offset := curHeight + 1 - startHeight
+					if offset > uint32(len(r.FilterHashes)) {
+						panic(fmt.Sprintf("initial "+
+							"cfheaders offset %d "+
+							"exceeds response size %d",
+							offset, len(r.FilterHashes)))
+					}
+					r.FilterHashes = r.FilterHashes[offset:]
+					startHeight += offset
+					adjustedInitialRange = true
+
+					log.Debugf("Using offset %d for initial "+
+						"filter header range (new prev_hash=%v)",
+						offset, r.PrevFilterHeader)
+				}
+
+				if len(r.FilterHashes) == 0 {
+					currentInterval = startHeight /
+						wire.CFCheckptInterval
+					continue
+				}
+
+				writeBatch = append(writeBatch, r)
+
+				lastHeight := startHeight +
+					uint32(len(r.FilterHashes)) - 1
+				currentInterval = lastHeight / wire.CFCheckptInterval
+			}
+
+			if len(writeBatch) == 0 {
 				break
 			}
 
-			// We have another response to write, so delete
-			// it from the cache and write it.
-			delete(queryResponses, currentInterval)
-
-			log.Debugf("Writing cfheaders at height=%v to "+
-				"next checkpoint", curHeight)
-
-			// If this is the very first range we've requested, we
-			// may already have a portion of the headers written to
-			// disk.
-			//
-			// TODO(roasbeef): can eventually special case handle
-			// this at the top
-			if bytes.Equal(curHeader[:], initialFilterHeader[:]) {
-				// So we'll set the prev header to our best
-				// known header, and seek within the header
-				// range a bit so we don't write any duplicate
-				// headers.
-				r.PrevFilterHeader = *curHeader
-				offset := curHeight + 1 - startHeight
-				r.FilterHashes = r.FilterHashes[offset:]
-
-				log.Debugf("Using offset %d for initial "+
-					"filter header range (new prev_hash=%v)",
-					offset, r.PrevFilterHeader)
-			}
+			log.Debugf("Writing %d cfheaders response(s) at "+
+				"height=%v to next checkpoint", len(writeBatch),
+				curHeight)
 
 			// As we write the set of headers to disk, we
 			// also obtain the hash of the last filter
 			// header we've written to disk so we can
 			// properly set the PrevFilterHeader field of
 			// the next message.
-			curHeader, curHeight, err = b.writeCFHeadersMsg(r, store)
+			curHeader, curHeight, err = b.writeCFHeadersMsgs(
+				writeBatch, store,
+			)
 			if err != nil {
 				panic(fmt.Sprintf("couldn't write "+
-					"cfheaders msg: %v", err))
+					"cfheaders messages: %v", err))
 			}
 
 			// Update the next interval to write to reflect our
@@ -1553,34 +1601,63 @@ func checkpointedCFHeadersBatchTimeout(batches int) time.Duration {
 func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	store headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
 
+	return b.writeCFHeadersMsgs([]*wire.MsgCFHeaders{msg}, store)
+}
+
+func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
+	store headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
+
+	if len(msgs) == 0 {
+		return nil, 0, fmt.Errorf("no cfheaders messages to write")
+	}
+
 	// Check that the PrevFilterHeader is the same as the last stored so we
 	// can prevent misalignment.
 	tip, tipHeight, err := store.ChainTip()
 	if err != nil {
 		return nil, 0, err
 	}
-	if *tip != msg.PrevFilterHeader {
+	if *tip != msgs[0].PrevFilterHeader {
 		return nil, 0, fmt.Errorf("attempt to write cfheaders out of "+
 			"order, tip=%v (height=%v), prev_hash=%v", *tip,
-			tipHeight, msg.PrevFilterHeader)
+			tipHeight, msgs[0].PrevFilterHeader)
+	}
+
+	totalHeaders := 0
+	for _, msg := range msgs {
+		totalHeaders += len(msg.FilterHashes)
 	}
 
 	// Cycle through the headers and compute each header based on the prev
 	// header and the filter hash from the cfheaders response entries.
-	lastHeader := msg.PrevFilterHeader
-	headerBatch := make([]headerfs.FilterHeader, 0, len(msg.FilterHashes))
-	for _, hash := range msg.FilterHashes {
-		// header = dsha256(filterHash || prevHeader)
-		lastHeader = chainhash.DoubleHashH(
-			append(hash[:], lastHeader[:]...),
-		)
+	lastHeader := msgs[0].PrevFilterHeader
+	headerBatch := make([]headerfs.FilterHeader, 0, totalHeaders)
+	var stopHash chainhash.Hash
+	for i, msg := range msgs {
+		if msg.PrevFilterHeader != lastHeader {
+			return nil, 0, fmt.Errorf("attempt to batch "+
+				"disconnected cfheaders at msg_index=%d, "+
+				"prev=%v, want=%v", i, msg.PrevFilterHeader,
+				lastHeader)
+		}
+		stopHash = msg.StopHash
 
-		headerBatch = append(headerBatch, headerfs.FilterHeader{
-			FilterHash: lastHeader,
-		})
+		for _, hash := range msg.FilterHashes {
+			// header = dsha256(filterHash || prevHeader)
+			lastHeader = chainhash.DoubleHashH(
+				append(hash[:], lastHeader[:]...),
+			)
+
+			headerBatch = append(headerBatch, headerfs.FilterHeader{
+				FilterHash: lastHeader,
+			})
+		}
 	}
 
 	numHeaders := len(headerBatch)
+	if numHeaders == 0 {
+		return tip, tipHeight, nil
+	}
 
 	// We'll now query for the set of block headers which match each of
 	// these filters headers in their corresponding chains. Our query will
@@ -1588,7 +1665,7 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	// designated stop hash.
 	blockHeaders := b.cfg.BlockHeaders
 	matchingBlockHeaders, startHeight, err := blockHeaders.FetchHeaderAncestors(
-		uint32(numHeaders-1), &msg.StopHash,
+		uint32(numHeaders-1), &stopHash,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -1600,11 +1677,15 @@ func (b *blockManager) writeCFHeadersMsg(msg *wire.MsgCFHeaders,
 	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
 	lastHash := lastBlockHeader.BlockHash()
 
-	// We only need to set the height and hash of the very last filter
-	// header in the range to ensure that the index properly updates the
-	// tip of the chain.
-	headerBatch[numHeaders-1].HeaderHash = lastHash
-	headerBatch[numHeaders-1].Height = lastHeight
+	// Fill in the block height and hash for every filter header. The
+	// legacy flat-file store only needs the last entry to update its tip
+	// index, but the SQL store persists each filter header as an
+	// individual row keyed by height and block hash.
+	for i := range headerBatch {
+		blockHash := matchingBlockHeaders[i].BlockHash()
+		headerBatch[i].HeaderHash = blockHash
+		headerBatch[i].Height = startHeight + uint32(i)
+	}
 
 	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
 		"new_tip=%v", lastHeight, lastHash, lastHeader)
@@ -2177,6 +2258,7 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
+	var stopQuery sync.Once
 	b.cfg.queryAllPeers(
 		msg,
 		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
@@ -2193,9 +2275,16 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 					// We got an answer from this peer so
 					// that peer's goroutine can stop.
 					close(peerQuit)
+
+					if len(headers) >= cfHeaderResponseQuorum {
+						stopQuery.Do(func() {
+							close(quit)
+						})
+					}
 				}
 			}
 		},
+		Timeout(cfHeaderCollectTimeout),
 	)
 
 	return headers, numHeaders
@@ -2376,6 +2465,10 @@ out:
 				b.handleHeaderSyncTimeoutMsg(
 					candidatePeers, msg,
 				)
+
+			case *headerSyncBootstrapMsg:
+				b.headerSyncBootstrapTimer = nil
+				b.startSync(candidatePeers)
 
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
@@ -3072,9 +3165,12 @@ func headerSyncPeerCandidates(peers *list.List) ([]headersync.PeerCandidate,
 	for e := peers.Front(); e != nil; e = e.Next() {
 		sp := e.Value.(*ServerPeer)
 		peerID := sp.Addr()
+		rtt := time.Duration(sp.LastPingMicros()) * time.Microsecond
 		candidates = append(candidates, headersync.PeerCandidate{
 			ID:     peerID,
 			Height: sp.LastBlock(),
+			Rank:   headerSyncPeerRank(sp),
+			RTT:    rtt,
 		})
 		peerByID[peerID] = sp
 	}
@@ -3257,6 +3353,63 @@ func (b *blockManager) handleHeaderSyncRangeTimeoutMsg(peers *list.List,
 	b.dispatchHeaderSyncWork(peers)
 }
 
+func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
+	bestHeight uint32) bool {
+
+	if b.headerSync.Controller() == nil || b.nextCheckpoint == nil ||
+		b.headerSync.Session().HasActiveWork() || bestHeight == 0 {
+
+		return false
+	}
+
+	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil || height != 0 {
+		return false
+	}
+
+	if peers.Len() >= headerSyncBootstrapMinPeers {
+		b.clearHeaderSyncBootstrapDelay()
+		return false
+	}
+
+	now := time.Now()
+	if b.headerSyncBootstrapFirstSeen.IsZero() {
+		b.headerSyncBootstrapFirstSeen = now
+		log.Infof("headersync bootstrap_deferred peers=%d "+
+			"min_peers=%d max_wait=%v", peers.Len(),
+			headerSyncBootstrapMinPeers,
+			headerSyncBootstrapMaxWait)
+	}
+
+	if now.Sub(b.headerSyncBootstrapFirstSeen) >=
+		headerSyncBootstrapMaxWait {
+
+		b.clearHeaderSyncBootstrapDelay()
+		return false
+	}
+
+	if b.headerSyncBootstrapTimer == nil {
+		b.headerSyncBootstrapTimer = time.AfterFunc(
+			headerSyncBootstrapMaxWait, func() {
+				select {
+				case b.peerChan <- &headerSyncBootstrapMsg{}:
+				case <-b.quit:
+				}
+			},
+		)
+	}
+
+	return true
+}
+
+func (b *blockManager) clearHeaderSyncBootstrapDelay() {
+	b.headerSyncBootstrapFirstSeen = time.Time{}
+	if b.headerSyncBootstrapTimer != nil {
+		b.headerSyncBootstrapTimer.Stop()
+		b.headerSyncBootstrapTimer = nil
+	}
+}
+
 // startSync will choose the best peer among the available candidate peers to
 // download/sync the blockchain from.  When syncing is already running, it
 // simply returns.  It also examines the candidates for any which are no longer
@@ -3305,10 +3458,15 @@ func (b *blockManager) startSync(peers *list.List) {
 
 	// Start syncing from the best peer if one was selected.
 	if bestPeer != nil {
-		if bestPeer.LastBlock() > 0 && b.startHeaderSync(
-			peers, bestPeer, uint32(bestPeer.LastBlock()),
-		) {
-			return
+		if bestPeer.LastBlock() > 0 {
+			bestHeight := uint32(bestPeer.LastBlock())
+			if b.shouldDeferHeaderSyncBootstrap(peers, bestHeight) {
+				return
+			}
+			if b.startHeaderSync(peers, bestPeer, bestHeight) {
+				b.clearHeaderSyncBootstrapDelay()
+				return
+			}
 		}
 
 		locator, err := b.cfg.BlockHeaders.LatestBlockLocator()

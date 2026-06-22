@@ -386,6 +386,27 @@ func TestAssignRangeBalancesLocalQueues(t *testing.T) {
 	require.Equal(t, "empty", assignment.PeerID)
 }
 
+func TestAssignRangePrefersMeasuredRTTOverUnknownRTT(t *testing.T) {
+	fsm := newTestFSM(0, 100)
+	addTrustedAnchor(t, fsm, 0, 100)
+	addTrustedAnchor(t, fsm, 10, 110)
+	require.NoError(t, fsm.AddPeer(PeerSnapshot{
+		ID:    "unknown-rtt",
+		Rank:  0,
+		State: PeerReady,
+	}))
+	require.NoError(t, fsm.AddPeer(PeerSnapshot{
+		ID:    "measured-rtt",
+		Rank:  0,
+		RTT:   50 * time.Millisecond,
+		State: PeerReady,
+	}))
+	mustPlanRange(t, fsm, 1, 0, 10)
+
+	assignment := mustAssignRange(t, fsm)
+	require.Equal(t, "measured-rtt", assignment.PeerID)
+}
+
 func TestRecoveredPeerCanOwnRangeAgain(t *testing.T) {
 	fsm := newTestFSM(0, 100)
 	addTrustedAnchor(t, fsm, 0, 100)
