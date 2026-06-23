@@ -10,9 +10,9 @@ require (
 	github.com/btcsuite/btcd/txscript/v2 v2.0.0
 	github.com/btcsuite/btcd/wire/v2 v2.0.0
 	github.com/btcsuite/btclog v1.0.0
-	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5
-	github.com/btcsuite/btcwallet/walletdb v1.5.1
-	github.com/btcsuite/btcwallet/wtxmgr v1.5.6
+	github.com/btcsuite/btcwallet/wallet/txauthor v1.4.0
+	github.com/btcsuite/btcwallet/walletdb v1.6.0
+	github.com/btcsuite/btcwallet/wtxmgr v1.6.0
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightninglabs/neutrino/cache v1.1.3
 	github.com/lightningnetwork/lnd/queue v1.0.1
@@ -25,8 +25,8 @@ require (
 	github.com/aead/siphash v1.0.1 // indirect
 	github.com/btcsuite/btcd/v2transport v1.0.1 // indirect
 	github.com/btcsuite/btcwallet v0.16.18 // indirect
-	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2 // indirect
-	github.com/btcsuite/btcwallet/wallet/txsizes v1.2.5 // indirect
+	github.com/btcsuite/btcwallet/wallet/txrules v1.3.0 // indirect
+	github.com/btcsuite/btcwallet/wallet/txsizes v1.3.0 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
@@ -51,14 +51,3 @@ require (
 go 1.25.11
 
 replace github.com/lightninglabs/neutrino/cache => ./cache
-
-// TODO(guggero): Replace all of these once
-// https://github.com/btcsuite/btcwallet/pull/1266 is merged and new tags have
-// been pushed.
-replace (
-	github.com/btcsuite/btcwallet/wallet/txauthor => github.com/guggero/btcwallet/wallet/txauthor v1.1.1-0.20260612135316-31b3139879fa
-	github.com/btcsuite/btcwallet/wallet/txrules => github.com/guggero/btcwallet/wallet/txrules v1.1.1-0.20260612135316-31b3139879fa
-	github.com/btcsuite/btcwallet/wallet/txsizes => github.com/guggero/btcwallet/wallet/txsizes v1.1.1-0.20260612135316-31b3139879fa
-	github.com/btcsuite/btcwallet/walletdb => github.com/guggero/btcwallet/walletdb v1.4.1-0.20260612135316-31b3139879fa
-	github.com/btcsuite/btcwallet/wtxmgr => github.com/guggero/btcwallet/wtxmgr v1.3.1-0.20260612135316-31b3139879fa
-)
