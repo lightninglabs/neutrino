@@ -3,7 +3,6 @@ package neutrino_test
 import (
 	"bytes"
 	"compress/bzip2"
-	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -17,17 +16,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -215,9 +215,9 @@ type secSource struct {
 	params  *chaincfg.Params
 }
 
-func (s *secSource) add(privKey *btcec.PrivateKey) (btcutil.Address, error) {
-	pubKeyHash := btcutil.Hash160(privKey.PubKey().SerializeCompressed())
-	addr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, s.params)
+func (s *secSource) add(privKey *btcec.PrivateKey) (address.Address, error) {
+	pubKeyHash := address.Hash160(privKey.PubKey().SerializeCompressed())
+	addr, err := address.NewAddressWitnessPubKeyHash(pubKeyHash, s.params)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,7 @@ func (s *secSource) add(privKey *btcec.PrivateKey) (btcutil.Address, error) {
 }
 
 // GetKey is required by the txscript.KeyDB interface.
-func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
+func (s *secSource) GetKey(addr address.Address) (*btcec.PrivateKey, bool,
 	error) {
 
 	privKey, ok := s.keys[addr.String()]
@@ -250,7 +250,7 @@ func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
 }
 
 // GetScript is required by the txscript.ScriptDB interface.
-func (s *secSource) GetScript(addr btcutil.Address) ([]byte, error) {
+func (s *secSource) GetScript(addr address.Address) ([]byte, error) {
 	script, ok := s.scripts[addr.String()]
 	if !ok {
 		return nil, fmt.Errorf("No script for address %s", addr)
@@ -319,7 +319,7 @@ var (
 	rescan                    *neutrino.Rescan
 	startBlock                headerfs.BlockStamp
 	secSrc                    *secSource
-	addr1, addr2, addr3       btcutil.Address
+	addr1, addr2, addr3       address.Address
 	script1, script2, script3 []byte
 	tx1, tx2                  *wire.MsgTx
 	ourOutPoint               wire.OutPoint
@@ -333,7 +333,7 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 	modParams := harness.svc.ChainParams()
 	secSrc = newSecSource(&modParams)
 
-	newPkScript := func() (btcutil.Address, []byte, *wire.TxOut) {
+	newPkScript := func() (address.Address, []byte, *wire.TxOut) {
 		t.Helper()
 
 		privKey, err := btcec.NewPrivateKey()
@@ -1077,7 +1077,7 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // a way to bootstrap neutrino nodes and significantly improving sync
 // performance.
 func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks.
 	h1, err := rpctest.New(
@@ -1096,7 +1096,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1175,7 +1175,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err = walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1261,7 +1261,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 // import, so its internal tracking state must be refreshed after import to
 // build correct P2P locators for the remaining chain.
 func TestNeutrinoImportThenP2PSync(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate an initial chain.
 	h1, err := rpctest.New(
@@ -1282,7 +1282,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 	defer os.RemoveAll(exportDir)
 
 	exportDB, err := walletdb.Create(
-		"bdb", exportDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", exportDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 
@@ -1347,7 +1347,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 	defer os.RemoveAll(svcDir)
 
 	svcDB, err := walletdb.Create(
-		"bdb", svcDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", svcDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer svcDB.Close()
@@ -1390,7 +1390,7 @@ func TestNeutrinoImportThenP2PSync(t *testing.T) {
 // TestNeutrinoSyncWithoutHeadersImport tests the standard synchronization
 // behavior of Neutrino without using the headers import feature.
 func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
@@ -1468,7 +1468,7 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1550,7 +1550,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 			tempDir := b.TempDir()
 			dbPath := filepath.Join(tempDir, "test.db")
 			db, err := walletdb.Create(
-				"bdb", dbPath, true, time.Second*10,
+				"bdb", dbPath, true, time.Second*10, false,
 			)
 			require.NoError(b, err)
 			defer db.Close()
@@ -1607,7 +1607,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 
 			b.ResetTimer()
 			startTime := time.Now()
-			ctx := context.Background()
+			ctx := b.Context()
 
 			importer, err := chainimport.NewHeadersImport(opts)
 			require.NoError(b, err)
@@ -1900,7 +1900,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 // from the rescan. At the end, the log should match one we precomputed based
 // on the flow of the test. The rescan starts at the genesis block and the
 // notifications continue until the `quit` channel is closed.
-func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
+func startRescan(t *testing.T, svc *neutrino.ChainService, addr address.Address,
 	startBlock *headerfs.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
 

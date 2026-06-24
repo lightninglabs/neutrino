@@ -4,8 +4,8 @@ import (
 	"io"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 )
@@ -173,14 +173,18 @@ type MockWalletDB struct {
 }
 
 // Update implements the walletdb.DB interface.
-func (m *MockWalletDB) Update(fn func(tx walletdb.ReadWriteTx) error) error {
-	args := m.Called(fn)
+func (m *MockWalletDB) Update(fn func(tx walletdb.ReadWriteTx) error,
+	reset func()) error {
+
+	args := m.Called(fn, reset)
 	return args.Error(0)
 }
 
 // View implements the walletdb.DB interface.
-func (m *MockWalletDB) View(fn func(tx walletdb.ReadTx) error) error {
-	args := m.Called(fn)
+func (m *MockWalletDB) View(fn func(tx walletdb.ReadTx) error,
+	reset func()) error {
+
+	args := m.Called(fn, reset)
 	return args.Error(0)
 }
 
@@ -210,6 +214,12 @@ func (m *MockWalletDB) BeginReadTx() (walletdb.ReadTx, error) {
 func (m *MockWalletDB) Copy(w io.Writer) error {
 	args := m.Called(w)
 	return args.Error(0)
+}
+
+// PrintStats implements the walletdb.DB interface.
+func (m *MockWalletDB) PrintStats() string {
+	args := m.Called()
+	return args.String(0)
 }
 
 // Close implements the walletdb.DB interface.

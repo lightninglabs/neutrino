@@ -1,8 +1,8 @@
 package neutrino
 
 import (
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/lightninglabs/neutrino/filterdb"
 )
 

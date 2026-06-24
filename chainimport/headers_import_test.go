@@ -2,7 +2,6 @@ package chainimport
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -17,9 +16,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/chainsync"
@@ -112,7 +111,7 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 // are written to the target header stores.
 func TestImportOperationOnFileHeaderSource(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		options *ImportOptions
 		cleanup func()
@@ -140,7 +139,8 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				c2 := func() {
 					db.Close()
@@ -287,7 +287,7 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 // are written to the target header stores.
 func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		hImport *headersImport
 		cleanup func()
@@ -314,7 +314,8 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				c2 := func() {
 					db.Close()
@@ -471,6 +472,7 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			prep := tc.prep()
+			require.NoError(t, prep.err)
 			importResult, err := prep.hImport.Import(ctx)
 			verify := verify{
 				tc:           t,
@@ -4999,7 +5001,7 @@ func TestRelativeAncestorCtxNonZeroStartHeight(t *testing.T) {
 // sequential block headers. It checks that the header is validated correctly.
 func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		iterator  HeaderIterator
 		validator HeadersValidator
@@ -5196,7 +5198,7 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 // correctly.
 func TestHeaderValidationOnSequentialFilterHeaders(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		iterator  HeaderIterator
 		validator HeadersValidator
@@ -5931,7 +5933,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6100,7 +6103,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6247,7 +6251,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6343,7 +6348,8 @@ func TestHeaderStorage(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -6464,7 +6470,7 @@ func TestHeaderStorage(t *testing.T) {
 // validating the leading store and syncing the lagging store.
 func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		hImport *headersImport
 		cleanup func()
@@ -6711,7 +6717,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -7116,7 +7123,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -7336,7 +7344,7 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 // target header stores.
 func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	type prep struct {
 		hImport *headersImport
 		cleanup func()
@@ -7795,7 +7803,8 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
