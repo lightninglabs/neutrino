@@ -14,7 +14,7 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.6.0
 	github.com/btcsuite/btcwallet/wtxmgr v1.6.0
 	github.com/davecgh/go-spew v1.1.1
-	github.com/lightninglabs/neutrino/cache v1.1.3
+	github.com/lightninglabs/neutrino/cache v1.1.4
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50
@@ -49,5 +49,3 @@ require (
 )
 
 go 1.25.11
-
-replace github.com/lightninglabs/neutrino/cache => ./cache
