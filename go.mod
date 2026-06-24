@@ -49,5 +49,3 @@ require (
 )
 
 go 1.25.11
-
-replace github.com/lightninglabs/neutrino/cache => ./cache
