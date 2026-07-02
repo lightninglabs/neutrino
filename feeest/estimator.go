@@ -375,9 +375,18 @@ func (e *Estimator) coldEstimate(target uint32, floor SatPerKW,
 	sampleCount int) Estimate {
 
 	rate := SatPerKW(float64(floor) * e.coldStartMult * multFor(target))
-	if floor > 0 && rate < floor {
+	if rate < floor {
 		rate = floor
 	}
+
+	// With no peer feefilter data at all, the projection above collapses
+	// to zero. Never hand callers a zero rate as a "successful" estimate:
+	// clamp to the canonical 1 sat/vbyte relay minimum, below which no
+	// default-policy node would relay the transaction anyway.
+	if rate < FeePerKWFloor {
+		rate = FeePerKWFloor
+	}
+
 	result := Estimate{
 		Rate:        rate,
 		Confidence:  e.coldConfidence,

@@ -61,8 +61,9 @@ func addFullSample(s *Sampler, sample feedb.FeeSample) {
 	_ = s.store.PutSample(&sample)
 }
 
-// TestEstimateColdStartNoPeers returns a zero rate when there is neither
-// sample data nor any peer feefilters.
+// TestEstimateColdStartNoPeers returns the relay-minimum floor when there is
+// neither sample data nor any peer feefilters: a zero rate must never be
+// handed back as a "successful" estimate.
 func TestEstimateColdStartNoPeers(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
@@ -71,7 +72,7 @@ func TestEstimateColdStartNoPeers(t *testing.T) {
 	got, err := withErr(est.Estimate(6), nil)
 	require.NoError(t, err)
 	require.Equal(t, FeeSourceCold, got.Source)
-	require.Equal(t, SatPerKW(0), got.Rate)
+	require.Equal(t, FeePerKWFloor, got.Rate)
 	require.InDelta(t, DefaultColdConfidence, got.Confidence, 1e-9)
 }
 

@@ -8,6 +8,38 @@ package feeest
 // dependency on this package.
 type SatPerKW int64
 
+// FeePerKWFloor is the lowest fee rate in sat/kW that estimates handed to
+// wallet-facing consumers should ever report. It is the sat/kW equivalent of
+// the 1 sat/vbyte network relay minimum and mirrors lnd's
+// chainfee.FeePerKwFloor, so rates crossing the package boundary stay
+// broadcastable even when no peer feefilter data is available.
+const FeePerKWFloor SatPerKW = 253
+
+// ChainEstimator mirrors the method set of lnd's lnwallet/chainfee.Estimator
+// interface. Neutrino cannot import that package directly (lnd depends on
+// neutrino, so the import would be circular); instead we declare a
+// structurally identical contract here, with SatPerKW standing in for
+// chainfee.SatPerKWeight. The lnd side satisfies chainfee.Estimator with a
+// thin wrapper that converts between the two int64-based types.
+type ChainEstimator interface {
+	// EstimateFeePerKW takes in a target for the number of blocks until
+	// an initial confirmation and returns the estimated fee expressed in
+	// sat/kW.
+	EstimateFeePerKW(numBlocks uint32) (SatPerKW, error)
+
+	// Start signals the estimator to start any processes or goroutines
+	// it needs to perform its duty.
+	Start() error
+
+	// Stop stops any spawned goroutines and cleans up the resources used
+	// by the estimator.
+	Stop() error
+
+	// RelayFeePerKW returns the minimum fee rate required for
+	// transactions to be relayed.
+	RelayFeePerKW() SatPerKW
+}
+
 // FeeSource describes which signal the estimator used to produce a result.
 type FeeSource uint8
 
