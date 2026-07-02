@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/lightninglabs/neutrino/blockfetch"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/chainimport"
@@ -610,6 +611,14 @@ type Config struct {
 	// synchronization.
 	HeadersImport *HeadersImportConfig
 
+	// BlockSource, when set, configures an HTTP(S) source from which full
+	// blocks are downloaded. When configured, GetBlock attempts to fetch a
+	// block from this source first and only falls back to the P2P network
+	// if the HTTP fetch fails. When nil, blocks are fetched exclusively
+	// from peers, as before. Block caching behaves identically regardless
+	// of where a block is ultimately fetched from.
+	BlockSource *BlockSourceConfig
+
 	// AssertFilterHeader is an optional field that allows the creator of
 	// the ChainService to ensure that if any chain data exists, it's
 	// compliant with the expected filter header state. If neutrino starts
@@ -663,6 +672,30 @@ type HeadersImportConfig struct {
 	ValidationFlags blockchain.BehaviorFlags
 }
 
+// BlockSourceConfig contains the configuration for downloading full blocks
+// from an HTTP(S) source (such as block-dn) before falling back to the P2P
+// network.
+type BlockSourceConfig struct {
+	// BaseURL is the base URL of the HTTP block source, e.g.
+	// "https://block-dn.org". Individual blocks are downloaded from
+	// "<BaseURL>/block/<hash>".
+	BaseURL string
+
+	// Client is an optional HTTP client used to issue requests. If nil, a
+	// default client is used. This can be set to route requests through a
+	// proxy, or to inject a custom client in tests.
+	Client blockfetch.HTTPClient
+
+	// NumRetries is the number of times an individual block download is
+	// attempted before falling back to the P2P network. If zero, a default
+	// is used.
+	NumRetries int
+
+	// RetryDelay is the delay between download attempts. If zero, a default
+	// is used.
+	RetryDelay time.Duration
+}
+
 // peerSubscription holds a peer subscription which we'll notify about any
 // connected peers.
 type peerSubscription struct {
@@ -685,6 +718,10 @@ type ChainService struct { // nolint:maligned
 	persistToDisk    bool
 
 	headersImport *HeadersImportConfig
+
+	// blockFetcher, when non-nil, downloads blocks from an HTTP block
+	// source. GetBlock tries it before falling back to the P2P network.
+	blockFetcher *blockfetch.BlockFetcher
 
 	FilterCache *lru.Cache[FilterCacheKey, *CacheableFilter]
 	BlockCache  *lru.Cache[wire.InvVect, *CacheableBlock]
@@ -829,6 +866,17 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		s.BlockCache = lru.NewCache[wire.InvVect, *CacheableBlock](
 			blockCacheSize,
 		)
+	}
+
+	// If an HTTP block source was configured, set up the fetcher that
+	// GetBlock will try before falling back to the P2P network.
+	if cfg.BlockSource != nil {
+		s.blockFetcher = blockfetch.New(blockfetch.Config{
+			BaseURL:    cfg.BlockSource.BaseURL,
+			Client:     cfg.BlockSource.Client,
+			NumRetries: cfg.BlockSource.NumRetries,
+			RetryDelay: cfg.BlockSource.RetryDelay,
+		})
 	}
 
 	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
