@@ -913,6 +913,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
 		queryAllPeers:    s.queryAllPeers,
+		OnRollback: func(invalidatedHeight uint32) {
+			if s.FeeSampler == nil {
+				return
+			}
+			s.FeeSampler.PruneFrom(invalidatedHeight)
+		},
 	})
 	if err != nil {
 		return nil, err

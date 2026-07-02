@@ -99,6 +99,12 @@ type blockManagerCfg struct {
 	// GetBlock fetches a block from the p2p network.
 	GetBlock func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 
+	// OnRollback, if non-nil, is invoked after the header chain has been
+	// rolled back to the given height, with the first now-invalid height
+	// (i.e. height+1). Consumers use it to drop state derived from
+	// orphaned blocks, such as fee samples.
+	OnRollback func(invalidatedHeight uint32)
+
 	// firstPeerSignal is a channel that's sent upon once the main daemon
 	// has made its first peer connection. We use this to ensure we don't
 	// try to perform any queries before we have our first peer.
@@ -1315,6 +1321,12 @@ func (b *blockManager) rollBackToHeight(height uint32) error {
 		b.onBlockDisconnected(
 			*header, headerHeight, *prevHeader,
 		)
+	}
+
+	// Let interested subsystems drop any state derived from the now
+	// orphaned blocks above the rollback point.
+	if b.cfg.OnRollback != nil {
+		b.cfg.OnRollback(height + 1)
 	}
 
 	return nil
