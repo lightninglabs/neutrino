@@ -28,6 +28,18 @@ type ChainTip struct {
 	UpdatedAt time.Time
 }
 
+type FeeSample struct {
+	Height         int64
+	BlockHash      []byte
+	Timestamp      int64
+	TotalFees      int64
+	TotalWeight    int64
+	CoinbaseWeight int64
+	MinKnownTxRate int64
+	KnownTxCount   int32
+	Flags          int32
+}
+
 type FilterHeader struct {
 	Height     int64
 	BlockHash  []byte

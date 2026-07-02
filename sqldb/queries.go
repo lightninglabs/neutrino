@@ -68,12 +68,29 @@ type BanQueries interface {
 		error)
 }
 
+// FeeQueries is the narrow subset of generated sqlc.Querier methods used by
+// the fee sample store (feedb.SQLFeeStore).
+type FeeQueries interface {
+	UpsertFeeSample(ctx context.Context,
+		arg sqlc.UpsertFeeSampleParams) error
+	GetFeeSampleByHeight(ctx context.Context, height int64) (
+		sqlc.FeeSample, error)
+	GetFeeSamplesTipN(ctx context.Context, limit int32) ([]sqlc.FeeSample,
+		error)
+	GetFeeSampleRange(ctx context.Context,
+		arg sqlc.GetFeeSampleRangeParams) ([]sqlc.FeeSample, error)
+	GetFeeSampleTip(ctx context.Context) (int64, error)
+	DeleteFeeSamplesBeforeHeight(ctx context.Context, height int64) error
+	DeleteFeeSamplesFromHeight(ctx context.Context, height int64) error
+}
+
 // Compile-time assertions that the generated *sqlc.Queries struct satisfies
 // each narrow domain interface.
 var (
 	_ HeaderQueries = (*sqlc.Queries)(nil)
 	_ FilterQueries = (*sqlc.Queries)(nil)
 	_ BanQueries    = (*sqlc.Queries)(nil)
+	_ FeeQueries    = (*sqlc.Queries)(nil)
 )
 
 // ChainTypeBlock and ChainTypeFilter are the persisted chain_type column
@@ -95,3 +112,6 @@ type FilterTx = sqldbv2.BatchedTx[FilterQueries]
 
 // BanTx is the BatchedTx alias used by the ban store implementation.
 type BanTx = sqldbv2.BatchedTx[BanQueries]
+
+// FeeTx is the BatchedTx alias used by the fee sample store implementation.
+type FeeTx = sqldbv2.BatchedTx[FeeQueries]

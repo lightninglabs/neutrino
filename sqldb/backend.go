@@ -29,6 +29,9 @@ type Backend struct {
 
 	// BanTxer is the executor injected into banman.SQLBanStore.
 	BanTxer BanTx
+
+	// FeeTxer is the executor injected into feedb.SQLFeeStore.
+	FeeTxer FeeTx
 }
 
 // NewBackend opens (and migrates) the SQL backend selected by cfg, returning
@@ -98,11 +101,19 @@ func NewBackend(dataDir string, cfg *Config,
 		},
 	)
 
+	feeExec := sqldbv2.NewTransactionExecutor[FeeQueries](
+		baseDB,
+		func(tx *sql.Tx) FeeQueries {
+			return sqlc.New(tx)
+		},
+	)
+
 	return &Backend{
 		store:      store,
 		HeaderTxer: headerExec,
 		FilterTxer: filterExec,
 		BanTxer:    banExec,
+		FeeTxer:    feeExec,
 	}, nil
 }
 
