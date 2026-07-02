@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/lightninglabs/neutrino/feedb"
 )
 
@@ -62,30 +63,43 @@ const (
 	adaptHalfLifeRatioDown = 0.5
 )
 
-// The kSigma and target-multiplier tables are package-level variables so
+// The quantile and target-multiplier tables are package-level variables so
 // operators can tune them against observed data without recompiling. The
 // defaults are provisional and should be calibrated once the estimator has
 // accumulated real-world sample distributions.
 //
-// kSigma is the number of standard deviations added to the block-average mean
-// to project a target-confirmation percentile. Positive values bias toward
-// higher fee rates (faster confirmation), negative toward lower (slower).
+// QuantileBy* is the weighted empirical quantile of the per-block entry-rate
+// proxies used for each confirmation target. To confirm within n blocks a
+// transaction needs to beat the entry rate of at least one of the next n
+// blocks, so treating recent blocks as draws from the near-future block
+// distribution, the quantile for an ~85% inclusion probability is
+// p = 1 - (1-0.85)^(1/n). Empirical quantiles are bounded by the observed
+// samples, so unlike a Gaussian mean+kσ projection they cannot explode when
+// a fee storm inflates the window's variance, and they need no distributional
+// assumption on the (heavily right-skewed) block fee rates.
 var (
-	KSigmaBy1Block  = 1.65
-	KSigmaBy3Block  = 0.85
-	KSigmaBy6Block  = 0.0
-	KSigmaBy24Block = -0.5
+	QuantileBy1Block  = 0.85
+	QuantileBy3Block  = 0.47
+	QuantileBy6Block  = 0.27
+	QuantileBy24Block = 0.08
 )
 
-// TargetMult is an additional safety multiplier applied on top of the kSigma
-// projection. We deliberately lean conservative on short targets because the
-// block-average proxy is a coarser signal than a full per-tx distribution.
+// TargetMult is an additional safety multiplier applied on top of the
+// quantile projection. The entry-rate proxy is itself an upper bound on the
+// true marginal rate (block averages sit above the tail), so these cushions
+// are deliberately mild.
 var (
-	TargetMultBy1Block  = 1.5
-	TargetMultBy3Block  = 1.2
+	TargetMultBy1Block  = 1.2
+	TargetMultBy3Block  = 1.1
 	TargetMultBy6Block  = 1.0
-	TargetMultBy24Block = 0.85
+	TargetMultBy24Block = 0.9
 )
+
+// fullBlockFraction is the share of the consensus weight limit above which a
+// block is considered full for the purposes of the congestion gate. Miners
+// leave a little headroom below the 4M WU limit, so 95% is a conservative
+// "there was competition for this block" threshold.
+const fullBlockFraction = 0.95
 
 // PeerFeeRater is the contract the estimator requires from its host (the
 // chain service) to get a snapshot of currently-connected peer feefilters.
@@ -113,6 +127,12 @@ type Stats struct {
 	// RelayFloor is the current peer-feefilter floor in sat/kW.
 	RelayFloor SatPerKW
 
+	// Congestion is the EWMA-weighted fraction of observed blocks that
+	// were full (>= fullBlockFraction of the consensus weight limit), in
+	// [0, 1]. Zero means recent blocks had spare capacity and the fee
+	// market is effectively idle.
+	Congestion float64
+
 	// WarmWindow is true when the tier-A estimator will activate on the
 	// next Estimate call (i.e., enough fresh samples exist).
 	WarmWindow bool
@@ -133,6 +153,12 @@ type Estimator struct {
 	// int64 so callers (or future adaptive logic) can update it
 	// atomically without blocking estimate queries.
 	halfLifeNanos int64
+
+	// lastAdaptHeight is the highest sample height for which the adaptive
+	// half-life logic has already run, accessed atomically. Adapting at
+	// most once per new block sample keeps repeated Estimate calls over
+	// the same window from ratcheting the half-life up or down.
+	lastAdaptHeight uint32
 
 	// minBlocksA is the threshold below which the cold-start path runs.
 	// Mutable so tests can lower it without rebuilding a Sampler with a
@@ -186,7 +212,13 @@ func New(cfg EstimatorConfig) *Estimator {
 		staleWindow:    DefaultStaleWindow,
 		coldStartMult:  DefaultColdStartMult,
 		coldConfidence: DefaultColdConfidence,
-		relayFloorPct:  0.75, // 75th-pct peer feefilter
+		// Median peer feefilter. The floor is used as a hard lower
+		// bound (and as the cold-start base), so it must be robust:
+		// with the median, moving it in either direction requires
+		// compromising more than half of our peer connections,
+		// whereas a 75th-percentile floor let a quarter of peers
+		// drag the clamp upward and force overpayment.
+		relayFloorPct: 0.5,
 		// With a 30-minute half-life and 10-minute block interval the
 		// EWMA effective sample count asymptotes at
 		// 1/(1-exp(-blockInterval/halfLife)) ≈ 3.5. We use 5 as the
@@ -242,6 +274,7 @@ func (e *Estimator) CurrentStats() Stats {
 		HalfLife:    hl,
 		StaleBlocks: staleBlocks(usable, now),
 		RelayFloor:  e.RelayFee(),
+		Congestion:  congestionFraction(all, now, hl),
 		WarmWindow:  warm,
 	}
 }
@@ -264,51 +297,94 @@ func (e *Estimator) Estimate(target uint32) Estimate {
 
 	// Cold start: not enough usable samples or the most recent is stale.
 	if len(usable) < e.minBlocksA || isStale(usable, now, e.staleWindow) {
-		rate := SatPerKW(float64(floor) * e.coldStartMult)
-		if floor > 0 && rate < floor {
-			rate = floor
-		}
-		result := Estimate{
-			Rate:        rate,
-			Confidence:  e.coldConfidence,
-			Source:      FeeSourceCold,
-			SampleCount: len(usable),
-			StaleBlocks: 0,
-		}
-		log.Debugf("Fee estimate (cold-start): target=%d rate=%d "+
-			"conf=%.2f floor=%d samples=%d",
-			target, rate, e.coldConfidence, floor, len(usable))
-		return result
+		return e.coldEstimate(target, floor, len(usable))
 	}
 
 	hl := e.HalfLife()
 	weights := ewmaWeights(usable, now, hl)
-	mean, std := weightedStats(usable, weights)
 
-	kSigma := kSigmaFor(target)
-	mult := multFor(target)
-	rate := SatPerKW(mult * (mean + kSigma*std))
+	// Effectively-zero total weight means every sample in the window is
+	// ancient relative to the half-life; a quantile over it would be
+	// numerically valid but meaningless, so treat it as a cold start.
+	var effW float64
+	for _, w := range weights {
+		effW += w
+	}
+	if effW < 1e-9 {
+		return e.coldEstimate(target, floor, len(usable))
+	}
+
+	// Project the target quantile of the per-block entry-rate proxies,
+	// then apply the target-dependent cushion.
+	proxies := make([]float64, len(usable))
+	for i := range usable {
+		proxies[i] = entryRate(&usable[i])
+	}
+	proj := multFor(target) * weightedQuantile(
+		proxies, weights, quantileFor(target),
+	)
+
+	// Gate the projection by observed congestion: when recent blocks had
+	// spare capacity there is no fee competition and the marginal entry
+	// price collapses to the relay floor, whatever historical block
+	// averages say. Blend linearly between floor and projection by the
+	// weighted fraction of full blocks. Empty and near-empty blocks are
+	// deliberately included here (via the unfiltered snapshot): a block
+	// with no fee-paying transactions carries no rate signal but is
+	// strong evidence of an idle market.
+	congestion := congestionFraction(all, now, hl)
+	rate := proj
+	if floor > 0 && proj > float64(floor) {
+		rate = float64(floor) + congestion*(proj-float64(floor))
+	}
 
 	// The relay floor is a hard lower bound: broadcasting below it
 	// guarantees the transaction will not propagate through the network
 	// regardless of fee market conditions.
-	if floor > 0 && rate < floor {
-		rate = floor
+	rateSat := SatPerKW(rate)
+	if floor > 0 && rateSat < floor {
+		rateSat = floor
 	}
 
+	mean, std := weightedStats(usable, weights)
 	conf := e.confidence(usable, weights, mean, std, floor, hl, now)
 
 	result := Estimate{
-		Rate:        rate,
+		Rate:        rateSat,
 		Confidence:  conf,
 		Source:      FeeSourceBlock,
 		SampleCount: len(usable),
 		StaleBlocks: staleBlocks(usable, now),
+		Congestion:  congestion,
 	}
 	log.Debugf("Fee estimate (block): target=%d rate=%d conf=%.2f "+
-		"floor=%d samples=%d stale=%d hl=%v mean=%.1f std=%.1f",
-		target, rate, conf, floor, len(usable),
-		result.StaleBlocks, hl, mean, std)
+		"floor=%d samples=%d stale=%d hl=%v congestion=%.2f "+
+		"proj=%.1f", target, rateSat, conf, floor, len(usable),
+		result.StaleBlocks, hl, congestion, proj)
+	return result
+}
+
+// coldEstimate is the fallback path when the block-sample window cannot
+// support an answer. It anchors on the peer-feefilter floor with a fixed
+// multiplier, scaled by the same target cushion as the warm path so that a
+// 1-block request still prices above a 24-block one.
+func (e *Estimator) coldEstimate(target uint32, floor SatPerKW,
+	sampleCount int) Estimate {
+
+	rate := SatPerKW(float64(floor) * e.coldStartMult * multFor(target))
+	if floor > 0 && rate < floor {
+		rate = floor
+	}
+	result := Estimate{
+		Rate:        rate,
+		Confidence:  e.coldConfidence,
+		Source:      FeeSourceCold,
+		SampleCount: sampleCount,
+		StaleBlocks: 0,
+	}
+	log.Debugf("Fee estimate (cold-start): target=%d rate=%d "+
+		"conf=%.2f floor=%d samples=%d",
+		target, rate, e.coldConfidence, floor, sampleCount)
 	return result
 }
 
@@ -320,10 +396,20 @@ func (e *Estimator) Estimate(target uint32) Estimate {
 //
 // Rising CV (fee storm) → halve the half-life so recent blocks dominate.
 // Falling CV (stable market) → double the half-life to smooth noise.
+//
+// The adjustment runs at most once per new sample: repeated Estimate calls
+// over an unchanged window would otherwise re-apply the same doubling or
+// halving each call and ratchet the half-life straight to its clamp.
 func (e *Estimator) maybeAdaptHalfLife(usable []feedb.FeeSample, now time.Time) {
 	if len(usable) < 2*e.minBlocksA {
 		return
 	}
+
+	newest := usable[len(usable)-1].Height
+	if newest <= atomic.LoadUint32(&e.lastAdaptHeight) {
+		return
+	}
+	atomic.StoreUint32(&e.lastAdaptHeight, newest)
 
 	hl := e.HalfLife()
 	midpoint := now.Add(-hl)
@@ -417,11 +503,15 @@ func (e *Estimator) confidence(samples []feedb.FeeSample, weights []float64,
 	}
 	stability := math.Exp(-2 * cv)
 
+	// Agreement penalises only the anomalous direction: block samples
+	// sitting *below* the relay floor mean our window disagrees with what
+	// peers currently require to even accept a transaction, so either the
+	// samples are outdated or the peer set is unhealthy. Samples above
+	// the floor are just a normal fee market and carry no penalty.
 	agreement := 1.0
-	if floor > 0 && mean > 0 {
-		gap := math.Abs(mean - float64(floor))
-		denom := math.Max(mean, float64(floor))
-		agreement = 1 - math.Min(1, gap/denom)
+	if floor > 0 && mean > 0 && float64(floor) > mean {
+		gap := float64(floor) - mean
+		agreement = 1 - math.Min(1, gap/float64(floor))
 	}
 
 	conf := 0.4*density + 0.3*recency + 0.2*stability + 0.1*agreement
@@ -552,18 +642,117 @@ func percentile(rates []SatPerKW, p float64) SatPerKW {
 	return cp[idx]
 }
 
-// kSigmaFor returns the σ multiplier for the given confirmation target,
-// reading from the package-level KSigmaBy* variables.
-func kSigmaFor(target uint32) float64 {
+// entryRate returns the per-block proxy for the marginal rate a transaction
+// had to pay to enter the block, in sat/kW. Both the block-average rate and
+// the minimum known per-tx rate are upper bounds on the true marginal rate
+// (every included transaction paid at least it), so the tighter of the two is
+// the better estimate. The known-tx bound typically comes from CPFP chains
+// and cuts far below a spam-inflated block average.
+func entryRate(s *feedb.FeeSample) float64 {
+	rate := float64(s.FeeRatePerKW())
+	if s.KnownTxCount > 0 && s.MinKnownTxRate > 0 &&
+		float64(s.MinKnownTxRate) < rate {
+
+		rate = float64(s.MinKnownTxRate)
+	}
+	return rate
+}
+
+// congestionFraction returns the EWMA-weighted fraction of samples whose
+// block was full (>= fullBlockFraction of the consensus weight limit).
+// Operates on the unfiltered sample set: empty blocks are evidence of an
+// idle market and must count against congestion. Returns 1 (fully
+// congested, i.e. no gating) when the input carries no usable weight, so a
+// degenerate window can never argue fees downward.
+func congestionFraction(samples []feedb.FeeSample, now time.Time,
+	halfLife time.Duration) float64 {
+
+	if len(samples) == 0 {
+		return 1
+	}
+
+	const fullWeight = fullBlockFraction * blockchain.MaxBlockWeight
+
+	weights := ewmaWeights(samples, now, halfLife)
+	var sumW, sumFull float64
+	for i, s := range samples {
+		sumW += weights[i]
+		if float64(s.TotalWeight) >= fullWeight {
+			sumFull += weights[i]
+		}
+	}
+	if sumW == 0 {
+		return 1
+	}
+	return sumFull / sumW
+}
+
+// weightedQuantile returns the p-th weighted quantile (p in [0, 1]) of the
+// given values, interpolating linearly between the cumulative-weight
+// midpoints of adjacent values. The result is always bounded by the observed
+// min and max. Returns 0 for empty input or non-positive total weight.
+func weightedQuantile(values, weights []float64, p float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > 1 {
+		p = 1
+	}
+
+	// Sort (value, weight) pairs by value.
+	idx := make([]int, len(values))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(a, b int) bool {
+		return values[idx[a]] < values[idx[b]]
+	})
+
+	var totalW float64
+	for _, w := range weights {
+		totalW += w
+	}
+	if totalW <= 0 {
+		return 0
+	}
+
+	// Walk cumulative weight midpoints: c_i = (sum of weights before i +
+	// half of w_i) / total. Interpolate between the bracketing values.
+	var cum, prevMid, prevVal float64
+	for k, i := range idx {
+		mid := (cum + weights[i]/2) / totalW
+		val := values[i]
+
+		if p <= mid {
+			if k == 0 || mid == prevMid {
+				return val
+			}
+			frac := (p - prevMid) / (mid - prevMid)
+			return prevVal + frac*(val-prevVal)
+		}
+
+		cum += weights[i]
+		prevMid = mid
+		prevVal = val
+	}
+	return values[idx[len(idx)-1]]
+}
+
+// quantileFor returns the entry-rate quantile for the given confirmation
+// target, reading from the package-level QuantileBy* variables.
+func quantileFor(target uint32) float64 {
 	switch target {
 	case 1:
-		return KSigmaBy1Block
+		return QuantileBy1Block
 	case 3:
-		return KSigmaBy3Block
+		return QuantileBy3Block
 	case 6:
-		return KSigmaBy6Block
+		return QuantileBy6Block
 	default: // 24+
-		return KSigmaBy24Block
+		return QuantileBy24Block
 	}
 }
 

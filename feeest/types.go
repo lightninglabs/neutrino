@@ -54,4 +54,10 @@ type Estimate struct {
 	// StaleBlocks is the number of blocks elapsed since the most recent
 	// sample. Zero in the cold-start case (no samples).
 	StaleBlocks uint32
+
+	// Congestion is the EWMA-weighted fraction of observed blocks that
+	// were full, in [0, 1]. Low values mean the fee market was idle and
+	// the recommendation is anchored near the relay floor. Zero in the
+	// cold-start case.
+	Congestion float64
 }

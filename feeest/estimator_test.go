@@ -116,17 +116,22 @@ func newTestEstimator(t *testing.T, peers []SatPerKW, now time.Time) (
 	return est, sampler
 }
 
-// addSample writes a synthetic block sample directly to the sampler's ring
+// addSample writes a synthetic block sample directly to the sampler's window
 // and store, bypassing block-level computation.
 func addSample(s *Sampler, height uint32, ts time.Time, fees, weight uint64) {
-	sample := feedb.FeeSample{
+	addFullSample(s, feedb.FeeSample{
 		Height:      height,
-		BlockHash:   chainhash.Hash{byte(height)},
+		BlockHash:   chainhash.Hash{byte(height), byte(height >> 8)},
 		Timestamp:   ts.Unix(),
 		TotalFees:   fees,
 		TotalWeight: weight,
-	}
-	s.ring.add(sample)
+	})
+}
+
+// addFullSample writes a caller-constructed sample to the sampler's window
+// and store.
+func addFullSample(s *Sampler, sample feedb.FeeSample) {
+	s.window.add(sample)
 	_ = s.store.PutSample(&sample)
 }
 
@@ -153,10 +158,13 @@ func TestEstimateColdStartWithPeers(t *testing.T) {
 
 	got := est.Estimate(6)
 	require.Equal(t, FeeSourceCold, got.Source)
-	// 75th-pct of {1000, 1500, 2000} → 2000 (nearest-rank).
-	// Cold-start multiplier 3.0 → 6000.
-	require.Equal(t, SatPerKW(6000), got.Rate)
+	// Median of {1000, 1500, 2000} → 1500. Cold-start multiplier 3.0 and
+	// target-6 cushion 1.0 → 4500.
+	require.Equal(t, SatPerKW(4500), got.Rate)
 	require.InDelta(t, DefaultColdConfidence, got.Confidence, 1e-9)
+
+	// Cold-start answers must still price short targets above long ones.
+	require.Greater(t, est.Estimate(1).Rate, est.Estimate(24).Rate)
 }
 
 // TestEstimateBelowMinSamples falls back to cold start until the threshold
@@ -194,9 +202,11 @@ func TestEstimateTierAActivates(t *testing.T) {
 
 	got := est.Estimate(6)
 	require.Equal(t, FeeSourceBlock, got.Source)
-	// All samples have identical rate, std=0, mean=2.5 → result = mult*mean
-	// for target 6 (mult=1, kSigma=0).
-	require.Equal(t, SatPerKW(2), got.Rate) // truncation of 2.5
+	// All samples share the same 2 sat/kW block-average rate, so every
+	// quantile is 2 and the target-6 cushion is 1.0. The blocks are full,
+	// so the congestion gate leaves the projection alone.
+	require.Equal(t, SatPerKW(2), got.Rate)
+	require.InDelta(t, 1.0, got.Congestion, 1e-9)
 	require.GreaterOrEqual(t, got.Confidence, 0.0)
 	require.LessOrEqual(t, got.Confidence, 1.0)
 }
@@ -220,17 +230,17 @@ func TestEstimateStaleFallsBackToColdStart(t *testing.T) {
 }
 
 // TestTargetMappingMonotone confirms tighter targets recommend higher rates
-// when σ > 0. Build a window with two distinct rates so std > 0.
+// when the window contains a spread of rates.
 func TestTargetMappingMonotone(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
 	est, sampler := newTestEstimator(t, nil, now)
 
-	// Alternate two rates so std > 0.
+	// Alternate two rates (125 and 25 sat/kW) so the quantiles spread.
 	for i := 0; i < DefaultMinBlocksA*2; i++ {
-		fees := uint64(10_000)
+		fees := uint64(100_000)
 		if i%2 == 0 {
-			fees = uint64(50_000)
+			fees = uint64(500_000)
 		}
 		addSample(sampler, uint32(100+i),
 			now.Add(-time.Duration(i+1)*5*time.Minute),
@@ -261,7 +271,7 @@ func TestRateNeverBelowFloor(t *testing.T) {
 			10, 4_000_000)
 	}
 
-	got := est.Estimate(24) // negative kSigma exacerbates the underflow.
+	got := est.Estimate(24) // the low quantile exacerbates the underflow.
 	require.GreaterOrEqual(t, got.Rate, est.RelayFee())
 }
 
@@ -345,8 +355,15 @@ func TestAdaptiveHalfLifeShortensOnVolatility(t *testing.T) {
 	est.Estimate(6)
 
 	// Half-life should have shortened below the default.
-	require.Less(t, est.HalfLife(), DefaultHalfLife,
+	adapted := est.HalfLife()
+	require.Less(t, adapted, DefaultHalfLife,
 		"half-life should shorten on high-volatility window")
+
+	// Re-estimating over the same window must not adapt again: without a
+	// new sample the half-life would otherwise ratchet down to the clamp.
+	est.Estimate(6)
+	require.Equal(t, adapted, est.HalfLife(),
+		"half-life must adapt at most once per new sample")
 }
 
 // TestCurrentStats returns a populated Stats snapshot without full estimation.
@@ -369,6 +386,156 @@ func TestCurrentStats(t *testing.T) {
 	s = est.CurrentStats()
 	require.Equal(t, DefaultMinBlocksA, s.SampleCount)
 	require.True(t, s.WarmWindow)
+}
+
+// TestCongestionGateIdleMarket confirms that when recent blocks have spare
+// capacity, the recommendation collapses toward the relay floor even if the
+// block-average rates are high (e.g. a few large-fee txs in small blocks).
+func TestCongestionGateIdleMarket(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	floor := SatPerKW(250)
+	est, sampler := newTestEstimator(t, []SatPerKW{floor}, now)
+
+	// Half-empty blocks with a high average rate: 2M sats of fees over
+	// 500k WU → 4000 sat/kW average, but no competition for space.
+	for i := 0; i < DefaultMinBlocksA*2; i++ {
+		addSample(sampler, uint32(100+i),
+			now.Add(-time.Duration(i+1)*5*time.Minute),
+			2_000_000, 500_000)
+	}
+
+	got := est.Estimate(1)
+	require.Equal(t, FeeSourceBlock, got.Source)
+	require.InDelta(t, 0.0, got.Congestion, 1e-9)
+
+	// With zero congestion the blend lands exactly on the floor.
+	require.Equal(t, floor, got.Rate)
+}
+
+// TestCongestionGateBlendsPartially confirms a mixed window of full and
+// non-full blocks lands between the floor and the full projection.
+func TestCongestionGateBlendsPartially(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	floor := SatPerKW(250)
+	est, sampler := newTestEstimator(t, []SatPerKW{floor}, now)
+
+	// Alternate full and near-empty blocks, all at 4000 sat/kW average.
+	for i := 0; i < DefaultMinBlocksA*2; i++ {
+		weight := uint64(4_000_000)
+		fees := uint64(16_000_000)
+		if i%2 == 0 {
+			weight = 500_000
+			fees = 2_000_000
+		}
+		addSample(sampler, uint32(100+i),
+			now.Add(-time.Duration(i+1)*5*time.Minute),
+			fees, weight)
+	}
+
+	got := est.Estimate(6)
+	require.Greater(t, got.Congestion, 0.0)
+	require.Less(t, got.Congestion, 1.0)
+	require.Greater(t, got.Rate, floor)
+	// Full projection would be mult(6)=1.0 × 4000; the blend must sit
+	// strictly below it.
+	require.Less(t, got.Rate, SatPerKW(4000))
+}
+
+// TestEntryProxyUsesKnownTxRate confirms a block whose average is inflated by
+// one huge payer is corrected by the exact per-tx bound from intra-block
+// spends.
+func TestEntryProxyUsesKnownTxRate(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	est, sampler := newTestEstimator(t, nil, now)
+
+	// Full blocks with a wildly inflated 40k sat/kW average, but each
+	// carries an intra-block spend chain showing a tx got in at 1000
+	// sat/kW.
+	for i := 0; i < DefaultMinBlocksA*2; i++ {
+		addFullSample(sampler, feedb.FeeSample{
+			Height:         uint32(100 + i),
+			BlockHash:      chainhash.Hash{byte(100 + i), 1},
+			Timestamp:      now.Add(-time.Duration(i+1) * 5 * time.Minute).Unix(),
+			TotalFees:      160_000_000,
+			TotalWeight:    4_000_000,
+			MinKnownTxRate: 1000,
+			KnownTxCount:   2,
+		})
+	}
+
+	got := est.Estimate(1)
+	require.Equal(t, FeeSourceBlock, got.Source)
+	// Projection is bounded by the known entry rate, not the block
+	// average: 1.2 × 1000 vs 1.2 × 40_000.
+	require.LessOrEqual(t, got.Rate, SatPerKW(1200))
+}
+
+// TestWeightedQuantile exercises the interpolated weighted quantile helper.
+func TestWeightedQuantile(t *testing.T) {
+	t.Parallel()
+
+	vals := []float64{10, 20, 30, 40}
+	unit := []float64{1, 1, 1, 1}
+
+	require.Equal(t, 0.0, weightedQuantile(nil, nil, 0.5))
+	require.Equal(t, 10.0, weightedQuantile(vals, unit, 0))
+	require.Equal(t, 40.0, weightedQuantile(vals, unit, 1))
+	// Midpoints sit at 0.125, 0.375, 0.625, 0.875; p=0.5 interpolates
+	// halfway between 20 and 30.
+	require.InDelta(t, 25.0, weightedQuantile(vals, unit, 0.5), 1e-9)
+
+	// Skewed weights pull the quantile toward the heavy value: with
+	// weights {1, 1, 1, 97} the p=0.5 quantile sits just below 40.
+	heavy := []float64{1, 1, 1, 97}
+	require.InDelta(t, 39.7, weightedQuantile(vals, heavy, 0.5), 0.1)
+
+	// Zero total weight cannot be projected.
+	require.Equal(t, 0.0, weightedQuantile(vals, []float64{0, 0, 0, 0}, 0.5))
+
+	// Monotone in p.
+	prev := 0.0
+	for p := 0.0; p <= 1.0; p += 0.05 {
+		q := weightedQuantile(vals, unit, p)
+		require.GreaterOrEqual(t, q, prev)
+		prev = q
+	}
+}
+
+// TestEstimateRescanDoesNotPolluteWindow reproduces the historical-block
+// pollution scenario end to end: a warm estimator must keep answering from
+// fresh tip samples even after a rescan floods the sampler with old blocks.
+func TestEstimateRescanDoesNotPolluteWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0)
+	est, sampler := newTestEstimator(t, nil, now)
+
+	// Warm window at the tip. The test sampler's window capacity is 50.
+	for i := 0; i < 50; i++ {
+		addSample(sampler, uint32(100_000+i),
+			now.Add(-time.Duration(50-i)*5*time.Minute),
+			16_000_000, 4_000_000)
+	}
+	require.Equal(t, FeeSourceBlock, est.Estimate(6).Source)
+
+	// A rescan pulls in a year-old range of blocks.
+	old := now.Add(-365 * 24 * time.Hour)
+	for i := 0; i < 200; i++ {
+		sampler.window.add(feedb.FeeSample{
+			Height:      uint32(40_000 + i),
+			BlockHash:   chainhash.Hash{byte(i), byte(i >> 8), 2},
+			Timestamp:   old.Add(time.Duration(i) * 10 * time.Minute).Unix(),
+			TotalFees:   16_000_000,
+			TotalWeight: 4_000_000,
+		})
+	}
+
+	got := est.Estimate(6)
+	require.Equal(t, FeeSourceBlock, got.Source,
+		"historical rescan blocks must not evict the fresh window")
+	require.Zero(t, got.StaleBlocks)
 }
 
 // withErr is a tiny helper used to thread (Estimate, error) through one-line

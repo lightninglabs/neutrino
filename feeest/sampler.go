@@ -7,6 +7,8 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/feedb"
 )
 
@@ -25,11 +27,11 @@ const DefaultRetentionBlocks uint32 = 1008
 const SpamFractionThreshold = 0.5
 
 // Sampler observes fully-fetched blocks and produces FeeSamples that flow
-// into both an in-memory ring and the on-disk feedb store. Observe is safe
+// into both an in-memory window and the on-disk feedb store. Observe is safe
 // for concurrent use; it is the chokepoint called from ChainService.GetBlock.
 type Sampler struct {
 	store     feedb.FeeSampleStore
-	ring      *ring
+	window    *sampleWindow
 	params    *chaincfg.Params
 	retention uint32
 
@@ -83,7 +85,7 @@ func NewSampler(cfg SamplerConfig) (*Sampler, error) {
 
 	s := &Sampler{
 		store:     cfg.Store,
-		ring:      newRing(ringSize),
+		window:    newSampleWindow(ringSize),
 		params:    cfg.Params,
 		retention: retention,
 		gcTrigger: make(chan uint32, 1),
@@ -92,14 +94,14 @@ func NewSampler(cfg SamplerConfig) (*Sampler, error) {
 
 	go s.gcWorker()
 
-	// Warm-load the ring from disk. Samples are returned newest-first, so
-	// reverse them when adding to preserve chronological order.
+	// Warm-load the window from disk. The window orders by height itself,
+	// so insertion order does not matter.
 	persisted, err := cfg.Store.FetchTipN(ringSize)
 	if err != nil {
 		log.Warnf("Could not warm-load fee samples: %v", err)
 	} else {
-		for i := len(persisted) - 1; i >= 0; i-- {
-			s.ring.add(*persisted[i])
+		for _, sample := range persisted {
+			s.window.add(*sample)
 		}
 		log.Debugf("Warm-loaded %d fee samples", len(persisted))
 	}
@@ -135,9 +137,9 @@ func (s *Sampler) gcWorker() {
 // must have been sanity-checked by the caller; observation does not validate
 // the block. height is the block's height in the active chain.
 //
-// Observe is idempotent: if the ring already contains a sample for the block's
-// hash, the call is a no-op. This prevents concurrent GetBlock calls for the
-// same block from double-counting the sample in the estimator window.
+// Observe is idempotent: if the window already contains a sample for the
+// block's hash, the call is a no-op. This prevents concurrent GetBlock calls
+// for the same block from double-counting the sample in the estimator window.
 //
 // Errors are logged and swallowed: fee sampling is best-effort and must not
 // disrupt the caller.
@@ -148,17 +150,20 @@ func (s *Sampler) Observe(block *btcutil.Block, height uint32) {
 		return
 	}
 
-	// addIfNew returns false if the ring already holds a sample for this
-	// block hash, making Observe idempotent under concurrent fetches.
-	if !s.ring.addIfNew(sample) {
-		log.Tracef("Skipping duplicate fee sample h=%d hash=%s",
+	// add returns false when the window already holds a sample for this
+	// block hash (idempotence under concurrent fetches), or when the
+	// sample is older than the full window's horizon (e.g. a historical
+	// block pulled in by a rescan). In the latter case we still persist:
+	// the disk store keeps the wider retention window.
+	if !s.window.add(sample) {
+		log.Tracef("Fee sample not admitted to window h=%d hash=%s",
 			height, sample.BlockHash)
-		return
 	}
 
-	log.Debugf("Fee sample h=%d hash=%s rate=%d sat/kW fees=%d weight=%d flags=%d",
-		height, sample.BlockHash, sample.FeeRatePerKW(),
-		sample.TotalFees, sample.TotalWeight, sample.Flags)
+	log.Debugf("Fee sample h=%d hash=%s rate=%d sat/kW fees=%d weight=%d "+
+		"knownMin=%d knownCnt=%d flags=%d", height, sample.BlockHash,
+		sample.FeeRatePerKW(), sample.TotalFees, sample.TotalWeight,
+		sample.MinKnownTxRate, sample.KnownTxCount, sample.Flags)
 
 	if err := s.store.PutSample(&sample); err != nil {
 		log.Warnf("Persisting fee sample h=%d: %v", height, err)
@@ -176,16 +181,38 @@ func (s *Sampler) Observe(block *btcutil.Block, height uint32) {
 	}
 }
 
-// Snapshot returns a chronological copy of the in-memory ring. Used by the
-// estimator on every query.
+// Snapshot returns a height-ordered copy of the in-memory window. Used by
+// the estimator on every query.
 func (s *Sampler) Snapshot() []feedb.FeeSample {
-	return s.ring.snapshot()
+	return s.window.snapshot()
+}
+
+// PruneFrom drops all samples at or above the given height from both the
+// in-memory window and the durable store. It is called from the block
+// manager's reorg path so observations from an orphaned chain never feed an
+// estimate. The disk purge is synchronous; reorgs are rare and shallow, so
+// the extra latency on the reorg path is preferable to serving stale samples
+// while an async purge is pending.
+func (s *Sampler) PruneFrom(height uint32) {
+	s.window.prune(func(sample feedb.FeeSample) bool {
+		return sample.Height >= height
+	})
+	if err := s.store.PurgeFrom(height); err != nil {
+		log.Warnf("Purging fee samples from h=%d: %v", height, err)
+	}
 }
 
 // computeSample derives a FeeSample from a block. It computes total fees as
 // (coinbase output value) - (block subsidy), and total weight via
 // blockchain.GetBlockWeight. Both values are derivable from the block alone,
 // without prevout knowledge.
+//
+// It additionally extracts exact per-transaction fee rates for transactions
+// whose inputs are all outputs created earlier in the same block (CPFP chains
+// and other intra-block spends). Those are the only transactions whose fees a
+// light client can compute without a UTXO set, and the minimum such rate is a
+// tighter upper bound on the block's marginal entry rate than the block-wide
+// average.
 func computeSample(block *btcutil.Block, height uint32,
 	params *chaincfg.Params) (feedb.FeeSample, error) {
 
@@ -226,21 +253,101 @@ func computeSample(block *btcutil.Block, height uint32,
 		return feedb.FeeSample{}, errors.New("block weight is zero")
 	}
 
+	txs := block.Transactions()
+	coinbaseWeight := uint64(blockchain.GetTransactionWeight(txs[0]))
+
+	minKnownRate, knownCount, maxKnownFee := knownTxRates(txs)
+
 	var flags feedb.SampleFlag
 	if totalFees == 0 {
 		flags |= feedb.FlagEmpty
 	}
-	// FlagSpam (single tx dominating block fees) requires per-tx fee
-	// data, which needs prevout lookups we do not implement yet. The
-	// flag stays in the schema so the estimator already knows to treat
-	// it as a down-weight signal once a UTXO cache lands.
+	// If a single transaction whose fee we could compute exactly
+	// contributes the majority of the block's fees, the block-average
+	// rate is dominated by that one payer and is a poor congestion
+	// signal. Flag it so consumers can prefer the per-tx bound.
+	if totalFees > 0 && float64(maxKnownFee) >
+		SpamFractionThreshold*float64(totalFees) {
+
+		flags |= feedb.FlagSpam
+	}
 
 	return feedb.FeeSample{
-		Height:      height,
-		BlockHash:   *block.Hash(),
-		Timestamp:   msg.Header.Timestamp.Unix(),
-		TotalFees:   totalFees,
-		TotalWeight: totalWeight,
-		Flags:       flags,
+		Height:         height,
+		BlockHash:      *block.Hash(),
+		Timestamp:      msg.Header.Timestamp.Unix(),
+		TotalFees:      totalFees,
+		TotalWeight:    totalWeight,
+		CoinbaseWeight: coinbaseWeight,
+		MinKnownTxRate: minKnownRate,
+		KnownTxCount:   knownCount,
+		Flags:          flags,
 	}, nil
+}
+
+// knownTxRates scans a block's transactions for those whose prevouts are all
+// created within the same block, computes their exact fees and fee rates, and
+// returns the minimum rate (sat/kW), the number of such transactions, and the
+// largest single fee among them. Returns (0, 0, 0) when no transaction
+// qualifies.
+func knownTxRates(txs []*btcutil.Tx) (uint64, uint16, uint64) {
+	// Index the block's own outputs so we can resolve intra-block spends.
+	outputs := make(map[chainhash.Hash]*wire.MsgTx, len(txs))
+	for _, tx := range txs {
+		outputs[*tx.Hash()] = tx.MsgTx()
+	}
+
+	var (
+		minRate     uint64
+		count       uint16
+		maxKnownFee uint64
+	)
+	for _, tx := range txs[1:] {
+		msgTx := tx.MsgTx()
+
+		// Sum input values; bail on the first prevout we cannot
+		// resolve within this block.
+		var inValue int64
+		known := true
+		for _, in := range msgTx.TxIn {
+			prev, ok := outputs[in.PreviousOutPoint.Hash]
+			if !ok {
+				known = false
+				break
+			}
+			idx := in.PreviousOutPoint.Index
+			if idx >= uint32(len(prev.TxOut)) {
+				known = false
+				break
+			}
+			inValue += prev.TxOut[idx].Value
+		}
+		if !known {
+			continue
+		}
+
+		var outValue int64
+		for _, out := range msgTx.TxOut {
+			outValue += out.Value
+		}
+
+		fee := inValue - outValue
+		weight := blockchain.GetTransactionWeight(tx)
+		if fee < 0 || weight <= 0 {
+			continue
+		}
+
+		rate := uint64(fee) * 1000 / uint64(weight)
+		if count == 0 || rate < minRate {
+			minRate = rate
+		}
+		if uint64(fee) > maxKnownFee {
+			maxKnownFee = uint64(fee)
+		}
+		if count < math.MaxUint16 {
+			count++
+		}
+	}
+
+	return minRate, count, maxKnownFee
 }

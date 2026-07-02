@@ -1,134 +1,113 @@
 package feeest
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/lightninglabs/neutrino/feedb"
 )
 
-// ring is a fixed-capacity in-memory ring buffer of fee samples. Writes are
-// O(1) and overwrite the oldest entry once full. Reads return a stable copy
-// so the estimator can iterate without holding the lock.
+// sampleWindow is a fixed-capacity, height-ordered window of fee samples.
+// Samples are kept sorted by block height and, once the window is full, the
+// lowest-height entry is evicted to make room for a higher one. Samples at or
+// below the current minimum height are rejected outright when the window is
+// full.
 //
-// The ring is the hot path for the estimator; the underlying feedb store is
+// Height ordering (rather than insertion ordering) is load-bearing: blocks
+// arrive at the sampler in whatever order the rest of the chain service
+// happens to fetch them. A rescan can pull thousands of historical blocks in
+// a burst, and with insertion-order eviction those would flush every recent
+// sample out of the window and leave the estimator looking "stale" even
+// though it had fresh tip data moments earlier. Ordering by height makes the
+// window always represent the most recent slice of the chain we have
+// observed, no matter the fetch order.
+//
+// The window is the hot path for the estimator; the underlying feedb store is
 // the durable history (and warm-load source on startup).
-type ring struct {
+type sampleWindow struct {
 	mu   sync.RWMutex
-	data []feedb.FeeSample
-	head int // next write index
-	size int // number of valid entries (<= cap)
+	data []feedb.FeeSample // sorted ascending by height
 	cap  int
 }
 
-// newRing allocates a ring with the given capacity. capacity must be > 0.
-func newRing(capacity int) *ring {
+// newSampleWindow allocates a window with the given capacity. Capacities
+// below 1 are bumped to 1.
+func newSampleWindow(capacity int) *sampleWindow {
 	if capacity < 1 {
 		capacity = 1
 	}
-	return &ring{
-		data: make([]feedb.FeeSample, capacity),
+	return &sampleWindow{
+		data: make([]feedb.FeeSample, 0, capacity),
 		cap:  capacity,
 	}
 }
 
-// add inserts a sample, evicting the oldest entry once the buffer is full.
-func (r *ring) add(s feedb.FeeSample) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.data[r.head] = s
-	r.head = (r.head + 1) % r.cap
-	if r.size < r.cap {
-		r.size++
-	}
-}
+// add inserts a sample in height order. It returns false without modifying
+// the window when a sample with the same block hash is already present, or
+// when the window is full and the sample's height does not exceed the current
+// minimum (i.e. it is older than everything we already hold).
+func (w *sampleWindow) add(s feedb.FeeSample) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-// addIfNew inserts the sample only if no existing entry has the same block
-// hash. It returns true if the sample was inserted, false if a duplicate was
-// found and the call was a no-op.
-//
-// The check-and-add is atomic under the ring's mutex, which prevents two
-// concurrent Observe calls for the same block from both inserting a copy.
-// The scan is O(r.size) but the ring is small (<=144 entries by default).
-func (r *ring) addIfNew(s feedb.FeeSample) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i := 0; i < r.size; i++ {
-		idx := (r.head - r.size + i + r.cap) % r.cap
-		if r.data[idx].BlockHash == s.BlockHash {
+	for i := range w.data {
+		if w.data[i].BlockHash == s.BlockHash {
 			return false
 		}
 	}
-	r.data[r.head] = s
-	r.head = (r.head + 1) % r.cap
-	if r.size < r.cap {
-		r.size++
+
+	if len(w.data) == w.cap {
+		// Full: only accept samples strictly newer than the oldest
+		// entry, then evict that entry.
+		if s.Height <= w.data[0].Height {
+			return false
+		}
+		copy(w.data, w.data[1:])
+		w.data = w.data[:len(w.data)-1]
 	}
+
+	// Insert at the sorted position. Samples almost always arrive in
+	// increasing height order, so this is typically an append.
+	idx := sort.Search(len(w.data), func(i int) bool {
+		return w.data[i].Height > s.Height
+	})
+	w.data = append(w.data, feedb.FeeSample{})
+	copy(w.data[idx+1:], w.data[idx:])
+	w.data[idx] = s
 	return true
 }
 
-// snapshot returns a copy of the current contents in chronological order
-// (oldest first). Empty ring returns nil.
-func (r *ring) snapshot() []feedb.FeeSample {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.size == 0 {
+// snapshot returns a copy of the current contents in ascending height order.
+// An empty window returns nil.
+func (w *sampleWindow) snapshot() []feedb.FeeSample {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if len(w.data) == 0 {
 		return nil
 	}
-
-	out := make([]feedb.FeeSample, r.size)
-	if r.size < r.cap {
-		copy(out, r.data[:r.size])
-		return out
-	}
-
-	// Buffer is full: oldest entry is at r.head, then wraps.
-	tail := r.cap - r.head
-	copy(out[:tail], r.data[r.head:])
-	copy(out[tail:], r.data[:r.head])
+	out := make([]feedb.FeeSample, len(w.data))
+	copy(out, w.data)
 	return out
 }
 
 // len returns the number of valid entries.
-func (r *ring) len() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.size
+func (w *sampleWindow) len() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return len(w.data)
 }
 
-// prune removes any sample for which pred returns true and re-packs the
-// remaining entries. Used for reorg handling.
-func (r *ring) prune(pred func(feedb.FeeSample) bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.size == 0 {
-		return
-	}
+// prune removes any sample for which pred returns true. Used for reorg
+// handling.
+func (w *sampleWindow) prune(pred func(feedb.FeeSample) bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	// Linearise.
-	flat := make([]feedb.FeeSample, 0, r.size)
-	if r.size < r.cap {
-		flat = append(flat, r.data[:r.size]...)
-	} else {
-		flat = append(flat, r.data[r.head:]...)
-		flat = append(flat, r.data[:r.head]...)
-	}
-
-	// Filter.
-	kept := flat[:0]
-	for _, s := range flat {
+	kept := w.data[:0]
+	for _, s := range w.data {
 		if !pred(s) {
 			kept = append(kept, s)
 		}
 	}
-
-	// Refill.
-	r.head = 0
-	r.size = 0
-	for _, s := range kept {
-		r.data[r.head] = s
-		r.head = (r.head + 1) % r.cap
-		if r.size < r.cap {
-			r.size++
-		}
-	}
+	w.data = kept
 }
