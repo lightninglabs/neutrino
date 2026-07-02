@@ -30,11 +30,14 @@ func makeSample(height uint32) *FeeSample {
 	hash[0] = byte(height)
 	hash[1] = byte(height >> 8)
 	return &FeeSample{
-		Height:      height,
-		BlockHash:   hash,
-		Timestamp:   int64(height) * 600, // pretend 10-min blocks
-		TotalFees:   10_000 + uint64(height),
-		TotalWeight: 4_000_000,
+		Height:         height,
+		BlockHash:      hash,
+		Timestamp:      int64(height) * 600, // pretend 10-min blocks
+		TotalFees:      10_000 + uint64(height),
+		TotalWeight:    4_000_000,
+		CoinbaseWeight: 800,
+		MinKnownTxRate: 250 + uint64(height),
+		KnownTxCount:   3,
 	}
 }
 
@@ -55,6 +58,9 @@ func TestPutFetchRoundTrip(t *testing.T) {
 	require.Equal(t, in.Timestamp, got.Timestamp)
 	require.Equal(t, in.TotalFees, got.TotalFees)
 	require.Equal(t, in.TotalWeight, got.TotalWeight)
+	require.Equal(t, in.CoinbaseWeight, got.CoinbaseWeight)
+	require.Equal(t, in.MinKnownTxRate, got.MinKnownTxRate)
+	require.Equal(t, in.KnownTxCount, got.KnownTxCount)
 	require.Equal(t, in.Flags, got.Flags)
 	require.Equal(t, in.FeeRatePerKW(), got.FeeRatePerKW())
 }
@@ -204,9 +210,43 @@ func TestPurgeFromEmpty(t *testing.T) {
 // decoding error rather than silent garbage.
 func TestEncodingUnknownVersion(t *testing.T) {
 	t.Parallel()
-	bad := make([]byte, encodingSize)
+	bad := make([]byte, encodingV2Size)
 	bad[0] = 99 // unknown version
 	_, err := decodeSample(1, bad)
+	require.Error(t, err)
+}
+
+// TestEncodingV1Compat confirms a record written with the V1 layout decodes
+// cleanly with the V2-only fields zeroed. Simulates a store carried over from
+// an older version.
+func TestEncodingV1Compat(t *testing.T) {
+	t.Parallel()
+
+	in := makeSample(77)
+	full := encodeSample(in)
+
+	// Truncate to the V1 payload and stamp the V1 version byte.
+	v1 := make([]byte, encodingV1Size)
+	copy(v1, full[:encodingV1Size])
+	v1[0] = encodingV1
+
+	got, err := decodeSample(77, v1)
+	require.NoError(t, err)
+	require.Equal(t, in.BlockHash, got.BlockHash)
+	require.Equal(t, in.Timestamp, got.Timestamp)
+	require.Equal(t, in.TotalFees, got.TotalFees)
+	require.Equal(t, in.TotalWeight, got.TotalWeight)
+	require.Equal(t, uint64(0), got.CoinbaseWeight)
+	require.Equal(t, uint64(0), got.MinKnownTxRate)
+	require.Equal(t, uint16(0), got.KnownTxCount)
+}
+
+// TestEncodingTruncated confirms a size mismatch for a known version errors
+// out instead of decoding garbage.
+func TestEncodingTruncated(t *testing.T) {
+	t.Parallel()
+	raw := encodeSample(makeSample(5))
+	_, err := decodeSample(5, raw[:len(raw)-1])
 	require.Error(t, err)
 }
 
@@ -215,6 +255,29 @@ func TestFeeRatePerKWZeroWeight(t *testing.T) {
 	t.Parallel()
 	s := &FeeSample{TotalFees: 1000, TotalWeight: 0}
 	require.Equal(t, uint64(0), s.FeeRatePerKW())
+}
+
+// TestFeeRatePerKWExcludesCoinbase confirms the block-average rate is
+// computed over the fee-paying weight only when the coinbase weight is known.
+func TestFeeRatePerKWExcludesCoinbase(t *testing.T) {
+	t.Parallel()
+
+	// 1000 sats over 5_000 WU total, 1_000 WU of which is the coinbase:
+	// 1000 * 1000 / 4000 = 250 sat/kW.
+	s := &FeeSample{
+		TotalFees:      1000,
+		TotalWeight:    5_000,
+		CoinbaseWeight: 1_000,
+	}
+	require.Equal(t, uint64(250), s.FeeRatePerKW())
+
+	// A v1 sample (no coinbase weight) falls back to the full weight.
+	s.CoinbaseWeight = 0
+	require.Equal(t, uint64(200), s.FeeRatePerKW())
+
+	// Degenerate: coinbase weight >= total weight must not underflow.
+	s.CoinbaseWeight = 5_000
+	require.Equal(t, uint64(200), s.FeeRatePerKW())
 }
 
 // TestNewIdempotent confirms repeatedly calling New on the same DB is a

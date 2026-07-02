@@ -83,17 +83,40 @@ type FeeSample struct {
 	// the block (including the coinbase).
 	TotalWeight uint64
 
+	// CoinbaseWeight is the weight of the coinbase transaction alone. It
+	// pays no fee, so subtracting it from TotalWeight gives the weight of
+	// the fee-paying remainder of the block. Zero for samples written by
+	// older versions (encoding v1).
+	CoinbaseWeight uint64
+
+	// MinKnownTxRate is the lowest exact per-transaction fee rate
+	// (sat/kW) observed among transactions whose prevouts were all
+	// created within the same block (intra-block spend chains). Every
+	// transaction in a block paid at least the block's marginal entry
+	// rate, so this is a tighter upper bound on that entry rate than the
+	// block average. Zero when no such transaction was found.
+	MinKnownTxRate uint64
+
+	// KnownTxCount is the number of transactions that contributed to
+	// MinKnownTxRate. A larger count makes the bound more trustworthy.
+	KnownTxCount uint16
+
 	// Flags captures qualitative properties of the sample.
 	Flags SampleFlag
 }
 
-// FeeRatePerKW returns the block-average fee rate in satoshis per kilo-weight.
-// Returns 0 if TotalWeight is zero (which should not happen for a valid block).
+// FeeRatePerKW returns the block-average fee rate in satoshis per kilo-weight,
+// computed over the fee-paying portion of the block (total weight minus the
+// coinbase weight when known). Returns 0 if the effective weight is zero.
 func (s *FeeSample) FeeRatePerKW() uint64 {
-	if s.TotalWeight == 0 {
+	weight := s.TotalWeight
+	if s.CoinbaseWeight > 0 && s.CoinbaseWeight < weight {
+		weight -= s.CoinbaseWeight
+	}
+	if weight == 0 {
 		return 0
 	}
-	return s.TotalFees * 1000 / s.TotalWeight
+	return s.TotalFees * 1000 / weight
 }
 
 // FeeSampleStore is the interface exposed to consumers of the package. The
@@ -194,37 +217,51 @@ func heightFromKey(key []byte) uint32 {
 }
 
 // encoding constants. The first byte is an encoding version that allows
-// appending fields without bumping the on-disk schema version.
+// appending fields without bumping the on-disk schema version. V2 appends
+// the coinbase weight and the known-tx rate summary after the V1 fields.
 const (
-	encodingV1   uint8 = 1
-	encodingSize       = 1 + 32 + 8 + 8 + 8 + 1 // 58 bytes
+	encodingV1     uint8 = 1
+	encodingV2     uint8 = 2
+	encodingV1Size       = 1 + 32 + 8 + 8 + 8 + 1     // 58 bytes
+	encodingV2Size       = encodingV1Size + 8 + 8 + 2 // 76 bytes
 )
 
-// encodeSample writes a sample to a fixed-size byte slice for storage.
+// encodeSample writes a sample to a fixed-size byte slice for storage. New
+// samples are always written with the latest encoding.
 func encodeSample(s *FeeSample) []byte {
-	var buf [encodingSize]byte
-	buf[0] = encodingV1
+	var buf [encodingV2Size]byte
+	buf[0] = encodingV2
 	copy(buf[1:33], s.BlockHash[:])
 	binary.BigEndian.PutUint64(buf[33:41], uint64(s.Timestamp))
 	binary.BigEndian.PutUint64(buf[41:49], s.TotalFees)
 	binary.BigEndian.PutUint64(buf[49:57], s.TotalWeight)
 	buf[57] = uint8(s.Flags)
+	binary.BigEndian.PutUint64(buf[58:66], s.CoinbaseWeight)
+	binary.BigEndian.PutUint64(buf[66:74], s.MinKnownTxRate)
+	binary.BigEndian.PutUint16(buf[74:76], s.KnownTxCount)
 	return buf[:]
 }
 
 // decodeSample parses a stored value back into a FeeSample. The height is not
 // stored in the value because it is encoded in the key; the caller passes it
-// back in.
+// back in. V1 values decode with the V2-only fields left at zero.
 func decodeSample(height uint32, raw []byte) (*FeeSample, error) {
 	if len(raw) < 1 {
 		return nil, fmt.Errorf("empty sample value")
 	}
-	if raw[0] != encodingV1 {
+
+	var wantSize int
+	switch raw[0] {
+	case encodingV1:
+		wantSize = encodingV1Size
+	case encodingV2:
+		wantSize = encodingV2Size
+	default:
 		return nil, fmt.Errorf("unsupported sample encoding %d", raw[0])
 	}
-	if len(raw) != encodingSize {
+	if len(raw) != wantSize {
 		return nil, fmt.Errorf("sample value size %d != %d",
-			len(raw), encodingSize)
+			len(raw), wantSize)
 	}
 
 	s := &FeeSample{Height: height}
@@ -233,6 +270,12 @@ func decodeSample(height uint32, raw []byte) (*FeeSample, error) {
 	s.TotalFees = binary.BigEndian.Uint64(raw[41:49])
 	s.TotalWeight = binary.BigEndian.Uint64(raw[49:57])
 	s.Flags = SampleFlag(raw[57])
+
+	if raw[0] >= encodingV2 {
+		s.CoinbaseWeight = binary.BigEndian.Uint64(raw[58:66])
+		s.MinKnownTxRate = binary.BigEndian.Uint64(raw[66:74])
+		s.KnownTxCount = binary.BigEndian.Uint16(raw[74:76])
+	}
 	return s, nil
 }
 
