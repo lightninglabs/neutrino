@@ -37,12 +37,17 @@ func NewTestBackend(t *testing.T) *Backend {
 		baseDB,
 		func(tx *sql.Tx) BanQueries { return sqlc.New(tx) },
 	)
+	feeExec := sqldbv2.NewTransactionExecutor[FeeQueries](
+		baseDB,
+		func(tx *sql.Tx) FeeQueries { return sqlc.New(tx) },
+	)
 
 	// sqldbv2.NewTestDB already registers a t.Cleanup that closes the
 	// connection. We don't add another close here.
 	require.NotNil(t, headerExec)
 	require.NotNil(t, filterExec)
 	require.NotNil(t, banExec)
+	require.NotNil(t, feeExec)
 
 	// We hold the *SqliteStore (or *PostgresStore via build tag) in the
 	// returned Backend so callers that need to access the raw DB for
@@ -54,5 +59,6 @@ func NewTestBackend(t *testing.T) *Backend {
 		HeaderTxer: headerExec,
 		FilterTxer: filterExec,
 		BanTxer:    banExec,
+		FeeTxer:    feeExec,
 	}
 }

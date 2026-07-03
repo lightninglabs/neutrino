@@ -945,6 +945,23 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
 
+	// Hand the block to the fee sampler if one is configured. We only
+	// observe on the network-fetched path; cache hits earlier in this
+	// function were observed when they were originally fetched, so
+	// re-sampling them would over-weight a single block. Errors from the
+	// sampler are best-effort and do not affect the caller.
+	//
+	// Before observing, re-check that the block is still the canonical
+	// block at its height: the height was resolved before the network
+	// round trip, and a reorg completing while the fetch was in flight
+	// would otherwise re-insert a sample that PruneFrom just evicted.
+	if s.FeeSampler != nil {
+		header, err := s.BlockHeaders.FetchHeaderByHeight(height)
+		if err == nil && header.BlockHash() == blockHash {
+			s.FeeSampler.Observe(foundBlock, height)
+		}
+	}
+
 	return foundBlock, nil
 }
 

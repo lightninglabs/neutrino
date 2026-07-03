@@ -16,6 +16,8 @@ type Querier interface {
 	DeleteBlockHeadersFromHeight(ctx context.Context, height int64) error
 	DeleteChainTip(ctx context.Context, chainType int32) error
 	DeleteExpiredBans(ctx context.Context, expiration time.Time) (int64, error)
+	DeleteFeeSamplesBeforeHeight(ctx context.Context, height int64) error
+	DeleteFeeSamplesFromHeight(ctx context.Context, height int64) error
 	DeleteFilterHeadersFromHeight(ctx context.Context, height int64) error
 	GetBan(ctx context.Context, ipNet []byte) (GetBanRow, error)
 	GetBlockHeaderByHash(ctx context.Context, blockHash []byte) (GetBlockHeaderByHashRow, error)
@@ -23,6 +25,10 @@ type Querier interface {
 	GetBlockHeaderHeightByHash(ctx context.Context, blockHash []byte) (int64, error)
 	GetBlockHeaderRange(ctx context.Context, arg GetBlockHeaderRangeParams) ([]GetBlockHeaderRangeRow, error)
 	GetChainTip(ctx context.Context, chainType int32) (GetChainTipRow, error)
+	GetFeeSampleByHeight(ctx context.Context, height int64) (FeeSample, error)
+	GetFeeSampleRange(ctx context.Context, arg GetFeeSampleRangeParams) ([]FeeSample, error)
+	GetFeeSampleTip(ctx context.Context) (int64, error)
+	GetFeeSamplesTipN(ctx context.Context, limit int32) ([]FeeSample, error)
 	GetFilter(ctx context.Context, blockHash []byte) ([]byte, error)
 	GetFilterHeaderByBlockHash(ctx context.Context, blockHash []byte) (GetFilterHeaderByBlockHashRow, error)
 	GetFilterHeaderByHeight(ctx context.Context, height int64) (GetFilterHeaderByHeightRow, error)
@@ -34,6 +40,7 @@ type Querier interface {
 	PutFilter(ctx context.Context, arg PutFilterParams) error
 	UpsertBan(ctx context.Context, arg UpsertBanParams) error
 	UpsertChainTip(ctx context.Context, arg UpsertChainTipParams) error
+	UpsertFeeSample(ctx context.Context, arg UpsertFeeSampleParams) error
 }
 
 var _ Querier = (*Queries)(nil)
