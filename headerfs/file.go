@@ -9,10 +9,21 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
-// ErrHeaderNotFound is returned when a target header on disk (flat file) can't
-// be found.
+// ErrHeaderNotFound is returned when a target header can't be found in a
+// header store.
 type ErrHeaderNotFound struct {
 	error
+}
+
+// NewErrHeaderNotFound returns an error indicating that a header could not be
+// read from a store.
+func NewErrHeaderNotFound(err error) *ErrHeaderNotFound {
+	return &ErrHeaderNotFound{error: err}
+}
+
+// Unwrap returns the underlying storage error.
+func (e *ErrHeaderNotFound) Unwrap() error {
+	return e.error
 }
 
 // appendRaw appends a new raw header to the end of the flat file.
@@ -64,7 +75,7 @@ func (h *headerStore) readRaw(seekDist uint64) ([]byte, error) {
 	// buffer.
 	rawHeader := make([]byte, headerSize)
 	if _, err := h.file.ReadAt(rawHeader, int64(seekDist)); err != nil {
-		return nil, &ErrHeaderNotFound{err}
+		return nil, NewErrHeaderNotFound(err)
 	}
 
 	return rawHeader, nil
