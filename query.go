@@ -830,6 +830,23 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		return nil, err
 	}
 
+	// If an HTTP block source is configured, try to fetch the block from
+	// there first. We only fall back to the P2P network below if the HTTP
+	// fetch (including its own retries) fails or returns a block that
+	// doesn't pass our validation. Caching happens here exactly as it does
+	// for the peer path, so the cache behaves identically regardless of
+	// where the block ultimately comes from.
+	if s.blockFetcher != nil {
+		block, err := s.fetchBlockFromSource(blockHash, height)
+		if err == nil {
+			s.cacheBlock(*inv, block)
+			return block, nil
+		}
+
+		log.Warnf("Unable to fetch block %v from HTTP source, falling "+
+			"back to peers: %v", blockHash, err)
+	}
+
 	// Construct the appropriate getdata message to fetch the target block.
 	getData := wire.NewMsgGetData()
 	_ = getData.AddInvVect(inv)
@@ -863,36 +880,16 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 			block.SetHeight(int32(height))
 		}
 
-		// If this claims our block but doesn't pass the sanity check,
-		// the peer is trying to bamboozle us.
-		if err := blockchain.CheckBlockSanity(
-			block,
-			// We don't need to check PoW because by the time we get
-			// here, it's been checked during header synchronization
-			s.chainParams.PowLimit,
-			s.timeSource,
-		); err != nil {
-			log.Warnf("Invalid block for %s received from %s: %v",
-				blockHash, peer, err)
-
-			// Ban and disconnect the peer.
-			err = s.BanPeer(peer, banman.InvalidBlock)
-			if err != nil {
-				log.Errorf("Unable to ban peer %v: %v", peer,
-					err)
-			}
-
-			return noProgress
-		}
-
-		if err := blockchain.ValidateWitnessCommitment(
-			block,
-		); err != nil {
+		// If this claims our block but doesn't pass our validation
+		// checks, the peer is trying to bamboozle us.
+		if err := s.validateBlock(block); err != nil {
 			log.Warnf("Invalid block for %s received from %s: %v "+
 				"-- disconnecting peer", blockHash, peer, err)
 
-			err = s.BanPeer(peer, banman.InvalidBlock)
-			if err != nil {
+			// Ban and disconnect the peer.
+			if err := s.BanPeer(
+				peer, banman.InvalidBlock,
+			); err != nil {
 				log.Errorf("Unable to ban peer %v: %v", peer,
 					err)
 			}
@@ -940,12 +937,67 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Add block to the cache before returning it.
-	_, err = s.BlockCache.Put(*inv, &CacheableBlock{Block: foundBlock})
+	s.cacheBlock(*inv, foundBlock)
+
+	return foundBlock, nil
+}
+
+// validateBlock checks that the given block passes the consensus-level sanity
+// checks we require before accepting it for the given hash, regardless of the
+// source it was obtained from (a peer or an HTTP block source). It
+// deliberately has no side effects (such as peer banning) so that the caller
+// can decide how to react to an invalid block based on its origin.
+//
+// We don't need to check the proof of work because by the time we get here the
+// block's header has already been validated during header synchronization.
+func (s *ChainService) validateBlock(block *btcutil.Block) error {
+	if err := blockchain.CheckBlockSanity(
+		block, s.chainParams.PowLimit, s.timeSource,
+	); err != nil {
+		return err
+	}
+
+	return blockchain.ValidateWitnessCommitment(block)
+}
+
+// cacheBlock stores the given block in the block cache under the provided
+// inventory vector. A failure to cache is logged but not returned, since it
+// doesn't affect the validity of the block we're about to hand back to the
+// caller. This is shared by all block sources so caching behaves identically
+// no matter where a block came from.
+func (s *ChainService) cacheBlock(inv wire.InvVect, block *btcutil.Block) {
+	_, err := s.BlockCache.Put(inv, &CacheableBlock{Block: block})
 	if err != nil {
 		log.Warnf("couldn't write block to cache: %v", err)
 	}
+}
 
-	return foundBlock, nil
+// fetchBlockFromSource downloads the block with the given hash from the
+// configured HTTP block source and runs it through the same consensus
+// validation we apply to blocks received from peers. Unlike the peer path, an
+// invalid block here only results in an error (so GetBlock falls back to the
+// network), as there's no peer to ban.
+func (s *ChainService) fetchBlockFromSource(blockHash chainhash.Hash,
+	height uint32) (*btcutil.Block, error) {
+
+	msgBlock, err := s.blockFetcher.FetchBlock(s.quit, blockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	block := btcutil.NewBlock(msgBlock)
+
+	// Only set height if btcutil hasn't automagically put one in.
+	if block.Height() == btcutil.BlockHeightUnknown {
+		block.SetHeight(int32(height))
+	}
+
+	if err := s.validateBlock(block); err != nil {
+		return nil, fmt.Errorf("block %v from HTTP source failed "+
+			"validation: %w", blockHash, err)
+	}
+
+	return block, nil
 }
 
 // sendTransaction sends a transaction to all peers. It returns an error if any
