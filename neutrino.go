@@ -5,6 +5,8 @@ package neutrino
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -219,6 +221,20 @@ func (sp *ServerPeer) addKnownAddresses(addresses []*wire.NetAddressV2) {
 			log.Debugf("Could not store known addresses: %v", err)
 		}
 	}
+}
+
+// SendPing sends a ping message to the peer to keep the connection alive.
+// This is used as a keepalive mechanism while waiting for responses to queries.
+func (sp *ServerPeer) SendPing() {
+
+	var nonce uint64
+	if err := binary.Read(rand.Reader, binary.BigEndian, &nonce); err != nil {
+		log.Warnf("Unable to generate random nonce for ping: %v", err)
+	}
+	pingMsg := wire.NewMsgPing(nonce)
+
+	log.Tracef("Sending ping to peer %v with nonce %d", sp.Addr(), nonce)
+	sp.QueueMessage(pingMsg, nil)
 }
 
 // OnVerAck is invoked when a peer receives a verack bitcoin message and is used
