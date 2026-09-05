@@ -1,109 +1,96 @@
-run:
-  # timeout for analysis
-  timeout: 10m
-
-linters-settings:
-  govet:
-    # Don't report about shadowed variables
-    shadow: false
-  gofmt:
-    # simplify code: gofmt with `-s` option, true by default
-    simplify: true
-  whitespace:
-    multi-func: true
-    multi-if: true
-  gosec:
-    excludes:
-      - G115 # Integer overflow conversion.
-  lll:
-    # Max line length, lines longer will be reported.
-    line-length: 80
-    # Tab width in spaces.
-    tab-width: 8
-
+version: "2"
 linters:
-  enable-all: true
+  default: all
   disable:
-    # Global variables are used in many places throughout the code base.
-    - gochecknoglobals
-
-    # We want to allow short variable names.
-    - varnamelen
-
-    # We want to allow TODOs.
-    - godox
-
-    # We have long functions, especially in tests. Moving or renaming those would
-    # trigger funlen problems that we may not want to solve at that time.
-    - funlen
-
-    # Disable for now as we haven't yet tuned the sensitivity to our codebase
-    # yet. Enabling by default for example, would also force new contributors to
-    # potentially extensively refactor code, when they want to smaller change to
-    # land.
-    - gocyclo
-    - gocognit
-    - cyclop
-
-    # Instances of table driven tests that don't pre-allocate shouldn't trigger
-    # the linter.
-    - prealloc
-
-    # Init functions are used by loggers throughout the codebase.
-    - gochecknoinits
-
-    # Causes stack overflow, see https://github.com/polyfloyd/go-errorlint/issues/19.
-    - errorlint
-
-    # New linters that need a code adjustment first.
-    - wrapcheck
-    - nolintlint
-    - paralleltest
-    - tparallel
-    - testpackage
-    - gofumpt
-    - gomoddirectives
-    - ireturn
-    - maintidx
-    - nlreturn
-    - dogsled
-    - gci
     - containedctx
     - contextcheck
-    - errname
+    # Disable complexity linters.
+    - cyclop
+    - depguard
+    - dogsled
     - err113
-    - mnd
-    - noctx
-    - nestif
-    - wsl
+    - errname
+    # Causes stack overflow, see https://github.com/polyfloyd/go-errorlint/issues/19.
+    - errorlint
     - exhaustive
+    - exhaustruct
     - forcetypeassert
+    # We have long functions, especially in tests.
+    - funlen
+    # Global variables are used in many places throughout the codebase.
+    - gochecknoglobals
+    # Init functions are used by loggers throughout the codebase.
+    - gochecknoinits
+    - gocognit
+    - gocyclo
+    # We want to allow TODOs.
+    - godox
+    - gomoddirectives
+    - inamedparam
+    - intrange
+    - ireturn
+    - maintidx
+    - mnd
+    - nestif
     - nilerr
     - nilnil
-    - stylecheck
-    - thelper
-    - exhaustruct
-    - intrange
-    - inamedparam
-    - depguard
-    - recvcheck
+    - nlreturn
+    - noctx
+    - nolintlint
+    - paralleltest
     - perfsprint
+    # Instances of table driven tests that don't pre-allocate shouldn't trigger the linter.
+    - prealloc
+    - recvcheck
     - revive
-
+    - testpackage
+    - thelper
+    - tparallel
+    # We want to allow short variable names.
+    - varnamelen
+    - wrapcheck
+    - wsl
+  settings:
+    gosec:
+      excludes:
+        - G115
+    lll:
+      line-length: 80
+      tab-width: 8
+    whitespace:
+      multi-if: true
+      multi-func: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - errcheck
+          - gosec
+          - prealloc
+          - staticcheck
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  # Only show newly introduced problems.
   new-from-rev: c932ae495eeedc20f58a521d0b3e08889348b06c
-
-  exclude-rules:
-    # Exclude gosec from running for tests so that tests with weak randomness
-    # (math/rand) will pass the linter.
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
-        - dupl
-        - staticcheck
-
-        # Instances of table driven tests that don't pre-allocate shouldn't
-        # trigger the linter.
-        - prealloc
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
