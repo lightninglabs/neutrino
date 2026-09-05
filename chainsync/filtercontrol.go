@@ -25,6 +25,8 @@ var filterHeaderCheckpoints = map[wire.BitcoinNet]map[uint32]*chainhash.Hash{
 		500000: hashFromStr("5d16ca293c9bdc0a9bc279b63f99fb661be38b095a59a44200a807caaa631a3c"),
 		600000: hashFromStr("bde0854d0b2f4386a860462547140e0c6817f5b4b2ab515ef70e204e377598f8"),
 		660000: hashFromStr("08312375fabc082b17fa8ee88443feb350c19a34bb7483f94f7478fa4ad33032"),
+		900000: hashFromStr("8627fbbd8fb0acbcaac7f7360ee2d9e7ef033350d1b509d4d49b4b6d3a69f447"),
+		930000: hashFromStr("8c0eb22b34748ba731062fb3bee7fa56d0b0352d3f9fc234a111cd0c8a78d1a6"),
 	},
 
 	// Testnet filter header checkpoints.
