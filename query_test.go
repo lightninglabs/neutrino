@@ -247,6 +247,21 @@ func TestBigFilterEvictsEverything(t *testing.T) {
 	assertEqual(t, getFilter(cs, b3, t), f3, "")
 }
 
+// TestTransactionInv ensures transaction announcements use the txid-based
+// inventory type. Witness serialization is negotiated later when a peer sends
+// getdata, so it must not change the preceding announcement.
+func TestTransactionInv(t *testing.T) {
+	t.Parallel()
+
+	tx := wire.NewMsgTx(2)
+	txHash := tx.TxHash()
+	inv := newTransactionInv(tx)
+
+	require.Len(t, inv.InvList, 1)
+	require.Equal(t, wire.InvTypeTx, inv.InvList[0].Type)
+	require.Equal(t, txHash, inv.InvList[0].Hash)
+}
+
 // TestBlockCache checks that blocks are inserted and fetched from the cache
 // before peers are queried.
 func TestBlockCache(t *testing.T) {

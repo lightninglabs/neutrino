@@ -948,6 +948,18 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
+// newTransactionInv creates the inventory used to announce a transaction.
+// BIP-144 reserves witness inventory types for getdata, where the requesting
+// peer selects the transaction encoding. The preceding inv therefore always
+// identifies the transaction by its txid using MSG_TX.
+func newTransactionInv(tx *wire.MsgTx) *wire.MsgInv {
+	txHash := tx.TxHash()
+	inv := wire.NewMsgInv()
+	_ = inv.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &txHash))
+
+	return inv
+}
+
 // sendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
@@ -958,20 +970,16 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 // cannot be done at the moment due to circular dependencies.
 func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 	// Starting with the set of default options, we'll apply any specified
-	// functional options to the query so that we can check what inv type
-	// to use. Broadcast the inv to all peers, responding to any getdata
-	// messages for the transaction.
+	// functional options to the query so we know which encoding to serve
+	// the transaction with. We broadcast an inv to all peers and respond to
+	// any getdata messages for the transaction.
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
-	invType := wire.InvTypeWitnessTx
-	if qo.encoding == wire.BaseEncoding {
-		invType = wire.InvTypeTx
-	}
 
-	// Create an inv.
+	// Announce the transaction by txid. A peer can request its preferred
+	// serialization in getdata, which we answer using qo.encoding below.
 	txHash := tx.TxHash()
-	inv := wire.NewMsgInv()
-	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+	inv := newTransactionInv(tx)
 
 	// We'll gather all the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use
