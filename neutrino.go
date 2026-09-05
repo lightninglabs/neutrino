@@ -549,15 +549,51 @@ func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 	sp.server.AddBytesSent(uint64(bytesWritten))
 }
 
+// ChainServiceStores contains the storage backends used by a ChainService.
+// All fields must be set when custom stores are supplied through Config.
+type ChainServiceStores struct {
+	FilterDB         filterdb.FilterDatabase
+	BlockHeaders     headerfs.BlockHeaderStore
+	RegFilterHeaders headerfs.FilterHeaderStore
+	BanStore         banman.Store
+}
+
+// validate checks that a complete set of custom stores was provided.
+func (s *ChainServiceStores) validate() error {
+	switch {
+	case s.FilterDB == nil:
+		return fmt.Errorf("custom filter database is required")
+
+	case s.BlockHeaders == nil:
+		return fmt.Errorf("custom block header store is required")
+
+	case s.RegFilterHeaders == nil:
+		return fmt.Errorf("custom filter header store is required")
+
+	case s.BanStore == nil:
+		return fmt.Errorf("custom ban store is required")
+
+	default:
+		return nil
+	}
+}
+
 // Config is a struct detailing the configuration of the chain service.
 type Config struct {
 	// DataDir is the directory that neutrino will store all header
 	// information within.
 	DataDir string
 
-	// Database is an *open* database instance that we'll use to storm
-	// indexes of the chain.
+	// Database is an *open* database instance that we'll use to store
+	// indexes of the chain. It may be nil when Stores is set.
 	Database walletdb.DB
+
+	// Stores optionally supplies all storage backends used by the chain
+	// service. If set, all stores must be non-nil, and Database won't be
+	// accessed to initialize the filter, header, or ban stores. Custom stores
+	// are responsible for their own state validation, so AssertFilterHeader
+	// must be nil.
+	Stores *ChainServiceStores
 
 	// ChainParams is the chain that we're running on.
 	ChainParams chaincfg.Params
@@ -729,6 +765,16 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	if cfg.Stores != nil {
+		if err := cfg.Stores.validate(); err != nil {
+			return nil, err
+		}
+		if cfg.AssertFilterHeader != nil {
+			return nil, fmt.Errorf("filter header assertions are not " +
+				"supported with custom stores")
+		}
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout
@@ -791,9 +837,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	})
 
 	var err error
-	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
-	if err != nil {
-		return nil, err
+	if cfg.Stores != nil {
+		s.FilterDB = cfg.Stores.FilterDB
+	} else {
+		s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if s.persistToDisk {
@@ -831,18 +881,23 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		)
 	}
 
-	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
-		cfg.DataDir, cfg.Database, &cfg.ChainParams,
-	)
-	if err != nil {
-		return nil, err
-	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
-		&cfg.ChainParams, cfg.AssertFilterHeader,
-	)
-	if err != nil {
-		return nil, err
+	if cfg.Stores != nil {
+		s.BlockHeaders = cfg.Stores.BlockHeaders
+		s.RegFilterHeaders = cfg.Stores.RegFilterHeaders
+	} else {
+		s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
+			cfg.DataDir, cfg.Database, &cfg.ChainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+		s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
+			cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+			&cfg.ChainParams, cfg.AssertFilterHeader,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	bm, err := newBlockManager(&blockManagerCfg{
@@ -987,9 +1042,14 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
-	s.banStore, err = banman.NewStore(cfg.Database)
-	if err != nil {
-		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
+	if cfg.Stores != nil {
+		s.banStore = cfg.Stores.BanStore
+	} else {
+		s.banStore, err = banman.NewStore(cfg.Database)
+		if err != nil {
+			return nil, fmt.Errorf("unable to initialize ban store: %v",
+				err)
+		}
 	}
 
 	// Start up persistent peers.
