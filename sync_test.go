@@ -1063,10 +1063,10 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // headers. It then prepares header files for import by copying them and adding
 // the necessary metadata.
 //
-// The first part of the test creates a new Neutrino instance that imports these
-// headers from files without connecting to any peers. It verifies that headers
-// are correctly imported and the chain is properly synchronized without network
-// assistance.
+// The first part of the test creates a new Neutrino instance that imports block
+// headers from files without connecting to any peers. Filter headers remain at
+// genesis because the import format doesn't include the compact filter hashes
+// needed to authenticate them.
 //
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
@@ -1200,17 +1200,19 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	importSvc, err := neutrino.NewChainService(importConfig)
 	require.NoError(t, err)
 
-	importSvc.Start(rootCtx)
+	err = importSvc.Start(rootCtx)
+	require.NoError(t, err)
 	defer importSvc.Stop()
 
-	// Ensure that neutrino initial synced using the imported headers.
-	testHarness = &neutrinoHarness{
-		h1:  h1,
-		h2:  nil,
-		h3:  nil,
-		svc: importSvc,
-	}
-	testInitialSync(testHarness, t)
+	_, blockHeight, err := importSvc.BlockHeaders.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(800), blockHeight)
+
+	_, filterHeight, err := importSvc.RegFilterHeaders.ChainTip()
+	require.NoError(t, err)
+	require.Zero(t, filterHeight)
+
+	require.NoError(t, importSvc.Stop())
 
 	// Generate an additional 300 blocks on h1. This ensures that when we
 	// sync again, the client will need to fetch these new blocks from the
@@ -1243,8 +1245,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	importSvcToBeSynced.Start(rootCtx)
 	defer importSvcToBeSynced.Stop()
 
-	// This test demonstrates that the service can successfully sync to the
-	// chain tip after the database has already been populated with headers.
+	// This test demonstrates that the service can authenticate the filter
+	// headers and continue the block-header chain once peers are available.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,

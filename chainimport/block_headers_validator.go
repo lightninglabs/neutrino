@@ -3,6 +3,7 @@ package chainimport
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -61,6 +62,14 @@ func (v *blockHeadersImportSourceValidator) Validate(ctx context.Context,
 		lastHeader Header
 	)
 
+	if start > end {
+		return io.EOF
+	}
+
+	if err := v.validateBoundary(start); err != nil {
+		return fmt.Errorf("boundary validation failed: %w", err)
+	}
+
 	for batch, err := range it.BatchIterator(start, end, batchSize) {
 		if err != nil {
 			return fmt.Errorf("failed to get next batch for "+
@@ -94,6 +103,69 @@ func (v *blockHeadersImportSourceValidator) Validate(ctx context.Context,
 
 	log.Debugf("Successfully validated %d block headers", count)
 	return nil
+}
+
+// validateBoundary gives the first header the parent context that pair-wise
+// validation normally obtains from the preceding element. A subrange uses the
+// preceding source header, while the first source range connects to either the
+// network genesis or the existing target-store tip.
+func (v *blockHeadersImportSourceValidator) validateBoundary(
+	start uint32) error {
+
+	current, err := v.blockHeadersImportSource.GetHeader(start)
+	if err != nil {
+		return fmt.Errorf("failed to get first block header: %w", err)
+	}
+
+	if start > 0 {
+		previous, err := v.blockHeadersImportSource.GetHeader(start - 1)
+		if err != nil {
+			return fmt.Errorf("failed to get preceding block header: %w",
+				err)
+		}
+
+		return v.ValidatePair(previous, current)
+	}
+
+	metadata, err := v.blockHeadersImportSource.GetHeaderMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to get block header metadata: %w", err)
+	}
+
+	if metadata.startHeight == 0 {
+		first, err := assertBlockHeader(current)
+		if err != nil {
+			return err
+		}
+
+		firstHash := first.BlockHash()
+		if !firstHash.IsEqual(v.targetChainParams.GenesisHash) {
+			return fmt.Errorf("block header at height 0 does not match "+
+				"network genesis: got %v, want %v", firstHash,
+				v.targetChainParams.GenesisHash)
+		}
+
+		return v.ValidateSingle(current)
+	}
+
+	// The target store owns history below the source range. Its tip gives
+	// the first imported header the same contextual checks as a header
+	// received from a peer.
+	previousHeight := metadata.startHeight - 1
+	previous, err := v.targetBlockHeaderStore.FetchHeaderByHeight(
+		previousHeight,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get target block header at height "+
+			"%d: %w", previousHeight, err)
+	}
+
+	return v.ValidatePair(&blockHeader{
+		BlockHeader: headerfs.BlockHeader{
+			BlockHeader: previous,
+			Height:      previousHeight,
+		},
+	}, current)
 }
 
 // ValidateSingle validates a single block header for basic sanity.
@@ -159,7 +231,7 @@ func (v *blockHeadersImportSourceValidator) ValidatePair(prev,
 	}
 
 	if err := blockchain.CheckBlockHeaderContext(
-		currBlockHeader.BlockHeader, parentCtx, v.flags, chainCtx, true,
+		currBlockHeader.BlockHeader, parentCtx, v.flags, chainCtx, false,
 	); err != nil {
 		return fmt.Errorf("block header contextual validation "+
 			"failed: %w", err)
@@ -176,8 +248,13 @@ func (v *blockHeadersImportSourceValidator) ValidatePair(prev,
 func (v *blockHeadersImportSourceValidator) ValidateBatch(
 	headers []Header) error {
 
-	if len(headers) == 1 {
-		return v.ValidateSingle(headers[0])
+	if len(headers) == 0 {
+		return nil
+	}
+
+	if err := v.ValidateSingle(headers[0]); err != nil {
+		return fmt.Errorf("validation failed at batch position 0: %w",
+			err)
 	}
 
 	for i := 1; i < len(headers); i++ {
@@ -227,15 +304,20 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 
 	ancestorHeight := uint32(math.Max(0, float64(l.height-distance)))
 
-	// Lookup the ancestor in the target store.
+	// The target store owns history below an imported range. Source-only
+	// validation doesn't require one. Prefer the store when present, and
+	// otherwise use the import source for ancestors within the supplied
+	// range.
 	targetStore := l.validator.targetBlockHeaderStore
-	ancestor, err := targetStore.FetchHeaderByHeight(ancestorHeight)
-	if err == nil {
-		return &lightHeaderCtx{
-			height:    int32(ancestorHeight),
-			bits:      ancestor.Bits,
-			timestamp: ancestor.Timestamp.Unix(),
-			validator: l.validator,
+	if targetStore != nil {
+		ancestor, err := targetStore.FetchHeaderByHeight(ancestorHeight)
+		if err == nil {
+			return &lightHeaderCtx{
+				height:    int32(ancestorHeight),
+				bits:      ancestor.Bits,
+				timestamp: ancestor.Timestamp.Unix(),
+				validator: l.validator,
+			}
 		}
 	}
 
@@ -327,7 +409,16 @@ func (l *lightChainCtx) MaxRetargetTimespan() int64 {
 func (l *lightChainCtx) VerifyCheckpoint(height int32,
 	hash *chainhash.Hash) bool {
 
-	return false
+	for i := range l.params.Checkpoints {
+		checkpoint := &l.params.Checkpoints[i]
+		if checkpoint.Height != height {
+			continue
+		}
+
+		return hash.IsEqual(checkpoint.Hash)
+	}
+
+	return true
 }
 
 // FindPreviousCheckpoint returns the most recent checkpoint that we have
