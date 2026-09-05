@@ -948,6 +948,18 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
+// newTransactionInv creates the inventory used to announce a transaction.
+// BIP-144 reserves witness inventory types for getdata, where the requesting
+// peer selects the transaction encoding. The preceding inv therefore always
+// identifies the transaction by its txid using MSG_TX.
+func newTransactionInv(tx *wire.MsgTx) *wire.MsgInv {
+	txHash := tx.TxHash()
+	inv := wire.NewMsgInv()
+	_ = inv.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &txHash))
+
+	return inv
+}
+
 // sendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
@@ -964,13 +976,10 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
 
-	// Announce the transaction with a non-witness inv type. Per BIP-144 the
-	// witness inv types (MSG_WITNESS_TX) are only valid in getdata, not in
-	// inv; a peer that wants the witness serialization requests it via
-	// getdata, which we answer using qo.encoding below.
+	// Announce the transaction by txid. A peer can request its preferred
+	// serialization in getdata, which we answer using qo.encoding below.
 	txHash := tx.TxHash()
-	inv := wire.NewMsgInv()
-	_ = inv.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &txHash))
+	inv := newTransactionInv(tx)
 
 	// We'll gather all the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use
