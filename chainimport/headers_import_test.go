@@ -4736,6 +4736,119 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderImportBoundaryValidation verifies that the first header in an
+// import range is subject to the same proof-of-work, difficulty, and checkpoint
+// rules as every subsequent header.
+func TestBlockHeaderImportBoundaryValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first batch header proof of work", func(t *testing.T) {
+		first, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		second, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+
+		first.Bits = 0x03000001
+		firstHash := first.BlockHash()
+		second.PrevBlock = firstHash
+
+		validator := newTestBlockValidator(
+			t, chaincfg.SimNetParams, nil, blockchain.BFFastAdd,
+			nil,
+		)
+		err = validator.ValidateBatch([]Header{first, second})
+		require.ErrorContains(t, err, "validation failed at batch "+
+			"position 0: block hash")
+	})
+
+	t.Run("first source header difficulty", func(t *testing.T) {
+		genesis, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		first, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+		first.Bits = 0x1f00ffff
+
+		validator := boundaryTestValidator(
+			t, chaincfg.SimNetParams, blockchain.BFNone, genesis,
+			first,
+		)
+		err = validator.Validate(t.Context(),
+			validator.blockHeadersImportSource.Iterator(0, 0, 1))
+		require.ErrorContains(t, err, "block difficulty")
+	})
+
+	t.Run("first source header checkpoint", func(t *testing.T) {
+		genesis, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		first, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+
+		params := chaincfg.SimNetParams
+		wrongHash := chainhash.Hash{1}
+		params.Checkpoints = []chaincfg.Checkpoint{{
+			Height: 1,
+			Hash:   &wrongHash,
+		}}
+
+		validator := boundaryTestValidator(
+			t, params, blockchain.BFFastAdd, genesis, first,
+		)
+		err = validator.Validate(t.Context(),
+			validator.blockHeadersImportSource.Iterator(0, 0, 1))
+		require.ErrorContains(t, err, "does not match checkpoint hash")
+	})
+}
+
+// boundaryTestValidator constructs a validator whose source begins at height
+// one and whose target store contains the source header's parent.
+func boundaryTestValidator(t *testing.T, params chaincfg.Params,
+	flags blockchain.BehaviorFlags, parent,
+	first *blockHeader) *blockHeadersImportSourceValidator {
+
+	t.Helper()
+
+	source := &mockHeaderImportSource{}
+	source.On("GetHeaderMetadata").Return(&headerMetadata{
+		importMetadata: &importMetadata{
+			startHeight: first.Height,
+		},
+		endHeight:    first.Height,
+		headersCount: 1,
+	}, nil)
+	source.On("GetHeader", uint32(0)).Return(first, nil)
+	source.On("Iterator", uint32(0), uint32(0), uint32(1)).Return(
+		&importSourceHeaderIterator{
+			source:     source,
+			startIndex: 0,
+			endIndex:   0,
+			batchSize:  1,
+		},
+	)
+
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("FetchHeaderByHeight", parent.Height).Return(
+		parent.BlockHeader.BlockHeader, nil,
+	)
+
+	return newTestBlockValidator(t, params, store, flags, source)
+}
+
+// newTestBlockValidator builds a block header validator through the
+// production constructor, so that the derived retarget values are set.
+func newTestBlockValidator(t *testing.T, params chaincfg.Params,
+	store headerfs.BlockHeaderStore, flags blockchain.BehaviorFlags,
+	source HeaderImportSource) *blockHeadersImportSourceValidator {
+
+	t.Helper()
+
+	validator, err := newBlockHeadersImportSourceValidator(
+		params, store, flags, source,
+	)
+	require.NoError(t, err)
+
+	return validator.(*blockHeadersImportSourceValidator)
+}
+
 // TestLightHeaderCtxParent tests that lightHeaderCtx.Parent() correctly
 // delegates to RelativeAncestorCtx(1) instead of returning nil. This is
 // critical for CalcPastMedianTime to compute the median of the last 11 blocks
@@ -5719,7 +5832,7 @@ func TestHeaderProcessing(t *testing.T) {
 					end:    90,
 					exists: true,
 					syncModes: syncModes{
-						append: appendBlockAndFilter,
+						append: appendBlockOnly,
 					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
@@ -5907,7 +6020,7 @@ func TestHeaderProcessing(t *testing.T) {
 					end:    90,
 					exists: true,
 					syncModes: syncModes{
-						append: appendBlockAndFilter,
+						append: appendBlockOnly,
 					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
@@ -6671,7 +6784,7 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 			expectErrMsg: "block header mismatch at height 4",
 		},
 		{
-			name: "ErrorOnSyncingFilterStoreWhenBlockStoreLeading",
+			name: "FilterStoreCatchUpDeferredToPeers",
 			region: headerRegion{
 				start:  1,
 				end:    4,
@@ -6756,15 +6869,13 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:    func(verify) {},
-			expectErr: true,
-			expectErrMsg: "failed to validate lead and sync " +
-				"lag headers: failed to sync target header " +
-				"store: failed to read filter headers batch " +
-				"at height 1: I/O read error",
+			verify: func(v verify) {
+				require.Zero(v.tc, v.importResult.AddedCount)
+				require.Zero(v.tc, v.importResult.ProcessedCount)
+			},
 		},
 		{
-			name: "ValidateLeadBlockStoreAndSyncLagFilterStore",
+			name: "ValidateLeadBlockStoreAndDeferLagFilterStore",
 			region: headerRegion{
 				start:  1,
 				end:    4,
@@ -6935,42 +7046,21 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 				}
 			},
 			verify: func(v verify) {
-				// Ensure divergence headers are processed and
-				// added.
-				nH := len(filterHdrs)
-				require.Equal(
-					v.tc, nH-1, v.importResult.AddedCount,
-				)
-				require.Equal(
-					v.tc, nH-1,
-					v.importResult.ProcessedCount,
-				)
+				require.Zero(v.tc, v.importResult.AddedCount)
+				require.Zero(v.tc, v.importResult.ProcessedCount)
 
 				// Verify no headers in the overlap region.
 				require.Equal(
 					v.tc, 0, v.importResult.SkippedCount,
 				)
 
-				// Verify that we can retrieve the chain tip of
-				// the target filter header store. It helps in
-				// signaling a correct write op.
+				// The filter store remains at genesis until peer
+				// synchronization derives its continuation.
 				options := v.importOptions
 				tFS := options.TargetFilterHeaderStore
-				chainTipF, height, err := tFS.ChainTip()
+				_, height, err := tFS.ChainTip()
 				require.NoError(v.tc, err)
-
-				// Verify that the target filter header store
-				// synced with filter header import store.
-				require.Equal(v.tc, uint32(nH-1), height)
-
-				// Assert that the known filter header at this
-				// index matches the retrieved one.
-				chainTipFEx, err := constructFilterHdr(
-					filterHdrs[nH-1], uint32(nH-1),
-				)
-				require.NoError(v.tc, err)
-				b := &chainTipFEx.FilterHash
-				require.Equal(v.tc, b, chainTipF)
+				require.Zero(v.tc, height)
 			},
 		},
 		{
@@ -7405,9 +7495,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 	}
 }
 
-// TestHeaderStorageOnNewHeadersRegion tests the header storage on the new
-// headers region. It checks that the headers are written correctly to the
-// target header stores.
+// TestHeaderStorageOnNewHeadersRegion tests block header storage in the new
+// headers region. Imported filter-header writes are rejected.
 func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -7482,7 +7571,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockAndFilter,
+					append: appendBlockOnly,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7540,7 +7629,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockAndFilter,
+					append: appendBlockOnly,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7594,7 +7683,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				"*chainimport.filterHeader",
 		},
 		{
-			name: "ErrorOnGetFilterHeader",
+			name: "RejectFilterHeaderRead",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7649,13 +7738,12 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:    func(verify) {},
-			expectErr: true,
-			expectErrMsg: "failed to read filter headers batch " +
-				"at height 1: I/O read error",
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "importing filter headers is unsupported",
 		},
 		{
-			name: "ErrorOnTypeAssertingFilterHeader",
+			name: "RejectFilterHeaderTypeAssertion",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7711,13 +7799,12 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:    func(verify) {},
-			expectErr: true,
-			expectErrMsg: "expected filterHeader type, got " +
-				"*chainimport.blockHeader",
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "importing filter headers is unsupported",
 		},
 		{
-			name: "ErrorOnHeadersLengthMismatch",
+			name: "RejectCombinedHeaderWrite",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7773,10 +7860,9 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:    func(verify) {},
-			expectErr: true,
-			expectErrMsg: "mismatch between block headers (0) " +
-				"and filter headers (1)",
+			verify:       func(verify) {},
+			expectErr:    true,
+			expectErrMsg: "importing filter headers is unsupported",
 		},
 		{
 			name: "ErrorOnWriteHeadersToTargetStores",
@@ -7785,7 +7871,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockAndFilter,
+					append: appendBlockOnly,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7857,7 +7943,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    4,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockAndFilter,
+					append: appendBlockOnly,
 				},
 			},
 			importResult: &ImportResult{},

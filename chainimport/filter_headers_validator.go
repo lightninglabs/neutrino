@@ -31,8 +31,10 @@ func newFilterHeadersImportSourceValidator(
 	}
 }
 
-// Validate performs validation on a batch of filter headers using hardcoded
-// checkpoints.
+// Validate checks imported filter headers against hardcoded checkpoints. This
+// detects a known mismatch, but doesn't authenticate entries between
+// checkpoints. The importer therefore doesn't write these values to the filter
+// header store.
 //
 // The validation utilizes the existing checkpointing mechanism based on the
 // hardcoded filter headers at different checkpoints. Individual headers are
@@ -113,8 +115,7 @@ func (v *filterHeadersImportSourceValidator) ValidateSingle(h Header) error {
 	return nil
 }
 
-// ValidatePair checks if two consecutive filter headers maintain the correct
-// cryptographic relationship.
+// ValidatePair can't check the relationship between consecutive filter headers.
 //
 // In a full validation, we would verify that each filter header is correctly
 // derived by hashing the previous filter header with the current block's
