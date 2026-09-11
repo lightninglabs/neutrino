@@ -604,10 +604,8 @@ type Config struct {
 	// they're doing something like a key import.
 	PersistToDisk bool
 
-	// HeadersImport contains configuration options for importing headers
-	// from external sources. When these options are set, neutrino will
-	// attempt to import headers from file before falling back to P2P
-	// synchronization.
+	// HeadersImport contains configuration options for importing block and
+	// filter headers from external sources.
 	HeadersImport *HeadersImportConfig
 
 	// AssertFilterHeader is an optional field that allows the creator of
@@ -635,8 +633,10 @@ type HeadersImportConfig struct {
 	// This could be a file path, URL, or other source identifier.
 	BlockHeadersSource string
 
-	// FilterHeadersSource specifies where to obtain filter headers from.
-	// This could be a file path, URL, or other source identifier.
+	// FilterHeadersSource specifies the filter-header source. The import
+	// format doesn't contain compact filter hashes, so entries between
+	// hardcoded checkpoints trust the configured source. Compact filters
+	// fetched later are checked against these imported commitments.
 	FilterHeadersSource string
 
 	// WriteBatchSizePerRegion defines the number of headers to write in a
