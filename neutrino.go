@@ -604,10 +604,8 @@ type Config struct {
 	// they're doing something like a key import.
 	PersistToDisk bool
 
-	// HeadersImport contains configuration options for importing block
-	// headers from external sources. Filter headers are synchronized over
-	// P2P because the import format doesn't contain the compact filter hashes
-	// needed to authenticate them.
+	// HeadersImport contains configuration options for importing block and
+	// filter headers from external sources.
 	HeadersImport *HeadersImportConfig
 
 	// AssertFilterHeader is an optional field that allows the creator of
@@ -635,10 +633,10 @@ type HeadersImportConfig struct {
 	// This could be a file path, URL, or other source identifier.
 	BlockHeadersSource string
 
-	// FilterHeadersSource specifies a filter header file used for metadata
-	// compatibility and known-checkpoint checks. Imported filter headers are
-	// not written to the filter header store because the format doesn't
-	// contain the compact filter hashes needed to authenticate the chain.
+	// FilterHeadersSource specifies the filter-header source. The import
+	// format doesn't contain compact filter hashes, so entries between
+	// hardcoded checkpoints trust the configured source. Compact filters
+	// fetched later are checked against these imported commitments.
 	FilterHeadersSource string
 
 	// WriteBatchSizePerRegion defines the number of headers to write in a
@@ -651,9 +649,8 @@ type HeadersImportConfig struct {
 	// usage.
 	//
 	// Default value: 16,384 (2^14) entries.
-	// This results in 16,384 block headers and 16,384 filter headers checked
-	// per batch. Only the block headers are written during import. The total
-	// upper bound size per batch is:
+	// This results in 16,384 block headers and 16,384 filter headers per
+	// batch. The total upper bound size per batch is:
 	//   - Block headers: (16,384 * 80 bytes) / (2^10) = 1.28 MB
 	//   - Filter headers: (16,384 * 32 bytes) / (2^10) = 0.5 MB
 	// Peak memory usage observed during benchmarking was ≈ 66 MB.

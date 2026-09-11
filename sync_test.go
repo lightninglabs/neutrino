@@ -1063,10 +1063,9 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // headers. It then prepares header files for import by copying them and adding
 // the necessary metadata.
 //
-// The first part of the test creates a new Neutrino instance that imports block
-// headers from files without connecting to any peers. Filter headers remain at
-// genesis because the import format doesn't include the compact filter hashes
-// needed to authenticate them.
+// The first part of the test creates a new Neutrino instance that imports these
+// headers from files without connecting to any peers. It verifies that both
+// header stores reach the imported chain tip without network assistance.
 //
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
@@ -1204,15 +1203,14 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	require.NoError(t, err)
 	defer importSvc.Stop()
 
-	_, blockHeight, err := importSvc.BlockHeaders.ChainTip()
-	require.NoError(t, err)
-	require.Equal(t, uint32(800), blockHeight)
-
-	_, filterHeight, err := importSvc.RegFilterHeaders.ChainTip()
-	require.NoError(t, err)
-	require.Zero(t, filterHeight)
-
-	require.NoError(t, importSvc.Stop())
+	// Ensure that Neutrino initially synced using the imported headers.
+	testHarness = &neutrinoHarness{
+		h1:  h1,
+		h2:  nil,
+		h3:  nil,
+		svc: importSvc,
+	}
+	testInitialSync(testHarness, t)
 
 	// Generate an additional 300 blocks on h1. This ensures that when we
 	// sync again, the client will need to fetch these new blocks from the
@@ -1245,8 +1243,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	importSvcToBeSynced.Start(rootCtx)
 	defer importSvcToBeSynced.Stop()
 
-	// This test demonstrates that the service can authenticate the filter
-	// headers and continue the block-header chain once peers are available.
+	// This test demonstrates that the service can continue both imported
+	// header chains once peers are available.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
