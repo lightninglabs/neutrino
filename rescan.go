@@ -34,7 +34,9 @@ var (
 	ErrRescanExit = errors.New("rescan exited")
 
 	// errRetryBlock is an internal error used to signal to the rescan
-	// should it should attempt to retry processing a block.
+	// that it should attempt to retry processing a block. It is returned
+	// whenever the block's filter or the block itself could not be fetched
+	// from the network, which is considered a transient failure.
 	errRetryBlock = errors.New("block must be retried")
 )
 
@@ -589,12 +591,13 @@ rescanLoop:
 					}
 
 					err := rs.handleBlockConnected(ntfn)
-					switch err {
-					case nil:
+					switch {
+					case err == nil:
 
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
 						log.Debugf("Retrying %v after %v",
 							ntfn, blockRetryInterval)
 						blockRetryQueue.push(ntfn)
@@ -648,17 +651,18 @@ rescanLoop:
 					err := rs.handleBlockConnected(
 						retryBlock,
 					)
-					switch err {
+					switch {
 					// We successfully notified the block
 					// this time, so we can remove it from
 					// our queue and move on to the next.
-					case nil:
+					case err == nil:
 						_ = blockRetryQueue.pop()
 						continue retryLoop
 
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
 						log.Debugf("Retrying %v after "+
 							"%v", retryBlock,
 							blockRetryInterval)
@@ -992,12 +996,23 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
 	block, err := chain.GetBlock(curStamp.Hash, ro.queryOptions...)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrShuttingDown):
 		return nil, err
-	}
-	if block == nil {
-		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
-			"network", curStamp.Height, curStamp.Hash)
+
+	// If we couldn't fetch the block, then this either means that we don't
+	// have any peers to fetch it from, or the peer(s) we asked didn't
+	// respond. This is transient, so we'll signal the block should be
+	// retried rather than terminating the rescan.
+	case err != nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s) from "+
+			"network: %w", errRetryBlock, curStamp.Height,
+			curStamp.Hash, err)
+
+	case block == nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s) from "+
+			"network", errRetryBlock, curStamp.Height,
+			curStamp.Hash)
 	}
 
 	// Before we go through the transactions, let's make sure the filter we
