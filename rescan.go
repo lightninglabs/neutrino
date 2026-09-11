@@ -759,6 +759,9 @@ rescanLoop:
 				return err
 			}
 
+			// Advance our state to the next block, but remember
+			// where we were in case we need to retry it.
+			prevHeader, prevStamp := rs.curHeader, rs.curStamp
 			rs.curHeader = *header
 			rs.curStamp.Height++
 			rs.curStamp.Hash = header.BlockHash()
@@ -770,10 +773,55 @@ rescanLoop:
 			}
 
 			err = rs.notifyBlock()
-			if err != nil {
+			switch {
+			case err == nil:
+
+			// We couldn't fetch the block's filter or the block
+			// itself from the network. This is usually transient,
+			// e.g. we have no peers or they didn't respond, so
+			// rather than terminating the rescan for good we'll
+			// rewind our state and retry the block after a short
+			// delay.
+			case errors.Is(err, errRetryBlock):
+				log.Errorf("Unable to process block %d (%s), "+
+					"retrying after %v: %v",
+					rs.curStamp.Height, rs.curStamp.Hash,
+					blockRetryInterval, err)
+
+				rs.curHeader = prevHeader
+				rs.curStamp = prevStamp
+
+				err := rs.waitForRetry(blockRetryInterval)
+				if err != nil {
+					return err
+				}
+
+			default:
 				return err
 			}
 		}
+	}
+}
+
+// waitForRetry waits for the given interval before a block is retried while
+// catching up with the chain. Filter updates received in the meantime are
+// applied immediately so that callers of Update are never blocked by a block
+// we're unable to fetch, in which case the wait is cut short.
+func (rs *rescanState) waitForRetry(interval time.Duration) error {
+	ro := rs.opts
+
+	select {
+	case <-ro.quit:
+		return ErrRescanExit
+
+	case update := <-ro.update:
+		_, err := ro.updateFilter(
+			rs.chain, update, &rs.curStamp, &rs.curHeader,
+		)
+		return err
+
+	case <-time.After(interval):
+		return nil
 	}
 }
 
@@ -869,8 +917,18 @@ func (rs *rescanState) notifyBlock() error {
 		matched, filter, err := blockFilterMatches(
 			chain, ro, &rs.curStamp.Hash,
 		)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrShuttingDown):
 			return err
+
+		// If the query failed, then this either means that we don't
+		// have any peers to fetch this filter from, or the peer(s) we
+		// asked didn't respond, so we'll signal the block should be
+		// retried.
+		case err != nil:
+			return fmt.Errorf("%w: unable to get filter for "+
+				"block %d (%s): %w", errRetryBlock,
+				rs.curStamp.Height, rs.curStamp.Hash, err)
 		}
 
 		if matched {
