@@ -106,9 +106,9 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 	}
 }
 
-// TestImportOperationOnFileHeaderSource tests the import operation on a file
-// header source. It checks that the import is successful and that the headers
-// are written to the target header stores.
+// TestImportOperationOnFileHeaderSource tests the import operation on file
+// header sources. It checks that the block and filter headers are written to
+// their target stores.
 func TestImportOperationOnFileHeaderSource(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -253,6 +253,22 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 				require.Equal(
 					v.tc, 0, v.importResult.SkippedCount,
 				)
+
+				blockStore := ops.TargetBlockHeaderStore
+				_, blockHeight, err := blockStore.ChainTip()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, uint32(len(blockHdrs)-1),
+					blockHeight,
+				)
+
+				_, filterHeight, err :=
+					ops.TargetFilterHeaderStore.ChainTip()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, uint32(len(filterHdrs)-1),
+					filterHeight,
+				)
 			},
 		},
 	}
@@ -279,6 +295,157 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 			require.NoError(t, err)
 			tc.verify(verify)
 		})
+	}
+}
+
+// TestImportOperationFromNonZeroHeight verifies that absolute target heights
+// are translated to zero-based import-source indices while both header stores
+// are extended.
+func TestImportOperationFromNonZeroHeight(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := walletdb.Create(
+		"bdb", dbPath, true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	blockStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	const startHeight = uint32(1)
+	blockFile, cleanupBlockFile, err := setupFileWithHdrsAtHeight(
+		headerfs.Block, startHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupBlockFile)
+	blockPath := blockFile.Name()
+	require.NoError(t, blockFile.Close())
+
+	filterFile, cleanupFilterFile, err := setupFileWithHdrsAtHeight(
+		headerfs.RegularFilter, startHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupFilterFile)
+	filterPath := filterFile.Name()
+	require.NoError(t, filterFile.Close())
+
+	importer, err := NewHeadersImport(&ImportOptions{
+		TargetChainParams:       chaincfg.SimNetParams,
+		TargetBlockHeaderStore:  blockStore,
+		TargetFilterHeaderStore: filterStore,
+		BlockHeadersSource:      blockPath,
+		FilterHeadersSource:     filterPath,
+		WriteBatchSizePerRegion: 2,
+		ValidationFlags:         blockchain.BFFastAdd,
+	})
+	require.NoError(t, err)
+
+	result, err := importer.Import(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, len(blockHdrs)-1, result.AddedCount)
+	require.Equal(t, len(blockHdrs)-1, result.ProcessedCount)
+
+	_, blockTip, err := blockStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(blockHdrs)-1), blockTip)
+
+	_, filterTip, err := filterStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(filterHdrs)-1), filterTip)
+}
+
+// TestFilterOnlyImportStopsBeforeBlockTip verifies that a partial filter-only
+// import uses the block hash at the end of each write batch for the filter
+// store tip.
+func TestFilterOnlyImportStopsBeforeBlockTip(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := walletdb.Create(
+		"bdb", dbPath, true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	blockStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	blockHeaders := make([]headerfs.BlockHeader, 0, len(blockHdrs)-1)
+	for height := uint32(1); height < uint32(len(blockHdrs)); height++ {
+		header, err := constructBlkHdr(blockHdrs[height], height)
+		require.NoError(t, err)
+		blockHeaders = append(blockHeaders, header.BlockHeader)
+	}
+	require.NoError(t, blockStore.WriteHeaders(blockHeaders...))
+
+	const (
+		startHeight = uint32(1)
+		endHeight   = uint32(3)
+	)
+	blockFile, cleanupBlockFile, err := setupFileWithHdrsRange(
+		headerfs.Block, startHeight, endHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupBlockFile)
+	blockPath := blockFile.Name()
+	require.NoError(t, blockFile.Close())
+
+	filterFile, cleanupFilterFile, err := setupFileWithHdrsRange(
+		headerfs.RegularFilter, startHeight, endHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupFilterFile)
+	filterPath := filterFile.Name()
+	require.NoError(t, filterFile.Close())
+
+	importer, err := NewHeadersImport(&ImportOptions{
+		TargetChainParams:       chaincfg.SimNetParams,
+		TargetBlockHeaderStore:  blockStore,
+		TargetFilterHeaderStore: filterStore,
+		BlockHeadersSource:      blockPath,
+		FilterHeadersSource:     filterPath,
+		WriteBatchSizePerRegion: 2,
+		ValidationFlags:         blockchain.BFFastAdd,
+	})
+	require.NoError(t, err)
+
+	result, err := importer.Import(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int(endHeight), result.AddedCount)
+	require.Equal(t, int(endHeight), result.ProcessedCount)
+
+	_, filterTip, err := filterStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, endHeight, filterTip)
+
+	for height := startHeight; height <= endHeight; height++ {
+		expected, err := constructFilterHdr(filterHdrs[height], height)
+		require.NoError(t, err)
+		actual, err := filterStore.FetchHeaderByHeight(height)
+		require.NoError(t, err)
+		require.Equal(t, expected.FilterHash, *actual)
 	}
 }
 
@@ -5632,6 +5799,51 @@ func TestHeaderProcessing(t *testing.T) {
 				"chain tip",
 		},
 
+		{
+			name: "BlockExtensionStartsAfterLaggingFilterGap",
+			prep: func() prep {
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 161,
+					},
+					endHeight: 170,
+				}
+
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(160), nil,
+				)
+
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(150), nil,
+				)
+
+				return prep{hImport: &headersImport{
+					blockHeadersImportSource: hIS,
+					options: &ImportOptions{
+						TargetBlockHeaderStore:  bHS,
+						TargetFilterHeaderStore: fHS,
+					},
+				}}
+			},
+			verify: func(v verify) {
+				divergence := v.processingRegions.divergence
+				require.False(v.tc, divergence.exists)
+				require.Equal(v.tc, headerRegion{
+					start:  161,
+					end:    170,
+					exists: true,
+					syncModes: syncModes{
+						append: appendBlockOnly,
+					},
+				}, v.processingRegions.newHeaders)
+			},
+		},
+
 		// ⚠️ Divergent cases (B ≠ F), B & F start at same pos.
 
 		/*
@@ -5755,7 +5967,7 @@ func TestHeaderProcessing(t *testing.T) {
 					end:    90,
 					exists: true,
 					syncModes: syncModes{
-						append: appendBlockOnly,
+						append: appendBlockAndFilter,
 					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
@@ -5943,7 +6155,7 @@ func TestHeaderProcessing(t *testing.T) {
 					end:    90,
 					exists: true,
 					syncModes: syncModes{
-						append: appendBlockOnly,
+						append: appendBlockAndFilter,
 					},
 				}
 				require.Equal(v.tc, nHRE, nHR)
@@ -6707,7 +6919,7 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 			expectErrMsg: "block header mismatch at height 4",
 		},
 		{
-			name: "FilterStoreCatchUpDeferredToPeers",
+			name: "ErrorOnSyncingFilterStoreWhenBlockStoreLeading",
 			region: headerRegion{
 				start:  1,
 				end:    4,
@@ -6772,6 +6984,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 				fIt.On("ReadBatch", in, in, in).Return(
 					nil, errors.New("I/O read error"),
 				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(10))
 
 				fIS := &mockHeaderImportSource{}
 				fIS.On("Iterator", in, in, in).Return(fIt)
@@ -6792,13 +7006,15 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify: func(v verify) {
-				require.Zero(v.tc, v.importResult.AddedCount)
-				require.Zero(v.tc, v.importResult.ProcessedCount)
-			},
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to validate lead and sync " +
+				"lag headers: failed to sync target header " +
+				"store: failed to read filter headers batch " +
+				"at height 1: I/O read error",
 		},
 		{
-			name: "ValidateLeadBlockStoreAndDeferLagFilterStore",
+			name: "ValidateLeadBlockStoreAndSyncLagFilterStore",
 			region: headerRegion{
 				start:  1,
 				end:    4,
@@ -6969,21 +7185,41 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 				}
 			},
 			verify: func(v verify) {
-				require.Zero(v.tc, v.importResult.AddedCount)
-				require.Zero(v.tc, v.importResult.ProcessedCount)
+				// Ensure divergence headers are processed and
+				// added.
+				nH := len(filterHdrs)
+				require.Equal(
+					v.tc, nH-1, v.importResult.AddedCount,
+				)
+				require.Equal(
+					v.tc, nH-1,
+					v.importResult.ProcessedCount,
+				)
 
 				// Verify no headers in the overlap region.
 				require.Equal(
 					v.tc, 0, v.importResult.SkippedCount,
 				)
 
-				// The filter store remains at genesis until peer
-				// synchronization derives its continuation.
+				// Verify the filter store caught up through the
+				// imported range.
 				options := v.importOptions
 				tFS := options.TargetFilterHeaderStore
-				_, height, err := tFS.ChainTip()
+				chainTipF, height, err := tFS.ChainTip()
 				require.NoError(v.tc, err)
-				require.Zero(v.tc, height)
+
+				// Verify that the target filter header store
+				// synced with filter header import store.
+				require.Equal(v.tc, uint32(nH-1), height)
+
+				// Assert that the known filter header at this
+				// index matches the retrieved one.
+				chainTipFEx, err := constructFilterHdr(
+					filterHdrs[nH-1], uint32(nH-1),
+				)
+				require.NoError(v.tc, err)
+				b := &chainTipFEx.FilterHash
+				require.Equal(v.tc, b, chainTipF)
 			},
 		},
 		{
@@ -7418,8 +7654,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 	}
 }
 
-// TestHeaderStorageOnNewHeadersRegion tests block header storage in the new
-// headers region. Imported filter-header writes are rejected.
+// TestHeaderStorageOnNewHeadersRegion tests the header storage on the new
+// headers region. It checks that headers are written to both target stores.
 func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -7494,7 +7730,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockOnly,
+					append: appendBlockAndFilter,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7552,7 +7788,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockOnly,
+					append: appendBlockAndFilter,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7606,7 +7842,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				"*chainimport.filterHeader",
 		},
 		{
-			name: "RejectFilterHeaderRead",
+			name: "ErrorOnGetFilterHeader",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7661,12 +7897,13 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:       func(verify) {},
-			expectErr:    true,
-			expectErrMsg: "importing filter headers is unsupported",
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "failed to read filter headers batch " +
+				"at height 1: I/O read error",
 		},
 		{
-			name: "RejectFilterHeaderTypeAssertion",
+			name: "ErrorOnTypeAssertingFilterHeader",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7722,12 +7959,13 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:       func(verify) {},
-			expectErr:    true,
-			expectErrMsg: "importing filter headers is unsupported",
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "expected filterHeader type, got " +
+				"*chainimport.blockHeader",
 		},
 		{
-			name: "RejectCombinedHeaderWrite",
+			name: "ErrorOnHeadersLengthMismatch",
 			region: headerRegion{
 				start:  1,
 				end:    100,
@@ -7783,9 +8021,10 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 					cleanup: func() {},
 				}
 			},
-			verify:       func(verify) {},
-			expectErr:    true,
-			expectErrMsg: "importing filter headers is unsupported",
+			verify:    func(verify) {},
+			expectErr: true,
+			expectErrMsg: "mismatch between block headers (0) " +
+				"and filter headers (1)",
 		},
 		{
 			name: "ErrorOnWriteHeadersToTargetStores",
@@ -7794,7 +8033,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    100,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockOnly,
+					append: appendBlockAndFilter,
 				},
 			},
 			importResult: &ImportResult{},
@@ -7866,7 +8105,7 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 				end:    4,
 				exists: true,
 				syncModes: syncModes{
-					append: appendBlockOnly,
+					append: appendBlockAndFilter,
 				},
 			},
 			importResult: &ImportResult{},
@@ -8078,6 +8317,44 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 func setupFileWithHdrs(hT headerfs.HeaderType,
 	includeMetadata bool) (headerfs.File, func(), error) {
 
+	if !includeMetadata {
+		return setupFileWithHdrsFromHeight(hT, false, 0)
+	}
+
+	return setupFileWithHdrsAtHeight(hT, 0)
+}
+
+// setupFileWithHdrsAtHeight creates a temporary import file whose first header
+// has the specified absolute height.
+func setupFileWithHdrsAtHeight(hT headerfs.HeaderType,
+	startHeight uint32) (headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromHeight(hT, true, startHeight)
+}
+
+// setupFileWithHdrsRange creates a temporary import file containing the
+// inclusive header range.
+func setupFileWithHdrsRange(hT headerfs.HeaderType, startHeight,
+	endHeight uint32) (headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromRange(
+		hT, true, startHeight, endHeight,
+	)
+}
+
+func setupFileWithHdrsFromHeight(hT headerfs.HeaderType,
+	includeMetadata bool, startHeight uint32) (
+	headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromRange(
+		hT, includeMetadata, startHeight, uint32(len(blockHdrs)-1),
+	)
+}
+
+func setupFileWithHdrsFromRange(hT headerfs.HeaderType,
+	includeMetadata bool, startHeight, endHeight uint32) (
+	headerfs.File, func(), error) {
+
 	fileName := fmt.Sprintf("test-%s-*", hT)
 	tempFile, err := os.CreateTemp("", fileName)
 	cleanup := func() {
@@ -8099,9 +8376,18 @@ func setupFileWithHdrs(hT headerfs.HeaderType,
 		return nil, cleanup, fmt.Errorf("%s", hT)
 	}
 
+	if startHeight >= uint32(len(hdrsData)) {
+		return nil, cleanup, fmt.Errorf("start height %d exceeds %s "+
+			"test headers", startHeight, hT)
+	}
+	if endHeight < startHeight || endHeight >= uint32(len(hdrsData)) {
+		return nil, cleanup, fmt.Errorf("invalid end height %d for %s "+
+			"test headers", endHeight, hT)
+	}
+
 	if includeMetadata {
 		err = AddHeadersImportMetadata(
-			tempFile.Name(), wire.SimNet, 0, hT, 0,
+			tempFile.Name(), wire.SimNet, 0, hT, startHeight,
 		)
 		if err != nil {
 			return nil, cleanup, err
@@ -8118,7 +8404,7 @@ func setupFileWithHdrs(hT headerfs.HeaderType,
 		}
 	}
 
-	for _, hdrHex := range hdrsData {
+	for _, hdrHex := range hdrsData[startHeight : endHeight+1] {
 		hdrBytes, err := hex.DecodeString(hdrHex)
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("failed to decode "+

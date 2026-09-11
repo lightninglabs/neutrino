@@ -128,10 +128,10 @@ type headerRegion struct {
 	syncModes syncModes
 }
 
-// headersImport validates block headers from external sources and writes them
-// to the local block header store. Filter header files are checked against
-// known checkpoints, but aren't written because their contents can't be
-// authenticated without the corresponding compact filter hashes.
+// headersImport validates headers from external sources and writes them to the
+// local header stores. Block headers receive full consensus validation. Filter
+// headers are checked against known checkpoints, while the configured import
+// source remains trusted for entries between those checkpoints.
 type headersImport struct {
 	// blockHeadersImportSource provides access to block headers from import
 	// source.
@@ -226,8 +226,7 @@ func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 			"headers: %w", err)
 	}
 
-	log.Debugf("Checking %d filter headers against known checkpoints",
-		metadata.headersCount)
+	log.Debugf("Validating %d filter headers", metadata.headersCount)
 	filterHeadersIterator := h.filterHeadersImportSource.Iterator(
 		0, metadata.headersCount-1,
 		uint32(h.options.WriteBatchSizePerRegion),
@@ -274,7 +273,7 @@ func (h *headersImport) Import(ctx context.Context) (*ImportResult, error) {
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(result.StartTime)
 
-	log.Infof("Headers import completed: processed %d block headers "+
+	log.Infof("Headers import completed: processed %d headers "+
 		"(added: %d, skipped: %d) from height "+
 		"%d to %d in %s (%.2f headers/sec, %.2f%% new)",
 		result.ProcessedCount, result.AddedCount, result.SkippedCount,
@@ -565,14 +564,15 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		effectiveTip:      effectiveTipHeight,
 	}
 
-	// A divergence region spans the heights held by only one target store.
-	// When the filter store leads, the imported block chain can fill the gap
-	// after its connection has been checked. When the block store leads, the
-	// missing filter headers remain the responsibility of peer sync because
-	// the import file can't derive them from compact filters.
-	divergeStart := effectiveTipHeight + 1
+	// A divergence region can only be reconciled when the import source
+	// contains the first header missing from the lagging store. Clipping the
+	// region to the import range isn't sufficient because it would leave a gap
+	// before the first appended header.
+	divergeStart := max(effectiveTipHeight+1, importStartHeight)
 	divergeEnd := min(max(bTipHeight, fTipHeight), importEndHeight)
-	divergeExists := bTipHeight != fTipHeight && divergeStart <= divergeEnd
+	divergeExists := bTipHeight != fTipHeight &&
+		importStartHeight <= effectiveTipHeight+1 &&
+		divergeStart <= divergeEnd
 	regions.divergence = headerRegion{
 		start:  divergeStart,
 		end:    divergeEnd,
@@ -582,18 +582,22 @@ func (h *headersImport) determineProcessingRegions() (*processingRegions, error)
 		),
 	}
 
-	// A new region extends beyond both target stores. We only extend the block
-	// store here: the normal multi-peer synchronization path derives and
-	// verifies the missing filter headers from compact filter hashes.
-	newStart := max(bTipHeight, fTipHeight) + 1
+	newStart := max(max(bTipHeight, fTipHeight)+1, importStartHeight)
 	newEnd := importEndHeight
+	newAppendMode := appendBlockAndFilter
+	if bTipHeight > fTipHeight &&
+		importStartHeight > fTipHeight+1 {
+
+		// The import source doesn't contain the gap between the filter
+		// store and the block store. Keep importing block headers, but leave
+		// the filter gap and continuation for peer synchronization.
+		newAppendMode = appendBlockOnly
+	}
 	regions.newHeaders = headerRegion{
-		start:  newStart,
-		end:    newEnd,
-		exists: newStart <= newEnd,
-		syncModes: syncModes{
-			append: appendBlockOnly,
-		},
+		start:     newStart,
+		end:       newEnd,
+		exists:    newStart <= newEnd,
+		syncModes: syncModes{append: newAppendMode},
 	}
 
 	return regions, nil
@@ -638,22 +642,6 @@ func (h *headersImport) processDivergenceHeadersRegion(ctx context.Context,
 
 	log.Infof("Processing %d divergence headers from heights %d to %d",
 		region.end-region.start+1, region.start, region.end)
-
-	// A leading block store already contains the only values this format can
-	// validate fully. Verify that it agrees with the source, then leave the
-	// filter store untouched so peer sync can authenticate its continuation.
-	if region.syncModes.append == appendFilterOnly {
-		if err := h.verifyHeadersAtTargetHeight(
-			region.end, verifyBlockOnly,
-		); err != nil {
-			return fmt.Errorf("failed to verify leading block header: %w",
-				err)
-		}
-
-		log.Infof("Leaving filter headers at their current tip for " +
-			"peer-validated synchronization")
-		return nil
-	}
 
 	if err := h.validateLeadAndSyncLag(ctx, region); err != nil {
 		return fmt.Errorf("failed to validate lead and sync lag "+
@@ -702,7 +690,7 @@ func (h *headersImport) processNewHeadersRegion(ctx context.Context,
 		return nil
 	}
 
-	log.Infof("Adding %d new block headers from heights "+
+	log.Infof("Adding %d new headers from heights "+
 		"%d to %d", region.end-region.start+1, region.start, region.end)
 
 	if err := h.appendNewHeaders(
@@ -727,13 +715,6 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 			"metadata: %w", err)
 	}
 
-	// Filter headers need their compact filter hashes to establish each link
-	// in the chain. Since the current format doesn't carry those hashes, no
-	// caller may route imported filter headers into the persistence path.
-	if appendMode != appendBlockOnly {
-		return fmt.Errorf("importing filter headers is unsupported")
-	}
-
 	totalHeaders := endHeight - startHeight + 1
 	log.Infof("Appending %d new headers in batches of %d", totalHeaders,
 		h.options.WriteBatchSizePerRegion)
@@ -749,15 +730,21 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 		sourceStartIdx, sourceEndIdx,
 		uint32(h.options.WriteBatchSizePerRegion),
 	)
+	filterIter := h.filterHeadersImportSource.Iterator(
+		sourceStartIdx, sourceEndIdx,
+		uint32(h.options.WriteBatchSizePerRegion),
+	)
 
-	batchStart := startHeight
+	batchStartHeight := startHeight
+	batchStartIndex := sourceStartIdx
 	for {
 		if err := ctxCancelled(ctx); err != nil {
 			return err
 		}
 
-		batchEnd, err := h.processBatch(
-			blockIter, nil, batchStart, appendMode,
+		batchEndHeight, headersRead, err := h.processBatch(
+			blockIter, filterIter, batchStartIndex,
+			batchStartHeight, appendMode,
 		)
 		if err == io.EOF {
 			break
@@ -767,7 +754,8 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 		}
 
 		// Move to next batch.
-		batchStart = batchEnd + 1
+		batchStartHeight = batchEndHeight + 1
+		batchStartIndex += headersRead
 	}
 
 	log.Infof("Successfully added %d new headers from heights %d to %d",
@@ -780,55 +768,62 @@ func (h *headersImport) appendNewHeaders(ctx context.Context, startHeight,
 // returns the batch end height on success, or an error including io.EOF when no
 // more batches.
 func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
-	batchStart uint32, appendMode appendMode) (uint32, error) {
+	batchStartIndex, batchStartHeight uint32,
+	appendMode appendMode) (uint32, uint32, error) {
 
 	var (
-		blockHeaders  []headerfs.BlockHeader
-		filterHeaders []headerfs.FilterHeader
-		batchEnd      uint32
+		blockHeaders   []headerfs.BlockHeader
+		filterHeaders  []headerfs.FilterHeader
+		batchEndHeight uint32
+		headersRead    uint32
 	)
 
 	if appendMode != appendFilterOnly {
 		blockBatch, blockErr := blockIter.ReadBatch(
-			batchStart, blockIter.GetEndIndex(),
+			batchStartIndex, blockIter.GetEndIndex(),
 			blockIter.GetBatchSize(),
 		)
 		if blockErr == io.EOF {
-			return 0, io.EOF
+			return 0, 0, io.EOF
 		}
 		if blockErr != nil {
-			return 0, fmt.Errorf("failed to read block headers "+
-				"batch at height %d: %w", batchStart, blockErr)
+			return 0, 0, fmt.Errorf("failed to read block headers "+
+				"batch at height %d: %w", batchStartHeight,
+				blockErr)
 		}
-
 		// Convert block header batches to target store format.
 		blockHeaders = make([]headerfs.BlockHeader, 0, len(blockBatch))
 		for _, header := range blockBatch {
 			blkHeader, err := assertBlockHeader(header)
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 			blockHeaders = append(
 				blockHeaders, blkHeader.BlockHeader,
 			)
 		}
 
-		batchEnd = batchStart + uint32(len(blockBatch)) - 1
+		headersRead = uint32(len(blockBatch))
+		if headersRead > 0 {
+			batchEndHeight = batchStartHeight + headersRead - 1
+		}
 	}
 
 	if appendMode != appendBlockOnly {
 		filterBatch, filterErr := filterIter.ReadBatch(
-			batchStart, blockIter.GetEndIndex(),
-			blockIter.GetBatchSize(),
+			batchStartIndex, filterIter.GetEndIndex(),
+			filterIter.GetBatchSize(),
 		)
 		if filterErr == io.EOF {
-			return 0, io.EOF
+			return 0, 0, io.EOF
 		}
 		if filterErr != nil {
-			return 0, fmt.Errorf("failed to read filter headers "+
-				"batch at height %d: %w", batchStart, filterErr)
+			return 0, 0, fmt.Errorf(
+				"failed to read filter headers batch at "+
+					"height %d: %w", batchStartHeight,
+				filterErr,
+			)
 		}
-
 		// Convert filter header batches to target store format.
 		filterHeaders = make(
 			[]headerfs.FilterHeader, 0, len(filterBatch),
@@ -836,31 +831,34 @@ func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
 		for _, header := range filterBatch {
 			fHeader, err := assertFilterHeader(header)
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 			filterHeaders = append(
 				filterHeaders, fHeader.FilterHeader,
 			)
 		}
 
-		batchEnd = batchStart + uint32(len(filterBatch)) - 1
+		filterHeadersRead := uint32(len(filterBatch))
+		if headersRead != 0 && headersRead != filterHeadersRead {
+			return 0, 0, fmt.Errorf("mismatch between block "+
+				"headers (%d) and filter headers (%d)",
+				headersRead, filterHeadersRead)
+		}
+		headersRead = filterHeadersRead
+		if headersRead > 0 {
+			batchEndHeight = batchStartHeight + headersRead - 1
+		}
 
-		isLastBatch := batchEnd >= filterIter.GetEndIndex()
-		if appendMode == appendFilterOnly && isLastBatch {
-			// Get the chain tip from both target stores.
-			tBHS := h.options.TargetBlockHeaderStore
-			lastH, height, err := tBHS.ChainTip()
+		if appendMode == appendFilterOnly {
+			// Each filter-store write takes its tip from the last
+			// filter header's block hash. Fetch that block header;
+			// the batch may stop before the block-store tip.
+			lastH, err := h.options.TargetBlockHeaderStore.
+				FetchHeaderByHeight(batchEndHeight)
 			if err != nil {
-				return 0, fmt.Errorf("failed to get target "+
-					"block header chain tip: %w", err)
-			}
-
-			i := len(filterHeaders) - 1
-			if height != filterHeaders[i].Height {
-				return 0, fmt.Errorf("mismatch between target "+
-					"block header chain tip height and "+
-					"filter headers height: %d != %d",
-					height, filterHeaders[i].Height)
+				return 0, 0, fmt.Errorf("failed to get target "+
+					"block header at height %d: %w",
+					batchEndHeight, err)
 			}
 
 			chainTipBlockHeader := headerfs.BlockHeader{
@@ -872,33 +870,35 @@ func (h *headersImport) processBatch(blockIter, filterIter HeaderIterator,
 		}
 	}
 
+	if headersRead == 0 {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+
 	if appendMode == appendBlockAndFilter {
 		// The length check condition should never be triggered during
 		// normal import operations as validation occurs earlier. They
 		// serve as sanity checks to catch unexpected inconsistencies.
 		if len(blockHeaders) != len(filterHeaders) {
-			return 0, fmt.Errorf("mismatch between block headers "+
-				"(%d) and filter headers (%d)",
+			return 0, 0, fmt.Errorf("mismatch between block "+
+				"headers (%d) and filter headers (%d)",
 				len(blockHeaders), len(filterHeaders))
 		}
 
 		chainTipBlockHeader := blockHeaders[len(blockHeaders)-1]
 		setLastFilterHeaderHash(filterHeaders, chainTipBlockHeader)
 	}
-
 	err := h.writeHeadersToTargetStores(
-		blockHeaders, filterHeaders, batchStart, batchEnd,
+		blockHeaders, filterHeaders, batchStartHeight, batchEndHeight,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("failed to write headers to target "+
+		return 0, 0, fmt.Errorf("failed to write headers to target "+
 			"stores: %v", err)
 	}
 
 	log.Debugf("Wrote headers batch from height %d to %d "+
-		"(%d headers)", batchStart, batchEnd,
-		batchEnd-batchStart+1)
+		"(%d headers)", batchStartHeight, batchEndHeight, headersRead)
 
-	return batchEnd, nil
+	return batchEndHeight, headersRead, nil
 }
 
 // Write block and filter headers to the target stores in a specific order to
