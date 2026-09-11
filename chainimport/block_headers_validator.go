@@ -132,8 +132,8 @@ func (v *blockHeadersImportSourceValidator) validateBoundary(
 	if start > 0 {
 		previous, err := v.blockHeadersImportSource.GetHeader(start - 1)
 		if err != nil {
-			return fmt.Errorf("failed to get preceding block header: %w",
-				err)
+			return fmt.Errorf("failed to get preceding block "+
+				"header: %w", err)
 		}
 
 		return v.ValidatePair(previous, current)
@@ -141,7 +141,8 @@ func (v *blockHeadersImportSourceValidator) validateBoundary(
 
 	metadata, err := v.blockHeadersImportSource.GetHeaderMetadata()
 	if err != nil {
-		return fmt.Errorf("failed to get block header metadata: %w", err)
+		return fmt.Errorf("failed to get block header metadata: %w",
+			err)
 	}
 
 	if metadata.startHeight == 0 {
@@ -152,9 +153,9 @@ func (v *blockHeadersImportSourceValidator) validateBoundary(
 
 		firstHash := first.BlockHash()
 		if !firstHash.IsEqual(v.targetChainParams.GenesisHash) {
-			return fmt.Errorf("block header at height 0 does not match "+
-				"network genesis: got %v, want %v", firstHash,
-				v.targetChainParams.GenesisHash)
+			return fmt.Errorf("block header at height 0 does not "+
+				"match network genesis: got %v, want %v",
+				firstHash, v.targetChainParams.GenesisHash)
 		}
 
 		return v.ValidateSingle(current)
@@ -168,8 +169,8 @@ func (v *blockHeadersImportSourceValidator) validateBoundary(
 		previousHeight,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to get target block header at height "+
-			"%d: %w", previousHeight, err)
+		return fmt.Errorf("failed to get target block header at "+
+			"height %d: %w", previousHeight, err)
 	}
 
 	return v.ValidatePair(&blockHeader{
@@ -240,7 +241,8 @@ func (v *blockHeadersImportSourceValidator) ValidatePair(prev,
 	}
 
 	if err := blockchain.CheckBlockHeaderContext(
-		currBlockHeader.BlockHeader, parentCtx, v.flags, chainCtx, false,
+		currBlockHeader.BlockHeader, parentCtx, v.flags, chainCtx,
+		false,
 	); err != nil {
 		return fmt.Errorf("block header contextual validation "+
 			"failed: %w", err)

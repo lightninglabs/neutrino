@@ -33,8 +33,9 @@ func newFilterHeadersImportSourceValidator(
 
 // Validate checks imported filter headers against hardcoded checkpoints. This
 // detects a known mismatch, but doesn't authenticate entries between
-// checkpoints. The importer therefore doesn't write these values to the filter
-// header store.
+// checkpoints. Importing filter headers therefore trusts the configured source
+// for those entries. Compact filters fetched later are still checked against
+// the imported filter-header commitments before use.
 //
 // The validation utilizes the existing checkpointing mechanism based on the
 // hardcoded filter headers at different checkpoints. Individual headers are
