@@ -26,6 +26,7 @@ import (
 type mockChainSource struct {
 	ntfnChan       chan blockntfns.BlockNtfn
 	filtersQueried chan chainhash.Hash
+	blocksQueried  chan chainhash.Hash
 
 	mu                    sync.Mutex // all fields below are protected
 	bestBlock             headerfs.BlockStamp
@@ -33,6 +34,7 @@ type mockChainSource struct {
 	blockHashesByHeight   map[uint32]*chainhash.Hash
 	blockHeaders          map[chainhash.Hash]*wire.BlockHeader
 	blocks                map[chainhash.Hash]*btcutil.Block
+	failGetBlock          bool // if true, returns nil block in GetBlock
 	failGetFilter         bool // if true, returns nil filter in GetCFilter
 	filters               map[chainhash.Hash]*gcs.Filter
 	filterHeadersByHeight map[uint32]*chainhash.Hash
@@ -46,6 +48,7 @@ func newMockChainSource(numBlocks int) *mockChainSource {
 	chain := &mockChainSource{
 		ntfnChan:       make(chan blockntfns.BlockNtfn),
 		filtersQueried: make(chan chainhash.Hash),
+		blocksQueried:  make(chan chainhash.Hash),
 
 		blockHeightIndex:      make(map[chainhash.Hash]uint32),
 		blockHashesByHeight:   make(map[uint32]*chainhash.Hash),
@@ -85,20 +88,33 @@ func newMockChainSource(numBlocks int) *mockChainSource {
 // addNewBlock advances the chain by one block. The notify boolean can be used
 // to notify the new block.
 func (c *mockChainSource) addNewBlock(notify bool) headerfs.BlockStamp {
+	return c.addNewBlockWithHeader(c.nextHeader(), notify)
+}
+
+// addNewBlockMatching advances the chain by one block whose filter matches the
+// given script, such that the rescan must fetch the block to process it. The
+// notify boolean can be used to notify the new block.
+func (c *mockChainSource) addNewBlockMatching(script []byte,
+	notify bool) headerfs.BlockStamp {
+
+	return c.addNewBlockWithHeaderAndScript(c.nextHeader(), script, notify)
+}
+
+// nextHeader returns a header for the block that would follow the current best
+// block.
+func (c *mockChainSource) nextHeader() *wire.BlockHeader {
 	c.mu.Lock()
 	newHeight := uint32(c.bestBlock.Height + 1)
 	prevHash := c.bestBlock.Hash
 	c.mu.Unlock()
 
 	genesisTimestamp := c.ChainParams().GenesisBlock.Header.Timestamp
-	header := &wire.BlockHeader{
+	return &wire.BlockHeader{
 		PrevBlock: prevHash,
 		Timestamp: genesisTimestamp.Add(
 			time.Duration(newHeight) * 10 * time.Minute,
 		),
 	}
-
-	return c.addNewBlockWithHeader(header, notify)
 }
 
 // addNewBlock advances the chain by one block with the given header. The notify
@@ -109,6 +125,20 @@ func (c *mockChainSource) addNewBlock(notify bool) headerfs.BlockStamp {
 func (c *mockChainSource) addNewBlockWithHeader(header *wire.BlockHeader,
 	notify bool) headerfs.BlockStamp {
 
+	return c.addNewBlockWithHeaderAndScript(header, nil, notify)
+}
+
+// addNewBlockWithHeaderAndScript advances the chain by one block with the given
+// header. If a script is provided, the block's filter is built to match it,
+// otherwise the filter is empty. The notify boolean can be used to notify the
+// new block.
+//
+// NOTE: The header's PrevBlock should properly point to the best block in the
+// chain.
+func (c *mockChainSource) addNewBlockWithHeaderAndScript(
+	header *wire.BlockHeader, script []byte,
+	notify bool) headerfs.BlockStamp {
+
 	c.mu.Lock()
 	newHeight := uint32(c.bestBlock.Height + 1)
 	newHash := header.BlockHash()
@@ -117,7 +147,15 @@ func (c *mockChainSource) addNewBlockWithHeader(header *wire.BlockHeader,
 	c.blockHeaders[newHash] = header
 	c.blocks[newHash] = btcutil.NewBlock(wire.NewMsgBlock(header))
 
-	newFilter, _ := gcs.FromBytes(0, builder.DefaultP, builder.DefaultM, nil)
+	var newFilter *gcs.Filter
+	if script != nil {
+		newFilter, _ = builder.WithKeyHash(&newHash).AddEntry(script).
+			Build()
+	} else {
+		newFilter, _ = gcs.FromBytes(
+			0, builder.DefaultP, builder.DefaultM, nil,
+		)
+	}
 	c.filters[newHash] = newFilter
 
 	newFilterHeader, _ := builder.MakeHeaderForFilter(
@@ -240,8 +278,16 @@ func (c *mockChainSource) GetBlockHeader(
 func (c *mockChainSource) GetBlock(hash chainhash.Hash,
 	_ ...QueryOption) (*btcutil.Block, error) {
 
+	defer func() {
+		c.blocksQueried <- hash
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.failGetBlock {
+		return nil, errors.New("failed block")
+	}
 
 	block, ok := c.blocks[hash]
 	if !ok {
@@ -263,6 +309,13 @@ func (c *mockChainSource) GetFilterHeaderByHeight(
 		return nil, errors.New("filter header not found")
 	}
 	return filterHeader, nil
+}
+
+// setFailGetBlock sets the failGetBlock flag.
+func (c *mockChainSource) setFailGetBlock(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failGetBlock = b
 }
 
 // setFailGetFilter determines whether we should fail to retrieve for a block.
@@ -451,6 +504,8 @@ func (ctx *rescanTestContext) stop() {
 		ctx.t.Fatalf("received unexpected block disconnected after shutdown")
 	case <-ctx.chain.filtersQueried:
 		ctx.t.Fatalf("received unexpected filter query after shutdown")
+	case <-ctx.chain.blocksQueried:
+		ctx.t.Fatalf("received unexpected block query after shutdown")
 	default:
 	}
 }
@@ -487,6 +542,117 @@ func (ctx *rescanTestContext) assertFilterQueried(hash chainhash.Hash) {
 		}
 	case <-time.After(time.Second):
 		ctx.t.Fatal("expected rescan to query for filter")
+	}
+}
+
+// assertBlockQueried asserts that the block with the given hash was queried
+// for.
+func (ctx *rescanTestContext) assertBlockQueried(hash chainhash.Hash) {
+	ctx.t.Helper()
+
+	select {
+	case hashQueried := <-ctx.chain.blocksQueried:
+		if !hashQueried.IsEqual(&hash) {
+			ctx.t.Fatalf("expected to query block %v, got %v",
+				hash, hashQueried)
+		}
+	case <-time.After(time.Second):
+		ctx.t.Fatal("expected rescan to query for block")
+	}
+}
+
+// assertRunning asserts that the rescan has not exited.
+func (ctx *rescanTestContext) assertRunning() {
+	ctx.t.Helper()
+
+	select {
+	case err := <-ctx.errChan:
+		ctx.t.Fatalf("rescan exited unexpectedly: %v", err)
+	default:
+	}
+}
+
+// updateWhileRetrying sends an update to the rescan while it is retrying the
+// block with the given hash. Any filter or block queries issued by the rescan
+// in the meantime are serviced so that the update is guaranteed to be
+// delivered without deadlocking the mock chain.
+func (ctx *rescanTestContext) updateWhileRetrying(hash chainhash.Hash,
+	options ...UpdateOption) {
+
+	ctx.t.Helper()
+
+	updateErr := make(chan error, 1)
+	go func() {
+		updateErr <- ctx.rescan.Update(options...)
+	}()
+
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case err := <-updateErr:
+			if err != nil {
+				ctx.t.Fatalf("unable to update rescan while "+
+					"retrying block: %v", err)
+			}
+			return
+
+		case hashQueried := <-ctx.chain.filtersQueried:
+			if !hashQueried.IsEqual(&hash) {
+				ctx.t.Fatalf("expected to query filter %v, "+
+					"got %v", hash, hashQueried)
+			}
+
+		case hashQueried := <-ctx.chain.blocksQueried:
+			if !hashQueried.IsEqual(&hash) {
+				ctx.t.Fatalf("expected to query block %v, "+
+					"got %v", hash, hashQueried)
+			}
+
+		case <-timeout:
+			ctx.t.Fatal("expected update to be applied while " +
+				"retrying block")
+		}
+	}
+}
+
+// recvBlockConnectedAfterRetries expects a block connected notification for
+// the given block, servicing any filter or block queries the rescan issues
+// for it in the meantime. This is useful once a previously failing fetch has
+// been allowed to succeed, as the exact number of retries in flight is not
+// deterministic.
+func (ctx *rescanTestContext) recvBlockConnectedAfterRetries(
+	block headerfs.BlockStamp) {
+
+	ctx.t.Helper()
+
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case recvBlock := <-ctx.blocksConnected:
+			if !reflect.DeepEqual(recvBlock, block) {
+				ctx.t.Fatalf("expected block connected "+
+					"notification for %v, got %v",
+					spew.Sdump(block),
+					spew.Sdump(recvBlock))
+			}
+			return
+
+		case hashQueried := <-ctx.chain.filtersQueried:
+			if !hashQueried.IsEqual(&block.Hash) {
+				ctx.t.Fatalf("expected to query filter %v, "+
+					"got %v", block.Hash, hashQueried)
+			}
+
+		case hashQueried := <-ctx.chain.blocksQueried:
+			if !hashQueried.IsEqual(&block.Hash) {
+				ctx.t.Fatalf("expected to query block %v, "+
+					"got %v", block.Hash, hashQueried)
+			}
+
+		case <-timeout:
+			ctx.t.Fatalf("expected to receive block connected "+
+				"notification for %v", spew.Sdump(block))
+		}
 	}
 }
 
@@ -665,4 +831,143 @@ func TestRescanRetryBlocksAfterCatchingUp(t *testing.T) {
 	ctx.recvBlockConnected(block2)
 	ctx.assertFilterQueried(block3.Hash)
 	ctx.recvBlockConnected(block3)
+}
+
+// testWatchScript is a script watched by the rescan in tests that need blocks
+// whose filters match, forcing the rescan to fetch the block itself.
+var testWatchScript = []byte{0x51} // OP_TRUE
+
+// TestRescanRetryBlockFetchWhenCurrent ensures that a failure to fetch a
+// matching block while the rescan is current with the chain results in the
+// block being retried rather than the rescan terminating.
+func TestRescanRetryBlockFetchWhenCurrent(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve blocks.
+	ctx.chain.setFailGetBlock(true)
+
+	// A new block matching our watch list should have its filter and then
+	// its block queried. As the block fetch fails, the rescan should keep
+	// retrying the block.
+	block := ctx.chain.addNewBlockMatching(testWatchScript, true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertBlockQueried(block.Hash)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertBlockQueried(block.Hash)
+	ctx.assertRunning()
+
+	// Updates must still be applied while the block is being retried, as
+	// wallets rely on this to register new addresses.
+	ctx.updateWhileRetrying(block.Hash, AddInputs(InputWithScript{}))
+
+	// Revert the mocked chain so that blocks can be retrieved successfully.
+	// The block should then be notified.
+	ctx.chain.setFailGetBlock(false)
+	ctx.recvBlockConnectedAfterRetries(block)
+
+	// Subsequent blocks should be processed as usual.
+	block2 := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block2.Hash)
+	ctx.recvBlockConnected(block2)
+
+	ctx.assertRunning()
+	if err := ctx.rescan.Update(AddInputs(InputWithScript{})); err != nil {
+		t.Fatalf("unable to update rescan: %v", err)
+	}
+}
+
+// TestRescanRetryBlockFetchWhileCatchingUp ensures that a failure to fetch a
+// matching block while the rescan is catching up with the chain results in the
+// block being retried rather than the rescan terminating.
+func TestRescanRetryBlockFetchWhileCatchingUp(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{PkScript: testWatchScript}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve blocks.
+	ctx.chain.setFailGetBlock(true)
+
+	// We'll add a matching block without notifying it and instead notify
+	// an invalid block, which should prompt the rescan to catch up with
+	// the chain manually.
+	block := ctx.chain.addNewBlockMatching(testWatchScript, false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+
+	// While catching up, the block's filter and then the block itself
+	// should be queried. As the block fetch fails, the rescan should keep
+	// retrying the block.
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertBlockQueried(block.Hash)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertBlockQueried(block.Hash)
+	ctx.assertRunning()
+
+	// Updates must still be applied while the block is being retried, as
+	// wallets rely on this to register new addresses.
+	ctx.updateWhileRetrying(block.Hash, AddInputs(InputWithScript{}))
+
+	// Revert the mocked chain so that blocks can be retrieved successfully.
+	// The block should then be notified.
+	ctx.chain.setFailGetBlock(false)
+	ctx.recvBlockConnectedAfterRetries(block)
+
+	ctx.assertRunning()
+	if err := ctx.rescan.Update(AddInputs(InputWithScript{})); err != nil {
+		t.Fatalf("unable to update rescan: %v", err)
+	}
+}
+
+// TestRescanRetryFilterFetchWhileCatchingUp ensures that a failure to fetch a
+// block's filter while the rescan is catching up with the chain results in the
+// block being retried rather than the rescan terminating.
+func TestRescanRetryFilterFetchWhileCatchingUp(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+	defer ctx.stop()
+
+	// Modify the mocked chain such that it fails to retrieve block filters.
+	ctx.chain.setFailGetFilter(true)
+
+	// We'll add a block without notifying it and instead notify an invalid
+	// block, which should prompt the rescan to catch up with the chain
+	// manually.
+	block := ctx.chain.addNewBlock(false)
+	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, 0,
+	)
+
+	// While catching up, the block's filter should be queried until it
+	// succeeds.
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertRunning()
+
+	// Revert the mocked chain so that block filters can be retrieved
+	// successfully. The block should then be notified.
+	ctx.chain.setFailGetFilter(false)
+	ctx.recvBlockConnectedAfterRetries(block)
+
+	ctx.assertRunning()
+	if err := ctx.rescan.Update(AddInputs(InputWithScript{})); err != nil {
+		t.Fatalf("unable to update rescan: %v", err)
+	}
 }
