@@ -11,6 +11,27 @@ for compact block filters to minimize bandwidth and storage use on the client
 side, while attempting to preserve privacy and minimize processor load on full
 nodes serving light clients.
 
+## Building from source
+
+Building Neutrino requires Go 1.25.11 or later. Clone the repository, enter its
+directory, and compile the packages:
+
+```sh
+git clone https://github.com/lightninglabs/neutrino.git
+cd neutrino
+go build ./...
+```
+
+Go downloads module dependencies automatically. Neutrino is a library: `go build
+./...` compiles and checks its packages rather than producing one standalone
+application binary.
+
+Run the test suite with:
+
+```sh
+go test ./...
+```
+
 ## Mechanism of operation
 The light client synchronizes only block headers and a chain of compact block
 filter headers specifying the correct filters for each block. Filters are loaded
