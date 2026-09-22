@@ -1,6 +1,7 @@
 package banman
 
 import (
+	"errors"
 	"net"
 	"reflect"
 	"testing"
@@ -16,6 +17,7 @@ func TestParseIPNet(t *testing.T) {
 		addr   string
 		mask   net.IPMask
 		result *net.IPNet
+		err    error
 	}{
 		{
 			name: "ipv4 with default mask",
@@ -53,6 +55,12 @@ func TestParseIPNet(t *testing.T) {
 				Mask: net.CIDRMask(32, 128),
 			},
 		},
+		{
+			name: "onion address with port",
+			addr: "52kldxh5vexi3gmwnbfwoa5ixx65icsuceattoqc2szohowfib" +
+				"zruyid.onion:8333",
+			err: ErrUnsupportedIP,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -60,6 +68,13 @@ func TestParseIPNet(t *testing.T) {
 			// Parse the IP network from each test's address and
 			// mask.
 			ipNet, err := ParseIPNet(testCase.addr, testCase.mask)
+			if testCase.err != nil {
+				if !errors.Is(err, testCase.err) {
+					t.Fatalf("expected error %v, got %v",
+						testCase.err, err)
+				}
+				return
+			}
 			if testCase.result != nil && err != nil {
 				t.Fatalf("unable to parse IP network for "+
 					"addr=%v and mask=%v: %v",
