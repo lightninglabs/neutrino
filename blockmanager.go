@@ -211,9 +211,18 @@ type blockManager struct { // nolint:maligned
 // newBlockManager returns a new bitcoin block manager.  Use Start to begin
 // processing asynchronous block and inv updates.
 func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
-	targetTimespan := int64(cfg.ChainParams.TargetTimespan / time.Second)
-	targetTimePerBlock := int64(cfg.ChainParams.TargetTimePerBlock / time.Second)
-	adjustmentFactor := cfg.ChainParams.RetargetAdjustmentFactor
+	retarget, err := chainsync.NewRetarget(cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create block manager: %w",
+			err)
+	}
+
+	// Surface the derived values once, since they are the first thing to
+	// check when a custom network fails to sync.
+	log.Debugf("Retarget parameters: blocks_per_retarget=%d, "+
+		"min_timespan=%ds, max_timespan=%ds",
+		retarget.BlocksPerRetarget, retarget.MinRetargetTimespan,
+		retarget.MaxRetargetTimespan)
 
 	bm := blockManager{
 		cfg:           cfg,
@@ -232,9 +241,9 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 			numMaxMemHeaders,
 		),
 		quit:                make(chan struct{}),
-		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
-		minRetargetTimespan: targetTimespan / adjustmentFactor,
-		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		blocksPerRetarget:   retarget.BlocksPerRetarget,
+		minRetargetTimespan: retarget.MinRetargetTimespan,
+		maxRetargetTimespan: retarget.MaxRetargetTimespan,
 	}
 
 	// Next we'll create the two signals that goroutines will use to wait

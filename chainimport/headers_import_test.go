@@ -433,7 +433,8 @@ func TestImportOperationOnHTTPHeaderSource(t *testing.T) {
 					ValidationFlags:         flags,
 				}
 
-				bV := ops.createBlockHeaderValidator(bS)
+				bV, vErr := ops.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := ops.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -1424,10 +1425,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 		{
 			name: "MissingFilterHeaderValidator",
 			prep: func() prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				headersImport := &headersImport{
 					options:                   opts,
 					blockHeadersImportSource:  bS,
@@ -1448,10 +1453,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 		{
 			name: "ErrorOnBlockFileNotExist",
 			prep: func() prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 				filePath := "/path/to/nonexistent/file"
 				bS.SetURI(filePath)
@@ -1486,10 +1495,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					}
 				}
 
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
@@ -1533,10 +1546,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					}
 				}
 
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(blockFile.Name())
@@ -1588,10 +1605,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					}
 				}
 
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
@@ -1643,10 +1664,14 @@ func TestOpenFileHeaderImportSources(t *testing.T) {
 					}
 				}
 
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
 				fS := opts.createFilterHeaderImportSrc()
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				bS.SetURI(bFile.Name())
@@ -1771,7 +1796,9 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 				}
 				mockHTTPClient.On("Get", fRS).Return(res, nil)
 
+				params := chaincfg.SimNetParams
 				opts := &ImportOptions{
+					TargetChainParams:   params,
 					BlockHeadersSource:  bRS,
 					FilterHeadersSource: fRS,
 				}
@@ -1783,7 +1810,8 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					fRS, mockHTTPClient,
 					&mockHeaderImportSource{},
 				)
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -1835,7 +1863,9 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					filterRes, nil,
 				)
 
+				params := chaincfg.SimNetParams
 				opts := &ImportOptions{
+					TargetChainParams:   params,
 					BlockHeadersSource:  bRS,
 					FilterHeadersSource: fRS,
 				}
@@ -1847,7 +1877,8 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					fRS, mockHTTPClient,
 					&mockHeaderImportSource{},
 				)
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -1898,7 +1929,9 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 				bIS.On("Open").Return(nil)
 				bIS.On("SetURI", mock.Anything).Return()
 
+				params := chaincfg.SimNetParams
 				opts := &ImportOptions{
+					TargetChainParams:   params,
 					BlockHeadersSource:  bRS,
 					FilterHeadersSource: fRS,
 				}
@@ -1913,7 +1946,8 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					os.Remove(bS.uri)
 				}
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -1967,7 +2001,9 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 				bIS.On("Open").Return(nil)
 				bIS.On("SetURI", mock.Anything).Return()
 
+				params := chaincfg.SimNetParams
 				opts := &ImportOptions{
+					TargetChainParams:   params,
 					BlockHeadersSource:  bRS,
 					FilterHeadersSource: fRS,
 				}
@@ -1982,7 +2018,8 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					os.Remove(bS.uri)
 				}
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -2044,7 +2081,9 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 				fIS.On("Open").Return(nil)
 				fIS.On("SetURI", mock.Anything).Return()
 
+				params := chaincfg.SimNetParams
 				opts := &ImportOptions{
+					TargetChainParams:   params,
 					BlockHeadersSource:  bRS,
 					FilterHeadersSource: fRS,
 				}
@@ -2061,7 +2100,8 @@ func TestOpenHTTPHeaderImportSources(t *testing.T) {
 					os.Remove(bS.uri)
 				}
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				fV := opts.createFilterHeaderValidator()
 
 				headersImport := &headersImport{
@@ -4266,9 +4306,13 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 			name: "ErrorOnMismatchPreviousHeaderType",
 			tCP:  chaincfg.Params{},
 			prep: func(chaincfg.Params) prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				return prep{
 					hValidator: bHV,
 					prev:       newFilterHeader(),
@@ -4283,9 +4327,13 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 			name: "ErrorOnMismatchCurrentHeaderType",
 			tCP:  chaincfg.Params{},
 			prep: func(chaincfg.Params) prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 				return prep{
 					hValidator: bHV,
 					prev:       newBlockHeader(),
@@ -4300,9 +4348,13 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 			name: "ErrorOnNonConsecutiveHeaderChain",
 			tCP:  chaincfg.Params{},
 			prep: func(chaincfg.Params) prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4337,9 +4389,13 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 			name: "ErrorOnInvalidHeaderHashChain",
 			tCP:  chaincfg.Params{},
 			prep: func(chaincfg.Params) prep {
-				opts := &ImportOptions{}
+				params := chaincfg.SimNetParams
+				opts := &ImportOptions{
+					TargetChainParams: params,
+				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				originH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4389,7 +4445,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					TargetChainParams: tCP,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4446,7 +4503,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					ValidationFlags:   blockchain.BFFastAdd,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4487,7 +4545,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					ValidationFlags:   blockchain.BFFastAdd,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4532,7 +4591,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					ValidationFlags:   blockchain.BFFastAdd,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4582,7 +4642,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					ValidationFlags:   blockchain.BFFastAdd,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4622,7 +4683,8 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 					ValidationFlags:   blockchain.BFFastAdd,
 				}
 				bS := opts.createBlockHeaderImportSrc()
-				bHV := opts.createBlockHeaderValidator(bS)
+				bHV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				prevH, err := constructBlkHdr(
 					blockHdrs[0], uint32(0),
@@ -4865,14 +4927,15 @@ func TestValidatePairWithNonMonotonicTimestamps(t *testing.T) {
 
 	// Validate with BFNone (no BFFastAdd) -- this exercises the median
 	// time check in CheckBlockHeaderContext that previously failed.
-	validator := newBlockHeadersImportSourceValidator(
+	validator, err := newBlockHeadersImportSourceValidator(
 		chaincfg.SimNetParams, mockStore,
 		blockchain.BFNone, mockSource,
 	)
+	require.NoError(t, err)
 
 	// The pair (header[13], header[14]) should pass: header[14] has a
 	// timestamp before header[13] but after the median of headers[3..13].
-	err := validator.ValidatePair(
+	err = validator.ValidatePair(
 		headers[numHeaders-2], headers[numHeaders-1],
 	)
 	require.NoError(t, err, "ValidatePair should accept a block whose "+
@@ -5056,7 +5119,8 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 					defaultWriteBatchSizePerRegion,
 				)
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				return prep{
 					iterator:  bIterator,
@@ -5109,7 +5173,8 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 					defaultWriteBatchSizePerRegion,
 				)
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				return prep{
 					iterator:  bIterator,
@@ -5165,7 +5230,8 @@ func TestHeaderValidationOnSequentialBlockHeaders(t *testing.T) {
 					defaultWriteBatchSizePerRegion,
 				)
 
-				bV := opts.createBlockHeaderValidator(bS)
+				bV, vErr := opts.createBlockHeaderValidator(bS)
+				require.NoError(t, vErr)
 
 				return prep{
 					iterator:  bIt,
