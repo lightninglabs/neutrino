@@ -57,8 +57,8 @@ func TestParseIPNet(t *testing.T) {
 		},
 		{
 			name: "onion address with port",
-			addr: "52kldxh5vexi3gmwnbfwoa5ixx65icsuceattoqc2szohowfib" +
-				"zruyid.onion:8333",
+			addr: "52kldxh5vexi3gmwnbfwoa5ixx65icsuceattoqc2szoh" +
+				"owfibzruyid.onion:8333",
 			err: ErrUnsupportedIP,
 		},
 	}
