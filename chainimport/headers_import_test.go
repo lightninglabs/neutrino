@@ -106,9 +106,9 @@ func TestHeadersConjunctionProperty(t *testing.T) {
 	}
 }
 
-// TestImportOperationOnFileHeaderSource tests the import operation on a file
-// header source. It checks that the import is successful and that the headers
-// are written to the target header stores.
+// TestImportOperationOnFileHeaderSource tests the import operation on file
+// header sources. It checks that the block and filter headers are written to
+// their target stores.
 func TestImportOperationOnFileHeaderSource(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -253,6 +253,22 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 				require.Equal(
 					v.tc, 0, v.importResult.SkippedCount,
 				)
+
+				blockStore := ops.TargetBlockHeaderStore
+				_, blockHeight, err := blockStore.ChainTip()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, uint32(len(blockHdrs)-1),
+					blockHeight,
+				)
+
+				_, filterHeight, err :=
+					ops.TargetFilterHeaderStore.ChainTip()
+				require.NoError(v.tc, err)
+				require.Equal(
+					v.tc, uint32(len(filterHdrs)-1),
+					filterHeight,
+				)
 			},
 		},
 	}
@@ -279,6 +295,157 @@ func TestImportOperationOnFileHeaderSource(t *testing.T) {
 			require.NoError(t, err)
 			tc.verify(verify)
 		})
+	}
+}
+
+// TestImportOperationFromNonZeroHeight verifies that absolute target heights
+// are translated to zero-based import-source indices while both header stores
+// are extended.
+func TestImportOperationFromNonZeroHeight(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := walletdb.Create(
+		"bdb", dbPath, true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	blockStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	const startHeight = uint32(1)
+	blockFile, cleanupBlockFile, err := setupFileWithHdrsAtHeight(
+		headerfs.Block, startHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupBlockFile)
+	blockPath := blockFile.Name()
+	require.NoError(t, blockFile.Close())
+
+	filterFile, cleanupFilterFile, err := setupFileWithHdrsAtHeight(
+		headerfs.RegularFilter, startHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupFilterFile)
+	filterPath := filterFile.Name()
+	require.NoError(t, filterFile.Close())
+
+	importer, err := NewHeadersImport(&ImportOptions{
+		TargetChainParams:       chaincfg.SimNetParams,
+		TargetBlockHeaderStore:  blockStore,
+		TargetFilterHeaderStore: filterStore,
+		BlockHeadersSource:      blockPath,
+		FilterHeadersSource:     filterPath,
+		WriteBatchSizePerRegion: 2,
+		ValidationFlags:         blockchain.BFFastAdd,
+	})
+	require.NoError(t, err)
+
+	result, err := importer.Import(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, len(blockHdrs)-1, result.AddedCount)
+	require.Equal(t, len(blockHdrs)-1, result.ProcessedCount)
+
+	_, blockTip, err := blockStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(blockHdrs)-1), blockTip)
+
+	_, filterTip, err := filterStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(filterHdrs)-1), filterTip)
+}
+
+// TestFilterOnlyImportStopsBeforeBlockTip verifies that a partial filter-only
+// import uses the block hash at the end of each write batch for the filter
+// store tip.
+func TestFilterOnlyImportStopsBeforeBlockTip(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+	db, err := walletdb.Create(
+		"bdb", dbPath, true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	blockStore, err := headerfs.NewBlockHeaderStore(
+		tempDir, db, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewFilterHeaderStore(
+		tempDir, db, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	blockHeaders := make([]headerfs.BlockHeader, 0, len(blockHdrs)-1)
+	for height := uint32(1); height < uint32(len(blockHdrs)); height++ {
+		header, err := constructBlkHdr(blockHdrs[height], height)
+		require.NoError(t, err)
+		blockHeaders = append(blockHeaders, header.BlockHeader)
+	}
+	require.NoError(t, blockStore.WriteHeaders(blockHeaders...))
+
+	const (
+		startHeight = uint32(1)
+		endHeight   = uint32(3)
+	)
+	blockFile, cleanupBlockFile, err := setupFileWithHdrsRange(
+		headerfs.Block, startHeight, endHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupBlockFile)
+	blockPath := blockFile.Name()
+	require.NoError(t, blockFile.Close())
+
+	filterFile, cleanupFilterFile, err := setupFileWithHdrsRange(
+		headerfs.RegularFilter, startHeight, endHeight,
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanupFilterFile)
+	filterPath := filterFile.Name()
+	require.NoError(t, filterFile.Close())
+
+	importer, err := NewHeadersImport(&ImportOptions{
+		TargetChainParams:       chaincfg.SimNetParams,
+		TargetBlockHeaderStore:  blockStore,
+		TargetFilterHeaderStore: filterStore,
+		BlockHeadersSource:      blockPath,
+		FilterHeadersSource:     filterPath,
+		WriteBatchSizePerRegion: 2,
+		ValidationFlags:         blockchain.BFFastAdd,
+	})
+	require.NoError(t, err)
+
+	result, err := importer.Import(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int(endHeight), result.AddedCount)
+	require.Equal(t, int(endHeight), result.ProcessedCount)
+
+	_, filterTip, err := filterStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, endHeight, filterTip)
+
+	for height := startHeight; height <= endHeight; height++ {
+		expected, err := constructFilterHdr(filterHdrs[height], height)
+		require.NoError(t, err)
+		actual, err := filterStore.FetchHeaderByHeight(height)
+		require.NoError(t, err)
+		require.Equal(t, expected.FilterHash, *actual)
 	}
 }
 
@@ -4674,6 +4841,108 @@ func TestHeaderValidationOnBlockHeadersPair(t *testing.T) {
 	}
 }
 
+// TestBlockHeaderImportBoundaryValidation verifies that the first header in an
+// import range is subject to the same proof-of-work, difficulty, and checkpoint
+// rules as every subsequent header.
+func TestBlockHeaderImportBoundaryValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first batch header proof of work", func(t *testing.T) {
+		first, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		second, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+
+		first.Bits = 0x03000001
+		firstHash := first.BlockHash()
+		second.PrevBlock = firstHash
+
+		validator := &blockHeadersImportSourceValidator{
+			targetChainParams: chaincfg.SimNetParams,
+			flags:             blockchain.BFFastAdd,
+		}
+		err = validator.ValidateBatch([]Header{first, second})
+		require.ErrorContains(t, err, "validation failed at batch "+
+			"position 0: block hash")
+	})
+
+	t.Run("first source header difficulty", func(t *testing.T) {
+		genesis, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		first, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+		first.Bits = 0x1f00ffff
+
+		validator := boundaryTestValidator(
+			t, chaincfg.SimNetParams, blockchain.BFNone, genesis,
+			first,
+		)
+		err = validator.Validate(t.Context(),
+			validator.blockHeadersImportSource.Iterator(0, 0, 1))
+		require.ErrorContains(t, err, "block difficulty")
+	})
+
+	t.Run("first source header checkpoint", func(t *testing.T) {
+		genesis, err := constructBlkHdr(blockHdrs[0], 0)
+		require.NoError(t, err)
+		first, err := constructBlkHdr(blockHdrs[1], 1)
+		require.NoError(t, err)
+
+		params := chaincfg.SimNetParams
+		wrongHash := chainhash.Hash{1}
+		params.Checkpoints = []chaincfg.Checkpoint{{
+			Height: 1,
+			Hash:   &wrongHash,
+		}}
+
+		validator := boundaryTestValidator(
+			t, params, blockchain.BFFastAdd, genesis, first,
+		)
+		err = validator.Validate(t.Context(),
+			validator.blockHeadersImportSource.Iterator(0, 0, 1))
+		require.ErrorContains(t, err, "does not match checkpoint hash")
+	})
+}
+
+// boundaryTestValidator constructs a validator whose source begins at height
+// one and whose target store contains the source header's parent.
+func boundaryTestValidator(t *testing.T, params chaincfg.Params,
+	flags blockchain.BehaviorFlags, parent,
+	first *blockHeader) *blockHeadersImportSourceValidator {
+
+	t.Helper()
+
+	source := &mockHeaderImportSource{}
+	source.On("GetHeaderMetadata").Return(&headerMetadata{
+		importMetadata: &importMetadata{
+			startHeight: first.Height,
+		},
+		endHeight:    first.Height,
+		headersCount: 1,
+	}, nil)
+	source.On("GetHeader", uint32(0)).Return(first, nil)
+	source.On("Iterator", uint32(0), uint32(0), uint32(1)).Return(
+		&importSourceHeaderIterator{
+			source:     source,
+			startIndex: 0,
+			endIndex:   0,
+			batchSize:  1,
+		},
+	)
+
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("FetchHeaderByHeight", parent.Height).Return(
+		parent.BlockHeader.BlockHeader, nil,
+	)
+
+	return &blockHeadersImportSourceValidator{
+		targetChainParams:        params,
+		targetBlockHeaderStore:   store,
+		flags:                    flags,
+		blockHeadersImportSource: source,
+	}
+}
+
 // TestLightHeaderCtxParent tests that lightHeaderCtx.Parent() correctly
 // delegates to RelativeAncestorCtx(1) instead of returning nil. This is
 // critical for CalcPastMedianTime to compute the median of the last 11 blocks
@@ -5528,6 +5797,51 @@ func TestHeaderProcessing(t *testing.T) {
 			expectErr: true,
 			expectErrMsg: "failed to get filter header store " +
 				"chain tip",
+		},
+
+		{
+			name: "BlockExtensionStartsAfterLaggingFilterGap",
+			prep: func() prep {
+				hM := &headerMetadata{
+					importMetadata: &importMetadata{
+						startHeight: 161,
+					},
+					endHeight: 170,
+				}
+
+				hIS := &mockHeaderImportSource{}
+				hIS.On("GetHeaderMetadata").Return(hM, nil)
+
+				bHS := &headerfs.MockBlockHeaderStore{}
+				bHS.On("ChainTip").Return(
+					&wire.BlockHeader{}, uint32(160), nil,
+				)
+
+				fHS := &headerfs.MockFilterHeaderStore{}
+				fHS.On("ChainTip").Return(
+					&chainhash.Hash{}, uint32(150), nil,
+				)
+
+				return prep{hImport: &headersImport{
+					blockHeadersImportSource: hIS,
+					options: &ImportOptions{
+						TargetBlockHeaderStore:  bHS,
+						TargetFilterHeaderStore: fHS,
+					},
+				}}
+			},
+			verify: func(v verify) {
+				divergence := v.processingRegions.divergence
+				require.False(v.tc, divergence.exists)
+				require.Equal(v.tc, headerRegion{
+					start:  161,
+					end:    170,
+					exists: true,
+					syncModes: syncModes{
+						append: appendBlockOnly,
+					},
+				}, v.processingRegions.newHeaders)
+			},
 		},
 
 		// ⚠️ Divergent cases (B ≠ F), B & F start at same pos.
@@ -6670,6 +6984,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 				fIt.On("ReadBatch", in, in, in).Return(
 					nil, errors.New("I/O read error"),
 				)
+				fIt.On("GetEndIndex").Return(uint32(100))
+				fIt.On("GetBatchSize").Return(uint32(10))
 
 				fIS := &mockHeaderImportSource{}
 				fIS.On("Iterator", in, in, in).Return(fIt)
@@ -6885,9 +7201,8 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 					v.tc, 0, v.importResult.SkippedCount,
 				)
 
-				// Verify that we can retrieve the chain tip of
-				// the target filter header store. It helps in
-				// signaling a correct write op.
+				// Verify the filter store caught up through the
+				// imported range.
 				options := v.importOptions
 				tFS := options.TargetFilterHeaderStore
 				chainTipF, height, err := tFS.ChainTip()
@@ -7340,8 +7655,7 @@ func TestHeaderStorageOnDivergenceHeadersRegion(t *testing.T) {
 }
 
 // TestHeaderStorageOnNewHeadersRegion tests the header storage on the new
-// headers region. It checks that the headers are written correctly to the
-// target header stores.
+// headers region. It checks that headers are written to both target stores.
 func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -8003,6 +8317,44 @@ func TestHeaderStorageOnNewHeadersRegion(t *testing.T) {
 func setupFileWithHdrs(hT headerfs.HeaderType,
 	includeMetadata bool) (headerfs.File, func(), error) {
 
+	if !includeMetadata {
+		return setupFileWithHdrsFromHeight(hT, false, 0)
+	}
+
+	return setupFileWithHdrsAtHeight(hT, 0)
+}
+
+// setupFileWithHdrsAtHeight creates a temporary import file whose first header
+// has the specified absolute height.
+func setupFileWithHdrsAtHeight(hT headerfs.HeaderType,
+	startHeight uint32) (headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromHeight(hT, true, startHeight)
+}
+
+// setupFileWithHdrsRange creates a temporary import file containing the
+// inclusive header range.
+func setupFileWithHdrsRange(hT headerfs.HeaderType, startHeight,
+	endHeight uint32) (headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromRange(
+		hT, true, startHeight, endHeight,
+	)
+}
+
+func setupFileWithHdrsFromHeight(hT headerfs.HeaderType,
+	includeMetadata bool, startHeight uint32) (
+	headerfs.File, func(), error) {
+
+	return setupFileWithHdrsFromRange(
+		hT, includeMetadata, startHeight, uint32(len(blockHdrs)-1),
+	)
+}
+
+func setupFileWithHdrsFromRange(hT headerfs.HeaderType,
+	includeMetadata bool, startHeight, endHeight uint32) (
+	headerfs.File, func(), error) {
+
 	fileName := fmt.Sprintf("test-%s-*", hT)
 	tempFile, err := os.CreateTemp("", fileName)
 	cleanup := func() {
@@ -8024,9 +8376,18 @@ func setupFileWithHdrs(hT headerfs.HeaderType,
 		return nil, cleanup, fmt.Errorf("%s", hT)
 	}
 
+	if startHeight >= uint32(len(hdrsData)) {
+		return nil, cleanup, fmt.Errorf("start height %d exceeds %s "+
+			"test headers", startHeight, hT)
+	}
+	if endHeight < startHeight || endHeight >= uint32(len(hdrsData)) {
+		return nil, cleanup, fmt.Errorf("invalid end height %d for %s "+
+			"test headers", endHeight, hT)
+	}
+
 	if includeMetadata {
 		err = AddHeadersImportMetadata(
-			tempFile.Name(), wire.SimNet, 0, hT, 0,
+			tempFile.Name(), wire.SimNet, 0, hT, startHeight,
 		)
 		if err != nil {
 			return nil, cleanup, err
@@ -8043,7 +8404,7 @@ func setupFileWithHdrs(hT headerfs.HeaderType,
 		}
 	}
 
-	for _, hdrHex := range hdrsData {
+	for _, hdrHex := range hdrsData[startHeight : endHeight+1] {
 		hdrBytes, err := hex.DecodeString(hdrHex)
 		if err != nil {
 			return nil, cleanup, fmt.Errorf("failed to decode "+

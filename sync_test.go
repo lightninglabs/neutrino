@@ -1064,9 +1064,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // the necessary metadata.
 //
 // The first part of the test creates a new Neutrino instance that imports these
-// headers from files without connecting to any peers. It verifies that headers
-// are correctly imported and the chain is properly synchronized without network
-// assistance.
+// headers from files without connecting to any peers. It verifies that both
+// header stores reach the imported chain tip without network assistance.
 //
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
@@ -1200,10 +1199,11 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	importSvc, err := neutrino.NewChainService(importConfig)
 	require.NoError(t, err)
 
-	importSvc.Start(rootCtx)
+	err = importSvc.Start(rootCtx)
+	require.NoError(t, err)
 	defer importSvc.Stop()
 
-	// Ensure that neutrino initial synced using the imported headers.
+	// Ensure that Neutrino initially synced using the imported headers.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
@@ -1243,8 +1243,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	importSvcToBeSynced.Start(rootCtx)
 	defer importSvcToBeSynced.Stop()
 
-	// This test demonstrates that the service can successfully sync to the
-	// chain tip after the database has already been populated with headers.
+	// This test demonstrates that the service can continue both imported
+	// header chains once peers are available.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
