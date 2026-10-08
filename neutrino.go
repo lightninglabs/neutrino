@@ -27,6 +27,7 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/chainimport"
+	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -559,7 +560,10 @@ type Config struct {
 	// indexes of the chain.
 	Database walletdb.DB
 
-	// ChainParams is the chain that we're running on.
+	// ChainParams is the chain that we're running on. The retarget
+	// parameters must be whole seconds and otherwise usable for header
+	// validation, see chainsync.NewRetarget. NewChainService returns an
+	// error wrapping chainsync.ErrInvalidRetargetParams if they are not.
 	ChainParams chaincfg.Params
 
 	// ConnectPeers is a slice of hosts that should be connected to on
@@ -729,6 +733,14 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	// Reject invalid retarget parameters before creating header stores or
+	// other resources that would need cleanup on failure. The block manager
+	// derives the values again when it is created; this only fails early.
+	if _, err := chainsync.NewRetarget(cfg.ChainParams); err != nil {
+		return nil, fmt.Errorf("unable to create chain service: %w",
+			err)
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout

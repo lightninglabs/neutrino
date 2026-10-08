@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -17,6 +18,9 @@ type blockHeadersImportSourceValidator struct {
 	// targetChainParams contains the blockchain network parameters for
 	// validation against the target chain.
 	targetChainParams chaincfg.Params
+
+	// retarget contains the validated, derived difficulty parameters.
+	retarget chainsync.Retarget
 
 	// targetBlockHeaderStore is the destination store where validated
 	// headers will be written later in the import process.
@@ -35,18 +39,26 @@ type blockHeadersImportSourceValidator struct {
 var _ HeadersValidator = (*blockHeadersImportSourceValidator)(nil)
 
 // newBlockHeadersImportSourceValidator creates a new validator for block
-// headers import source.
+// headers import source. It fails if the retarget parameters of the target
+// chain cannot be used for header validation.
 func newBlockHeadersImportSourceValidator(targetChainParams chaincfg.Params,
 	targetBlockHeaderStore headerfs.BlockHeaderStore,
 	flags blockchain.BehaviorFlags,
-	blockHeadersImportSource HeaderImportSource) HeadersValidator {
+	blockHeadersImportSource HeaderImportSource) (HeadersValidator, error) {
+
+	retarget, err := chainsync.NewRetarget(targetChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create block header "+
+			"validator: %w", err)
+	}
 
 	return &blockHeadersImportSourceValidator{
 		targetChainParams:        targetChainParams,
+		retarget:                 retarget,
 		targetBlockHeaderStore:   targetBlockHeaderStore,
 		flags:                    flags,
 		blockHeadersImportSource: blockHeadersImportSource,
-	}
+	}, nil
 }
 
 // Validate performs thorough validation of a batch of block headers.
@@ -149,13 +161,10 @@ func (v *blockHeadersImportSourceValidator) ValidatePair(prev,
 	tCP := v.targetChainParams
 
 	chainCtx := &lightChainCtx{
-		params: &tCP,
-		blocksPerRetarget: int32(tCP.TargetTimespan.Seconds() /
-			tCP.TargetTimePerBlock.Seconds()),
-		minRetargetTimespan: int64(tCP.TargetTimespan.Seconds() /
-			float64(tCP.RetargetAdjustmentFactor)),
-		maxRetargetTimespan: int64(tCP.TargetTimespan.Seconds() *
-			float64(tCP.RetargetAdjustmentFactor)),
+		params:              &tCP,
+		blocksPerRetarget:   v.retarget.BlocksPerRetarget,
+		minRetargetTimespan: v.retarget.MinRetargetTimespan,
+		maxRetargetTimespan: v.retarget.MaxRetargetTimespan,
 	}
 
 	if err := blockchain.CheckBlockHeaderContext(
