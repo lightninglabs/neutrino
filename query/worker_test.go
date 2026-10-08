@@ -49,6 +49,10 @@ func (m *mockPeer) Addr() string {
 	return m.addr
 }
 
+func (m *mockPeer) SendPing() {
+	// Mock implementation - do nothing for tests
+}
+
 // makeJob returns a new query job that will be done when it is given the
 // finalResp message. Similarly it will progress on being given the
 // progressResp message, while any other message will be ignored.
