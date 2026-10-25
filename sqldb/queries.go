@@ -13,7 +13,7 @@ import (
 // interface (rather than the full Querier) so that mocks and test doubles
 // only need to implement the methods relevant to a given domain.
 //
-//nolint:interfacebloat // Both header chains share one atomic transaction boundary.
+//nolint:interfacebloat // Header chains share an atomic transaction boundary.
 type HeaderQueries interface {
 	// Block headers.
 	InsertBlockHeader(ctx context.Context,
