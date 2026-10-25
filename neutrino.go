@@ -822,9 +822,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// schema migrations and any registered legacy import) and inject the
 	// resulting per-domain TransactionExecutors into each store below.
 	if cfg.SQLConfig != nil {
+		var legacyMigration sqldb.MakeProgrammaticMigrations
+		if !cfg.SQLConfig.SkipLegacyMigration {
+			legacyMigration = sqldb.MakeLegacyImportMigration(
+				cfg.LegacyImport,
+			)
+		}
+
 		s.sqlBackend, err = sqldb.NewBackend(
-			cfg.DataDir, cfg.SQLConfig,
-			sqldb.MakeLegacyImportMigration(cfg.LegacyImport),
+			cfg.DataDir, cfg.SQLConfig, legacyMigration,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to open SQL "+

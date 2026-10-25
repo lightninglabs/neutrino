@@ -1,7 +1,6 @@
 package neutrino_test
 
 import (
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,11 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/sqldb"
 )
 
-// TestNewChainServiceSQLValidation verifies the mutual-exclusion rule
-// between Config.Database and Config.SQLConfig.
+// TestNewChainServiceSQLValidation verifies the mutual-exclusion rule between
+// Config.Database and Config.SQLConfig.
 func TestNewChainServiceSQLValidation(t *testing.T) {
 	t.Parallel()
 
@@ -68,10 +68,10 @@ func TestNewChainServiceSQLPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cs)
 	// NOTE: We deliberately do NOT call cs.Stop() here. The legacy
-	// ChainService.Stop() unconditionally awaits the UtxoScanner
-	// shutdown channel which is only closed by a prior cs.Start().
-	// This test only exercises the construction path; the OS releases
-	// the SQL connection at process exit.
+	// ChainService.Stop() unconditionally awaits the UtxoScanner shutdown
+	// channel which is only closed by a prior cs.Start(). This test only
+	// exercises the construction path; the OS releases the SQL connection
+	// at process exit.
 
 	// The SQL database file should have been created in DataDir.
 	require.FileExists(
@@ -91,7 +91,12 @@ func TestNewChainServiceSQLPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), fTipHeight)
 
-	// Sanity: walletdb-only Database is unset so the legacy code paths
-	// are bypassed.
-	require.True(t, errors.Is(nil, nil)) // keep linter happy
+	// Sanity: walletdb-only Database is unset so the legacy code paths are
+	// bypassed.
+	require.IsType(t, (*headerfs.SQLBlockHeaderStore)(nil), cs.BlockHeaders)
+	require.IsType(
+		t,
+		(*headerfs.SQLFilterHeaderStore)(nil),
+		cs.RegFilterHeaders,
+	)
 }
