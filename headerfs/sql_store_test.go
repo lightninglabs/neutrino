@@ -207,6 +207,25 @@ func TestSQLFilterHeaderStoreOperations(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(prev.Height), stamp.Height)
 	require.Equal(t, prevFilterHash[:], stamp.Hash[:])
+
+	// The caller supplies a block hash, but the durable tip must remain a
+	// filter-header hash. Reconstruct the store to bypass local state.
+	for _, reopened := range []bool{false, true} {
+		if reopened {
+			store, err = NewSQLFilterHeaderStore(
+				t.Context(), store.db, RegularFilter,
+				&chaincfg.SimNetParams, nil,
+			)
+			require.NoError(t, err)
+		}
+		tip, height, err := store.ChainTip()
+		require.NoError(t, err)
+		require.Equal(t, prev.Height, height)
+		require.Equal(t, prev.FilterHash, *tip)
+		byHeight, err := store.FetchHeaderByHeight(height)
+		require.NoError(t, err)
+		require.Equal(t, *byHeight, *tip)
+	}
 }
 
 // TestSQLFilterHeaderAssertReset verifies that constructing the store with a

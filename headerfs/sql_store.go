@@ -870,8 +870,8 @@ func (s *SQLFilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 		}, sqldbv2.NoOpReset)
 }
 
-// RollbackLastBlock removes the most recent filter header and updates the
-// chain tip to point at newTip.
+// RollbackLastBlock removes the most recent filter header. newTip identifies
+// the previous block, whereas the stored tip identifies its filter header.
 //
 // NOTE: Part of the FilterHeaderStore interface.
 func (s *SQLFilterHeaderStore) RollbackLastBlock(
@@ -911,15 +911,10 @@ func (s *SQLFilterHeaderStore) RollbackLastBlock(
 				return err
 			}
 
-			tipHash := prevHash[:]
-			if newTip != nil {
-				tipHash = newTip[:]
-			}
-
 			err = q.UpsertChainTip(
 				ctx, sqlc.UpsertChainTipParams{
 					ChainType: sqldb.ChainTypeFilter,
-					TipHash:   tipHash,
+					TipHash:   prevHash[:],
 					TipHeight: newHeight,
 				},
 			)
