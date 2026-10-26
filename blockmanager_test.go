@@ -326,6 +326,59 @@ func newTestServerPeer(t *testing.T, addr string,
 	return sp
 }
 
+func TestCFHeadersCollectsHonestConflict(t *testing.T) {
+	t.Parallel()
+
+	stop := &wire.BlockHeader{Nonce: 1}
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("ChainTip").Return(stop, uint32(1), nil)
+	stopHash := stop.BlockHash()
+	bm := &blockManager{cfg: &blockManagerCfg{
+		BlockHeaders: store,
+		queryAllPeers: func(_ wire.Message,
+			check func(*ServerPeer, wire.Message,
+				chan<- struct{}, chan<- struct{}),
+			_ ...QueryOption) {
+
+			quit := make(chan struct{})
+			for i := 0; i < 4; i++ {
+				select {
+				case <-quit:
+					return
+				default:
+				}
+
+				// Keep collecting timely honest conflicts.
+				hash := chainhash.Hash{1}
+				if i == 3 {
+					hash = chainhash.Hash{2}
+				}
+				sp := newTestServerPeer(t,
+					fmt.Sprintf("127.0.0.%d:8333", i+1), 1,
+				)
+				peerQuit := make(chan struct{})
+				check(sp, &wire.MsgCFHeaders{
+					FilterType:   wire.GCSFilterRegular,
+					StopHash:     stopHash,
+					FilterHashes: []*chainhash.Hash{&hash},
+				}, quit, peerQuit)
+				select {
+				case <-peerQuit:
+				default:
+					t.Fatal("peer still collecting")
+				}
+			}
+		},
+	}}
+	headers, count := bm.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
+	require.Equal(t, 1, count)
+	require.Len(t, headers, 4)
+	require.NotEqual(t,
+		*headers["127.0.0.1:8333"].FilterHashes[0],
+		*headers["127.0.0.4:8333"].FilterHashes[0],
+	)
+}
+
 // TestHeaderAnchorDiscoveryUsesDurableTip verifies that discovery never mixes
 // a store height with a hash from an older blockmanager notification snapshot.
 func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {

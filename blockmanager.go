@@ -93,15 +93,9 @@ const (
 	// thousands of tiny sqlite transactions.
 	maxCFHeadersMsgsPerWriteBatch = 32
 
-	// cfHeaderResponseQuorum is the number of matching cfheader responses
-	// we try to collect before ending an uncheckpointed cfheader broadcast
-	// query early. Waiting for every connected peer adds a fixed timeout
-	// floor per 2,000-header segment when some peers do not answer.
-	cfHeaderResponseQuorum = 3
-
-	// cfHeaderCollectTimeout is the fallback collection window for
-	// uncheckpointed cfheader broadcast queries when fewer than quorum peers
-	// respond. The normal fast path exits earlier as soon as quorum arrives.
+	// cfHeaderCollectTimeout bounds uncheckpointed response collection.
+	// Early agreement is not authentication: collect remaining peers so a
+	// prompt honest conflict still reaches mismatch detection.
 	cfHeaderCollectTimeout = 2 * time.Second
 
 )
@@ -2261,10 +2255,9 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
-	var stopQuery sync.Once
 	b.cfg.queryAllPeers(
 		msg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
+		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
 			peerQuit chan<- struct{}) {
 
 			m, isHeaders := resp.(*wire.MsgCFHeaders)
@@ -2278,12 +2271,6 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 					// We got an answer from this peer so
 					// that peer's goroutine can stop.
 					close(peerQuit)
-
-					if len(headers) >= cfHeaderResponseQuorum {
-						stopQuery.Do(func() {
-							close(quit)
-						})
-					}
 				}
 			}
 		},
