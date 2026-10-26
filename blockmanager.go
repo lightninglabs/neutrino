@@ -3854,17 +3854,20 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 			result.Range.StartHeight, result.Range.StopHeight,
 			len(hmsg.headers.Headers))
 
+		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+			log.Warnf("headersync failed to commit anchor-backed "+
+				"range_id=%d: %v", result.Range.ID, err)
+			if b.rejectInvalidHeaderCommit(peers, err) {
+				return true
+			}
+		}
+
 		if result.Confirmed && b.pipelineHeaderFrontierDiscovery(
 			peers, result.Response,
 		) {
 			log.Debugf("headersync frontier_discovery_overlapped "+
 				"range_id=%d stop_height=%d", result.Range.ID,
 				result.Range.StopHeight)
-		}
-
-		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
-			log.Warnf("headersync failed to commit anchor-backed "+
-				"range_id=%d: %v", result.Range.ID, err)
 		}
 	}
 
@@ -4008,6 +4011,9 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 
 	if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
 		log.Warnf("headersync failed to commit ready ranges: %v", err)
+		if b.rejectInvalidHeaderCommit(peers, err) {
+			return true
+		}
 	}
 
 	b.continueHeaderSync(peers)
@@ -4112,6 +4118,26 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	}
 
 	if _, err := b.commitHeaderSyncRangeHeaders(commitRanges); err != nil {
+		var invalid *headerSyncValidationError
+		if !errors.As(err, &invalid) {
+			return err
+		}
+		recoveryCtx, cancel := b.headerSyncOpCtx()
+		defer cancel()
+		controller := b.headerSync.Controller()
+		result, recoveryErr := controller.InvalidateRange(
+			recoveryCtx, invalid.rangeID,
+			time.Now().Add(b.headerSyncTimeout),
+		)
+		log.Warnf("headersync range_invalidated range_id=%d peer=%s "+
+			"invalidated_ranges=%v invalidated_anchors=%d "+
+			"reason=%v",
+			invalid.rangeID, invalid.peerID, result.Ranges,
+			len(result.Anchors), err)
+		if recoveryErr != nil {
+			return fmt.Errorf("%w; invalidation failed: %v",
+				err, recoveryErr)
+		}
 		return err
 	}
 
@@ -4145,6 +4171,38 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 type headerSyncRangeCommit struct {
 	Range  headersync.HeaderRange
 	Staged headersync.StagedRange
+}
+
+// headerSyncValidationError distinguishes permanently invalid peer data from
+// retryable storage or lookup failures. Only the former invalidates staging.
+type headerSyncValidationError struct {
+	rangeID headersync.RangeID
+	peerID  string
+	err     error
+}
+
+func (e *headerSyncValidationError) Error() string { return e.err.Error() }
+
+func (e *headerSyncValidationError) Unwrap() error { return e.err }
+
+func (b *blockManager) rejectInvalidHeaderCommit(peers *list.List,
+	err error) bool {
+
+	var invalid *headerSyncValidationError
+	if !errors.As(err, &invalid) {
+		return false
+	}
+	for element := peers.Front(); element != nil; element = element.Next() {
+		peer := element.Value.(*ServerPeer)
+		if peer.Addr() == invalid.peerID {
+			b.rejectHeaderSyncRangePeer(
+				peers, peer, invalid.rangeID,
+			)
+			break
+		}
+	}
+	b.continueHeaderSync(peers)
+	return true
 }
 
 type headerSyncVerifiedCheckpoint struct {
@@ -4252,25 +4310,40 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(
 		rng := commitRange.Range
 		headers := commitRange.Staged.Headers
 		peerID := commitRange.Staged.PeerID
+		invalid := func(err error) error {
+			return &headerSyncValidationError{
+				rangeID: rng.ID, peerID: peerID, err: err,
+			}
+		}
 
 		if len(headers) == 0 {
-			return prepared, headersync.ErrNoHeaders
+			return prepared, invalid(headersync.ErrNoHeaders)
 		}
 
 		var rangeFinalHeight int32
 		for _, blockHeader := range headers {
 			blockHash := blockHeader.BlockHash()
 			if !prevHash.IsEqual(&blockHeader.PrevBlock) {
-				return prepared, fmt.Errorf("headersync staged "+
+				err := fmt.Errorf("headersync staged "+
 					"range_id=%d does not connect to current "+
 					"tip hash=%s prev=%s", rng.ID, prevHash,
 					blockHeader.PrevBlock)
+				if uint32(prevHeight) == rng.StartHeight &&
+					prevHash == rng.StartHash {
+
+					return prepared, invalid(err)
+				}
+				return prepared, err
 			}
 
 			if err := b.checkHeaderSanity(
 				blockHeader, false, prevHeight, &prevHeader,
 				validationList,
 			); err != nil {
+				var ruleErr blockchain.RuleError
+				if errors.As(err, &ruleErr) {
+					err = invalid(err)
+				}
 				return prepared, fmt.Errorf("headersync "+
 					"range_id=%d header sanity failed: %w",
 					rng.ID, err)
@@ -4295,12 +4368,13 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(
 				node.Height == prepared.NextCheckpoint.Height {
 
 				if !blockHash.IsEqual(prepared.NextCheckpoint.Hash) {
-					return prepared, fmt.Errorf("headersync "+
+					err := fmt.Errorf("headersync "+
 						"checkpoint mismatch height=%d "+
 						"got=%s want=%s peer=%s",
 						node.Height, blockHash,
 						prepared.NextCheckpoint.Hash,
 						peerID)
+					return prepared, invalid(err)
 				}
 
 				prepared.VerifiedCheckpoints = append(
@@ -4325,9 +4399,10 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(
 		}
 
 		if rangeFinalHeight != int32(rng.StopHeight) {
-			return prepared, fmt.Errorf("headersync range_id=%d "+
+			err := fmt.Errorf("headersync range_id=%d "+
 				"final_height=%d stop_height=%d", rng.ID,
 				rangeFinalHeight, rng.StopHeight)
+			return prepared, invalid(err)
 		}
 	}
 
@@ -4825,6 +4900,8 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	parentHeaderCtx := newLightHeaderCtx(
 		prevNodeHeight, prevNodeHeader, b.cfg.BlockHeaders, hList,
 	)
+	var ancestorErr error
+	parentHeaderCtx.ancestorErr = &ancestorErr
 
 	// Create a lightChainCtx as well.
 	chainCtx := newLightChainCtx(
@@ -4836,6 +4913,10 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	err := blockchain.CheckBlockHeaderContext(
 		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
 	)
+	if ancestorErr != nil {
+		return fmt.Errorf("unable to read header ancestor: %w",
+			ancestorErr)
+	}
 	if err != nil {
 		return err
 	}
@@ -5003,6 +5084,11 @@ type lightHeaderCtx struct {
 	// pointer for O(log n) ancestor lookups instead of walking back from
 	// the chain tip on every call.
 	node *headerlist.Node
+
+	// ancestorErr is shared by a validation's ancestor contexts. HeaderCtx
+	// cannot return lookup errors, so retain them instead of accepting a
+	// truncated history or blaming peer data for a storage failure.
+	ancestorErr *error
 }
 
 // newLightHeaderCtx returns an instance of a lightHeaderCtx to be used when
@@ -5061,6 +5147,9 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 	distance int32) blockchain.HeaderCtx {
 
 	ancestorHeight := l.height - distance
+	if ancestorHeight < 0 {
+		return nil
+	}
 
 	var (
 		ancestor *wire.BlockHeader
@@ -5092,6 +5181,9 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 			uint32(ancestorHeight),
 		)
 		if err != nil {
+			if l.ancestorErr != nil && *l.ancestorErr == nil {
+				*l.ancestorErr = err
+			}
 			return nil
 		}
 	}
@@ -5103,6 +5195,7 @@ func (l *lightHeaderCtx) RelativeAncestorCtx(
 		ancestorHeight, ancestor, l.store, l.headerList,
 	)
 	ancestorCtx.node = ancestorNode
+	ancestorCtx.ancestorErr = l.ancestorErr
 
 	return ancestorCtx
 }
