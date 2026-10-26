@@ -143,6 +143,11 @@ type headerSyncTimeoutMsg struct {
 // after the cold-start peer admission window expires.
 type headerSyncBootstrapMsg struct{}
 
+// headerSyncCommitRetryMsg retries retained staging after a storage failure.
+type headerSyncCommitRetryMsg struct {
+	generation uint64
+}
+
 // blockManagerCfg holds options and dependencies needed by the blockManager
 // during operation.
 type blockManagerCfg struct {
@@ -182,6 +187,10 @@ type blockManagerCfg struct {
 	// HeaderSyncTimeout is the base timeout for block header getheaders
 	// requests. If zero, defaultHeaderSyncTimeout is used.
 	HeaderSyncTimeout time.Duration
+
+	// HeaderTransport sends header requests to the peer. If nil, requests
+	// use the existing Bitcoin peer transport.
+	HeaderTransport headerTransport
 
 	queryAllPeers func(
 		queryMsg wire.Message,
@@ -282,9 +291,11 @@ type blockManager struct { // nolint:maligned
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
-	headerSyncTimeout time.Duration
-	headerRequestID   uint64
-	headerSyncTimer   *time.Timer
+	headerSyncTimeout      time.Duration
+	headerRequestID        uint64
+	headerSyncTimer        *time.Timer
+	headerCommitRetryTimer *time.Timer
+	headerCommitRetryID    uint64
 
 	headerSyncBootstrapFirstSeen time.Time
 	headerSyncBootstrapTimer     *time.Timer
@@ -510,6 +521,7 @@ func (b *blockManager) Stop() error {
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.wg.Wait()
+	b.cancelHeaderCommitRetry()
 	b.stopHeaderSyncActors()
 
 	close(done)
@@ -2441,32 +2453,7 @@ out:
 		// Now check peer messages and quit channels.
 		select {
 		case m := <-b.peerChan:
-			switch msg := m.(type) {
-			case *newPeerMsg:
-				b.handleNewPeerMsg(candidatePeers, msg.peer)
-
-			case *invMsg:
-				b.handleInvMsg(msg)
-
-			case *headersMsg:
-				b.handleHeadersMsgWithPeers(candidatePeers, msg)
-
-			case *headerSyncTimeoutMsg:
-				b.handleHeaderSyncTimeoutMsg(
-					candidatePeers, msg,
-				)
-
-			case *headerSyncBootstrapMsg:
-				b.headerSyncBootstrapTimer = nil
-				b.startSync(candidatePeers)
-
-			case *donePeerMsg:
-				b.handleDonePeerMsg(candidatePeers, msg.peer)
-
-			default:
-				log.Warnf("Invalid message type in block "+
-					"handler: %T", msg)
-			}
+			b.handlePeerMessage(candidatePeers, m)
 
 		case <-b.quit:
 			break out
@@ -2474,6 +2461,42 @@ out:
 	}
 
 	log.Trace("Block handler done")
+}
+
+// handlePeerMessage is the serialized peer-event entry point. Keeping dispatch
+// separate from the goroutine lets virtual-time transports exercise the same
+// response, disconnect, and timer handlers without starting filter sync.
+func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
+	switch msg := message.(type) {
+	case *newPeerMsg:
+		b.handleNewPeerMsg(peers, msg.peer)
+	case *invMsg:
+		b.handleInvMsg(msg)
+	case *headersMsg:
+		b.handleHeadersMsgWithPeers(peers, msg)
+	case *headerSyncTimeoutMsg:
+		b.handleHeaderSyncTimeoutMsg(peers, msg)
+	case *headerSyncBootstrapMsg:
+		b.headerSyncBootstrapTimer = nil
+		b.startSync(peers)
+	case *headerSyncCommitRetryMsg:
+		if msg.generation != b.headerCommitRetryID {
+			return
+		}
+		b.headerCommitRetryTimer = nil
+		ctx, cancel := b.headerSyncOpCtx()
+		defer cancel()
+		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+			log.Warnf("headersync commit_retry_failed: %v", err)
+			b.rejectInvalidHeaderCommit(peers, err)
+			return
+		}
+		b.continueHeaderSync(peers)
+	case *donePeerMsg:
+		b.handleDonePeerMsg(peers, msg.peer)
+	default:
+		log.Warnf("Invalid message type in block handler: %T", msg)
+	}
 }
 
 // SyncPeer returns the current sync peer.
@@ -2630,7 +2653,7 @@ func (b *blockManager) requestHeaders(peer *ServerPeer,
 	locator blockchain.BlockLocator, stopHash *chainhash.Hash,
 	startHeight uint32) error {
 
-	if err := peer.PushGetHeadersMsg(locator, stopHash); err != nil {
+	if err := b.sendHeaderRequest(peer, locator, stopHash); err != nil {
 		return err
 	}
 
@@ -2644,7 +2667,7 @@ func (b *blockManager) requestHeaderSyncRange(peer *ServerPeer,
 	startHash := assignment.StartHash
 	stopHash := assignment.StopHash
 	locator := blockchain.BlockLocator([]*chainhash.Hash{&startHash})
-	if err := peer.PushGetHeadersMsg(locator, &stopHash); err != nil {
+	if err := b.sendHeaderRequest(peer, locator, &stopHash); err != nil {
 		return err
 	}
 
@@ -2691,7 +2714,7 @@ func (b *blockManager) requestHeaderSyncAnchor(peer *ServerPeer,
 	stopHeight uint32) error {
 
 	locator := blockchain.BlockLocator([]*chainhash.Hash{&startHash})
-	if err := peer.PushGetHeadersMsg(locator, &stopHash); err != nil {
+	if err := b.sendHeaderRequest(peer, locator, &stopHash); err != nil {
 		return err
 	}
 
@@ -4050,24 +4073,13 @@ func (b *blockManager) handleStaleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
 	assignment := staleRequest.Assignment
-	result, err := b.headerSync.Manager().CompleteRange(
-		ctx, peerID, assignment.RangeID, assignment.LeaseEpoch, true,
-		time.Now(),
-	)
-	if err != nil {
-		log.Warnf("headersync stale completion failed peer=%s "+
-			"range_id=%d epoch=%d: %v", peerID, assignment.RangeID,
-			assignment.LeaseEpoch, err)
-		return true
-	}
-
+	// A timed-out request may still own its old epoch until another peer
+	// steals it. Reporting completion here would stage unvalidated work
+	// without retaining its headers, permanently blocking ordered commit.
 	log.Infof("headersync stale_completion peer=%s range_id=%d "+
-		"epoch=%d stale=%v state=%s", peerID, assignment.RangeID,
-		assignment.LeaseEpoch, result.Stale, result.RangeState)
+		"epoch=%d stale=true", peerID, assignment.RangeID,
+		assignment.LeaseEpoch)
 
 	b.continueHeaderSync(peers)
 
@@ -4100,6 +4112,7 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 		return err
 	}
 	if len(ready) == 0 {
+		b.cancelHeaderCommitRetry()
 		return nil
 	}
 
@@ -4129,6 +4142,7 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	if _, err := b.commitHeaderSyncRangeHeaders(commitRanges); err != nil {
 		var invalid *headerSyncValidationError
 		if !errors.As(err, &invalid) {
+			b.scheduleHeaderCommitRetry()
 			return err
 		}
 		recoveryCtx, cancel := b.headerSyncOpCtx()
@@ -4160,8 +4174,10 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 
 	commitResult, err := b.headerSync.Controller().CommitReadyRanges(commitCtx)
 	if err != nil {
+		b.scheduleHeaderCommitRetry()
 		return err
 	}
+	b.cancelHeaderCommitRetry()
 	commit := commitResult.Commit
 	if commitResult.PrunedAnchors > 0 {
 		log.Infof("headersync pruned_obsolete_anchors "+
@@ -4175,6 +4191,31 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// scheduleHeaderCommitRetry keeps one wakeup while staging waits for storage.
+// A recovered store must not need another network response to drain staging.
+func (b *blockManager) scheduleHeaderCommitRetry() {
+	if b.headerCommitRetryTimer != nil {
+		return
+	}
+	b.headerCommitRetryID++
+	generation := b.headerCommitRetryID
+	b.headerCommitRetryTimer = time.AfterFunc(time.Second, func() {
+		message := &headerSyncCommitRetryMsg{generation: generation}
+		select {
+		case b.peerChan <- message:
+		case <-b.quit:
+		}
+	})
+}
+
+func (b *blockManager) cancelHeaderCommitRetry() {
+	if b.headerCommitRetryTimer != nil {
+		b.headerCommitRetryTimer.Stop()
+		b.headerCommitRetryTimer = nil
+		b.headerCommitRetryID++
+	}
 }
 
 type headerSyncRangeCommit struct {
@@ -4824,6 +4865,13 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		err := b.cfg.BlockHeaders.WriteHeaders(headerWriteBatch...)
 		if err != nil {
 			log.Errorf("Unable to write block headers: %v", err)
+			// Restore the durable parent after preparing the memory
+			// list, so staged work can retry from that parent.
+			resetErr := b.resetHeaderListToTip()
+			if resetErr != nil {
+				log.Errorf("Unable to restore header tip: %v",
+					resetErr)
+			}
 			return
 		}
 	}
