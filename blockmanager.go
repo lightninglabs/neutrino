@@ -3786,7 +3786,9 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		headersync.DefaultMaxRangeHeaders,
 	)
 	if !ok {
-		return false
+		// Keep unmatched replies out of the compatibility path while
+		// discovery waits for a different locator response.
+		return b.headerSync.Session().AnchorActive(peerID)
 	}
 	if err != nil {
 		log.Warnf("headersync unable to add discovered anchor peer=%s "+
@@ -3921,8 +3923,15 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	hmsg *headersMsg) bool {
 
 	peerID := hmsg.peer.Addr()
-	request, ok := b.headerSync.Session().FinishRange(peerID)
+	request, ok := b.headerSync.Session().FinishRangeHeaders(
+		peerID, hmsg.headers.Headers,
+	)
 	if !ok {
+		if b.headerSync.Session().RangeActive(peerID) {
+			log.Debugf("headersync unmatched_range_reply peer=%s",
+				peerID)
+			return true
+		}
 		return b.handleStaleHeaderSyncRangeHeaders(peers, peerID)
 	}
 
