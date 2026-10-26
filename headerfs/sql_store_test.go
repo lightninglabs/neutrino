@@ -1,7 +1,6 @@
 package headerfs
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
@@ -20,7 +19,7 @@ func newSQLBlockHeaderStore(t *testing.T) *SQLBlockHeaderStore {
 
 	backend := sqldb.NewTestBackend(t)
 	store, err := NewSQLBlockHeaderStore(
-		context.Background(), backend.HeaderTxer,
+		t.Context(), backend.HeaderTxer,
 		&chaincfg.SimNetParams,
 	)
 	require.NoError(t, err)
@@ -36,7 +35,7 @@ func newSQLFilterHeaderStore(t *testing.T,
 
 	backend := sqldb.NewTestBackend(t)
 	store, err := NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, assertion,
 	)
 	require.NoError(t, err)
@@ -131,13 +130,13 @@ func TestSQLBlockHeaderGenesisIdempotent(t *testing.T) {
 	backend := sqldb.NewTestBackend(t)
 
 	_, err := NewSQLBlockHeaderStore(
-		context.Background(), backend.HeaderTxer,
+		t.Context(), backend.HeaderTxer,
 		&chaincfg.SimNetParams,
 	)
 	require.NoError(t, err)
 
 	store, err := NewSQLBlockHeaderStore(
-		context.Background(), backend.HeaderTxer,
+		t.Context(), backend.HeaderTxer,
 		&chaincfg.SimNetParams,
 	)
 	require.NoError(t, err)
@@ -164,7 +163,7 @@ func TestSQLBlockHeaderFetchAncestors(t *testing.T) {
 	stop := chain[40].BlockHash()
 	headers, startHeight, err := store.FetchHeaderAncestors(10, &stop)
 	require.NoError(t, err)
-	require.Len(t, headers, 11)            // 10 ancestors + stop
+	require.Len(t, headers, 11) // 10 ancestors + stop
 	require.Equal(t, uint32(31), startHeight)
 	for i, h := range headers {
 		require.True(t, reflect.DeepEqual(*chain[31+i-1].BlockHeader,
@@ -238,7 +237,7 @@ func TestSQLFilterHeaderAssertReset(t *testing.T) {
 	chain := createTestFilterHeaderChain(20)
 
 	store, err := NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, nil,
 	)
 	require.NoError(t, err)
@@ -247,7 +246,7 @@ func TestSQLFilterHeaderAssertReset(t *testing.T) {
 	// Matching assertion: should be a no-op.
 	matching := chain[10]
 	store, err = NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, &matching,
 	)
 	require.NoError(t, err)
@@ -260,7 +259,7 @@ func TestSQLFilterHeaderAssertReset(t *testing.T) {
 	bad := matching
 	bad.FilterHash[0] ^= 0xFF
 	store, err = NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, &bad,
 	)
 	require.NoError(t, err)
@@ -291,7 +290,7 @@ func TestSQLFilterHeaderAssertMissingHeight(t *testing.T) {
 	chain := createTestFilterHeaderChain(5)
 
 	store, err := NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, nil,
 	)
 	require.NoError(t, err)
@@ -302,7 +301,7 @@ func TestSQLFilterHeaderAssertMissingHeight(t *testing.T) {
 	bogus.HeaderHash[0] = 0xCD
 
 	store, err = NewSQLFilterHeaderStore(
-		context.Background(), backend.HeaderTxer, RegularFilter,
+		t.Context(), backend.HeaderTxer, RegularFilter,
 		&chaincfg.SimNetParams, &bogus,
 	)
 	require.NoError(t, err)

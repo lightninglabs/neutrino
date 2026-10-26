@@ -332,7 +332,6 @@ func (s *SQLBlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator,
 			decrement := uint32(1)
 			for height > 0 &&
 				len(locator) < wire.MaxBlockLocatorsPerMsg {
-
 				if len(locator) > 10 {
 					decrement *= 2
 				}
@@ -533,7 +532,8 @@ func NewSQLFilterHeaderStore(ctx context.Context, db sqldb.HeaderTx,
 	}
 
 	if headerStateAssertion != nil {
-		if err := store.maybeReset(ctx, headerStateAssertion); err != nil {
+		err := store.maybeReset(ctx, headerStateAssertion)
+		if err != nil {
 			return nil, err
 		}
 	}
