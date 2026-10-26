@@ -25,8 +25,8 @@ type SQLBlockHeaderStore struct {
 	chainParams *chaincfg.Params
 
 	// mtx preserves the linearizable semantics that callers like
-	// blockmanager rely on: a ChainTip immediately following a
-	// successful WriteHeaders must observe the new tip.
+	// blockmanager rely on: a ChainTip immediately following a successful
+	// WriteHeaders must observe the new tip.
 	mtx sync.RWMutex
 
 	// The SQL store backs lnd's ChainConn methods. During notifier startup
@@ -173,7 +173,7 @@ func (s *SQLBlockHeaderStore) clearBlockHeaderCache() {
 	s.headerCacheNext = 0
 }
 
-func sqlBlockHeaderReadCachePrefetchEnd(height uint32) uint32 {
+func readCachePrefetchEnd(height uint32) uint32 {
 	const maxUint32 = ^uint32(0)
 
 	if maxUint32-height < sqlBlockHeaderReadCachePrefetch-1 {
@@ -183,8 +183,8 @@ func sqlBlockHeaderReadCachePrefetchEnd(height uint32) uint32 {
 	return height + sqlBlockHeaderReadCachePrefetch - 1
 }
 
-// ensureGenesis writes the genesis block header row into block_headers if
-// the table is empty. The check + insert run inside a single tx so multiple
+// ensureGenesis writes the genesis block header row into block_headers if the
+// table is empty. The check + insert run inside a single tx so multiple
 // processes racing on first start cannot insert duplicate genesis rows.
 func (s *SQLBlockHeaderStore) ensureGenesis(ctx context.Context) error {
 	header := s.chainParams.GenesisBlock.Header
@@ -288,7 +288,7 @@ func (s *SQLBlockHeaderStore) FetchHeaderByHeight(height uint32) (
 				ctx, sqlc.GetBlockHeaderRangeParams{
 					StartHeight: int64(height),
 					EndHeight: int64(
-						sqlBlockHeaderReadCachePrefetchEnd(
+						readCachePrefetchEnd(
 							height,
 						),
 					),
@@ -328,8 +328,8 @@ func (s *SQLBlockHeaderStore) FetchHeaderByHeight(height uint32) (
 	return header, nil
 }
 
-// FetchHeader returns the block header for a given hash along with its
-// height in the chain.
+// FetchHeader returns the block header for a given hash along with its height
+// in the chain.
 //
 // NOTE: Part of the BlockHeaderStore interface.
 func (s *SQLBlockHeaderStore) FetchHeader(hash *chainhash.Hash) (
@@ -519,8 +519,8 @@ func (s *SQLBlockHeaderStore) LatestBlockLocator() (blockchain.BlockLocator,
 	return locator, err
 }
 
-// WriteHeaders inserts the given headers atomically and updates the chain
-// tip pointer to the highest header in the batch.
+// WriteHeaders inserts the given headers atomically and updates the chain tip
+// pointer to the highest header in the batch.
 //
 // NOTE: Part of the BlockHeaderStore interface.
 func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
@@ -537,6 +537,11 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 			var (
 				lastHash   chainhash.Hash
 				lastHeight uint32
+				rows       = make(
+					[]sqlc.InsertBlockHeaderParams,
+					0,
+					len(hdrs),
+				)
 			)
 
 			for _, hdr := range hdrs {
@@ -546,19 +551,25 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 				}
 				hash := hdr.BlockHash()
 
-				err := q.InsertBlockHeader(
-					ctx, sqlc.InsertBlockHeaderParams{
+				rows = append(
+					rows,
+					sqlc.InsertBlockHeaderParams{
 						Height:    int64(hdr.Height),
 						BlockHash: hash[:],
 						RawHeader: raw.Bytes(),
 					},
 				)
-				if err != nil {
-					return err
-				}
 
 				lastHash = hash
 				lastHeight = hdr.Height
+			}
+
+			if err := sqldb.InsertBlockHeaders(
+				ctx,
+				q,
+				rows,
+			); err != nil {
+				return err
 			}
 
 			return q.UpsertChainTip(
@@ -580,9 +591,8 @@ func (s *SQLBlockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 	return nil
 }
 
-// RollbackBlockHeaders deletes the n most recent headers and resets the
-// chain tip to the previous height. Returns a BlockStamp describing the new
-// tip.
+// RollbackBlockHeaders deletes the n most recent headers and resets the chain
+// tip to the previous height. Returns a BlockStamp describing the new tip.
 //
 // NOTE: Part of the BlockHeaderStore interface.
 func (s *SQLBlockHeaderStore) RollbackBlockHeaders(n uint32) (*BlockStamp,
@@ -682,8 +692,8 @@ var _ FilterHeaderStore = (*SQLFilterHeaderStore)(nil)
 
 // NewSQLFilterHeaderStore returns a new SQL-backed filter header store. On a
 // fresh DB it inserts the genesis filter header row. When headerStateAssertion
-// is non-nil and the asserted height is present but does not match, the
-// store transactionally purges every filter header row and re-seeds genesis.
+// is non-nil and the asserted height is present but does not match, the store
+// transactionally purges every filter header row and re-seeds genesis.
 func NewSQLFilterHeaderStore(ctx context.Context, db sqldb.HeaderTx,
 	filterType HeaderType, netParams *chaincfg.Params,
 	headerStateAssertion *FilterHeader) (*SQLFilterHeaderStore, error) {
@@ -706,8 +716,10 @@ func NewSQLFilterHeaderStore(ctx context.Context, db sqldb.HeaderTx,
 	}
 
 	if headerStateAssertion != nil {
-		err := store.maybeReset(ctx, headerStateAssertion)
-		if err != nil {
+		if err := store.maybeReset(
+			ctx,
+			headerStateAssertion,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -754,11 +766,11 @@ func (s *SQLFilterHeaderStore) ensureGenesis(ctx context.Context) error {
 		}, sqldbv2.NoOpReset)
 }
 
-// maybeReset performs the equivalent of the legacy maybeResetHeaderState,
-// but transactionally. If the asserted height is missing the assertion is a
-// no-op; if the asserted filter hash differs from the stored value, every
-// row in filter_headers is purged and genesis is re-seeded — all within one
-// SQL transaction.
+// maybeReset performs the equivalent of the legacy maybeResetHeaderState, but
+// transactionally. If the asserted height is missing the assertion is a no-op;
+// if the asserted filter hash differs from the stored value, every row in
+// filter_headers is purged and genesis is re-seeded — all within one SQL
+// transaction.
 func (s *SQLFilterHeaderStore) maybeReset(ctx context.Context,
 	assertion *FilterHeader) error {
 
@@ -819,8 +831,8 @@ func (s *SQLFilterHeaderStore) maybeReset(ctx context.Context,
 		}, sqldbv2.NoOpReset)
 }
 
-// computeGenesis returns the genesis block hash and the genesis filter
-// header hash for the configured chain.
+// computeGenesis returns the genesis block hash and the genesis filter header
+// hash for the configured chain.
 func (s *SQLFilterHeaderStore) computeGenesis() (chainhash.Hash, chainhash.Hash,
 	error) {
 
@@ -943,8 +955,7 @@ func (s *SQLFilterHeaderStore) FetchHeaderByHeight(height uint32) (
 }
 
 // FetchHeaderAncestors returns numHeaders ancestors of stopHash plus stopHash
-// itself, for a total of numHeaders+1 entries, along with the starting
-// height.
+// itself, for a total of numHeaders+1 entries, along with the starting height.
 //
 // NOTE: Part of the FilterHeaderStore interface.
 func (s *SQLFilterHeaderStore) FetchHeaderAncestors(numHeaders uint32,
@@ -1018,21 +1029,32 @@ func (s *SQLFilterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 			var (
 				tipHash   chainhash.Hash
 				tipHeight uint32
+				rows      = make(
+					[]sqlc.InsertFilterHeaderParams,
+					0,
+					len(hdrs),
+				)
 			)
 			for _, hdr := range hdrs {
-				err := q.InsertFilterHeader(
-					ctx, sqlc.InsertFilterHeaderParams{
+				rows = append(
+					rows,
+					sqlc.InsertFilterHeaderParams{
 						Height:     int64(hdr.Height),
 						BlockHash:  hdr.HeaderHash[:],
 						FilterHash: hdr.FilterHash[:],
 					},
 				)
-				if err != nil {
-					return err
-				}
 
 				tipHash = hdr.FilterHash
 				tipHeight = hdr.Height
+			}
+
+			if err := sqldb.InsertFilterHeaders(
+				ctx,
+				q,
+				rows,
+			); err != nil {
+				return err
 			}
 
 			return q.UpsertChainTip(

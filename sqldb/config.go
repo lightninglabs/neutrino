@@ -122,13 +122,16 @@ func (c *Config) sqliteConfig() *sqldbv2.SqliteConfig {
 func defaultSqliteChainPragmas() []string {
 	return []string{
 		// WAL+NORMAL remains atomic and consistent and is safe across
-		// application crashes. A power loss may lose recent commits, but
+		// application crashes. A power loss may lose recent commits,
+		// but
 		// header/filter state can be redownloaded from peers.
 		"synchronous=NORMAL",
 
-		// sqldb/v2 currently hardcodes fullfsync=true in the SQLite DSN.
-		// Keep checkpoint_fullfsync disabled here so the chain profile is
-		// ready once sqldb/v2 grows a typed no-fullfsync knob.
+		// lnd's wallet-oriented sqlite default enables macOS
+		// F_FULLFSYNC.
+		// Neutrino's chain database is rebuildable, so avoid the extra
+		// flush cost during large initial syncs.
+		"fullfsync=false",
 		"checkpoint_fullfsync=false",
 
 		// Keep WAL growth bounded without forcing tiny 1,000-page
@@ -137,8 +140,9 @@ func defaultSqliteChainPragmas() []string {
 		"journal_size_limit=268435456",
 
 		// Initial sync is an append-heavy workload with frequent header
-		// lookups. Keep sqlite's temporary structures in memory and give
-		// the connection enough cache/mmap room to avoid unnecessary pager
+		// lookups. Keep sqlite's temporary structures in memory and
+		// give the connection enough cache/mmap room to avoid
+		// unnecessary pager
 		// churn while preserving the on-disk format.
 		"temp_store=MEMORY",
 		"cache_size=-131072",
