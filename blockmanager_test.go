@@ -2,7 +2,6 @@ package neutrino
 
 import (
 	"container/list"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -197,7 +196,7 @@ func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 	t.Parallel()
 
 	backend := sqldb.NewTestBackend(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	blockStore, err := headerfs.NewSQLBlockHeaderStore(
 		ctx, backend.HeaderTxer, &chaincfg.SimNetParams,
 	)
@@ -290,7 +289,11 @@ func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(numHeaders), tipHeight)
-	require.Equal(t, expectedFilterHeaders[len(expectedFilterHeaders)-1], *tip)
+	require.Equal(
+		t,
+		expectedFilterHeaders[len(expectedFilterHeaders)-1],
+		*tip,
+	)
 
 	for i, expected := range expectedFilterHeaders {
 		height := uint32(i + 1)
