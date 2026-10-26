@@ -789,11 +789,10 @@ func TestWorkManagerBothTimeouts(t *testing.T) {
 		queries = append(queries, &Request{})
 	}
 
+	start := time.Now()
 	errChan := wm.Query(
 		queries, Timeout(hardTimeout), ProgressTimeout(idleTimeout),
 	)
-
-	start := time.Now()
 
 	// Feed successes one per ~10ms — total natural runtime is ~10s,
 	// far longer than the 300ms hard deadline. The hard timeout must
@@ -910,6 +909,7 @@ func TestWorkManagerProgressTimeoutFailuresDontReset(t *testing.T) {
 		queries = append(queries, &Request{})
 	}
 
+	start := time.Now()
 	errChan := wm.Query(
 		queries, Timeout(time.Hour), NoRetryMax(),
 		ProgressTimeout(progressTimeout),
@@ -938,7 +938,6 @@ func TestWorkManagerProgressTimeoutFailuresDontReset(t *testing.T) {
 	}()
 	defer close(stop)
 
-	start := time.Now()
 	select {
 	case err := <-errChan:
 		require.ErrorIs(t, err, ErrQueryTimeout)
