@@ -11,6 +11,9 @@ go test . -run '^TestHeaderSyncDSTReplay$' -count=1
 go test -race . -run '^TestHeaderSyncDSTReplay$' -count=2
 go test . -run '^$' -fuzz '^FuzzHeaderSyncDST$' -fuzztime=60s -parallel=1
 go test ./headersync/... ./querysync/... -count=1
+go test . -run '^TestHeaderTransport|^TestHeaderCommitRetryGeneration'
+go test . -run '^$' -fuzz '^FuzzHeaderTransportDST$' -fuzztime=2m -parallel=1
+go test . -run '^$' -fuzz '^FuzzHeaderTransportCheckpointDST$' -fuzztime=2m
 ```
 
 `blockmanager_dst_test.go` uses `testing/synctest` to control elapsed time and
@@ -66,33 +69,77 @@ replay retains peer ordering when samples differ by less than a millisecond.
 Existing millisecond-only traces remain readable. These are Go scheduler
 traces, not P checker schedules.
 
+## Transport Runner
+
+`blockmanager_transport_dst_test.go` adds a seeded transport around the real
+headersync/querysync runtime. Production getheaders requests go through an
+internal `headerTransport`; the default remains `ServerPeer.PushGetHeadersMsg`.
+The simulator has one outbound slot per connection, encodes/decodes header
+messages, and delivers them through `QueueHeaders` and the same serialized
+`handlePeerMessage` entry point used by the production block handler.
+
+Unlike the first harness, this runner expires the real request timers. It
+generates reply reordering, duplicates, partial/corrupt replies, blocked sends,
+disconnect/reconnect, stalls, and write outages. Simultaneous timeout delivery
+order is explicitly chosen by the seed. `synctest` alone does not fix callback
+ordering. Each input runs twice and compares actor events, event steps, writes,
+and counters. Resource use is bounded to 24 input actions and 32 recovery rounds.
+
+After each event, an independent oracle checks unique ownership, retained
+staged payloads, increasing durable heights, agreement between the durable and
+visible tips, and agreement with the validation cache. The recovery phase
+restores storage and peer availability, then uses replies and production timers
+only. It does not force FSM ownership changes or call commit to make progress.
+
+The saved seed `5b15bb10e03b320e` reproduces the write-outage stall found by the
+first campaign. See [the campaign report](dst-transport-results-2026-10-25.md)
+for its decoded sequence, failure mechanism, and replay command.
+
+`FuzzHeaderTransportCheckpointDST` initially plans only the first checkpoint
+span, so healing must also schedule follow-up spans. Its fixed regression
+requires a successful commit retry to dispatch beyond that checkpoint without
+another peer message. The matching regression delivers an old reply after the
+same peer starts a new range and requires unchanged ownership and peer quality.
+Session tests check both range and discovery matching, including timer retention.
+
+The P transport layer tracks live wire requests, retained payloads, retry
+generations, and validation-cache rollback. Its scenarios cover expired replies
+before lease transfer, both response/timeout orders, duplicate replies, obsolete
+timer callbacks, storage recovery without another network reply, and planning
+after checkpoint retry. Matching uses the first parent hash, not a wire request
+ID: two leases using the same locator remain indistinguishable. These are
+abstract contract checks, not mechanically derived implementation refinement.
+
 ## Remaining DST Work
 
-The harness injects timeout events; it does not exercise the full ServerPeer
-socket, decode, outbound queue, and production getheaders timer path. A full
-network simulation still needs a simulated transport at that boundary.
+The original harness still injects timeout events. The transport runner covers
+production timers and header-message encode/decode, but not TCP framing,
+handshake, the concrete ServerPeer socket writer, or SQL process crashes.
 
-The next scenarios must drive the real request timers and bounded peer queues,
-including blocked sends, partial responses, reconnects, cancellation, and
-shutdown. Add SQL commit/restart fault injection separately from virtual-time
-actor tests. Expand seed generation and compare traces against model invariants
-before treating the harness as production-wide deterministic simulation.
+The simulated outbound slot is not the concrete btcd peer send queue. Expand
+that boundary separately if socket-writer scheduling becomes relevant. SQL
+commit/restart fault injection remains separate from virtual-time actor tests.
+Wire matching coverage excludes replies with a different locator without
+consuming the current request. It does not establish identity for replies
+sharing a locator or mechanically compare every Go transition with P.
 
-## Next Acceptance Gates
+## Coverage Gates
 
-Transport-level DST is the next testing milestone, not a claim established by
-the current harness. Keep the production actor/FSM logic in that test path.
+The runner keeps production actor/FSM logic in the test path. Checked items
+below are covered by the current bounded corpus; unchecked items remain open.
 
-- [ ] Put a simulated transport behind the real peer request/send boundary.
+- [x] Put a simulated transport behind the real peer request/send boundary.
   A test must expire a production request timer without directly marking its
   owner blocked, then observe reassignment and eventual commit.
-- [ ] Generate seeded event sequences with multiple peers and ranges, rather
+- [x] Generate seeded event sequences with multiple peers and ranges, rather
   than only varying the current fixed recovery story. Cover blocked queues,
   partial replies, churn, cancellation, and shutdown. Every failure must save
   a replayable seed, with no wall-clock sleeps or external network dependency.
-- [ ] Check ownership, epoch, staging, and commit invariants after each event.
-  Compare implementation transitions with bridge/model expectations, and
-  require bounded progress under an explicitly responsive-peer assumption.
-- [ ] Run a bounded seed corpus in CI, with longer fuzz campaigns separately.
+- [x] Check ownership, epochs, staging, cache, and commit invariants per event.
+  Require bounded progress after explicitly restoring a viable peer and store.
+- [x] Preserve newer requests and peer quality under different-locator duplicates.
+- [ ] Add exact wire-transition comparison with the P/bridge contract.
+- [x] Run the bounded seed corpus through the existing `go test ./...` CI lanes.
+- [ ] Run longer continuous fuzz campaigns separately from unit CI.
   Keep SQL restart/crash checks outside the virtual-time actor bubble until
   driver behavior can be controlled without changing production semantics.
