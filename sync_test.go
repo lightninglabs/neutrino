@@ -732,11 +732,27 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	// newly-best chain on h2. This will reorg the chain, including the
 	// transactions broadcast earlier, so we'll have to check that the
 	// rescan status has updated for the correct number of transactions.
-	// However, with the addition of the reliable broadcaster, the
-	// transaction will confirm once again on the h2 chain so the rescan
-	// should still show the two received transactions in addition to the
-	// two other transactions spending them.
-	_, err := harness.h2.Client.Generate(5)
+	// Seed the replacement miner with the spends before mining. The
+	// previous subtest deliberately banned h2 while broadcasting to h1,
+	// so relay timing cannot establish which transactions h2 will mine.
+	// The rescan must report both receives and both spends on either fork.
+	_, forkHeight, err := harness.h2.Client.GetBestBlock()
+	require.NoError(t, err)
+	_, originalHeight, err := harness.h1.Client.GetBestBlock()
+	require.NoError(t, err)
+	for height := forkHeight + 1; height <= originalHeight; height++ {
+		hash, err := harness.h1.Client.GetBlockHash(int64(height))
+		require.NoError(t, err)
+		block, err := harness.h1.Client.GetBlock(hash)
+		require.NoError(t, err)
+		for _, tx := range block.Transactions[1:] {
+			_, err := harness.h2.Client.SendRawTransaction(tx, true)
+			if err != nil && !strings.Contains(err.Error(), "already have") {
+				t.Fatalf("unable to seed replacement-chain transaction: %v", err)
+			}
+		}
+	}
+	_, err = harness.h2.Client.Generate(5)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit blocks: %s", err)
 	}
