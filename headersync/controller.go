@@ -125,7 +125,7 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	if err := c.advanceCommittedTip(ctx, tip); err != nil {
+	if err := c.AdvanceCommittedTip(ctx, tip); err != nil {
 		return CheckpointRangePlan{}, err
 	}
 
@@ -154,12 +154,16 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 	}, nil
 }
 
-// advanceCommittedTip moves the FSM to a durable tip that was persisted
+// AdvanceCommittedTip moves the FSM to a durable tip that was persisted
 // outside the staged commit path, then drops the staged payloads of every range
 // that move retired. Without the sweep those payloads stay in memory for the
 // life of the session, and nothing else ever deletes them.
-func (c *Controller) advanceCommittedTip(ctx context.Context,
+func (c *Controller) AdvanceCommittedTip(ctx context.Context,
 	tip ChainPoint) error {
+
+	if c == nil || c.manager == nil {
+		return nil
+	}
 
 	advanced, err := c.manager.AdvanceCommittedTip(
 		ctx, tip.Height, tip.Hash,
@@ -209,7 +213,7 @@ func (c *Controller) PlanFrontierRanges(ctx context.Context,
 		return PlanRangesResult{}, nil
 	}
 
-	if err := c.advanceCommittedTip(ctx, tip); err != nil {
+	if err := c.AdvanceCommittedTip(ctx, tip); err != nil {
 		return PlanRangesResult{}, err
 	}
 

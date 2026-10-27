@@ -2730,6 +2730,23 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 	})
 }
 
+// advanceHeaderSyncTip reconciles the headersync FSM with a durable tip that
+// the serial writer persisted, and drops the staging of ranges it retired.
+func (b *blockManager) advanceHeaderSyncTip(height uint32,
+	hash chainhash.Hash) {
+
+	ctx, cancel := b.headerSyncOpCtx()
+	defer cancel()
+
+	err := b.headerSync.Controller().AdvanceCommittedTip(
+		ctx, headersync.ChainPoint{Height: height, Hash: hash},
+	)
+	if err != nil {
+		log.Warnf("headersync unable to advance to serial tip "+
+			"height=%d: %v", height, err)
+	}
+}
+
 // disarmHeaderSyncTimeout cancels the serial getheaders deadline. Bumping the
 // request ID also voids a timeout callback that already fired but has not been
 // handled yet.
@@ -5237,6 +5254,12 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 			}
 			return
 		}
+
+		// The serial writer moved the durable tip outside the
+		// headersync commit path. Retire the ranges it covered now,
+		// rather than at the next planning pass, which may never
+		// come once sync is done.
+		b.advanceHeaderSyncTip(uint32(finalHeight), *finalHash)
 	}
 
 	// When this header is a checkpoint, find the next checkpoint.
