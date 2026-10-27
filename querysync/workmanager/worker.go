@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/query"
 )
 
 // queryJob is the internal struct that wraps the Query to work on, in addition
@@ -22,7 +21,7 @@ type queryJob struct {
 	activeAt           time.Time
 	lastStolenAt       time.Time
 	stolenCount        uint16
-	*query.Request
+	*Request
 }
 
 // canceled returns true if the query was canceled by the caller or internally
@@ -56,7 +55,7 @@ func (q *queryJob) Index() uint64 {
 // jobResult is the final result of the worker's handling of the queryJob.
 type jobResult struct {
 	job  *queryJob
-	peer query.Peer
+	peer Peer
 	err  error
 }
 
@@ -65,7 +64,7 @@ type jobResult struct {
 // query's response handler, and polls more work for the peer when it has
 // successfully received a response to the request.
 type worker struct {
-	peer query.Peer
+	peer Peer
 
 	// nextJob is a channel of queries to be distributed, where the worker
 	// will poll new work from.
@@ -76,7 +75,7 @@ type worker struct {
 var _ Worker = (*worker)(nil)
 
 // NewWorker creates a new worker associated with the given peer.
-func NewWorker(peer query.Peer) Worker {
+func NewWorker(peer Peer) Worker {
 	return &worker{
 		peer:    peer,
 		nextJob: make(chan *queryJob),
@@ -134,7 +133,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 				"already canceled", peer.Addr(), job.Index())
 
 			// We break to the below loop, where we'll check the
-			// cancel channel again and the query.ErrJobCanceled
+			// cancel channel again and the ErrJobCanceled
 			// result will be sent back.
 			break
 
@@ -146,7 +145,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 
 			// We break to the below loop, where we'll check the
 			// internal cancel channel again and the
-			// query.ErrJobCanceled result will be sent back.
+			// ErrJobCanceled result will be sent back.
 			break
 
 		// We received a non-canceled query job, send it to the peer.
@@ -179,12 +178,12 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					job.Req, resp, peer.Addr(),
 				)
 				if !progress.Finished &&
-					query.IsNotFoundResponse(
+					IsNotFoundResponse(
 						job.Req,
 						resp,
 					) {
 
-					jobErr = query.ErrPeerNotFound
+					jobErr = ErrPeerNotFound
 					log.Tracef("Worker %v received "+
 						"notfound "+
 						"for request %T with job "+
@@ -230,7 +229,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 			case <-timeout.C:
 				// The query did experience a timeout and will
 				// be given to someone else.
-				jobErr = query.ErrQueryTimeout
+				jobErr = ErrQueryTimeout
 				log.Tracef("Worker %v timeout for request %T "+
 					"with job index %v", peer.Addr(),
 					job.Req, job.Index())
@@ -244,7 +243,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 					"cancelling job %v", peer.Addr(),
 					job.Index())
 
-				jobErr = query.ErrPeerDisconnected
+				jobErr = ErrPeerDisconnected
 				break Loop
 
 			// If the job was canceled, we report this back to the
@@ -253,14 +252,14 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 				log.Tracef("Worker %v job %v canceled",
 					peer.Addr(), job.Index())
 
-				jobErr = query.ErrJobCanceled
+				jobErr = ErrJobCanceled
 				break Loop
 
 			case <-job.internalCancelChan:
 				log.Tracef("Worker %v job %v internally "+
 					"canceled", peer.Addr(), job.Index())
 
-				jobErr = query.ErrJobCanceled
+				jobErr = ErrJobCanceled
 				break Loop
 
 			case <-quit:
@@ -284,7 +283,7 @@ func (w *worker) Run(results chan<- *jobResult, quit <-chan struct{}) {
 		}
 
 		// If the peer disconnected, we can exit immediately.
-		if jobErr == query.ErrPeerDisconnected {
+		if jobErr == ErrPeerDisconnected {
 			return
 		}
 	}

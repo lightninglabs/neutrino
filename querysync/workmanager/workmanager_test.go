@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/query"
 	"github.com/lightninglabs/neutrino/querysync"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +21,7 @@ type mockPeer struct {
 	quit           chan struct{}
 }
 
-var _ query.Peer = (*mockPeer)(nil)
+var _ Peer = (*mockPeer)(nil)
 
 func (m *mockPeer) QueueMessageWithEncoding(wire.Message,
 	chan<- struct{}, wire.MessageEncoding) {
@@ -45,7 +44,7 @@ func (m *mockPeer) OnDisconnect() <-chan struct{} {
 }
 
 type mockWorker struct {
-	peer    query.Peer
+	peer    Peer
 	nextJob chan *queryJob
 	results chan *jobResult
 }
@@ -117,22 +116,22 @@ func startWorkManager(
 	numWorkers int,
 	trace *querysync.TraceRecorder,
 	events querysync.SchedulerEventSink,
-) (query.WorkManager, []*mockWorker) {
+) (WorkManager, []*mockWorker) {
 
 	t.Helper()
 
 	workerChan := make(chan *mockWorker)
-	peerChan := make(chan query.Peer)
+	peerChan := make(chan Peer)
 	ranking := &mockPeerRanking{}
 	ranking.setLess(func(i, j string) bool {
 		return i < j
 	})
 
 	wm := NewWorkManager(&Config{
-		ConnectedPeers: func() (<-chan query.Peer, func(), error) {
+		ConnectedPeers: func() (<-chan Peer, func(), error) {
 			return peerChan, func() {}, nil
 		},
-		NewWorker: func(peer query.Peer) Worker {
+		NewWorker: func(peer Peer) Worker {
 			m := &mockWorker{
 				peer:    peer,
 				nextJob: make(chan *queryJob, 1),
@@ -256,7 +255,7 @@ func TestWorkManagerRecordsReplayableSchedulerTraceAndEvents(t *testing.T) {
 		require.NoError(t, wm.Stop())
 	}()
 
-	errChan := wm.Query([]*query.Request{{}})
+	errChan := wm.Query([]*Request{{}})
 	job := recvJob(t, workers[0], errChan)
 	sendResult(t, workers[0], job, nil)
 	requireQueryDone(t, errChan)
@@ -308,15 +307,15 @@ func TestWorkManagerAvoidsAllFailedPeersForRetry(t *testing.T) {
 	}()
 
 	errChan := wm.Query(
-		[]*query.Request{{}}, query.NumRetries(4),
+		[]*Request{{}}, NumRetries(4),
 	)
 	job := recvJob(t, workers[0], errChan)
 
-	sendResult(t, workers[0], job, query.ErrPeerNotFound)
+	sendResult(t, workers[0], job, ErrPeerNotFound)
 	retry := recvJob(t, workers[1], errChan)
 	require.Same(t, job, retry)
 
-	sendResult(t, workers[1], retry, query.ErrQueryTimeout)
+	sendResult(t, workers[1], retry, ErrQueryTimeout)
 	retry = recvJob(t, workers[2], errChan)
 	require.Same(t, job, retry)
 
@@ -330,14 +329,14 @@ func TestWorkManagerHardCoolsTimeoutPeerAndReassignsLocalWork(t *testing.T) {
 		require.NoError(t, wm.Stop())
 	}()
 
-	errChan := wm.Query([]*query.Request{
+	errChan := wm.Query([]*Request{
 		{}, {}, {}, {}, {},
 	})
 
 	job0 := recvJob(t, workers[0], errChan)
 	job1 := recvJob(t, workers[1], errChan)
 
-	sendResult(t, workers[0], job0, query.ErrQueryTimeout)
+	sendResult(t, workers[0], job0, ErrQueryTimeout)
 	requireNoJob(t, workers[0])
 
 	sendResult(t, workers[1], job1, nil)
@@ -384,7 +383,7 @@ func TestSchedulerDoesNotRelaxHardCooldown(t *testing.T) {
 		ctx, scheduler, workers, ranking, &queryJob{
 			index:   1,
 			timeout: minQueryTimeout,
-			Request: &query.Request{},
+			Request: &Request{},
 		}, 0, nil, true,
 	)
 	require.True(t, ok)
@@ -398,7 +397,7 @@ func TestWorkManagerStealsOwnedWorkFromBusyPeer(t *testing.T) {
 		require.NoError(t, wm.Stop())
 	}()
 
-	errChan := wm.Query([]*query.Request{
+	errChan := wm.Query([]*Request{
 		{}, {}, {}, {}, {},
 	})
 

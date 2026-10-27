@@ -31,7 +31,6 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
-	"github.com/lightninglabs/neutrino/query"
 	"github.com/lightninglabs/neutrino/querysync"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
@@ -509,15 +508,15 @@ func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
 	delete(sp.recvSubscribers, subscription)
 }
 
-// A compile-time check to ensure that ServerPeer implements the query.Peer
+// A compile-time check to ensure that ServerPeer implements the querysyncwm.Peer
 // interface.
-var _ query.Peer = (*ServerPeer)(nil)
+var _ querysyncwm.Peer = (*ServerPeer)(nil)
 
 // SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
 // messages received from this peer will be sent on the returned channel. A
 // closure is also returned, that should be called to cancel the subscription.
 //
-// NOTE: Part of the query.Peer interface.
+// NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	// We won't have to buffer this channel, since we'll always send on it
 	// from a new goroutine.
@@ -541,7 +540,7 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 // OnDisconnect returns a channel that will be closed when this peer is
 // disconnected.
 //
-// NOTE: Part of the query.Peer interface.
+// NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) OnDisconnect() <-chan struct{} {
 	return sp.quit
 }
@@ -691,7 +690,7 @@ type HeadersImportConfig struct {
 // peerSubscription holds a peer subscription which we'll notify about any
 // connected peers.
 type peerSubscription struct {
-	peers  chan<- query.Peer
+	peers  chan<- querysyncwm.Peer
 	cancel <-chan struct{}
 }
 
@@ -732,7 +731,7 @@ type ChainService struct { // nolint:maligned
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
 	sqlBackend           *sqldb.Backend
-	workManager          query.WorkManager
+	workManager          querysyncwm.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
 	queryPeerQuarantine  map[string]time.Time
 
@@ -828,14 +827,14 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
 		ConnectedPeers: s.ConnectedPeers,
-		OnPeerUnresponsive: func(peer query.Peer) {
+		OnPeerUnresponsive: func(peer querysyncwm.Peer) {
 			err := s.BanPeer(peer.Addr(), banman.NonResponsivePeer)
 			if err != nil {
 				log.Errorf("Unable to ban non-responsive peer "+
 					"%v: %v", peer.Addr(), err)
 			}
 		},
-		Ranking:         query.NewPeerRanking(),
+		Ranking:         querysyncwm.NewPeerRanking(),
 		SchedulerTrace:  cfg.QuerySchedulerTrace,
 		SchedulerEvents: cfg.QuerySchedulerEvents,
 	})

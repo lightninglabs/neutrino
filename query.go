@@ -17,7 +17,7 @@ import (
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
 var (
@@ -64,9 +64,9 @@ var (
 	// fails.
 	ErrFilterFetchFailed = fmt.Errorf("unable to fetch cfilter")
 
-	// noProgress will be used to indicate to a query.WorkManager that a
+	// noProgress will be used to indicate to a querysyncwm.WorkManager that a
 	// response makes no progress towards the completion of the query.
-	noProgress = query.Progress{
+	noProgress = querysyncwm.Progress{
 		Finished:   false,
 		Progressed: false,
 	}
@@ -433,13 +433,13 @@ type cfiltersQuery struct {
 }
 
 // request couples a query message with the handler to be used for the response
-// in a query.Request struct.
-func (q *cfiltersQuery) request() *query.Request {
+// in a querysyncwm.Request struct.
+func (q *cfiltersQuery) request() *querysyncwm.Request {
 	msg := wire.NewMsgGetCFilters(
 		q.filterType, uint32(q.startHeight), q.stopHash,
 	)
 
-	return &query.Request{
+	return &querysyncwm.Request{
 		Req:        msg,
 		HandleResp: q.handleResponse,
 	}
@@ -448,7 +448,7 @@ func (q *cfiltersQuery) request() *query.Request {
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
 func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+	_ string) querysyncwm.Progress {
 
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
@@ -548,14 +548,14 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	// If there are still entries left in the headerIndex then the query
 	// has made progress but has not yet completed.
 	if len(q.headerIndex) != 0 {
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: true,
 		}
 	}
 
 	// The headerIndex is empty and so this query is complete.
-	return query.Progress{
+	return querysyncwm.Progress{
 		Finished:   true,
 		Progressed: true,
 	}
@@ -755,14 +755,14 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		filterQuery.startHeight, filterQuery.stopHeight,
 		filterQuery.stopHash)
 
-	opts := []query.QueryOption{
-		query.Cancel(s.quit),
-		query.Encoding(qo.encoding),
-		query.NumRetries(qo.numRetries),
+	opts := []querysyncwm.QueryOption{
+		querysyncwm.Cancel(s.quit),
+		querysyncwm.Encoding(qo.encoding),
+		querysyncwm.NumRetries(qo.numRetries),
 	}
 
 	errChan := s.workManager.Query(
-		[]*query.Request{filterQuery.request()}, opts...,
+		[]*querysyncwm.Request{filterQuery.request()}, opts...,
 	)
 
 	select {
@@ -839,7 +839,7 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(req, resp wire.Message, peer string) querysyncwm.Progress {
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {
@@ -904,27 +904,27 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		// we declare it sane. We can kill the query and pass the
 		// response back to the caller.
 		foundBlock = block
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   true,
 			Progressed: true,
 		}
 	}
 
 	// Prepare the query request.
-	request := &query.Request{
+	request := &querysyncwm.Request{
 		Req:        getData,
 		HandleResp: handleResp,
 	}
 
 	// Prepare the query options.
-	queryOpts := []query.QueryOption{
-		query.Encoding(qo.encoding),
-		query.NumRetries(qo.numRetries),
-		query.Cancel(s.quit),
+	queryOpts := []querysyncwm.QueryOption{
+		querysyncwm.Encoding(qo.encoding),
+		querysyncwm.NumRetries(qo.numRetries),
+		querysyncwm.Cancel(s.quit),
 	}
 
 	// Send the request to the work manager and await a response.
-	errChan := s.workManager.Query([]*query.Request{request}, queryOpts...)
+	errChan := s.workManager.Query([]*querysyncwm.Request{request}, queryOpts...)
 	select {
 	case err := <-errChan:
 		if err != nil {

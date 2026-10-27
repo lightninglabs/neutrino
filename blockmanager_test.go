@@ -25,7 +25,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
 	"github.com/stretchr/testify/require"
 )
@@ -40,19 +40,19 @@ const (
 	dbOpenTimeout = time.Second * 10
 )
 
-// mockDispatcher implements the query.Dispatcher interface and allows us to
+// mockDispatcher implements the querysyncwm.Dispatcher interface and allows us to
 // set up a custom Query method during tests.
 type mockDispatcher struct {
-	query.WorkManager
+	querysyncwm.WorkManager
 
-	query func(requests []*query.Request,
-		options ...query.QueryOption) chan error
+	query func(requests []*querysyncwm.Request,
+		options ...querysyncwm.QueryOption) chan error
 }
 
-var _ query.Dispatcher = (*mockDispatcher)(nil)
+var _ querysyncwm.Dispatcher = (*mockDispatcher)(nil)
 
-func (m *mockDispatcher) Query(requests []*query.Request,
-	options ...query.QueryOption) chan error {
+func (m *mockDispatcher) Query(requests []*querysyncwm.Request,
+	options ...querysyncwm.QueryOption) chan error {
 
 	return m.query(requests, options...)
 }
@@ -787,8 +787,8 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// will use this to feed the blockmanager with our crafted
 		// responses.
 		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
-			requests []*query.Request,
-			options ...query.QueryOption) chan error {
+			requests []*querysyncwm.Request,
+			options ...querysyncwm.QueryOption) chan error {
 
 			var msgs []wire.Message
 			for _, q := range requests {
@@ -1016,8 +1016,8 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		}
 
 		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
-			requests []*query.Request,
-			options ...query.QueryOption) chan error {
+			requests []*querysyncwm.Request,
+			options ...querysyncwm.QueryOption) chan error {
 
 			var msgs []wire.Message
 			for _, q := range requests {

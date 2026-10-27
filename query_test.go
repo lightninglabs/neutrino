@@ -22,7 +22,7 @@ import (
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/stretchr/testify/require"
 )
 
@@ -308,8 +308,8 @@ func TestBlockCache(t *testing.T) {
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.workManager.(*mockDispatcher).query = func(reqs []*query.Request,
-		opts ...query.QueryOption) chan error {
+	cs.workManager.(*mockDispatcher).query = func(reqs []*querysyncwm.Request,
+		opts ...querysyncwm.QueryOption) chan error {
 
 		errChan := make(chan error, 1)
 		defer close(errChan)

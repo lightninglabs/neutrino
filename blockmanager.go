@@ -28,7 +28,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/headersync/querydispatch"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
 const (
@@ -183,7 +183,7 @@ type blockManagerCfg struct {
 	TimeSource blockchain.MedianTimeSource
 
 	// QueryDispatcher is used to make queries to connected Bitcoin peers.
-	QueryDispatcher query.Dispatcher
+	QueryDispatcher querysyncwm.Dispatcher
 
 	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
@@ -1204,10 +1204,10 @@ type checkpointedCFHeadersQuery struct {
 }
 
 // requests creates the query.Requests for this CF headers query.
-func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
-	reqs := make([]*query.Request, len(c.msgs))
+func (c *checkpointedCFHeadersQuery) requests() []*querysyncwm.Request {
+	reqs := make([]*querysyncwm.Request, len(c.msgs))
 	for idx, m := range c.msgs {
-		reqs[idx] = &query.Request{
+		reqs[idx] = &querysyncwm.Request{
 			Req:        m,
 			HandleResp: c.handleResponse,
 		}
@@ -1218,12 +1218,12 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peerAddr string) query.Progress {
+	peerAddr string) querysyncwm.Progress {
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
 		// We are only looking for cfheaders messages.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1233,7 +1233,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	if !ok {
 		// We sent a getcfheaders message, so that's what we should be
 		// comparing against.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1241,7 +1241,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 	// The response doesn't match the query.
 	if q.FilterType != r.FilterType || q.StopHash != r.StopHash {
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1250,7 +1250,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	checkPointIndex, ok := c.stopHashes[r.StopHash]
 	if !ok {
 		// We never requested a matching stop hash.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1287,7 +1287,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
 
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1301,13 +1301,13 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	select {
 	case c.headerChan <- r:
 	case <-c.blockMgr.quit:
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
 	}
 
-	return query.Progress{
+	return querysyncwm.Progress{
 		Finished:   true,
 		Progressed: true,
 	}
@@ -1444,9 +1444,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// timer alive for hours and amplify a slow-peer attack.
 	//
 	errChan := b.cfg.QueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
-		query.Timeout(checkpointedCFHeadersBatchTimeout(batchesCount)),
-		query.ProgressTimeout(30*time.Second),
+		q.requests(), querysyncwm.Cancel(b.quit), querysyncwm.NoRetryMax(),
+		querysyncwm.Timeout(checkpointedCFHeadersBatchTimeout(batchesCount)),
+		querysyncwm.ProgressTimeout(30*time.Second),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
@@ -1457,7 +1457,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		case r = <-headerChan:
 		case err := <-errChan:
 			switch {
-			case err == query.ErrWorkManagerShuttingDown:
+			case err == querysyncwm.ErrWorkManagerShuttingDown:
 				return
 			case err != nil:
 				log.Errorf("Query finished with error before "+

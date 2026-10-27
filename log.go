@@ -12,7 +12,6 @@ import (
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
-	"github.com/lightninglabs/neutrino/query"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
 )
@@ -45,7 +44,6 @@ func UseLogger(logger btclog.Logger) {
 	blockntfns.UseLogger(logger)
 	pushtx.UseLogger(logger)
 	connmgr.UseLogger(logger)
-	query.UseLogger(logger)
 	querysyncwm.UseLogger(logger)
 	filterdb.UseLogger(logger)
 	chanutils.UseLogger(logger)

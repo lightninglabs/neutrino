@@ -5,7 +5,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/lightninglabs/neutrino/query"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,11 +35,11 @@ func TestWorkManagerProgressTimeout(t *testing.T) {
 				wm, _ := startWorkManager(t, 0, nil, nil)
 				defer func() { require.NoError(t, wm.Stop()) }()
 				result := wm.Query(
-					[]*query.Request{{}},
-					query.Timeout(
+					[]*Request{{}},
+					Timeout(
 						tc.hard,
 					),
-					query.ProgressTimeout(tc.idle),
+					ProgressTimeout(tc.idle),
 				)
 				synctest.Wait()
 				time.Sleep(tc.advance)
@@ -50,7 +49,7 @@ func TestWorkManagerProgressTimeout(t *testing.T) {
 					require.ErrorIs(
 						t,
 						err,
-						query.ErrQueryTimeout,
+						ErrQueryTimeout,
 					)
 				default:
 					t.Fatal("batch did not time out")
@@ -68,11 +67,11 @@ func TestWorkManagerProgressTimeoutReset(t *testing.T) {
 		defer func() { require.NoError(t, wm.Stop()) }()
 		synctest.Wait()
 		result := wm.Query(
-			[]*query.Request{{}, {}},
-			query.Timeout(
+			[]*Request{{}, {}},
+			Timeout(
 				time.Hour,
 			),
-			query.ProgressTimeout(10*time.Second),
+			ProgressTimeout(10*time.Second),
 		)
 		job := recvJob(t, workers[0], result)
 		synctest.Wait()
@@ -95,7 +94,7 @@ func TestWorkManagerProgressTimeoutReset(t *testing.T) {
 		requireQueryDone(t, result)
 		// A completed batch's timer cannot cancel a later batch.
 		time.Sleep(11 * time.Second)
-		next := wm.Query([]*query.Request{{}}, query.Timeout(time.Hour))
+		next := wm.Query([]*Request{{}}, Timeout(time.Hour))
 		job = recvJob(t, workers[0], next)
 		time.Sleep(11 * time.Second)
 		sendResult(t, workers[0], job, nil)
@@ -110,20 +109,20 @@ func TestWorkManagerFailureDoesNotResetIdle(t *testing.T) {
 		wm, workers := startWorkManager(t, 1, nil, nil)
 		defer func() { require.NoError(t, wm.Stop()) }()
 		result := wm.Query(
-			[]*query.Request{{}},
-			query.Timeout(time.Hour),
-			query.NoRetryMax(),
-			query.ProgressTimeout(10*time.Second),
+			[]*Request{{}},
+			Timeout(time.Hour),
+			NoRetryMax(),
+			ProgressTimeout(10*time.Second),
 		)
 		job := recvJob(t, workers[0], result)
 		time.Sleep(6 * time.Second)
-		sendResult(t, workers[0], job, query.ErrQueryTimeout)
+		sendResult(t, workers[0], job, ErrQueryTimeout)
 		synctest.Wait()
 		time.Sleep(5 * time.Second)
 		synctest.Wait()
 		select {
 		case err := <-result:
-			require.ErrorIs(t, err, query.ErrQueryTimeout)
+			require.ErrorIs(t, err, ErrQueryTimeout)
 		default:
 			t.Fatal("failed request reset the idle timeout")
 		}

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lightninglabs/neutrino/query"
 	"github.com/lightninglabs/neutrino/querysync"
 )
 
@@ -47,8 +46,8 @@ const (
 )
 
 type batch struct {
-	requests []*query.Request
-	options  query.Options
+	requests []*Request
+	options  Options
 	errChan  chan error
 }
 
@@ -60,7 +59,7 @@ type progressWake struct {
 }
 
 // Worker is the interface that must be satisfied by workers managed by this
-// package's query.WorkManager implementation.
+// package's WorkManager implementation.
 type Worker interface {
 	// Run starts the worker. The worker will supply its peer with queries,
 	// and handle responses from it. Results for any query handled by this
@@ -113,7 +112,7 @@ type peerScorer interface {
 // TODO(halseth): support more than one active job at a time.
 type activeWorker struct {
 	w            Worker
-	peer         query.Peer
+	peer         Peer
 	actor        *querysync.PeerActor
 	activeJob    *queryJob
 	localWork    []*queryJob
@@ -130,23 +129,23 @@ type Config struct {
 	// will be sent imemdiately, and new peers as they connect.
 	//
 	// The returned function closure is called to cancel the subscription.
-	ConnectedPeers func() (<-chan query.Peer, func(), error)
+	ConnectedPeers func() (<-chan Peer, func(), error)
 
 	// NewWorker is function closure that should start a new worker. We
 	// make this configurable to easily mock the worker used during tests.
-	NewWorker func(query.Peer) Worker
+	NewWorker func(Peer) Worker
 
 	// OnMaxTries gives the caller access to the peer once a maximum number
 	// of retries have been attempted. The caller can then access the
 	// peer's address and can choose to punish the peer accordingly.
-	OnMaxTries func(query.Peer)
+	OnMaxTries func(Peer)
 
 	// OnPeerUnresponsive gives the caller access to a peer that repeatedly
 	// failed to respond to assigned queries. Callers can use this to
 	// extend the normal peer ban system; the work manager also quarantines
 	// the peer locally so it is not selected while the callback
 	// disconnects it.
-	OnPeerUnresponsive func(query.Peer)
+	OnPeerUnresponsive func(Peer)
 
 	// Ranking is used to rank the connected peers when determining who to
 	// give work to.
@@ -166,7 +165,7 @@ type Config struct {
 // peerWorkManager is the main access point for outside callers, and satisfies
 // the QueryAccess API. It receives queries to pass to peers, and schedules
 // them among available workers, orchestrating where to send them. It
-// implements the query.WorkManager interface.
+// implements the WorkManager interface.
 type peerWorkManager struct {
 	cfg *Config
 
@@ -182,13 +181,13 @@ type peerWorkManager struct {
 	wg   sync.WaitGroup
 }
 
-// Compile time check to ensure peerWorkManager satisfies the query.WorkManager
+// Compile time check to ensure peerWorkManager satisfies the WorkManager
 // interface.
-var _ query.WorkManager = (*peerWorkManager)(nil)
+var _ WorkManager = (*peerWorkManager)(nil)
 
-// NewWorkManager returns a new query.WorkManager with the regular worker
+// NewWorkManager returns a new WorkManager with the regular worker
 // implementation.
-func NewWorkManager(cfg *Config) query.WorkManager {
+func NewWorkManager(cfg *Config) WorkManager {
 	if cfg == nil {
 		cfg = &Config{}
 	}
@@ -196,7 +195,7 @@ func NewWorkManager(cfg *Config) query.WorkManager {
 		cfg.NewWorker = NewWorker
 	}
 	if cfg.Ranking == nil {
-		cfg.Ranking = query.NewPeerRanking()
+		cfg.Ranking = NewPeerRanking()
 	}
 
 	return &peerWorkManager{
@@ -212,7 +211,7 @@ func NewWorkManager(cfg *Config) query.WorkManager {
 // backoff still works across peers.
 func queryTimeoutForPeer(
 	baseTimeout time.Duration,
-	peer query.Peer,
+	peer Peer,
 ) time.Duration {
 
 	return querysync.QueryTimeoutForPeer(
@@ -227,7 +226,7 @@ func queryTimeoutForPeer(
 }
 
 func peerSnapshot(
-	peer query.Peer,
+	peer Peer,
 	rank int,
 	state querysync.PeerState,
 ) querysync.PeerSnapshot {
@@ -290,11 +289,11 @@ func sortedPeerSet(peers map[string]struct{}) []string {
 }
 
 func isNonResponseErr(err error) bool {
-	return err == query.ErrQueryTimeout || err == query.ErrPeerDisconnected
+	return err == ErrQueryTimeout || err == ErrPeerDisconnected
 }
 
 func isHardCooldownErr(err error) bool {
-	return err == query.ErrQueryTimeout || err == query.ErrPeerNotFound
+	return err == ErrQueryTimeout || err == ErrPeerNotFound
 }
 
 func recordSchedulerEvent(sink querysync.SchedulerEventSink,
@@ -534,7 +533,7 @@ func assignQueryJobToLocalWorkWithScheduler(ctx context.Context,
 
 // Start starts the peerWorkManager.
 //
-// NOTE: this is part of the query.WorkManager interface.
+// NOTE: this is part of the WorkManager interface.
 func (w *peerWorkManager) Start() error {
 	w.wg.Add(1)
 	go w.workDispatcher()
@@ -544,7 +543,7 @@ func (w *peerWorkManager) Start() error {
 
 // Stop stops the peerWorkManager and all underlying goroutines.
 //
-// NOTE: this is part of the query.WorkManager interface.
+// NOTE: this is part of the WorkManager interface.
 func (w *peerWorkManager) Stop() error {
 	close(w.quit)
 	w.wg.Wait()
@@ -564,7 +563,7 @@ func (w *peerWorkManager) workDispatcher() {
 	defer w.wg.Done()
 
 	// Get a peer subscription. We do it in this goroutine rather than
-	// Start to avoid a deadlock when starting the query.WorkManager
+	// Start to avoid a deadlock when starting the WorkManager
 	// fetches the peers from the server.
 	peersConnected, cancel, err := w.cfg.ConnectedPeers()
 	if err != nil {
@@ -626,7 +625,7 @@ func (w *peerWorkManager) workDispatcher() {
 			if b.progressTimer != nil {
 				b.progressTimer.Stop()
 			}
-			b.errChan <- query.ErrWorkManagerShuttingDown
+			b.errChan <- ErrWorkManagerShuttingDown
 		}
 	}()
 
@@ -691,7 +690,7 @@ func (w *peerWorkManager) workDispatcher() {
 
 		batch, ok := currentBatches[batchNum]
 		if ok {
-			finishBatch(batchNum, batch, query.ErrJobCanceled, true)
+			finishBatch(batchNum, batch, ErrJobCanceled, true)
 			log.Debugf("Canceled batch %v", batchNum)
 		}
 	}
@@ -985,7 +984,7 @@ Loop:
 					batch, ok := currentBatches[batchNum]
 					if ok {
 						finishBatch(
-							batchNum, batch, query.ErrJobCanceled,
+							batchNum, batch, ErrJobCanceled,
 							true,
 						)
 						log.Debugf(
@@ -1248,7 +1247,7 @@ Loop:
 
 			switch {
 			// If the query ended because it was canceled, drop it.
-			case result.err == query.ErrJobCanceled:
+			case result.err == ErrJobCanceled:
 				log.Tracef("Query(%d) was canceled before "+
 					"result was available from peer %v",
 					result.job.index, result.peer.Addr())
@@ -1383,7 +1382,7 @@ Loop:
 				}
 
 				// Refresh peer rank on disconnect.
-				if result.err == query.ErrPeerDisconnected {
+				if result.err == ErrPeerDisconnected {
 					w.cfg.Ranking.ResetRanking(
 						result.peer.Addr(),
 					)
@@ -1448,7 +1447,7 @@ Loop:
 
 				// If it was a timeout, we dynamically increase
 				// it for the next attempt.
-				if result.err == query.ErrQueryTimeout {
+				if result.err == ErrQueryTimeout {
 					newTimeout := result.job.timeout * 2
 					if newTimeout > maxQueryTimeout {
 						newTimeout = maxQueryTimeout
@@ -1544,7 +1543,7 @@ Loop:
 			if !ok || batch.progressGen != wake.gen {
 				continue Loop
 			}
-			finishBatch(wake.batchNum, batch, query.ErrQueryTimeout, true)
+			finishBatch(wake.batchNum, batch, ErrQueryTimeout, true)
 			log.Warnf("Batch %v idle timeout after %v without progress",
 				wake.batchNum, batch.progressTimeout)
 
@@ -1555,7 +1554,7 @@ Loop:
 			}
 
 			finishBatch(
-				batchNum, batch, query.ErrQueryTimeout, true,
+				batchNum, batch, ErrQueryTimeout, true,
 			)
 
 			log.Warnf("Batch %v timed out", batchNum)
@@ -1572,11 +1571,11 @@ Loop:
 
 // Query distributes the slice of requests to the set of connected peers.
 //
-// NOTE: this is part of the query.WorkManager interface.
-func (w *peerWorkManager) Query(requests []*query.Request,
-	options ...query.QueryOption) chan error {
+// NOTE: this is part of the WorkManager interface.
+func (w *peerWorkManager) Query(requests []*Request,
+	options ...QueryOption) chan error {
 
-	qo := query.ResolveOptions(options...)
+	qo := ResolveOptions(options...)
 
 	errChan := make(chan error, 1)
 
@@ -1588,7 +1587,7 @@ func (w *peerWorkManager) Query(requests []*query.Request,
 		errChan:  errChan,
 	}:
 	case <-w.quit:
-		errChan <- query.ErrWorkManagerShuttingDown
+		errChan <- ErrWorkManagerShuttingDown
 	}
 
 	return errChan

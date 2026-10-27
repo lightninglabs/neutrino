@@ -6,7 +6,6 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/query"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,7 +16,7 @@ type livePeer struct {
 	quit          chan struct{}
 }
 
-var _ query.Peer = (*livePeer)(nil)
+var _ Peer = (*livePeer)(nil)
 
 func (l *livePeer) QueueMessageWithEncoding(msg wire.Message,
 	_ chan<- struct{}, _ wire.MessageEncoding) {
@@ -77,12 +76,12 @@ func TestWorkerNotFoundFailsFast(t *testing.T) {
 		index:    1,
 		timeout:  time.Hour,
 		encoding: wire.WitnessEncoding,
-		Request: &query.Request{
+		Request: &Request{
 			Req: getData,
 			HandleResp: func(_, _ wire.Message,
-				_ string) query.Progress {
+				_ string) Progress {
 
-				return query.Progress{}
+				return Progress{}
 			},
 		},
 	}
@@ -109,7 +108,7 @@ func TestWorkerNotFoundFailsFast(t *testing.T) {
 	case result := <-results:
 		require.Same(t, job, result.job)
 		require.Same(t, peer, result.peer)
-		require.ErrorIs(t, result.err, query.ErrPeerNotFound)
+		require.ErrorIs(t, result.err, ErrPeerNotFound)
 
 	case <-time.After(time.Second):
 		t.Fatalf("worker did not report notfound")

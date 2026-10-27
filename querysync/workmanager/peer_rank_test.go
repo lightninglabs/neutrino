@@ -1,4 +1,4 @@
-package query
+package workmanager
 
 import (
 	"fmt"
