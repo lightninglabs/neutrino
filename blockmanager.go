@@ -352,11 +352,10 @@ type blockManager struct { // nolint:maligned
 // newBlockManager returns a new bitcoin block manager. Use Start to begin
 // processing asynchronous block and inv updates.
 func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
-	targetTimespan := int64(cfg.ChainParams.TargetTimespan / time.Second)
-	targetTimePerBlock := int64(
-		cfg.ChainParams.TargetTimePerBlock / time.Second,
-	)
-	adjustmentFactor := cfg.ChainParams.RetargetAdjustmentFactor
+	retarget, err := chainsync.NewRetarget(cfg.ChainParams)
+	if err != nil {
+		return nil, err
+	}
 
 	bm := blockManager{
 		cfg:           cfg,
@@ -374,13 +373,11 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		reorgList: headerlist.NewBoundedMemoryChain(
 			numMaxMemHeaders,
 		),
-		headerSyncTimeout: cfg.HeaderSyncTimeout,
-		quit:              make(chan struct{}),
-		blocksPerRetarget: int32(targetTimespan / targetTimePerBlock),
-		minRetargetTimespan: targetTimespan /
-			adjustmentFactor,
-		maxRetargetTimespan: targetTimespan *
-			adjustmentFactor,
+		headerSyncTimeout:   cfg.HeaderSyncTimeout,
+		quit:                make(chan struct{}),
+		blocksPerRetarget:   retarget.BlocksPerRetarget,
+		minRetargetTimespan: retarget.MinRetargetTimespan,
+		maxRetargetTimespan: retarget.MaxRetargetTimespan,
 	}
 	if bm.headerSyncTimeout == 0 {
 		bm.headerSyncTimeout = defaultHeaderSyncTimeout

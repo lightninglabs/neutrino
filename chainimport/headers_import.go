@@ -166,9 +166,12 @@ func NewHeadersImport(options *ImportOptions) (*headersImport, error) {
 	blockHeadersSource := options.createBlockHeaderImportSrc()
 	filterHeadersSource := options.createFilterHeaderImportSrc()
 
-	blockheadersValidator := options.createBlockHeaderValidator(
+	blockheadersValidator, err := options.createBlockHeaderValidator(
 		blockHeadersSource,
 	)
+	if err != nil {
+		return nil, err
+	}
 	filterheadersValidator := options.createFilterHeaderValidator()
 
 	importer := &headersImport{
@@ -1097,7 +1100,9 @@ func (h *headersImport) validateSourcesCompatibility() error {
 // ImportOptions defines parameters for the import process.
 type ImportOptions struct {
 	// TargetChainParams specifies the blockchain network parameters for the
-	// chain into which headers will be imported.
+	// chain into which headers will be imported. NewHeadersImport returns
+	// an error wrapping chainsync.ErrInvalidRetargetParams if the retarget
+	// parameters cannot be used for header validation.
 	TargetChainParams chaincfg.Params
 
 	// TargetBlockHeaderStore is the storage backend where block headers
@@ -1180,7 +1185,7 @@ func (options *ImportOptions) createFilterHeaderImportSrc() HeaderImportSource {
 // createBlockHeaderValidator creates the appropriate validator for block
 // headers.
 func (options *ImportOptions) createBlockHeaderValidator(
-	blockHeadersImportSource HeaderImportSource) HeadersValidator {
+	blockHeadersImportSource HeaderImportSource) (HeadersValidator, error) {
 
 	return newBlockHeadersImportSourceValidator(
 		options.TargetChainParams, options.TargetBlockHeaderStore,

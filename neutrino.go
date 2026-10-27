@@ -27,6 +27,7 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/chainimport"
+	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -547,7 +548,8 @@ type Config struct {
 	// SQLConfig is nil.
 	LegacyImport *sqldb.LegacyDataSource
 
-	// ChainParams is the chain that we're running on.
+	// ChainParams is the chain that we're running on. Retarget parameters
+	// must be valid whole-second values, as checked by chainsync.NewRetarget.
 	ChainParams chaincfg.Params
 
 	// ConnectPeers is a slice of hosts that should be connected to on
@@ -729,6 +731,10 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	if _, err := chainsync.NewRetarget(cfg.ChainParams); err != nil {
+		return nil, fmt.Errorf("unable to create chain service: %w", err)
+	}
+
 	// Validate that the caller provided at least one of the two supported
 	// persistent backends. This is checked before any other side effect
 	// so misconfigurations fail fast.
