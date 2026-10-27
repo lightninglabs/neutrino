@@ -3,14 +3,15 @@ package rescan
 import (
 	"bytes"
 	"fmt"
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -20,7 +21,7 @@ import (
 // together during state transitions.
 type WatchState struct {
 	// Addrs is the set of addresses being watched for incoming payments.
-	Addrs []btcutil.Address
+	Addrs []address.Address
 
 	// Inputs is the set of outpoints being watched for spends.
 	Inputs []neutrino.InputWithScript
@@ -34,7 +35,7 @@ type WatchState struct {
 // don't share underlying slice memory.
 func (ws *WatchState) Clone() WatchState {
 	clone := WatchState{
-		Addrs:  make([]btcutil.Address, len(ws.Addrs)),
+		Addrs:  make([]address.Address, len(ws.Addrs)),
 		Inputs: make([]neutrino.InputWithScript, len(ws.Inputs)),
 		List:   make([][]byte, len(ws.List)),
 	}
@@ -233,7 +234,7 @@ func SpendsWatchedInput(tx *btcutil.Tx,
 // for the matching outputs, so that future spends of these outputs are also
 // watched.
 func PaysWatchedAddr(tx *btcutil.Tx,
-	watchAddrs []btcutil.Address) (bool, []neutrino.InputWithScript,
+	watchAddrs []address.Address) (bool, []neutrino.InputWithScript,
 	error) {
 
 	var (

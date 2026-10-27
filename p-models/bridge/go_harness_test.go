@@ -1,13 +1,13 @@
 package bridge
 
 import (
+	"github.com/btcsuite/btcd/address/v2"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/lightninglabs/neutrino/rescan"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +53,7 @@ func TestRealActorLifecycleConformsToModelInvariants(t *testing.T) {
 func TestRealActorRewindFindsHistoricalTx(t *testing.T) {
 	chain := NewMockChain(6)
 
-	addr, err := btcutil.NewAddressPubKeyHash(
+	addr, err := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("bridge-rewind"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -72,7 +72,7 @@ func TestRealActorRewindFindsHistoricalTx(t *testing.T) {
 
 	rewindTo := uint32(txStamp.Height - 1)
 	err = harness.Actor.AddWatchAddrs(
-		[]btcutil.Address{addr}, nil, &rewindTo,
+		[]address.Address{addr}, nil, &rewindTo,
 	)
 	require.NoError(t, err)
 
@@ -123,7 +123,7 @@ func TestCurrentAddWatchNoOpRewindDoesNotRestartSubscription(t *testing.T) {
 	cur, ok := state.(*rescan.StateCurrent)
 	require.True(t, ok)
 
-	addr, err := btcutil.NewAddressPubKeyHash(
+	addr, err := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("bridge-noop-rewind"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -131,7 +131,7 @@ func TestCurrentAddWatchNoOpRewindDoesNotRestartSubscription(t *testing.T) {
 
 	rewindTo := uint32(cur.CurStamp.Height)
 	err = harness.Actor.AddWatchAddrs(
-		[]btcutil.Address{addr}, nil, &rewindTo,
+		[]address.Address{addr}, nil, &rewindTo,
 	)
 	require.NoError(t, err)
 
@@ -184,7 +184,7 @@ func TestRecoveredBlockRetryDoesNotReError(t *testing.T) {
 	chain := NewMockChain(3)
 
 	var errorCount atomic.Int32
-	dummyAddr, err := btcutil.NewAddressPubKeyHash(
+	dummyAddr, err := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("bridge-retry-dummy"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -192,7 +192,7 @@ func TestRecoveredBlockRetryDoesNotReError(t *testing.T) {
 
 	harness, err := NewActorHarnessWithChain(chain, ActorHarnessConfig{
 		BatchSize:  100,
-		WatchAddrs: []btcutil.Address{dummyAddr},
+		WatchAddrs: []address.Address{dummyAddr},
 		OnError: func(err error) {
 			errorCount.Add(1)
 		},

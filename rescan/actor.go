@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -84,7 +85,7 @@ type ActorConfig struct {
 	StartTime time.Time
 
 	// WatchAddrs is the initial set of addresses to watch.
-	WatchAddrs []btcutil.Address
+	WatchAddrs []address.Address
 
 	// WatchInputs is the initial set of outpoints to watch for spends.
 	WatchInputs []neutrino.InputWithScript
@@ -140,7 +141,7 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 
 	// Build the initial watch state from config.
 	watch := WatchState{
-		Addrs:  make([]btcutil.Address, len(cfg.WatchAddrs)),
+		Addrs:  make([]address.Address, len(cfg.WatchAddrs)),
 		Inputs: make([]neutrino.InputWithScript, len(cfg.WatchInputs)),
 	}
 	copy(watch.Addrs, cfg.WatchAddrs)
@@ -273,7 +274,7 @@ func (a *RescanActor) WaitForShutdown() {
 // AddWatchAddrs sends an AddWatchAddrs mailbox request so watch-list changes
 // are serialized with all other actor work and any FSM failure is surfaced to
 // the caller.
-func (a *RescanActor) AddWatchAddrs(addrs []btcutil.Address,
+func (a *RescanActor) AddWatchAddrs(addrs []address.Address,
 	inputs []neutrino.InputWithScript, rewindTo *uint32) error {
 
 	ref, err := a.requireActorRef()

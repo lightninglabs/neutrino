@@ -1,8 +1,8 @@
 package rescan
 
 import (
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 )
 
@@ -46,7 +46,7 @@ func (BlockDisconnectedEvent) rescanEventSealed() {}
 // that height and re-scan all subsequent blocks with the updated watch list.
 type AddWatchAddrsEvent struct {
 	// Addrs contains new addresses to watch for incoming payments.
-	Addrs []btcutil.Address
+	Addrs []address.Address
 
 	// Inputs contains new outpoints to watch for spends.
 	Inputs []neutrino.InputWithScript

@@ -1,15 +1,16 @@
 package rescan
 
 import (
+	"github.com/btcsuite/btcd/address/v2"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
@@ -76,7 +77,7 @@ func TestRescanActorReceiveProcessNextBlock(t *testing.T) {
 func TestRescanActorReceiveAddWatchAddrs(t *testing.T) {
 	actor := newActorReceiveHarness(t)
 
-	addr, err := btcutil.NewAddressPubKeyHash(
+	addr, err := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("receive-test"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -84,7 +85,7 @@ func TestRescanActorReceiveAddWatchAddrs(t *testing.T) {
 
 	result := actor.Receive(
 		t.Context(), newAddWatchAddrsMsg(
-			[]btcutil.Address{addr}, nil, nil,
+			[]address.Address{addr}, nil, nil,
 		),
 	)
 	require.True(t, result.IsOk())
@@ -191,11 +192,11 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Add a watch address (no rewind).
-	addr, _ := btcutil.NewAddressPubKeyHash(
+	addr, _ := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("test-addr"))[:20],
 		&chaincfg.MainNetParams,
 	)
-	err := actor.AddWatchAddrs([]btcutil.Address{addr}, nil, nil)
+	err := actor.AddWatchAddrs([]address.Address{addr}, nil, nil)
 	require.NoError(t, err)
 
 	// Wait for the address to appear in state.
@@ -242,7 +243,7 @@ func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
 	})
 
 	err := actor.AddWatchAddrs(
-		[]btcutil.Address{invalidTestAddress{}}, nil, nil,
+		[]address.Address{invalidTestAddress{}}, nil, nil,
 	)
 	require.Error(t, err)
 }
@@ -256,7 +257,7 @@ func TestRescanActorWithTxMatch(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	// Create a watched address and add a block with a matching tx.
-	addr, _ := btcutil.NewAddressPubKeyHash(
+	addr, _ := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("match-test"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -277,7 +278,7 @@ func TestRescanActorWithTxMatch(t *testing.T) {
 		},
 		StartHeader: *genesisHeader,
 		StartTime:   time.Time{},
-		WatchAddrs:  []btcutil.Address{addr},
+		WatchAddrs:  []address.Address{addr},
 		Callbacks: Callbacks{
 			OnFilteredBlockConnected: func(height int32,
 				header *wire.BlockHeader,
@@ -423,7 +424,7 @@ func TestRewindingAddWatchLowerTarget(t *testing.T) {
 // TestWatchStateClone tests that Clone produces an independent copy.
 func TestWatchStateClone(t *testing.T) {
 	original := WatchState{
-		Addrs: []btcutil.Address{},
+		Addrs: []address.Address{},
 		List:  [][]byte{{0x01, 0x02}},
 	}
 

@@ -13,16 +13,16 @@ const (
 	EvStop              EventType = "eStopEvent"
 
 	// Outbox events (announced by FSM for monitors).
-	EvFilteredBlockOutbox    EventType = "eFilteredBlockOutbox"
-	EvBlockConnectedOutbox   EventType = "eBlockConnectedOutbox"
-	EvBlockDisconnectedOutbox EventType = "eBlockDisconnectedOutbox"
-	EvRescanProgressOutbox   EventType = "eRescanProgressOutbox"
-	EvRescanFinishedOutbox   EventType = "eRescanFinishedOutbox"
-	EvStartSubscriptionOutbox EventType = "eStartSubscriptionOutbox"
+	EvFilteredBlockOutbox      EventType = "eFilteredBlockOutbox"
+	EvBlockConnectedOutbox     EventType = "eBlockConnectedOutbox"
+	EvBlockDisconnectedOutbox  EventType = "eBlockDisconnectedOutbox"
+	EvRescanProgressOutbox     EventType = "eRescanProgressOutbox"
+	EvRescanFinishedOutbox     EventType = "eRescanFinishedOutbox"
+	EvStartSubscriptionOutbox  EventType = "eStartSubscriptionOutbox"
 	EvCancelSubscriptionOutbox EventType = "eCancelSubscriptionOutbox"
-	EvSelfTellOutbox         EventType = "eSelfTellOutbox"
-	EvFSMStateChange         EventType = "eFSMStateChange"
-	EvGroundTruth            EventType = "eGroundTruthBlockProcessed"
+	EvSelfTellOutbox           EventType = "eSelfTellOutbox"
+	EvFSMStateChange           EventType = "eFSMStateChange"
+	EvGroundTruth              EventType = "eGroundTruthBlockProcessed"
 
 	// Actor events.
 	EvActorStart         EventType = "eActorStart"
@@ -63,7 +63,7 @@ func (s FSMState) String() string {
 // FilteredBlockPayload is the Go representation of the eFilteredBlockOutbox
 // payload from the P model: (Height, seq[AbstractTx]).
 type FilteredBlockPayload struct {
-	Height int `json:"0"`
+	Height int                 `json:"0"`
 	Txs    []AbstractTxPayload `json:"1"`
 }
 

@@ -2,13 +2,14 @@ package bridge
 
 import (
 	"fmt"
+	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/rescan"
@@ -307,7 +308,7 @@ type ActorHarness struct {
 type ActorHarnessConfig struct {
 	StartTime   time.Time
 	BatchSize   int
-	WatchAddrs  []btcutil.Address
+	WatchAddrs  []address.Address
 	WatchInputs []neutrino.InputWithScript
 	OnError     func(error)
 }

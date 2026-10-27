@@ -2,17 +2,18 @@ package bridge
 
 import (
 	"errors"
+	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -127,7 +128,7 @@ func (c *MockChain) AddBlock() headerfs.BlockStamp {
 
 // AddBlockWithTx extends the chain with a block paying to the given address.
 func (c *MockChain) AddBlockWithTx(
-	addr btcutil.Address) (headerfs.BlockStamp, *wire.MsgTx, error) {
+	addr address.Address) (headerfs.BlockStamp, *wire.MsgTx, error) {
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	if err != nil {

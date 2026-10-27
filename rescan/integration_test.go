@@ -1,15 +1,16 @@
 package rescan
 
 import (
+	"github.com/btcsuite/btcd/address/v2"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
@@ -22,7 +23,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	// Phase 1: Build a chain with a known transaction.
 	chain := newMockChainWithTxs(10)
 
-	addr, _ := btcutil.NewAddressPubKeyHash(
+	addr, _ := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("integration-test"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -93,7 +94,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	_ = pkScript
 
 	err := actor.AddWatchAddrs(
-		[]btcutil.Address{addr}, nil, &rewindTo,
+		[]address.Address{addr}, nil, &rewindTo,
 	)
 	require.NoError(t, err)
 
@@ -149,7 +150,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 func TestIntegrationRaceConditionPrevention(t *testing.T) {
 	chain := newMockChainWithTxs(20)
 
-	addr, _ := btcutil.NewAddressPubKeyHash(
+	addr, _ := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("race-prevent"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -214,7 +215,7 @@ func TestIntegrationRaceConditionPrevention(t *testing.T) {
 
 	// Add the address with rewind right after (or simultaneously).
 	err := actor.AddWatchAddrs(
-		[]btcutil.Address{addr}, nil, &rewindTo,
+		[]address.Address{addr}, nil, &rewindTo,
 	)
 	require.NoError(t, err)
 

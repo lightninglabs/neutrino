@@ -2,9 +2,9 @@ package rescan
 
 import (
 	"fmt"
+	"github.com/btcsuite/btcd/address/v2"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
@@ -53,7 +53,7 @@ func (*stopRescanMsg) rescanActorMsgSealed() {}
 type addWatchAddrsMsg struct {
 	lndactor.BaseMessage
 
-	Addrs    []btcutil.Address
+	Addrs    []address.Address
 	Inputs   []neutrino.InputWithScript
 	RewindTo *uint32
 }
@@ -112,11 +112,11 @@ type currentStateResp struct {
 
 func (*currentStateResp) rescanActorRespSealed() {}
 
-func newAddWatchAddrsMsg(addrs []btcutil.Address,
+func newAddWatchAddrsMsg(addrs []address.Address,
 	inputs []neutrino.InputWithScript, rewindTo *uint32) *addWatchAddrsMsg {
 
 	msg := &addWatchAddrsMsg{
-		Addrs:  append([]btcutil.Address(nil), addrs...),
+		Addrs:  append([]address.Address(nil), addrs...),
 		Inputs: copyInputsWithScripts(inputs),
 	}
 

@@ -2,15 +2,16 @@ package rescan
 
 import (
 	"context"
+	"github.com/btcsuite/btcd/address/v2"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
@@ -39,7 +40,7 @@ func newMockChainWithTxs(numBlocks int) *mockChainWithTxs {
 // addBlockWithTx adds a block containing a transaction that pays to the
 // given address. Returns the block stamp and the transaction.
 func (c *mockChainWithTxs) addBlockWithTx(
-	addr btcutil.Address) (headerfs.BlockStamp, *wire.MsgTx) {
+	addr address.Address) (headerfs.BlockStamp, *wire.MsgTx) {
 
 	c.mu.Lock()
 	newHeight := uint32(c.bestBlock.Height + 1)
@@ -117,7 +118,7 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 		chain := newMockChainWithTxs(numEmptyBlocks + 1)
 
 		// Generate a test address.
-		privKey, _ := btcutil.NewAddressPubKeyHash(
+		privKey, _ := address.NewAddressPubKeyHash(
 			chainhash.HashB([]byte("test-key"))[:20],
 			&chaincfg.MainNetParams,
 		)
@@ -130,7 +131,7 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 		genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 		initialWatch := WatchState{}
-		initialWatch.Addrs = []btcutil.Address{privKey}
+		initialWatch.Addrs = []address.Address{privKey}
 		pkScript, _ := txscript.PayToAddrScript(privKey)
 		initialWatch.List = [][]byte{pkScript}
 
@@ -216,7 +217,7 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 
 		chain := newMockChainWithTxs(numEmpty + 1)
 
-		privKey, _ := btcutil.NewAddressPubKeyHash(
+		privKey, _ := address.NewAddressPubKeyHash(
 			chainhash.HashB([]byte("mid-sync-key"))[:20],
 			&chaincfg.MainNetParams,
 		)
@@ -270,7 +271,7 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		transition, err := currentState.ProcessEvent(
 			context.Background(),
 			AddWatchAddrsEvent{
-				Addrs:    []btcutil.Address{privKey},
+				Addrs:    []address.Address{privKey},
 				RewindTo: &rewindTo,
 			},
 			env,

@@ -1,16 +1,17 @@
 package rescan
 
 import (
+	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
@@ -28,13 +29,13 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 	var (
 		finished atomic.Bool
 		mu       sync.Mutex
-		addrs    []btcutil.Address
+		addrs    []address.Address
 	)
 
 	// Generate addresses we'll add concurrently.
 	for i := 0; i < 10; i++ {
 		key := chainhash.HashB([]byte{byte(i), 0xca, 0xfe})
-		addr, _ := btcutil.NewAddressPubKeyHash(
+		addr, _ := address.NewAddressPubKeyHash(
 			key[:20], &chaincfg.MainNetParams,
 		)
 		addrs = append(addrs, addr)
@@ -74,7 +75,7 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 			mu.Unlock()
 
 			err := actor.AddWatchAddrs(
-				[]btcutil.Address{addr}, nil, nil,
+				[]address.Address{addr}, nil, nil,
 			)
 			if err != nil {
 				t.Errorf("AddWatchAddrs failed: %v", err)
@@ -188,7 +189,7 @@ func TestChaosAddWatchWithRewindDuringCurrent(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	// Add a block with a tx at height 11.
-	addr, _ := btcutil.NewAddressPubKeyHash(
+	addr, _ := address.NewAddressPubKeyHash(
 		chainhash.HashB([]byte("chaos-rewind"))[:20],
 		&chaincfg.MainNetParams,
 	)
@@ -240,7 +241,7 @@ func TestChaosAddWatchWithRewindDuringCurrent(t *testing.T) {
 	_ = pkScript
 
 	err := actor.AddWatchAddrs(
-		[]btcutil.Address{addr}, nil, &rewindTo,
+		[]address.Address{addr}, nil, &rewindTo,
 	)
 	require.NoError(t, err)
 
