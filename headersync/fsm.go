@@ -362,11 +362,20 @@ func (h *HeaderSyncFSM) Ranges() []HeaderRange {
 	return ranges
 }
 
-// CanPlanRange returns true when both boundary anchors are confirmed.
+// CanPlanRange returns true when both boundary anchors are confirmed and the
+// span starts at or above the committed tip.
 func (h *HeaderSyncFSM) CanPlanRange(startHeight,
 	stopHeight uint32) bool {
 
 	if startHeight >= stopHeight {
+		return false
+	}
+
+	// Ordered commit only drains ranges from the committed tip upward, so
+	// a span starting below it could never commit. A late discovery reply
+	// for a span the serial writer already persisted would otherwise be
+	// staged and kept forever.
+	if startHeight < h.committedTip {
 		return false
 	}
 	if stopHeight-startHeight > h.cfg.MaxRangeHeaders {

@@ -690,6 +690,24 @@ func TestRejectedAnchorDoesNotBlockLaterObservations(t *testing.T) {
 	require.True(t, fsm.AnchorConfirmed(anchor))
 }
 
+// TestStageDiscoveredRangeBelowTipRefused checks that a discovery reply for a
+// span below the committed tip is not staged. Ordered commit could never drain
+// it, so its payload would stay in memory for the life of the session.
+func TestStageDiscoveredRangeBelowTipRefused(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 8, 108)
+	addTrustedAnchor(t, fsm, 12, 112)
+	require.True(t, fsm.AdvanceCommittedTip(12, testHash(112)))
+
+	_, ok, err := fsm.StageDiscoveredRange(
+		1, "peer", 8, 12, time.Unix(0, 0),
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.False(t, fsm.CanPlanRange(8, 12))
+}
+
 func commitLogStrictlyIncreasing(log []RangeID) bool {
 	for i := 1; i < len(log); i++ {
 		if log[i] <= log[i-1] {
