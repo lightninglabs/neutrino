@@ -427,7 +427,8 @@ func runRescanDST(t *testing.T, script []byte) dstOutcome {
 				if newHash == old4.BlockHash() {
 					chain.mu.Unlock()
 					return fmt.Errorf(
-						"replacement equals orphan %s", newHash,
+						"replacement equals orphan %s",
+						newHash,
 					)
 				}
 				filter, err := builder.BuildBasicFilter(
