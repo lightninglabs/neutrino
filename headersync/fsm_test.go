@@ -631,6 +631,65 @@ func permutedRangeOrder(numRanges int, raw []uint8) []RangeID {
 	return order
 }
 
+// TestTrustedObservationClearsRejection checks that a trusted observation of
+// an anchor's own hash clears an earlier rejection. A conflicting reply used to
+// leave a committed tip's anchor {Trusted, Rejected}, so it never counted as
+// confirmed and nothing could be planned from the tip.
+func TestTrustedObservationClearsRejection(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AnchorConfirmationsRequired = 1
+	fsm := NewHeaderSyncFSM(0, testHash(100), cfg)
+
+	_, ok := fsm.AddOrConfirmAnchor(10, testHash(110), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(10, testHash(111), false)
+	require.False(t, ok)
+
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(110)))
+	anchor, ok := fsm.AnchorByHeight(10)
+	require.True(t, ok)
+	require.True(t, anchor.Trusted)
+	require.False(t, anchor.Rejected)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
+// TestRejectedAnchorDoesNotBlockLaterObservations checks that once a conflict
+// rejects an unconfirmed anchor, a later observation starts over instead of
+// conflicting with the rejected hash. Otherwise one liar that answered first
+// gets every honest reporter rejected and the height is never confirmed.
+func TestRejectedAnchorDoesNotBlockLaterObservations(t *testing.T) {
+	fsm := newTestFSM()
+
+	_, ok := fsm.AddOrConfirmAnchor(10, testHash(66), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(10, testHash(110), false)
+	require.False(t, ok, "first conflict still rejects")
+
+	for i := 0; i < 2; i++ {
+		_, ok = fsm.AddOrConfirmAnchor(10, testHash(110), false)
+		require.True(t, ok)
+	}
+	anchor, ok := fsm.AnchorByHeight(10)
+	require.True(t, ok)
+	require.Equal(t, testHash(110), anchor.Hash)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+
+	// The same holds when the honest observation came first and a liar's
+	// conflict rejected it: later reports of the honest hash restart it.
+	fsm = newTestFSM()
+	_, ok = fsm.AddOrConfirmAnchor(20, testHash(120), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(20, testHash(66), false)
+	require.False(t, ok)
+	for i := 0; i < 2; i++ {
+		_, ok = fsm.AddOrConfirmAnchor(20, testHash(120), false)
+		require.True(t, ok)
+	}
+	anchor, ok = fsm.AnchorByHeight(20)
+	require.True(t, ok)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
 func commitLogStrictlyIncreasing(log []RangeID) bool {
 	for i := 1; i < len(log); i++ {
 		if log[i] <= log[i-1] {

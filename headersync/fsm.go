@@ -108,7 +108,24 @@ func (h *HeaderSyncFSM) CommitLog() []RangeID {
 func (h *HeaderSyncFSM) AddOrConfirmAnchor(height uint32, hash Hash,
 	trusted bool) (Anchor, bool) {
 
-	if existing, ok := h.anchors[height]; ok {
+	existing, ok := h.anchors[height]
+
+	// A rejected incumbent already lost its standing, whichever hash it
+	// carries. Comparing later observations against it would reject each
+	// honest reporter in turn, so a single liar that answered first could
+	// block the height forever. Start over from the new observation.
+	if ok && existing.Rejected && !existing.Trusted && !trusted {
+		anchor := h.newAnchor(height, hash, false)
+		h.anchors[height] = anchor
+		h.metrics.AnchorsAdded++
+		if h.anchorConfirmed(anchor) {
+			h.metrics.AnchorsConfirmed++
+		}
+
+		return anchor, true
+	}
+
+	if ok {
 		if existing.Hash != hash {
 			if trusted {
 				anchor := h.newAnchor(height, hash, true)
@@ -129,7 +146,12 @@ func (h *HeaderSyncFSM) AddOrConfirmAnchor(height uint32, hash Hash,
 
 		wasConfirmed := h.anchorConfirmed(existing)
 		if trusted {
+			// A trusted observation is authoritative, so it also
+			// clears an earlier rejection. Otherwise a committed
+			// tip whose anchor a conflicting reply had rejected
+			// stays unconfirmed, and nothing plans from it.
 			existing.Trusted = true
+			existing.Rejected = false
 			existing.Confirmations =
 				h.cfg.AnchorConfirmationsRequired
 		} else if existing.Confirmations <
