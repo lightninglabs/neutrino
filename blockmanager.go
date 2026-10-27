@@ -5277,6 +5277,16 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		b.advanceHeaderSyncTip(uint32(finalHeight), *finalHash)
 	}
 
+	// The headers are durable, so publish the new tip before asking for
+	// more. A failed follow-up request used to return first, leaving the
+	// visible tip behind disk and filter header sync waiting on a signal
+	// that never came.
+	b.newHeadersMtx.Lock()
+	b.headerTip = uint32(finalHeight)
+	b.headerTipHash = *finalHash
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
+
 	// When this header is a checkpoint, find the next checkpoint.
 	if receivedCheckpoint {
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
@@ -5296,18 +5306,8 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.peer.Addr(), err)
-			return
 		}
 	}
-
-	// Since we have a new set of headers written to disk, we'll send out a
-	// new signal to notify any waiting sub-systems that they can now maybe
-	// proceed do to us extending the header chain.
-	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(finalHeight)
-	b.headerTipHash = *finalHash
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
 }
 
 // areHeadersConnected returns true if the passed block headers are connected
