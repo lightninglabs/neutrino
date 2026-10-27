@@ -457,6 +457,13 @@ func (h *HeaderSyncFSM) StageDiscoveredRange(
 		}
 	}
 
+	// A discovered span that overlaps other work (say a short reply's
+	// range inside it) is not staged. The anchor still counts, and
+	// planning fills the span once the overlap is gone.
+	if h.rangeOverlaps(startHeight, stopHeight) {
+		return HeaderRange{}, false, nil
+	}
+
 	rng, ok, err := h.PlanRange(id, startHeight, stopHeight)
 	if err != nil || !ok {
 		return rng, ok, err

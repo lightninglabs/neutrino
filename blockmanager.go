@@ -4000,17 +4000,23 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		ctx, peerID, hmsg.headers.Headers,
 		headersync.DefaultMaxRangeHeaders,
 	)
-	if !ok {
-		// Keep unmatched replies out of the compatibility path while
-		// discovery waits for a different locator response.
-		return b.headerSync.Session().AnchorActive(peerID)
-	}
+
+	// Check the error before the match flag, so an actor failure is never
+	// mistaken for an unmatched reply. The request is already finished, so
+	// keep sync moving: otherwise nothing is in flight and nothing ever
+	// schedules the next request.
 	if err != nil {
 		log.Warnf("headersync unable to add discovered anchor "+
 			"peer=%s "+
 			"height=%d hash=%s: %v", peerID, result.Response.Height,
 			result.Response.Hash, err)
+		b.continueHeaderSync(peers)
 		return true
+	}
+	if !ok {
+		// Keep unmatched replies out of the compatibility path while
+		// discovery waits for a different locator response.
+		return b.headerSync.Session().AnchorActive(peerID)
 	}
 
 	request := result.Request

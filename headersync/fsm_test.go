@@ -708,6 +708,24 @@ func TestStageDiscoveredRangeBelowTipRefused(t *testing.T) {
 	require.False(t, fsm.CanPlanRange(8, 12))
 }
 
+// TestStageDiscoveredRangeSkipsOverlap checks that a discovered span which
+// overlaps planned work is not staged and does not fail. An overlong reply can
+// confirm an anchor inside the next span; the error used to abort the reply
+// and leave nothing in flight.
+func TestStageDiscoveredRangeSkipsOverlap(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 1, 101)
+	addTrustedAnchor(t, fsm, 4, 104)
+	mustPlanRange(t, fsm, 1, 0, 1)
+
+	_, ok, err := fsm.StageDiscoveredRange(
+		2, "peer", 0, 4, time.Unix(0, 0),
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
 func commitLogStrictlyIncreasing(log []RangeID) bool {
 	for i := 1; i < len(log); i++ {
 		if log[i] <= log[i-1] {
