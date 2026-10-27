@@ -19,11 +19,12 @@ var (
 )
 
 type mockPeer struct {
-	addr          string
-	requests      chan wire.Message
-	responses     chan<- wire.Message
-	subscriptions chan chan wire.Message
-	quit          chan struct{}
+	addr           string
+	lastPingMicros int64
+	requests       chan wire.Message
+	responses      chan<- wire.Message
+	subscriptions  chan chan wire.Message
+	quit           chan struct{}
 }
 
 var _ Peer = (*mockPeer)(nil)
@@ -47,6 +48,10 @@ func (m *mockPeer) OnDisconnect() <-chan struct{} {
 
 func (m *mockPeer) Addr() string {
 	return m.addr
+}
+
+func (m *mockPeer) LastPingMicros() int64 {
+	return m.lastPingMicros
 }
 
 // makeJob returns a new query job that will be done when it is given the
