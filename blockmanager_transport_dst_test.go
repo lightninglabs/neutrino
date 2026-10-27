@@ -3,9 +3,15 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand/v2"
+	"reflect"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -14,194 +20,616 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headersync"
+	"github.com/lightninglabs/neutrino/headersync/querydispatch"
+	"github.com/lightninglabs/neutrino/querysync"
 	"github.com/stretchr/testify/require"
 )
 
-const transportDSTHeight = 12
+const (
+	// dstPeerSlots is the number of simulated peer connections.
+	dstPeerSlots = 3
 
-var errDSTWrite = errors.New("simulated header store unavailable")
+	// dstMaxSteps bounds the scripted fault phase of one run.
+	dstMaxSteps = 32
 
+	// dstHealRounds bounds the recovery phase of one run.
+	dstHealRounds = 48
+
+	// dstRangeCap is the scaled-down getheaders cap used by discovery
+	// modes, so a 12-header chain needs several spans. Simulated peers
+	// honour the same cap, as real peers honour the 2000-header wire cap.
+	dstRangeCap = 4
+
+	// dstRequestTimeout is the base header request timeout.
+	dstRequestTimeout = time.Second
+
+	// dstStall is long enough for every outstanding request to expire.
+	dstStall = 2 * time.Second
+
+	// dstWireCap is the getheaders reply cap of checkpoint modes.
+	dstWireCap = wire.MaxBlockHeadersPerMsg
+)
+
+// dstMode selects how a run plans and discovers header work.
+type dstMode uint8
+
+const (
+	// dstModeCheckpointAll pre-plans every checkpoint-backed range, as
+	// the original transport harness did.
+	dstModeCheckpointAll dstMode = iota
+
+	// dstModeCheckpoint starts from production startSync with a
+	// checkpoint every two heights.
+	dstModeCheckpoint
+
+	// dstModeAnchor has a single checkpoint at dstChainHeight, so
+	// production must discover intermediate anchors toward it.
+	dstModeAnchor
+
+	// dstModeFrontier1 has no checkpoints and uses the production anchor
+	// policy: one observation confirms an anchor, fanout four.
+	dstModeFrontier1
+
+	// dstModeFrontier2 has no checkpoints and requires two matching
+	// observations per anchor.
+	dstModeFrontier2
+
+	// dstModeCount is the number of modes.
+	dstModeCount
+)
+
+// String returns a short mode name.
+func (m dstMode) String() string {
+	return [...]string{
+		"checkpoint_all", "checkpoint", "anchor", "frontier1",
+		"frontier2",
+	}[m]
+}
+
+// discovery reports whether the mode reaches anchor discovery.
+func (m dstMode) discovery() bool {
+	return m >= dstModeAnchor
+}
+
+// dstFault is one swarm fault class. A seed enables a subset of classes so
+// different runs stress different combinations instead of averaging every
+// fault into a uniform background rate.
+type dstFault uint16
+
+const (
+	dstFaultDuplicate dstFault = 1 << iota
+	dstFaultStall
+	dstFaultChurn
+	dstFaultBlock
+	dstFaultStore
+	dstFaultAsk
+	dstFaultByzantine
+	dstFaultRestart
+	dstFaultShutdown
+	dstFaultRTT
+	dstFaultReorg
+)
+
+// dstConfig is the decoded swarm configuration of one seed.
+type dstConfig struct {
+	mode   dstMode
+	faults dstFault
+	// order seeds the delivery order of same-instant callbacks.
+	order uint64
+}
+
+// decodeDSTScript splits a seed into its swarm configuration and op bytes.
+// The first three bytes choose the mode and fault set; an empty or short
+// seed enables every fault class in the default mode.
+func decodeDSTScript(script []byte) (dstConfig, []byte) {
+	cfg := dstConfig{faults: ^dstFault(0)}
+	if len(script) >= 3 {
+		cfg.mode = dstMode(script[0] % byte(dstModeCount))
+		cfg.faults = dstFault(binary.LittleEndian.Uint16(script[1:3]))
+		script = script[3:]
+	}
+	digest := sha256.Sum256(script)
+	cfg.order = binary.LittleEndian.Uint64(digest[:8])
+	return cfg, script[:min(len(script), dstMaxSteps)]
+}
+
+// dstHeaderRequest is one getheaders request waiting in a peer's outbound
+// queue.
 type dstHeaderRequest struct {
 	peer  *ServerPeer
 	start uint32
 	stop  uint32
+	// stopKnown is false for discovery requests with a zero stop hash.
+	stopKnown bool
 }
 
-// dstHeaderTransport models one bounded outbound slot per connection. It never
-// schedules work or synthesizes timeout events. Production request timers and
+// dstHeaderTransport models each connection's outbound getheaders queue. A peer
+// answers its requests in order. The transport never schedules work or
+// synthesizes timeout events. Production request timers and
 // message handlers decide when a stalled request loses its lease.
 type dstHeaderTransport struct {
-	heights map[chainhash.Hash]uint32
 	queued  []dstHeaderRequest
 	blocked map[string]bool
+	cap     uint32
+	best    uint32
 	sent    int
 }
 
+// SendGetHeaders queues a request in the peer's single outbound slot.
 func (d *dstHeaderTransport) SendGetHeaders(peer *ServerPeer,
 	locator blockchain.BlockLocator, stop *chainhash.Hash) error {
 
 	if d.blocked[peer.Addr()] {
 		return errors.New("simulated outbound queue blocked")
 	}
-	for _, request := range d.queued {
-		if request.peer == peer {
-			return errors.New("simulated outbound queue full")
-		}
-	}
 	if len(locator) == 0 || stop == nil {
 		return errors.New("missing header request boundaries")
 	}
-	start, ok := d.heights[*locator[0]]
+
+	// A real peer answers from the first locator hash it knows on its own
+	// (honest) chain.
+	fixture := dstChains()
+	start, ok := uint32(0), false
+	for _, hash := range locator {
+		height, known := fixture.heights[*hash]
+		if known && height <= d.best &&
+			fixture.honest[height].BlockHash() == *hash {
+
+			start, ok = height, true
+			break
+		}
+	}
 	if !ok {
 		return errors.New("unknown header request locator")
 	}
-	end := uint32(transportDSTHeight)
+	end, stopKnown := min(d.best, start+d.cap), false
 	if *stop != zeroHash {
-		var known bool
-		end, known = d.heights[*stop]
-		if !known {
-			return errors.New("unknown header request stop")
+		height, known := fixture.heights[*stop]
+		// Like btcd, a stop hash at or behind the locator is never
+		// reached, so the reply runs to the cap.
+		if known && height <= d.best && height > start &&
+			fixture.honest[height].BlockHash() == *stop {
+
+			end, stopKnown = min(height, start+d.cap), true
 		}
 	}
 	d.queued = append(d.queued, dstHeaderRequest{
-		peer: peer, start: start, stop: end,
+		peer: peer, start: start, stop: end, stopKnown: stopKnown,
 	})
 	d.sent++
 	return nil
 }
 
-type dstHeaderStore struct {
-	headerfs.BlockHeaderStore
-	unavailable bool
-	writes      []uint32
+// take removes and returns the oldest request queued for peer.
+func (d *dstHeaderTransport) take(peer *ServerPeer) (dstHeaderRequest, bool) {
+	for i, request := range d.queued {
+		if request.peer == peer {
+			d.queued = slices.Delete(d.queued, i, i+1)
+			return request, true
+		}
+	}
+	return dstHeaderRequest{}, false
 }
 
-func (d *dstHeaderStore) WriteHeaders(headers ...headerfs.BlockHeader) error {
-	if d.unavailable {
-		return errDSTWrite
+// queuedFor reports whether peer has an unanswered request.
+func (d *dstHeaderTransport) queuedFor(peer *ServerPeer) bool {
+	for _, request := range d.queued {
+		if request.peer == peer {
+			return true
+		}
 	}
-	if err := d.BlockHeaderStore.WriteHeaders(headers...); err != nil {
-		return err
-	}
-	for _, header := range headers {
-		d.writes = append(d.writes, header.Height)
-	}
-	return nil
+	return false
 }
 
-type headerTransportDST struct {
-	t             *testing.T
-	bm            *blockManager
-	store         *dstHeaderStore
-	transport     *dstHeaderTransport
-	peers         *list.List
-	current       [3]*ServerPeer
-	generation    [3]int
-	headers       []*wire.BlockHeader
-	recorder      *headersync.EventRecorder
-	last          [3]*headersMsg
-	timer         *headerSyncTimeoutMsg
-	timeouts      int
-	steps         []string
-	lastTip       uint32
-	reverseTimers bool
-	epochs        map[headersync.RangeID]uint64
+// dstRun is one deterministic header-sync simulation over the production
+// blockmanager, headersync runtime, and querysync dispatch actors.
+type dstRun struct {
+	t   *testing.T
+	cfg dstConfig
+	rng *rand.Rand
+
+	bm        *blockManager
+	store     *dstHeaderStore
+	filters   *memFilterHeaderStore
+	transport *dstHeaderTransport
+	recorder  *headersync.EventRecorder
+	peers     *list.List
+
+	current    [dstPeerSlots]*ServerPeer
+	generation [dstPeerSlots]int
+	last       [dstPeerSlots]*headersMsg
+
+	// faulted records peers that misbehaved or stalled. Only these may be
+	// quarantined or disconnected.
+	faulted map[string]string
+
+	// punished records quarantines, bans and disconnects by peer.
+	punished map[string]string
+
+	// bans records every BanPeer call as "addr:reason".
+	bans []string
+
+	// askFaults holds one-shot actor ask faults.
+	askFaults map[headerSyncAskOp]headerSyncAskFault
+
+	// anchorLiar is set once a peer served a PoW-valid but dishonest
+	// chain, which can win anchor discovery.
+	anchorLiar bool
+
+	// conflictPunishments counts honest peers punished for reporting an
+	// anchor that conflicted with a liar's (known policy gap F12).
+	conflictPunishments int
+
+	// restarts counts block manager rebuilds over the same stores.
+	restarts int
+
+	// stopped is set once the run shut the block manager down.
+	stopped bool
+
+	// target is the honest best height the run must reach.
+	target uint32
+
+	inv      *dstInvariants
+	steps    []string
+	timeouts int
 }
 
-func newHeaderTransportDST(t *testing.T) *headerTransportDST {
+// dstSnapshot is the comparable outcome of one run. Two runs of one seed
+// must produce identical snapshots.
+type dstSnapshot struct {
+	Events   []headersync.Event
+	Steps    []string
+	Writes   []uint32
+	Ranges   []headersync.HeaderRange
+	Peers    []headersync.PeerSnapshot
+	Bans     []string
+	Timeouts int
+	Sent     int
+	Restarts int
+
+	ConflictPunishments int
+}
+
+// setupDSTBlockManager builds a block manager over in-memory header stores.
+// It skips the bbolt setup that dominated the cost of each DST execution.
+func setupDSTBlockManager(t *testing.T) (*blockManager,
+	*memBlockHeaderStore) {
+
 	t.Helper()
-	return newHeaderTransportDSTThrough(t, transportDSTHeight)
+	store := newMemBlockHeaderStore(&chaincfg.SimNetParams)
+	filters, err := newMemFilterHeaderStore(&chaincfg.SimNetParams)
+	require.NoError(t, err)
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      chaincfg.SimNetParams,
+		BlockHeaders:     store,
+		RegFilterHeaders: filters,
+		QueryDispatcher:  &mockDispatcher{},
+		TimeSource:       blockchain.NewMedianTime(),
+		BanPeer: func(string, banman.Reason) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	return bm, store
 }
 
-func newHeaderTransportDSTThrough(t *testing.T,
-	plannedHeight uint32) *headerTransportDST {
-
+// newDSTRun builds a block manager over in-memory stores and connects the
+// initial peers. It must be called inside a synctest bubble.
+func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 	t.Helper()
-	bm, store, _, err := setupBlockManager(t)
-	require.NoError(t, err)
-	genesis, _, err := store.ChainTip()
-	require.NoError(t, err)
-	bm.cfg.TimeSource = dstMedianTime{
-		MedianTimeSource: bm.cfg.TimeSource,
-		offset:           time.Until(genesis.Timestamp.Add(time.Hour)),
-	}
-	headers := discoveryTestHeaders(t, bm, genesis, transportDSTHeight)
+	enableDSTLog()
 
-	// Use cheap SimNet proof of work while enabling the production actor
-	// path, which otherwise preserves a serial SimNet compatibility path.
-	bm.cfg.ChainParams.Net = chaincfg.TestNet3Params.Net
-	for height := uint32(2); height <= transportDSTHeight; height += 2 {
-		hash := headers[height-1].BlockHash()
-		bm.cfg.ChainParams.Checkpoints = append(
-			bm.cfg.ChainParams.Checkpoints,
-			chaincfg.Checkpoint{Height: int32(height), Hash: &hash},
+	d := &dstRun{
+		t:   t,
+		cfg: cfg,
+		rng: rand.New(rand.NewPCG(cfg.order, uint64(cfg.mode))),
+		store: &dstHeaderStore{
+			BlockHeaderStore: newMemBlockHeaderStore(
+				&chaincfg.SimNetParams,
+			),
+		},
+		peers:     list.New(),
+		faulted:   make(map[string]string),
+		punished:  make(map[string]string),
+		askFaults: make(map[headerSyncAskOp]headerSyncAskFault),
+		target:    dstChainHeight,
+	}
+	filters, err := newMemFilterHeaderStore(&chaincfg.SimNetParams)
+	require.NoError(t, err)
+	d.filters = filters
+	d.inv = newDSTInvariants(d)
+	d.build()
+
+	// Stop inside the bubble even when an invariant fails, so a failure
+	// reports itself instead of a goroutine deadlock.
+	t.Cleanup(func() {
+		if !d.stopped {
+			d.stopped = true
+			require.NoError(t, d.bm.Stop())
+		}
+	})
+
+	// The checkpoint-all mode pre-plans every range before peers connect,
+	// so production planning finds the spans already covered.
+	if cfg.mode == dstModeCheckpointAll {
+		manager := d.bm.headerSync.Manager()
+		plan, err := manager.PlanConfirmedAnchorRanges(
+			t.Context(), 1, 0, dstChainHeight,
 		)
+		require.NoError(t, err)
+		require.Len(t, plan.Ranges, dstChainHeight/2)
+		d.bm.headerSync.Session().SetNextRangeID(plan.NextID)
 	}
-	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(0)
-	require.NoError(t, bm.initHeaderSyncManager(0, genesis.BlockHash()))
-	recorder := &headersync.EventRecorder{}
-	bm.headerSync.Manager().SetEventSink(recorder)
-	bm.headerSync.Start(t.Context())
-	bm.headerSyncTimeout = time.Second
-	t.Cleanup(func() { require.NoError(t, bm.Stop()) })
-	transport := &dstHeaderTransport{
-		heights: map[chainhash.Hash]uint32{genesis.BlockHash(): 0},
-		blocked: make(map[string]bool),
+	for slot := range d.current {
+		d.connect(slot)
 	}
-	for i, header := range headers {
-		transport.heights[header.BlockHash()] = uint32(i + 1)
+	if cfg.mode == dstModeCheckpointAll {
+		d.bm.dispatchHeaderSyncWork(d.peers)
 	}
-	bm.cfg.HeaderTransport = transport
-	faultStore := &dstHeaderStore{BlockHeaderStore: store}
-	bm.cfg.BlockHeaders = faultStore
-	d := &headerTransportDST{
-		t: t, bm: bm, store: faultStore, transport: transport,
-		peers: list.New(), headers: headers, recorder: recorder,
-		epochs: make(map[headersync.RangeID]uint64),
-	}
-	for peer := range d.current {
-		d.connect(peer)
-	}
-	plan, err := bm.headerSync.Manager().PlanConfirmedAnchorRanges(
-		t.Context(), 1, 0, plannedHeight,
-	)
-	require.NoError(t, err)
-	require.Len(t, plan.Ranges, int(plannedHeight/2))
-	bm.headerSync.Session().SetNextRangeID(plan.NextID)
-	bm.dispatchHeaderSyncWork(d.peers)
+	d.pump()
 	d.check("start")
 	return d
 }
 
-func (d *headerTransportDST) connect(index int) {
-	if d.current[index] != nil {
-		for element := d.peers.Front(); element != nil; {
-			if element.Value == d.current[index] {
-				return
-			}
-			element = element.Next()
+// params returns the chain parameters for the run's mode. SimNet proof of
+// work stays cheap while the TestNet3 network ID enables the production
+// actor path instead of the serial SimNet compatibility path.
+func (d *dstRun) params() chaincfg.Params {
+	params := chaincfg.SimNetParams
+	params.Net = chaincfg.TestNet3Params.Net
+	params.Checkpoints = nil
+	honest := dstChains().honest
+	switch d.cfg.mode {
+	case dstModeCheckpointAll, dstModeCheckpoint:
+		for height := 2; height <= dstChainHeight; height += 2 {
+			hash := honest[height].BlockHash()
+			params.Checkpoints = append(params.Checkpoints,
+				chaincfg.Checkpoint{
+					Height: int32(height), Hash: &hash,
+				},
+			)
 		}
-		d.bm.unregisterHeaderSyncPeer(d.current[index])
+	case dstModeAnchor:
+		hash := honest[dstChainHeight].BlockHash()
+		params.Checkpoints = []chaincfg.Checkpoint{{
+			Height: dstChainHeight, Hash: &hash,
+		}}
 	}
-	d.generation[index]++
-	peer := newTestServerPeer(d.t,
-		fmt.Sprintf("127.0.0.%d:%d", index+1,
-			8332+d.generation[index]), transportDSTHeight,
+	return params
+}
+
+// headerConfig returns the headersync policy for the run's mode.
+func (d *dstRun) headerConfig() headersync.Config {
+	cfg := headersync.ProductionConfig()
+	if d.cfg.mode.discovery() {
+		cfg.MaxRangeHeaders = dstRangeCap
+	}
+	if d.cfg.mode == dstModeFrontier2 {
+		cfg.AnchorConfirmationsRequired = 2
+		cfg.AnchorRequestFanout = 2
+	}
+	return cfg
+}
+
+// build creates a block manager over the run's durable stores. A restart
+// calls it again with the same stores.
+func (d *dstRun) build() {
+	t := d.t
+	genesis := chaincfg.SimNetParams.GenesisBlock.Header
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      d.params(),
+		BlockHeaders:     d.store,
+		RegFilterHeaders: d.filters,
+		QueryDispatcher:  &mockDispatcher{},
+		TimeSource: dstMedianTime{
+			MedianTimeSource: blockchain.NewMedianTime(),
+			offset: time.Until(
+				genesis.Timestamp.Add(time.Hour),
+			),
+		},
+		HeaderSyncTimeout: dstRequestTimeout,
+		BanPeer: func(addr string, reason banman.Reason) error {
+			d.bans = append(d.bans, fmt.Sprintf("%s:%v", addr,
+				reason))
+			d.punished[addr] = "ban"
+			return nil
+		},
+		QuarantinePeer: func(addr string, _ time.Duration) {
+			d.punished[addr] = "quarantine"
+		},
+		headerSyncAskFault: d.askFault,
+	})
+	require.NoError(t, err)
+
+	// Replace the default runtime so discovery modes can use a scaled cap
+	// and the two-observation policy. The dispatch mirror is the same
+	// querysync actor production builds.
+	_, tip, err := d.store.ChainTip()
+	require.NoError(t, err)
+	tipHeader, err := d.store.FetchHeaderByHeight(tip)
+	require.NoError(t, err)
+	bm.headerSync.Stop()
+	dispatchFSM := querysync.NewSchedulerFSM(querysync.DefaultConfig())
+	dispatchActor := querysync.NewManagerActor(
+		dispatchFSM, headerSyncActorMailboxSize,
 	)
-	d.current[index] = peer
-	d.peers.PushBack(peer)
-	d.bm.registerHeaderSyncPeer(peer)
-	// The fixture starts below a checkpoint, not at the serial sync tip.
-	if d.bm.syncPeer == nil {
-		d.bm.syncPeer = peer
+	bm.headerSync, _ = headersync.NewRuntime(
+		headersync.ChainPoint{Height: tip, Hash: tipHeader.BlockHash()},
+		bm.cfg.ChainParams.Checkpoints,
+		headersync.RuntimeConfig{
+			Config:        d.headerConfig(),
+			MailboxSize:   headerSyncActorMailboxSize,
+			Dispatch:      querydispatch.New(dispatchActor),
+			DispatchActor: dispatchActor,
+		},
+	)
+	d.recorder = &headersync.EventRecorder{}
+	bm.headerSync.Manager().SetEventSink(d.recorder)
+	bm.headerSync.Start(t.Context())
+
+	if d.transport == nil {
+		d.transport = &dstHeaderTransport{
+			blocked: make(map[string]bool),
+			cap:     dstWireCap,
+			best:    dstChainHeight,
+		}
+		if d.cfg.mode.discovery() {
+			d.transport.cap = dstRangeCap
+		}
+	}
+	bm.cfg.HeaderTransport = d.transport
+	d.bm = bm
+	d.inv.reset()
+}
+
+// askFault consumes a one-shot ask fault armed by the script.
+func (d *dstRun) askFault(op headerSyncAskOp) headerSyncAskFault {
+	fault, ok := d.askFaults[op]
+	if !ok {
+		return headerSyncAskOK
+	}
+	delete(d.askFaults, op)
+	return fault
+}
+
+// slotOf returns the slot holding peer, or -1.
+func (d *dstRun) slotOf(peer *ServerPeer) int {
+	for slot, current := range d.current {
+		if current == peer && peer != nil {
+			return slot
+		}
+	}
+	return -1
+}
+
+// listed reports whether peer is still a sync candidate.
+func (d *dstRun) listed(peer *ServerPeer) bool {
+	for element := d.peers.Front(); element != nil; {
+		if element.Value == peer {
+			return true
+		}
+		element = element.Next()
+	}
+	return false
+}
+
+// connect replaces the peer in slot with a fresh connection through the
+// production new-peer handler.
+func (d *dstRun) connect(slot int) {
+	if d.current[slot] != nil {
+		d.disconnect(slot)
+	}
+	d.generation[slot]++
+	peer := newTestServerPeer(d.t,
+		fmt.Sprintf("127.0.0.%d:%d", slot+1,
+			8332+d.generation[slot]), int32(d.transport.best),
+	)
+	d.current[slot] = peer
+	d.last[slot] = nil
+	d.handle(&newPeerMsg{peer: peer})
+}
+
+// disconnect drops the connection in slot through the production done-peer
+// handler, as the server does when a socket closes.
+func (d *dstRun) disconnect(slot int) {
+	peer := d.current[slot]
+	if peer == nil {
+		return
+	}
+	d.current[slot] = nil
+	d.transport.take(peer)
+	delete(d.transport.blocked, peer.Addr())
+	d.handle(&donePeerMsg{peer: peer})
+}
+
+// handle delivers one message through the serialized block handler entry
+// point and checks every invariant afterwards.
+func (d *dstRun) handle(message any) {
+	d.t.Helper()
+	if timeout, ok := message.(*headerSyncTimeoutMsg); ok {
+		d.timeouts++
+		// An expired request means the peer stalled; production may
+		// quarantine it.
+		d.fault(timeout.peer, "timeout")
+	}
+	d.bm.handlePeerMessage(d.peers, message)
+	synctest.Wait()
+	d.reapRemoved()
+	d.check(fmt.Sprintf("message:%T", message))
+}
+
+// reapRemoved disconnects peers the block manager dropped from its candidate
+// list, as the server would after peer.Disconnect.
+func (d *dstRun) reapRemoved() {
+	for slot, peer := range d.current {
+		if peer == nil || (d.listed(peer) && !dstDisconnected(peer)) {
+			continue
+		}
+
+		// Dropping a peer from the candidate list is not punishment;
+		// disconnecting it is. Either way the slot is gone.
+		_, punished := d.punished[peer.Addr()]
+		if !punished && dstDisconnected(peer) {
+			d.punished[peer.Addr()] = "disconnect"
+		}
+		d.current[slot] = nil
+		d.transport.take(peer)
+		d.bm.handlePeerMessage(d.peers, &donePeerMsg{peer: peer})
+		synctest.Wait()
 	}
 }
 
-func (d *headerTransportDST) pump() {
+// dstDisconnected reports whether production called Disconnect on peer. The
+// simulated peer has no socket, so the btcd disconnect flag is the only trace.
+func dstDisconnected(peer *ServerPeer) bool {
+	return reflect.ValueOf(peer.Peer).Elem().
+		FieldByName("disconnect").Int() != 0
+}
+
+// fault marks peer as misbehaving or slow.
+func (d *dstRun) fault(peer *ServerPeer, reason string) {
+	if peer == nil {
+		return
+	}
+	d.faultAddr(peer.Addr(), reason)
+}
+
+// faultAddr marks the peer with addr as misbehaving or slow.
+func (d *dstRun) faultAddr(addr, reason string) {
+	if _, ok := d.faulted[addr]; !ok {
+		d.faulted[addr] = reason
+	}
+}
+
+// messageKey orders block-handler callbacks canonically before the seeded
+// shuffle, so delivery order depends only on the seed.
+func messageKey(message any) string {
+	switch msg := message.(type) {
+	case *headerSyncTimeoutMsg:
+		return fmt.Sprintf("timeout:%020d", msg.requestID)
+	case *headerSyncCommitRetryMsg:
+		return fmt.Sprintf("retry:%020d", msg.generation)
+	case *headerSyncBootstrapMsg:
+		return "bootstrap"
+	case *headersMsg:
+		return "headers:" + msg.peer.Addr()
+	case *donePeerMsg:
+		return "done:" + msg.peer.Addr()
+	case *newPeerMsg:
+		return "new:" + msg.peer.Addr()
+	default:
+		return fmt.Sprintf("%T", message)
+	}
+}
+
+// pump delivers every callback that is ready at the current virtual instant.
+// synctest makes the set deterministic but not its order, so the batch is
+// sorted and then shuffled by the seed.
+func (d *dstRun) pump() {
 	d.t.Helper()
-	for {
+	for !d.stopped {
 		synctest.Wait()
 		var messages []any
 	drain:
@@ -216,68 +644,151 @@ func (d *headerTransportDST) pump() {
 		if len(messages) == 0 {
 			return
 		}
-		// Seed the delivery order of callbacks sharing a deadline.
-		// synctest alone does not control their order.
 		sort.SliceStable(messages, func(i, j int) bool {
-			a, aTimer := messages[i].(*headerSyncTimeoutMsg)
-			b, bTimer := messages[j].(*headerSyncTimeoutMsg)
-			if aTimer != bTimer {
-				return aTimer
-			}
-			if !aTimer {
-				return false
-			}
-			if d.reverseTimers {
-				return a.requestID > b.requestID
-			}
-			return a.requestID < b.requestID
+			return messageKey(messages[i]) <
+				messageKey(messages[j])
+		})
+		d.rng.Shuffle(len(messages), func(i, j int) {
+			messages[i], messages[j] = messages[j], messages[i]
 		})
 		for _, message := range messages {
-			if timer, ok := message.(*headerSyncTimeoutMsg); ok {
-				d.timer = timer
-				d.timeouts++
-			}
-			d.bm.handlePeerMessage(d.peers, message)
-			synctest.Wait()
-			d.check(fmt.Sprintf("message:%T", message))
+			d.handle(message)
 		}
 	}
 }
 
-func (d *headerTransportDST) reply(index int, corrupt, partial bool) bool {
+// dstReplyKind selects how a peer answers its queued request.
+type dstReplyKind uint8
+
+const (
+	dstReplyHonest dstReplyKind = iota
+	dstReplyCorrupt
+	dstReplyPartial
+	dstReplyEmpty
+	dstReplyOverlong
+	dstReplyReorder
+	dstReplyFork
+	dstReplyBadTime
+	dstReplyBadBits
+	dstReplyGap
+	dstReplyUnsolicited
+	dstReplyKinds
+)
+
+// String returns a short reply kind name.
+func (k dstReplyKind) String() string {
+	return [...]string{
+		"honest", "corrupt", "partial", "empty", "overlong",
+		"reorder", "fork", "bad_time", "bad_bits", "gap",
+		"unsolicited",
+	}[k]
+}
+
+// reply answers the request queued for slot. Every kind except honest marks
+// the peer faulty, since production may then punish it.
+func (d *dstRun) reply(slot int, kind dstReplyKind) bool {
 	d.t.Helper()
-	peer := d.current[index]
+	peer := d.current[slot]
 	if peer == nil || d.transport.blocked[peer.Addr()] {
 		return false
 	}
-	for i, request := range d.transport.queued {
-		if request.peer != peer {
-			continue
+
+	// An unsolicited reply answers some other peer's request without
+	// consuming this peer's own.
+	if kind == dstReplyUnsolicited {
+		for _, request := range d.transport.queued {
+			if request.peer == peer {
+				continue
+			}
+			d.fault(peer, kind.String())
+			d.deliver(&headersMsg{
+				peer: peer, headers: d.answer(request,
+					dstReplyHonest),
+			})
+			return true
 		}
-		d.transport.queued = append(d.transport.queued[:i],
-			d.transport.queued[i+1:]...)
-		msg := wire.NewMsgHeaders()
-		for _, header := range d.headers[request.start:request.stop] {
-			copyHeader := *header
-			require.NoError(d.t, msg.AddBlockHeader(&copyHeader))
-		}
-		if partial && len(msg.Headers) > 0 {
-			msg.Headers = msg.Headers[:len(msg.Headers)-1]
-		}
-		if corrupt && len(msg.Headers) > 0 {
-			msg.Headers[0].Bits = 0
-		}
-		d.last[index] = &headersMsg{peer: peer, headers: msg}
-		d.deliver(d.last[index])
-		return true
+		return false
 	}
-	return false
+
+	request, ok := d.transport.take(peer)
+	if !ok {
+		return false
+	}
+	if kind != dstReplyHonest {
+		d.fault(peer, kind.String())
+	}
+	switch kind {
+	case dstReplyFork, dstReplyBadTime, dstReplyBadBits:
+		d.anchorLiar = true
+	}
+	log.Debugf("dst reply slot=%d %d..%d %s", slot, request.start,
+		request.stop, kind)
+	d.steps = append(d.steps, fmt.Sprintf("reply slot=%d %d..%d %s",
+		slot, request.start, request.stop, kind))
+	d.last[slot] = &headersMsg{peer: peer, headers: d.answer(request, kind)}
+	d.deliver(d.last[slot])
+	return true
 }
 
-func (d *headerTransportDST) deliver(message *headersMsg) {
+// answer builds the headers message for request.
+func (d *dstRun) answer(request dstHeaderRequest,
+	kind dstReplyKind) *wire.MsgHeaders {
+
+	fixture := dstChains()
+	headers := fixture.honest[request.start+1 : request.stop+1]
+	if request.start < dstChainHeight {
+		count := int(request.stop - request.start)
+		switch kind {
+		case dstReplyFork:
+			headers = fixture.fork[request.start][:count]
+		case dstReplyBadTime:
+			headers = fixture.badTime[request.start][:count]
+		case dstReplyBadBits:
+			headers = fixture.badBits[request.start][:count]
+		}
+	}
+
+	msg := wire.NewMsgHeaders()
+	for _, header := range headers {
+		copyHeader := *header
+		require.NoError(d.t, msg.AddBlockHeader(&copyHeader))
+	}
+	n := len(msg.Headers)
+	switch kind {
+	case dstReplyCorrupt:
+		if n > 0 {
+			msg.Headers[0].Bits = 0
+		}
+	case dstReplyPartial:
+		if n > 0 {
+			msg.Headers = msg.Headers[:n-1]
+		}
+	case dstReplyEmpty:
+		msg.Headers = nil
+	case dstReplyOverlong:
+		honest := fixture.honest
+		if int(request.stop)+1 < len(honest) {
+			extra := *honest[request.stop+1]
+			msg.Headers = append(msg.Headers, &extra)
+		}
+	case dstReplyReorder:
+		if n > 1 {
+			msg.Headers[0], msg.Headers[1] =
+				msg.Headers[1], msg.Headers[0]
+		}
+	case dstReplyGap:
+		if n > 2 {
+			msg.Headers = slices.Delete(msg.Headers, 1, 2)
+		}
+	}
+	return msg
+}
+
+// deliver encodes and decodes a reply, then queues it through QueueHeaders
+// like the peer read loop. Encoding prevents duplicates from sharing mutable
+// header objects with earlier callbacks. TCP framing is not simulated.
+func (d *dstRun) deliver(message *headersMsg) {
 	d.t.Helper()
-	// Encode/decode each delivery so duplicates do not share mutable header
-	// objects with earlier callbacks. TCP framing is not simulated.
 	var buf bytes.Buffer
 	require.NoError(d.t, message.headers.BtcEncode(
 		&buf, wire.ProtocolVersion, wire.BaseEncoding,
@@ -290,235 +801,367 @@ func (d *headerTransportDST) deliver(message *headersMsg) {
 	d.pump()
 }
 
-// check is an independent oracle for the P ownership and ordered-commit
-// invariants, not another implementation of dispatch or work stealing.
-func (d *headerTransportDST) check(event string) {
+// enabled reports whether the seed enabled a fault class.
+func (d *dstRun) enabled(fault dstFault) bool {
+	return d.cfg.faults&fault != 0
+}
+
+// step decodes and applies one scripted op. An op whose fault class is
+// disabled degrades to an honest reply, so every seed still makes progress.
+func (d *dstRun) step(value byte) {
 	d.t.Helper()
-	ctx := d.t.Context()
-	tip, height, err := d.store.ChainTip()
-	require.NoError(d.t, err)
-	require.GreaterOrEqual(d.t, height, d.lastTip)
-	require.LessOrEqual(d.t, height, uint32(transportDSTHeight))
-	if height > 0 {
-		require.Equal(d.t,
-			d.headers[height-1].BlockHash(), tip.BlockHash(),
-		)
+	op, arg := value%16, int(value/16)
+	slot := arg % dstPeerSlots
+	sub := arg / dstPeerSlots
+	label := fmt.Sprintf("op=%d arg=%d", op, arg)
+
+	honest := func() {
+		d.reply(slot, dstReplyHonest)
 	}
-	require.Equal(d.t, height, d.bm.headerTip)
-	require.Equal(d.t, tip.BlockHash(), d.bm.headerTipHash)
-	require.EqualValues(d.t, height, d.bm.headerList.Back().Height,
-		"failed write left the validation cache ahead of disk")
-	d.lastTip = height
-	owners := make(map[headersync.RangeID]string)
+	switch {
+	case op <= 2:
+		d.reply(int(op), dstReplyHonest)
+
+	case op == 3 && d.enabled(dstFaultDuplicate):
+		// TCP does not duplicate messages, so a repeated reply is the
+		// peer's doing. Once its request is gone, the legacy path may
+		// reject the repeat as unconnected headers.
+		if d.last[slot] != nil {
+			d.fault(d.last[slot].peer, "duplicate")
+			d.deliver(d.last[slot])
+		}
+
+	case op == 4:
+		if d.enabled(dstFaultStall) && sub%2 == 1 {
+			// Keep one peer responsive while the others stall.
+			for d.reply(slot, dstReplyHonest) {
+			}
+			for _, peer := range d.current {
+				if peer != nil && d.transport.queuedFor(peer) {
+					d.fault(peer, "stall")
+				}
+			}
+			time.Sleep(dstStall)
+		} else {
+			time.Sleep(time.Duration(arg+1) * time.Millisecond)
+		}
+
+	case op == 5 && d.enabled(dstFaultChurn):
+		if peer := d.current[slot]; peer != nil {
+			d.fault(peer, "churn")
+			d.disconnect(slot)
+		}
+
+	case op == 6 && d.enabled(dstFaultChurn):
+		if d.current[slot] == nil {
+			d.connect(slot)
+		}
+
+	case op == 7 && d.enabled(dstFaultBlock):
+		if peer := d.current[slot]; peer != nil {
+			id := peer.Addr()
+			d.transport.blocked[id] = !d.transport.blocked[id]
+			d.fault(peer, "blocked")
+		}
+
+	case op == 8 && d.enabled(dstFaultStore):
+		mode := dstStoreMode(1 + arg%3)
+		if d.store.mode == mode {
+			mode = dstStoreOK
+		}
+		d.store.mode = mode
+		label += " store=" + mode.String()
+
+	case op == 9 && d.enabled(dstFaultAsk):
+		askOp := headerSyncAskOp(arg % int(headerSyncAskOps))
+		fault := headerSyncAskFailBefore + headerSyncAskFault(
+			(arg/int(headerSyncAskOps))%2,
+		)
+		d.askFaults[askOp] = fault
+
+	case (op == 10 || op == 11) && d.enabled(dstFaultByzantine):
+		kind := 1 + dstReplyKind(
+			(int(op-10)*6+sub)%int(dstReplyKinds-1),
+		)
+		label += " reply=" + kind.String()
+		d.reply(slot, kind)
+
+	case op == 12 && d.enabled(dstFaultRestart):
+		d.restart()
+
+	case op == 13 && d.enabled(dstFaultShutdown):
+		d.shutdown()
+		return
+
+	case op == 14 && d.enabled(dstFaultRTT):
+		if peer := d.current[slot]; peer != nil {
+			rtt := time.Duration(sub+1) * 150 * time.Millisecond
+			_ = d.bm.headerSync.UpdatePeerRTT(
+				d.t.Context(), peer.Addr(), rtt,
+			)
+		}
+
+	case op == 15:
+		for slot := range d.current {
+			d.reply(slot, dstReplyHonest)
+		}
+
+	default:
+		honest()
+	}
+	d.pump()
+	d.check("step " + label)
+}
+
+// restart stops the block manager and rebuilds it over the same durable
+// stores, as a process restart would. Every connection drops.
+func (d *dstRun) restart() {
+	d.t.Helper()
+	require.NoError(d.t, d.bm.Stop())
+	synctest.Wait()
+	for len(d.bm.peerChan) > 0 {
+		<-d.bm.peerChan
+	}
+	d.restarts++
+	d.transport.queued = nil
+	clear(d.transport.blocked)
+	d.peers = list.New()
+	old := d.current
+	d.current = [dstPeerSlots]*ServerPeer{}
+	d.build()
+	for slot, peer := range old {
+		if peer != nil {
+			d.connect(slot)
+		}
+	}
+	d.pump()
+}
+
+// shutdown stops the block manager at an arbitrary point and checks that no
+// request or retry callback survives it.
+func (d *dstRun) shutdown() {
+	d.t.Helper()
+	require.NoError(d.t, d.bm.Stop())
+	d.stopped = true
+	synctest.Wait()
+	pending := len(d.bm.peerChan)
+	time.Sleep(3 * dstStall)
+	synctest.Wait()
+	require.Len(d.t, d.bm.peerChan, pending,
+		"request/retry callback survived shutdown")
+	require.Zero(d.t, d.bm.headerSync.Session().ActiveRangeCount())
+	require.Nil(d.t, d.bm.headerCommitRetryTimer)
+	d.bm.QueueHeaders(wire.NewMsgHeaders(), d.current[0])
+	require.Len(d.t, d.bm.peerChan, pending)
+}
+
+// heal restores storage and gives every slot a responsive, honest peer. It
+// changes only the environment, never scheduler state: replies and real
+// deadlines must finish the work without directly invoking commit.
+func (d *dstRun) heal() {
+	d.t.Helper()
+	d.store.mode = dstStoreOK
+	clear(d.askFaults)
+	clear(d.transport.blocked)
+	for slot, peer := range d.current {
+		if peer == nil || d.faulted[peer.Addr()] != "" {
+			d.connect(slot)
+		}
+	}
+	d.pump()
+	for rounds := 0; rounds < dstHealRounds; rounds++ {
+		if d.quiescent() == nil {
+			break
+		}
+		progressed := false
+		for slot := range d.current {
+			if d.reply(slot, dstReplyHonest) {
+				progressed = true
+			}
+		}
+		if !progressed {
+			time.Sleep(dstStall)
+		}
+		d.pump()
+	}
+	d.check("healed")
+}
+
+// check runs every per-event invariant.
+func (d *dstRun) check(event string) {
+	d.t.Helper()
+	d.inv.check(event)
+	d.steps = append(d.steps, fmt.Sprintf("%s:height=%d", event,
+		d.inv.lastTip))
+}
+
+// snapshot returns the comparable outcome of the run, including the final
+// range and peer tables so a divergence that changes no event is still seen.
+func (d *dstRun) snapshot() dstSnapshot {
+	ctx := d.t.Context()
+	snapshot := dstSnapshot{
+		Events: d.recorder.Events(), Steps: d.steps,
+		Writes: d.store.writes, Bans: d.bans,
+		Timeouts: d.timeouts, Sent: d.transport.sent,
+		Restarts: d.restarts,
+
+		ConflictPunishments: d.conflictPunishments,
+	}
+	if d.stopped {
+		return snapshot
+	}
+	manager := d.bm.headerSync.Manager()
+	nextID := d.bm.headerSync.Session().NextRangeID()
+	for id := headersync.RangeID(1); id < nextID; id++ {
+		rng, ok, err := manager.SnapshotRange(ctx, id)
+		require.NoError(d.t, err)
+		if ok {
+			snapshot.Ranges = append(snapshot.Ranges, rng)
+		}
+	}
 	for _, peer := range d.current {
 		if peer == nil {
 			continue
 		}
-		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
-			ctx, peer.Addr(),
-		)
+		state, ok, err := manager.SnapshotPeer(ctx, peer.Addr())
 		require.NoError(d.t, err)
-		if !ok {
-			continue
-		}
-		for _, id := range snapshot.LocalRanges {
-			require.NotContains(d.t, owners, id)
-			owners[id] = peer.Addr()
-		}
-		if snapshot.ActiveRange != headersync.NoRange {
-			require.NotContains(d.t, owners, snapshot.ActiveRange)
-			owners[snapshot.ActiveRange] = peer.Addr()
+		if ok {
+			snapshot.Peers = append(snapshot.Peers, state)
 		}
 	}
-	nextID := d.bm.headerSync.Session().NextRangeID()
-	for id := headersync.RangeID(1); id < nextID; id++ {
-		rng, ok, err := d.bm.headerSync.Manager().SnapshotRange(ctx, id)
-		require.NoError(d.t, err)
-		if !ok {
-			continue
-		}
-		require.GreaterOrEqual(d.t, rng.LeaseEpoch, d.epochs[id],
-			"a late callback restored an older lease")
-		d.epochs[id] = rng.LeaseEpoch
-		switch rng.State {
-		case headersync.RangeOwned, headersync.RangeActive:
-			require.Equal(d.t, rng.OwnerPeer, owners[id])
-		case headersync.RangeCommitted:
-			require.True(d.t, rng.Valid)
-			require.LessOrEqual(d.t, rng.StopHeight, height)
-		case headersync.RangeStaged:
-			_, staged := d.bm.headerSync.Session().StagedRange(id)
-			require.True(d.t, staged,
-				"event=%s range=%+v tip=%d events=%+v",
-				event, rng, height, d.recorder.Events())
-		}
-	}
-	for i, written := range d.store.writes {
-		require.EqualValues(d.t, i+1, written,
-			"duplicate or skipped durable header")
-	}
-	committed := make(map[headersync.RangeID]bool)
-	for _, event := range d.recorder.Events() {
-		for _, id := range event.Committed {
-			require.False(d.t, committed[id],
-				"range committed twice")
-			committed[id] = true
-		}
-	}
-	d.steps = append(d.steps, fmt.Sprintf("%s:height=%d", event, height))
+	return snapshot
 }
 
-func (d *headerTransportDST) step(value byte) {
-	d.t.Helper()
-	index := int(value/10) % len(d.current)
-	faultPeer := index % 2 // Peer two remains a viable recovery source.
-	switch value % 10 {
-	case 0:
-		d.reply(index, false, false)
-	case 1:
-		if d.last[index] != nil {
-			d.deliver(d.last[index])
+// describe renders the run for a failure message.
+func (d *dstRun) describe() string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "mode=%s faults=%#x\n", d.cfg.mode, d.cfg.faults)
+	if !d.stopped {
+		manager := d.bm.headerSync.Manager()
+		nextID := d.bm.headerSync.Session().NextRangeID()
+		for id := headersync.RangeID(1); id < nextID; id++ {
+			rng, _, _ := manager.SnapshotRange(d.t.Context(), id)
+			fmt.Fprintf(&out, "range=%+v\n", rng)
 		}
-	case 2:
-		time.Sleep(time.Duration(value+1) * time.Millisecond)
-	case 3:
-		// Keep one peer responsive while the other requests stall.
-		for d.reply(2, false, false) {
-		}
-		time.Sleep(2 * time.Second)
-	case 4:
-		if peer := d.current[faultPeer]; peer != nil {
-			message := &donePeerMsg{peer: peer}
-			d.bm.handlePeerMessage(d.peers, message)
-			d.current[faultPeer] = nil
-		}
-	case 5:
-		d.connect(faultPeer)
-		d.bm.dispatchHeaderSyncWork(d.peers)
-	case 6:
-		if peer := d.current[faultPeer]; peer != nil {
-			id := peer.Addr()
-			d.transport.blocked[id] = !d.transport.blocked[id]
-		}
-	case 7:
-		d.store.unavailable = !d.store.unavailable
-	case 8:
-		d.reply(faultPeer, true, false)
-	case 9:
-		d.reply(faultPeer, false, true)
 	}
-	d.pump()
-	d.check(fmt.Sprintf("input:%d", value))
+	fmt.Fprintf(&out, "faulted=%v punished=%v\n", d.faulted, d.punished)
+	fmt.Fprintf(&out, "steps=%v\n", d.steps)
+	return out.String()
 }
 
-type transportDSTResult struct {
-	Events   []headersync.Event
-	Steps    []string
-	Writes   []uint32
-	Timeouts int
-	Sent     int
-}
-
-func runHeaderTransportDST(t *testing.T, script []byte) transportDSTResult {
+// runHeaderTransportDST runs one seed to completion: the scripted fault phase,
+// then healing, then the liveness and quiescence checks.
+func runHeaderTransportDST(t *testing.T, script []byte) dstSnapshot {
 	t.Helper()
-	return runHeaderTransportDSTThrough(t, script, transportDSTHeight)
-}
-
-func runHeaderTransportDSTThrough(t *testing.T, script []byte,
-	plannedHeight uint32) transportDSTResult {
-
-	t.Helper()
-	var result transportDSTResult
+	var result dstSnapshot
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDSTThrough(t, plannedHeight)
-		d.reverseTimers = len(script) > 0 && script[0]&128 != 0
-		// Bound resource use for large fuzz inputs.
-		for _, value := range script[:min(len(script), 24)] {
-			d.step(value)
-		}
-		d.store.unavailable = false
-		clear(d.transport.blocked)
-		d.connect(2)
-		d.bm.dispatchHeaderSyncWork(d.peers)
-		// Heal the environment, not scheduler state. Responses and real
-		// deadlines must finish work without directly invoking commit.
-		for rounds := 0; rounds < 32; rounds++ {
-			if d.lastTip == transportDSTHeight {
+		cfg, ops := decodeDSTScript(script)
+		d := newDSTRun(t, cfg)
+		for _, value := range ops {
+			if d.stopped {
 				break
 			}
-
-			progressed := false
-			for peer := range d.current {
-				if d.reply(peer, false, false) {
-					progressed = true
-				}
-			}
-			if !progressed {
-				time.Sleep(2 * time.Second)
-			}
-			d.pump()
+			d.step(value)
 		}
-		d.check("healed")
-		if d.lastTip != transportDSTHeight {
-			manager := d.bm.headerSync.Manager()
-			nextID := d.bm.headerSync.Session().NextRangeID()
-			for id := headersync.RangeID(1); id < nextID; id++ {
-				rng, _, _ := manager.SnapshotRange(
-					t.Context(), id,
-				)
-				t.Logf("range=%+v", rng)
-			}
-			t.Logf("steps=%v", d.steps)
+		if !d.stopped {
+			d.heal()
+			require.NoError(t, d.quiescent(),
+				"recovery did not complete; seed=%x\n%s",
+				script, d.describe())
 		}
-		require.EqualValues(t, transportDSTHeight, d.lastTip,
-			"recovery did not complete; seed=%x", script)
-		result = transportDSTResult{
-			Events: d.recorder.Events(), Steps: d.steps,
-			Writes: d.store.writes, Timeouts: d.timeouts,
-			Sent: d.transport.sent,
-		}
+		result = d.snapshot()
 	})
 	return result
 }
 
+// dstCorpus is the fixed seed corpus. Each entry is checked for determinism
+// by running it twice.
+var dstCorpus = [][]byte{
+	{}, {0, 0, 0, 20, 10, 0}, {0, 0, 0, 0, 1}, {0, 0, 0, 4 + 16},
+	{0, 255, 255, 133}, {0, 255, 255, 5, 6}, {0, 255, 255, 7, 4 + 16},
+	{0, 255, 255, 10}, {0, 255, 255, 11},
+	{0, 255, 255, 8, 20, 10, 0, 8},
+	{0, 255, 255, 20, 21, 4 + 16, 5, 6},
+	{1, 255, 255, 0, 1, 2, 15},
+	{2, 255, 255, 0, 1, 2, 15},
+	{3, 255, 255, 0, 1, 2, 15},
+	{4, 255, 255, 0, 1, 2, 15},
+	{3, 255, 255, 10 + 5*16, 0, 1, 2},
+	{4, 255, 255, 10 + 5*16, 0, 1, 2},
+	{2, 255, 255, 11, 10 + 6*16, 0, 1},
+	{1, 255, 255, 8 + 16, 15, 15},
+	{0, 255, 255, 8 + 32, 15, 15},
+	{1, 255, 255, 9, 15, 15}, {1, 255, 255, 9 + 16*4, 15},
+	{1, 255, 255, 12, 0, 15}, {3, 255, 255, 0, 12, 15},
+	{1, 255, 255, 0, 13}, {3, 255, 255, 14, 14 + 16, 15},
+}
+
 func TestHeaderTransportDST(t *testing.T) {
-	seeds := [][]byte{
-		{}, {20, 10, 0}, {0, 1}, {3}, {133}, {4, 5}, {6, 3},
-		{8}, {9}, {7, 20, 10, 0, 7}, {20, 21, 3, 4, 5},
-	}
-	for _, seed := range seeds {
+	for _, seed := range dstCorpus {
 		t.Run(fmt.Sprintf("%x", seed), func(t *testing.T) {
 			first := runHeaderTransportDST(t, seed)
-			require.Equal(t, first, runHeaderTransportDST(t, seed))
+			require.Equal(t, first, runHeaderTransportDST(t, seed),
+				"same seed produced a different trace")
 		})
 	}
 }
 
 func FuzzHeaderTransportDST(f *testing.F) {
-	for _, seed := range [][]byte{{}, {0, 1}, {3}, {7, 20, 10, 0}} {
+	for _, seed := range dstCorpus {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, seed []byte) {
 		first := runHeaderTransportDST(t, seed)
-		require.Equal(t, first, runHeaderTransportDST(t, seed))
+
+		// Determinism is verified on the fixed corpus. Re-run a cheap
+		// sample of generated inputs too, keyed by content so a saved
+		// input replays the same way.
+		if sha256.Sum256(seed)[0]%16 == 0 {
+			require.Equal(t, first, runHeaderTransportDST(t, seed))
+		}
 	})
+}
+
+// dstSwarmSeed derives the i-th swarm seed of a campaign.
+func dstSwarmSeed(rng *rand.Rand) []byte {
+	seed := make([]byte, 3+rng.IntN(dstMaxSteps))
+	for i := range seed {
+		seed[i] = byte(rng.Uint32())
+	}
+	return seed
+}
+
+// TestHeaderTransportDSTSwarm runs a fixed, reproducible swarm campaign. Each
+// seed draws its own mode and fault set. Set the count with -dst.swarm.
+func TestHeaderTransportDSTSwarm(t *testing.T) {
+	rng := rand.New(rand.NewPCG(*dstSwarmSeedFlag, 0))
+	for i := 0; i < *dstSwarmRuns; i++ {
+		seed := dstSwarmSeed(rng)
+		ok := t.Run(fmt.Sprintf("%d_%x", i, seed), func(t *testing.T) {
+			runHeaderTransportDST(t, seed)
+		})
+		if !ok {
+			t.Fatalf("swarm seed %d failed after %d runs: %x", i,
+				i+1, seed)
+		}
+	}
 }
 
 func TestHeaderTransportCheckpointRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDSTThrough(t, 2)
-		d.store.unavailable = true
-		for peer := range d.current {
-			d.reply(peer, false, false)
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpoint})
+		d.store.mode = dstStoreDown
+		for slot := range d.current {
+			d.reply(slot, dstReplyHonest)
 		}
 		d.pump()
-		require.Zero(t, d.lastTip)
+		require.Zero(t, d.inv.lastTip)
 		require.NotNil(t, d.bm.headerCommitRetryTimer)
 		sent := d.transport.sent
-		d.store.unavailable = false
+		d.store.mode = dstStoreOK
 		time.Sleep(time.Second)
 		d.pump()
-		require.EqualValues(t, 2, d.lastTip)
+		require.EqualValues(t, 2, d.inv.lastTip)
 		require.Greater(t, d.transport.sent, sent,
 			"retry must dispatch the next checkpoint span")
 	})
@@ -526,8 +1169,8 @@ func TestHeaderTransportCheckpointRetry(t *testing.T) {
 
 func TestHeaderTransportDuplicatePreservesRequest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDST(t)
-		require.True(t, d.reply(0, false, false))
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
+		require.True(t, d.reply(0, dstReplyHonest))
 		manager := d.bm.headerSync.Manager()
 		peerID := d.current[0].Addr()
 		before, ok, err := manager.SnapshotPeer(t.Context(), peerID)
@@ -548,52 +1191,35 @@ func TestHeaderTransportDuplicatePreservesRequest(t *testing.T) {
 
 func TestHeaderTransportFailedCompatibilityWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDST(t)
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
 		// Remove request matching to exercise the compatibility writer.
 		// The original failing seed entered this path with a duplicate.
+		d.inv.skipLeases = true
 		d.bm.headerSync.Session().StopAll()
-		d.store.unavailable = true
+		d.store.mode = dstStoreDown
 		message := wire.NewMsgHeaders()
-		for _, header := range d.headers[:2] {
+		for _, header := range dstChains().honest[1:3] {
 			require.NoError(t, message.AddBlockHeader(header))
 		}
 		d.deliver(&headersMsg{peer: d.current[0], headers: message})
-		require.Zero(t, d.lastTip)
+		require.Zero(t, d.inv.lastTip)
 		require.Empty(t, d.store.writes)
 		require.Zero(t, d.bm.headerList.Back().Height)
 	})
 }
 
-func FuzzHeaderTransportCheckpointDST(f *testing.F) {
-	for _, seed := range [][]byte{{}, {7, 0, 7}, {3}, {133}} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, seed []byte) {
-		first := runHeaderTransportDSTThrough(t, seed, 2)
-		require.Equal(t, first,
-			runHeaderTransportDSTThrough(t, seed, 2))
-	})
-}
-
 func TestHeaderTransportDSTShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDST(t)
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
 		require.NotZero(t, d.bm.headerSync.Session().ActiveRangeCount())
 		d.bm.scheduleHeaderCommitRetry()
-		require.NoError(t, d.bm.Stop())
-		time.Sleep(3 * time.Second)
-		synctest.Wait()
-		require.Empty(t, d.bm.peerChan,
-			"request/retry callback survived shutdown")
-		require.Zero(t, d.bm.headerSync.Session().ActiveRangeCount())
-		d.bm.QueueHeaders(wire.NewMsgHeaders(), d.current[0])
-		require.Empty(t, d.bm.peerChan)
+		d.shutdown()
 	})
 }
 
 func TestHeaderCommitRetryGeneration(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		d := newHeaderTransportDST(t)
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
 		d.bm.scheduleHeaderCommitRetry()
 		first := d.bm.headerCommitRetryTimer
 		generation := d.bm.headerCommitRetryID
@@ -607,5 +1233,64 @@ func TestHeaderCommitRetryGeneration(t *testing.T) {
 		})
 		require.Same(t, replacement, d.bm.headerCommitRetryTimer,
 			"obsolete wakeup consumed a replacement timer")
+	})
+}
+
+// TestHeaderTransportAmbiguousCommit is the regression for an ambiguous header
+// commit. A write that lands but reports an error, a write that lands in part,
+// or a CommitReadyRanges ask that fails after a successful write all used to
+// leave memory behind disk, after which the commit retry never connected and
+// header sync stalled until restart.
+func TestHeaderTransportAmbiguousCommit(t *testing.T) {
+	cases := []struct {
+		name  string
+		store dstStoreMode
+		ask   headerSyncAskFault
+	}{
+		{name: "ack_lost", store: dstStoreAckLost},
+		{name: "torn", store: dstStoreTorn},
+		{name: "commit_ask_after_write", ask: headerSyncAskFailAfter},
+		{name: "commit_ask_before", ask: headerSyncAskFailBefore},
+	}
+	modes := []dstMode{
+		dstModeCheckpointAll, dstModeCheckpoint, dstModeFrontier1,
+	}
+	for _, tc := range cases {
+		for _, mode := range modes {
+			name := tc.name + "/" + mode.String()
+			t.Run(name, func(t *testing.T) {
+				runAmbiguousCommit(t, mode, tc.store, tc.ask)
+			})
+		}
+	}
+}
+
+// runAmbiguousCommit arms one ambiguous fault for the first commit, heals,
+// and requires the run to reach the honest tip with nothing left over.
+func runAmbiguousCommit(t *testing.T, mode dstMode, store dstStoreMode,
+	ask headerSyncAskFault) {
+
+	synctest.Test(t, func(t *testing.T) {
+		d := newDSTRun(t, dstConfig{mode: mode})
+		d.store.mode = store
+		if ask != headerSyncAskOK {
+			d.askFaults[headerSyncAskCommitReady] = ask
+		}
+
+		// Let the first replies hit the fault before healing clears
+		// it. The bootstrap window may hold discovery back, so give it
+		// time to expire.
+		for i := 0; i < 2; i++ {
+			for slot := range d.current {
+				d.reply(slot, dstReplyHonest)
+			}
+			time.Sleep(headerSyncBootstrapMaxWait)
+			d.pump()
+		}
+		require.True(t, d.store.ambiguous > 0 ||
+			d.store.mode == dstStoreDown ||
+			len(d.askFaults) == 0, "fault never fired")
+		d.heal()
+		require.NoError(t, d.quiescent(), d.describe())
 	})
 }

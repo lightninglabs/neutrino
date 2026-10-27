@@ -2,7 +2,6 @@ package neutrino
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -49,8 +48,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		if len(script) > 2 {
 			deadline = script[2]
 		}
-		bm, store, _, err := setupBlockManager(t)
-		require.NoError(t, err)
+		bm, store := setupDSTBlockManager(t)
 		ctx := t.Context()
 		runtime := bm.headerSync
 		runtime.Start(ctx)
@@ -231,22 +229,28 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 	return result
 }
 
-func TestHeaderSyncDSTReplay(t *testing.T) {
-	for flags := byte(0); flags < 16; flags++ {
-		script := []byte{flags, flags * 7, flags * 3}
-		t.Run(fmt.Sprintf("%x", script), func(t *testing.T) {
-			first := runHeaderDST(t, script)
-			require.Equal(t, first, runHeaderDST(t, script))
-		})
-	}
-}
+// TestHeaderSyncDSTExhaustive runs every behaviour runHeaderDST can decode:
+// four flag bits, eight latencies and eight deadlines, 1,024 in all. The
+// space is small enough to enumerate, so fuzzing it would only repeat these
+// cases. A sample of the cases also runs twice to check determinism.
+func TestHeaderSyncDSTExhaustive(t *testing.T) {
+	const (
+		flagCases     = 16
+		latencyCases  = 8
+		deadlineCases = 8
+	)
+	for flags := byte(0); flags < flagCases; flags++ {
+		for latency := byte(0); latency < latencyCases; latency++ {
+			for deadline := byte(0); deadline < deadlineCases; deadline++ {
 
-func FuzzHeaderSyncDST(f *testing.F) {
-	for flags := byte(0); flags < 16; flags++ {
-		f.Add([]byte{flags, flags * 7, flags * 3})
+				script := []byte{flags, latency, deadline}
+				first := runHeaderDST(t, script)
+				if latency == deadline {
+					require.Equal(t, first,
+						runHeaderDST(t, script),
+						"script=%x", script)
+				}
+			}
+		}
 	}
-	f.Fuzz(func(t *testing.T, script []byte) {
-		first := runHeaderDST(t, script)
-		require.Equal(t, first, runHeaderDST(t, script))
-	})
 }
