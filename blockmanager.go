@@ -2724,6 +2724,17 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 	})
 }
 
+// disarmHeaderSyncTimeout cancels the serial getheaders deadline. Bumping the
+// request ID also voids a timeout callback that already fired but has not been
+// handled yet.
+func (b *blockManager) disarmHeaderSyncTimeout() {
+	if b.headerSyncTimer != nil {
+		b.headerSyncTimer.Stop()
+		b.headerSyncTimer = nil
+	}
+	b.headerRequestID++
+}
+
 func (b *blockManager) requestHeaders(peer *ServerPeer,
 	locator blockchain.BlockLocator, stopHash *chainhash.Hash,
 	startHeight uint32) error {
@@ -3420,22 +3431,14 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 	}
 
 	log.Warnf("Header sync from peer %s stalled for %v at height %d; "+
-		"marking peer non-responsive and selecting a new sync peer",
+		"quarantining peer and selecting a new sync peer",
 		msg.peer.Addr(), msg.timeout, height)
-	b.updateHeaderSyncPeerState(msg.peer, headersync.PeerQuarantined)
 
+	// A slow or stalled peer is quarantined, never IP-banned: on regtest
+	// and behind NAT or Tor one address can be the only usable peer.
+	b.quarantineHeaderSyncPeer(msg.peer)
 	removeSyncCandidate(peers, msg.peer)
-
-	if b.cfg.BanPeer != nil {
-		if err := b.cfg.BanPeer(
-			msg.peer.Addr(), banman.NonResponsivePeer,
-		); err != nil {
-			log.Warnf("Unable to ban non-responsive header sync "+
-				"peer %s: %v", msg.peer.Addr(), err)
-		}
-	} else {
-		msg.peer.Disconnect()
-	}
+	msg.peer.Disconnect()
 
 	b.syncPeerMutex.Lock()
 	if b.syncPeer == msg.peer {
@@ -4861,6 +4864,13 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 	if b.handleHeaderSyncRangeHeaders(peers, hmsg) {
 		return
+	}
+
+	// Any reply from the sync peer answers the outstanding serial
+	// request. An empty reply means the peer has nothing past our
+	// locator, which is not a stall.
+	if hmsg.peer == b.SyncPeer() {
+		b.disarmHeaderSyncTimeout()
 	}
 
 	// Nothing to do for an empty headers message.

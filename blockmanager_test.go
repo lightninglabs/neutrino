@@ -607,11 +607,14 @@ func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
 	require.NoError(t, err)
 	bm.headerSyncTimeout = time.Hour
 
-	var banned []string
+	// An unresponsive sync peer is quarantined, never IP-banned.
+	var banned, quarantined []string
 	bm.cfg.BanPeer = func(addr string, reason banman.Reason) error {
-		require.Equal(t, banman.NonResponsivePeer, reason)
 		banned = append(banned, addr)
 		return nil
+	}
+	bm.cfg.QuarantinePeer = func(addr string, _ time.Duration) {
+		quarantined = append(quarantined, addr)
 	}
 
 	slowPeer := newTestServerPeer(t, "127.0.0.1:8333", 100)
@@ -631,8 +634,46 @@ func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
 		timeout:     bm.headerSyncTimeout,
 	})
 
-	require.Equal(t, []string{slowPeer.Addr()}, banned)
+	require.Empty(t, banned)
+	require.Equal(t, []string{slowPeer.Addr()}, quarantined)
 	require.Equal(t, fastPeer, bm.SyncPeer())
+}
+
+// TestHeaderSyncEmptyReplyDisarmsTimeout checks that an empty headers reply
+// from the sync peer answers the serial request. The peer simply has nothing
+// past our locator, so its deadline must not later quarantine it.
+func TestHeaderSyncEmptyReplyDisarmsTimeout(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSyncTimeout = time.Hour
+
+	var quarantined []string
+	bm.cfg.QuarantinePeer = func(addr string, _ time.Duration) {
+		quarantined = append(quarantined, addr)
+	}
+
+	peer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	peers := list.New()
+	peers.PushBack(peer)
+	bm.startSync(peers)
+	require.Equal(t, peer, bm.SyncPeer())
+	requestID := bm.headerRequestID
+
+	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+		peer: peer, headers: wire.NewMsgHeaders(),
+	})
+	require.Nil(t, bm.headerSyncTimer)
+
+	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
+		peer:        peer,
+		requestID:   requestID,
+		startHeight: 0,
+		timeout:     bm.headerSyncTimeout,
+	})
+	require.Empty(t, quarantined)
+	require.Equal(t, peer, bm.SyncPeer())
 }
 
 // headers wraps the different headers and filters used throughout the tests.
