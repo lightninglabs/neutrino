@@ -220,7 +220,9 @@ func (a *RescanActor) Start() {
 		a.system = system
 		a.mu.Unlock()
 
-		ref.Tell(context.Background(), &processNextBlockMsg{})
+		if a.startBridge(0) {
+			ref.Tell(context.Background(), &processNextBlockMsg{})
+		}
 	})
 }
 
@@ -406,7 +408,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		})
 
 	case *subscriptionClosedMsg:
-		return a.handleSubscriptionClosed()
+		return a.handleSubscriptionClosed(m)
 
 	case *stopRescanMsg:
 		return a.handleStop(actorCtx)
@@ -510,7 +512,14 @@ func (a *RescanActor) handleStop(
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
 
-func (a *RescanActor) handleSubscriptionClosed() fn.Result[RescanActorResp] {
+func (a *RescanActor) handleSubscriptionClosed(msg *subscriptionClosedMsg) fn.Result[RescanActorResp] {
+	a.bridgeMu.Lock()
+	active := a.sub
+	a.bridgeMu.Unlock()
+	if active != msg.Sub {
+		return fn.Ok[RescanActorResp](&rescanActorAck{})
+	}
+
 	select {
 	case <-a.ctx.Done():
 		return fn.Ok[RescanActorResp](&rescanActorAck{})
@@ -522,19 +531,24 @@ func (a *RescanActor) handleSubscriptionClosed() fn.Result[RescanActorResp] {
 		return fn.Err[RescanActorResp](err)
 	}
 
-	cur, ok := state.(*StateCurrent)
-	if !ok {
+	if state.IsTerminal() {
 		return fn.Ok[RescanActorResp](&rescanActorAck{})
 	}
+	var height uint32
+	if cur, ok := state.(*StateCurrent); ok {
+		height = uint32(cur.CurStamp.Height)
+	}
 
-	log.Warnf("RescanActor: restarting closed subscription from height %d",
-		cur.CurStamp.Height)
-
+	log.Warnf("RescanActor: restarting closed subscription from height %d", height)
 	if a.cfg.OnError != nil {
 		a.cfg.OnError(errSubscriptionClosed)
 	}
-
-	a.startBridge(uint32(cur.CurStamp.Height))
+	a.cancelBridge()
+	if a.startBridge(height) {
+		if ref, refErr := a.requireActorRef(); refErr == nil {
+			ref.Tell(context.Background(), &processNextBlockMsg{})
+		}
+	}
 
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
@@ -638,17 +652,12 @@ func (a *RescanActor) dispatchOutbox(actorCtx context.Context,
 
 // startBridge starts the subscription bridge goroutine that converts block
 // subscription notifications into mailbox messages.
-func (a *RescanActor) startBridge(bestHeight uint32) {
+func (a *RescanActor) startBridge(bestHeight uint32) bool {
 	a.bridgeMu.Lock()
 	defer a.bridgeMu.Unlock()
 
-	if a.bridgeCancel != nil {
-		a.bridgeCancel()
-		a.bridgeCancel = nil
-	}
 	if a.sub != nil {
-		a.sub.Cancel()
-		a.sub = nil
+		return true
 	}
 
 	bridgeCtx, bridgeCancel := context.WithCancel(a.ctx)
@@ -663,23 +672,18 @@ func (a *RescanActor) startBridge(bestHeight uint32) {
 		}
 		a.scheduleRetry(&subscriptionClosedMsg{})
 
-		return
+		return false
 	}
 
 	a.bridgeCancel = bridgeCancel
 	a.sub = sub
-
-	// A reorg can occur between catch-up and subscribing at the same height.
-	// Check the scanned tip after installing the subscription.
-	if ref, err := a.requireActorRef(); err == nil {
-		ref.Tell(context.Background(), &processNextBlockMsg{})
-	}
 
 	a.asyncWG.Add(1)
 	go func() {
 		defer a.asyncWG.Done()
 		a.bridgeSubscription(bridgeCtx, sub)
 	}()
+	return true
 }
 
 // cancelBridge cancels the current subscription bridge goroutine.
@@ -719,7 +723,7 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 				if err == nil {
 					ref.Tell(
 						context.Background(),
-						&subscriptionClosedMsg{},
+						&subscriptionClosedMsg{Sub: sub},
 					)
 				}
 

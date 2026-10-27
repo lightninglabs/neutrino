@@ -378,12 +378,10 @@ machine RescanFSM {
             if (payload.1 > 0 && payload.1 < cur_height) {
                 target_height = payload.1;
 
-                announce eCancelSubscriptionOutbox;
                 announce eSelfTellOutbox;
                 announce eFSMStateChange, (FSMCurrent, FSMRewinding);
 
                 if (observer != default(machine)) {
-                    send observer, eObsFSMCancelSubscription;
                     send observer, eObsFSMSelfTell;
                 }
 

@@ -38,6 +38,9 @@ func (s *StateRewinding) ProcessEvent(_ context.Context, event RescanEvent,
 	case AddWatchAddrsEvent:
 		return s.handleAddWatch(&e)
 
+	case BlockDisconnectedEvent:
+		return s.handleDisconnect(&e)
+
 	case StopEvent:
 		return &StateTransition{
 			NextState: &StateTerminal{},
@@ -119,6 +122,25 @@ func (s *StateRewinding) processRewind(
 				Event: ProcessNextBlockEvent{},
 			}),
 		},
+	}, nil
+}
+
+// handleDisconnect applies a reorg notification while rewinding.
+func (s *StateRewinding) handleDisconnect(event *BlockDisconnectedEvent) (*StateTransition, error) {
+	if event.Header.BlockHash() != s.CurStamp.Hash ||
+		int32(event.Height) != s.CurStamp.Height {
+		return &StateTransition{NextState: s}, nil
+	}
+	header := event.Header
+	return &StateTransition{
+		NextState: &StateRewinding{
+			CurStamp:  headerfs.BlockStamp{Hash: event.ChainTip.BlockHash(), Height: s.CurStamp.Height - 1},
+			CurHeader: event.ChainTip, Watch: s.Watch, TargetHeight: s.TargetHeight,
+		},
+		Events: &EmittedEvent{Outbox: []OutboxEvent{
+			BlockDisconnectedOutbox{Hash: s.CurStamp.Hash, Height: s.CurStamp.Height, Header: &header},
+			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+		}},
 	}, nil
 }
 

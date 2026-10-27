@@ -81,7 +81,6 @@ func (s *StateCurrent) reconcileTip(env *Environment) (*StateTransition, error) 
 			Watch: s.Watch, TargetHeight: uint32(s.CurStamp.Height - 1),
 		},
 		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			CancelSubscriptionOutbox{},
 			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
 		}},
 	}, nil
@@ -244,7 +243,6 @@ func (s *StateCurrent) handleAddWatch(
 			},
 			Events: &EmittedEvent{
 				Outbox: []OutboxEvent{
-					CancelSubscriptionOutbox{},
 					SelfTellOutbox{
 						Event: ProcessNextBlockEvent{},
 					},

@@ -306,9 +306,9 @@ func TestDuplicateCurrentTipNotificationIsIgnored(t *testing.T) {
 	harness.StopAndWait()
 }
 
-// TestSubscriptionLifecycleAlternatesAcrossRewind proves that the real actor
-// preserves strict start/cancel ordering through a rewind cycle and shutdown.
-func TestSubscriptionLifecycleAlternatesAcrossRewind(t *testing.T) {
+// TestSubscriptionLifecycleRetainedAcrossRewind checks that the actor keeps
+// its subscription across rewind and cancels it on shutdown.
+func TestSubscriptionLifecycleRetainedAcrossRewind(t *testing.T) {
 	harness, err := NewActorHarness(6, ActorHarnessConfig{
 		BatchSize: 100,
 	})
@@ -332,7 +332,7 @@ func TestSubscriptionLifecycleAlternatesAcrossRewind(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return harness.Recorder.FinishedCount() >= initialFinished+1
 	}, 5*time.Second, 10*time.Millisecond,
-		"expected rewind cycle to finish and restart subscription")
+		"expected rewind cycle to finish")
 
 	harness.StopAndWait()
 
@@ -340,14 +340,12 @@ func TestSubscriptionLifecycleAlternatesAcrossRewind(t *testing.T) {
 	subErrs := CheckSubscriptionAlternation(subEvents)
 	require.Empty(t, subErrs, "subscription lifecycle errors: %v", subErrs)
 
-	require.Len(t, subEvents, 4,
-		"expected start, cancel, start, cancel across rewind and stop")
+	require.Equal(t, int32(5), cur.CurStamp.Height)
+	require.Len(t, subEvents, 2,
+		"expected one subscription throughout scanning and rewind")
 	require.Equal(t, SubscriptionStarted, subEvents[0].Kind)
-	require.Equal(t, uint32(cur.CurStamp.Height), subEvents[0].Height)
+	require.Zero(t, subEvents[0].Height)
 	require.Equal(t, SubscriptionCanceled, subEvents[1].Kind)
-	require.Equal(t, SubscriptionStarted, subEvents[2].Kind)
-	require.Equal(t, uint32(cur.CurStamp.Height), subEvents[2].Height)
-	require.Equal(t, SubscriptionCanceled, subEvents[3].Kind)
 }
 
 // TestDisconnectCallbacksStayPairedAcrossReattach proves the real actor emits

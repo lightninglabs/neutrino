@@ -43,6 +43,9 @@ func (s *StateSyncing) ProcessEvent(_ context.Context, event RescanEvent,
 	case AddWatchAddrsEvent:
 		return s.handleAddWatch(&e, env)
 
+	case BlockDisconnectedEvent:
+		return s.handleDisconnect(&e)
+
 	case StopEvent:
 		return &StateTransition{
 			NextState: &StateTerminal{},
@@ -117,6 +120,10 @@ func (s *StateSyncing) processNextBatch(
 			return partial(err)
 		}
 
+		if curStamp.Height > bestBlock.Height {
+			return partial(fmt.Errorf("scanned tip height %d exceeds chain tip %d", curStamp.Height, bestBlock.Height))
+		}
+
 		// A historical fetch can race a reorg. Never advance from an
 		// orphaned tip or publish a child from a different chain.
 		if curStamp.Height <= bestBlock.Height {
@@ -125,18 +132,7 @@ func (s *StateSyncing) processNextBatch(
 				return partial(err)
 			}
 			if active.BlockHash() != curStamp.Hash {
-				if curStamp.Height == 0 {
-					return partial(fmt.Errorf("genesis block changed"))
-				}
-				return &StateTransition{
-					NextState: &StateRewinding{
-						CurStamp: curStamp, CurHeader: curHeader, Watch: watch,
-						TargetHeight: uint32(curStamp.Height - 1),
-					},
-					Events: &EmittedEvent{Outbox: append(outbox, SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					})},
-				}, nil
+				return partial(fmt.Errorf("scanned tip %s at height %d is no longer active", curStamp.Hash, curStamp.Height))
 			}
 		}
 
@@ -258,6 +254,25 @@ func (s *StateSyncing) processNextBatch(
 				Event: ProcessNextBlockEvent{},
 			}),
 		},
+	}, nil
+}
+
+// handleDisconnect applies a queued chain disconnection to the scanned tip.
+func (s *StateSyncing) handleDisconnect(event *BlockDisconnectedEvent) (*StateTransition, error) {
+	if event.Header.BlockHash() != s.CurStamp.Hash ||
+		int32(event.Height) != s.CurStamp.Height {
+		return &StateTransition{NextState: s}, nil
+	}
+	header := event.Header
+	return &StateTransition{
+		NextState: &StateSyncing{
+			CurStamp:  headerfs.BlockStamp{Hash: event.ChainTip.BlockHash(), Height: s.CurStamp.Height - 1},
+			CurHeader: event.ChainTip, Watch: s.Watch, Scanning: s.Scanning,
+		},
+		Events: &EmittedEvent{Outbox: []OutboxEvent{
+			BlockDisconnectedOutbox{Hash: s.CurStamp.Hash, Height: s.CurStamp.Height, Header: &header},
+			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+		}},
 	}, nil
 }
 

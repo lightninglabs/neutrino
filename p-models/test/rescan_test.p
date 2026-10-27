@@ -427,8 +427,6 @@ machine TestSubscriptionLifecycle {
         }
 
         on eObsFSMStartSubscription do (height: Height) {
-            assert !sub_started || sub_cancelled,
-                "double start subscription without cancel";
             sub_started = true;
             sub_cancelled = false;
         }

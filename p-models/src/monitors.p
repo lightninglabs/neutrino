@@ -210,8 +210,8 @@ spec WatchListConsistency observes eAddWatchAddrsEvent {
 // =============================================================================
 // Monitor 5: SubscriptionLifecycle
 // =============================================================================
-// StartSubscriptionOutbox and CancelSubscriptionOutbox must alternate
-// correctly. There should never be two starts without a cancel in between.
+// Start requests are idempotent when a subscription is already active.
+// Cancellation must only occur after a start request.
 
 spec SubscriptionLifecycle observes
     eStartSubscriptionOutbox, eCancelSubscriptionOutbox
@@ -224,8 +224,6 @@ spec SubscriptionLifecycle observes
         }
 
         on eStartSubscriptionOutbox do (height: Height) {
-            assert !sub_active,
-                format("SubscriptionLifecycle: double start at height {0} without cancel", height);
             sub_active = true;
         }
 

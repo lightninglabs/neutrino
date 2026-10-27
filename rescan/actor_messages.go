@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
@@ -96,6 +97,7 @@ func (*currentStateReq) rescanActorMsgSealed() {}
 
 type subscriptionClosedMsg struct {
 	lndactor.BaseMessage
+	Sub *blockntfns.Subscription
 }
 
 func (*subscriptionClosedMsg) MessageType() string {
@@ -187,7 +189,7 @@ func cloneRetryMsg(msg RescanActorMsg) (RescanActorMsg, error) {
 		return &processNextBlockMsg{}, nil
 
 	case *subscriptionClosedMsg:
-		return &subscriptionClosedMsg{}, nil
+		return &subscriptionClosedMsg{Sub: m.Sub}, nil
 
 	case *blockConnectedMsg:
 		return &blockConnectedMsg{

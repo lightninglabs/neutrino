@@ -321,7 +321,7 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 }
 
 // TestStateCurrentAddWatchRewind tests that AddWatchAddrs with rewind in
-// Current transitions to Rewinding and cancels subscription.
+// Current transitions to Rewinding and keeps the subscription.
 func TestStateCurrentAddWatchRewind(t *testing.T) {
 	state := &StateCurrent{
 		CurStamp: headerfs.BlockStamp{
@@ -355,7 +355,7 @@ func TestStateCurrentAddWatchRewind(t *testing.T) {
 			hasSelfTell = true
 		}
 	}
-	require.True(t, hasCancelSub)
+	require.False(t, hasCancelSub)
 	require.True(t, hasSelfTell)
 }
 

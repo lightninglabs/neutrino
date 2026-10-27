@@ -77,7 +77,9 @@ machine RescanActor {
         // =====================================================================
 
         on eActorStart do {
-            // Kick off the FSM with the first ProcessNextBlockEvent.
+            // Subscribe before scanning so reorg disconnects are retained.
+            sub_active = true;
+            send chain, eChainSubscribe, (this, 0);
             send fsm, eProcessNextBlockEvent;
         }
 
@@ -172,9 +174,11 @@ machine RescanActor {
         // =====================================================================
 
         on eStartSubscriptionOutbox do (height: Height) {
-            sub_active = true;
-            last_known_height = height;
-            send chain, eChainSubscribe, (this, height);
+            if (!sub_active) {
+                sub_active = true;
+                last_known_height = height;
+                send chain, eChainSubscribe, (this, height);
+            }
 
             if (observer != default(machine)) {
                 send observer, eObservedStartSubscription, height;
