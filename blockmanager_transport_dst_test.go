@@ -883,6 +883,14 @@ func (d *dstRun) step(value byte) {
 		kind := 1 + dstReplyKind(
 			(int(op-10)*6+sub)%int(dstReplyKinds-1),
 		)
+
+		// Without a checkpoint above it, an equal-work fork is a
+		// valid chain and may legitimately win. On mainnet an
+		// attacker cannot mine one, so discovery modes model liars
+		// whose chains fail contextual checks instead.
+		if kind == dstReplyFork && d.cfg.mode.discovery() {
+			kind = dstReplyBadTime
+		}
 		label += " reply=" + kind.String()
 		d.reply(slot, kind)
 
