@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -1609,4 +1610,65 @@ func TestBanAndDisconnect(t *testing.T) {
 	require.Equal(t, []string{"invalid"}, banned)
 	require.Equal(t, []string{"unresponsive"}, disconnected)
 	require.ElementsMatch(t, []string{"invalid", "unresponsive"}, acted)
+}
+
+// TestResolveCFHeaderMixedResponders checks that a silent peer does not hide
+// a conflict between responsive peers at the same height.
+func TestResolveCFHeaderMixedResponders(t *testing.T) {
+	correctHash, err := builder.GetFilterHash(correctFilter)
+	require.NoError(t, err)
+	wrongHash, err := builder.GetFilterHash(fakeFilter1)
+	require.NoError(t, err)
+	headers := map[string]*wire.MsgCFHeaders{
+		"good:1":   {FilterHashes: []*chainhash.Hash{&correctHash}},
+		"wrong:1":  {FilterHashes: []*chainhash.Hash{&wrongHash}},
+		"silent:1": {FilterHashes: []*chainhash.Hash{&correctHash}},
+	}
+	checkpoints := make(map[string][]*chainhash.Hash)
+	for peer := range headers {
+		checkpoints[peer] = nil
+	}
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("FetchHeaderByHeight", uint32(100)).Return(&block.Header, nil)
+	var banned, disconnected []string
+	bm := &blockManager{cfg: &blockManagerCfg{
+		BlockHeaders: store,
+		GetBlock: func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error) {
+			return btcutil.NewBlock(block), nil
+		},
+		BanPeer: func(addr string, _ banman.Reason) error {
+			banned = append(banned, addr)
+			return nil
+		},
+		DisconnectPeer: func(addr string) error {
+			disconnected = append(disconnected, addr)
+			return nil
+		},
+	}}
+	bm.cfg.queryAllPeers = func(_ wire.Message,
+		respond func(*ServerPeer, wire.Message, chan<- struct{}, chan<- struct{}),
+		_ ...QueryOption) {
+
+		for addr, filter := range map[string]*gcs.Filter{
+			"good:1": correctFilter, "wrong:1": fakeFilter1,
+		} {
+			p := newTestServerPeer(t, addr, 100)
+			payload, err := filter.NBytes()
+			require.NoError(t, err)
+			hash := block.BlockHash()
+			respond(p, wire.NewMsgCFilter(
+				wire.GCSFilterRegular, &hash, payload,
+			), make(chan struct{}), make(chan struct{}))
+		}
+	}
+	err = bm.resolveCFHeaderMismatches(
+		headers, checkpoints, 100, 1, wire.GCSFilterRegular,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"wrong:1"}, banned)
+	require.Equal(t, []string{"silent:1"}, disconnected)
+	require.Len(t, headers, 1)
+	require.Contains(t, headers, "good:1")
+	require.Len(t, checkpoints, 1)
+	require.Contains(t, checkpoints, "good:1")
 }

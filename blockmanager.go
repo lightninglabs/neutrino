@@ -1283,28 +1283,10 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 		return fmt.Errorf("couldn't get cfheaders from peers")
 	}
 
-	// For each header, go through and check whether all headers messages
-	// have the same filter hash. If we find a difference, get the block,
-	// calculate the filter, and throw out any mismatching peers.
-	for i := 0; i < numHeaders; i++ {
-		if checkForCFHeaderMismatch(headers, i) {
-			targetHeight := startHeight + uint32(i)
-
-			invalidPeers, unresponsivePeers, err := b.detectBadPeers(
-				headers, targetHeight, uint32(i), fType,
-			)
-			if err != nil {
-				return err
-			}
-
-			actedOn := b.banAndDisconnect(
-				invalidPeers, unresponsivePeers,
-				banman.InvalidFilterHeader,
-			)
-			for _, peer := range actedOn {
-				delete(headers, peer)
-			}
-		}
+	if err := b.resolveCFHeaderMismatches(
+		headers, nil, startHeight, numHeaders, fType,
+	); err != nil {
+		return err
 	}
 
 	// Get the longest filter hash chain and write it to the store.
@@ -2166,31 +2148,10 @@ func (b *blockManager) resolveConflict(
 		}
 	}
 
-	// For each header, go through and check whether all headers messages
-	// have the same filter hash. If we find a difference, get the block,
-	// calculate the filter, and throw out any mismatching peers.
-	for i := 0; i < numHeaders; i++ {
-		if checkForCFHeaderMismatch(headers, i) {
-			// Get the block header for this height, along with the
-			// block as well.
-			targetHeight := startHeight + uint32(i)
-
-			invalidPeers, unresponsivePeers, err := b.detectBadPeers(
-				headers, targetHeight, uint32(i), fType,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			actedOn := b.banAndDisconnect(
-				invalidPeers, unresponsivePeers,
-				banman.InvalidFilterHeader,
-			)
-			for _, peer := range actedOn {
-				delete(headers, peer)
-				delete(checkpoints, peer)
-			}
-		}
+	if err := b.resolveCFHeaderMismatches(
+		headers, checkpoints, startHeight, numHeaders, fType,
+	); err != nil {
+		return nil, err
 	}
 
 	// Drop peers that supplied checkpoints but failed to answer the
@@ -2198,7 +2159,8 @@ func (b *blockManager) resolveConflict(
 	for peer := range checkpoints {
 		if _, ok := headers[peer]; !ok {
 			if err := b.cfg.DisconnectPeer(peer); err != nil {
-				log.Errorf("Unable to disconnect peer %v: %v", peer, err)
+				log.Errorf("Unable to disconnect peer %v: %v",
+					peer, err)
 			}
 			delete(checkpoints, peer)
 		}
@@ -2250,6 +2212,39 @@ func checkForCFHeaderMismatch(headers map[string]*wire.MsgCFHeaders,
 	}
 
 	return false
+}
+
+// resolveCFHeaderMismatches removes conflicting peers before advancing to the
+// next filter hash. A first pass can remove nonresponders while responsive
+// peers still disagree, so each height is checked again until it agrees.
+func (b *blockManager) resolveCFHeaderMismatches(
+	headers map[string]*wire.MsgCFHeaders,
+	checkpoints map[string][]*chainhash.Hash, startHeight uint32,
+	numHeaders int, fType wire.FilterType) error {
+
+	for i := 0; i < numHeaders; i++ {
+		for checkForCFHeaderMismatch(headers, i) {
+			invalid, unresponsive, err := b.detectBadPeers(
+				headers, startHeight+uint32(i), uint32(i), fType,
+			)
+			if err != nil {
+				return err
+			}
+
+			before := len(headers)
+			for _, peer := range b.banAndDisconnect(
+				invalid, unresponsive, banman.InvalidFilterHeader,
+			) {
+				delete(headers, peer)
+				delete(checkpoints, peer)
+			}
+			if len(headers) == before {
+				return fmt.Errorf("unable to resolve filter header "+
+					"mismatch at height %d", startHeight+uint32(i))
+			}
+		}
+	}
+	return nil
 }
 
 // banAndDisconnect bans every peer that served verified invalid filter data
