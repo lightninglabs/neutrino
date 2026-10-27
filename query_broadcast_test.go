@@ -166,3 +166,34 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 		})
 	}
 }
+
+// TestOnPeerUnresponsiveQuarantines checks that an unresponsive query peer is
+// quarantined for the configured duration, by exact address, and not banned.
+func TestOnPeerUnresponsiveQuarantines(t *testing.T) {
+	t.Parallel()
+
+	s := &ChainService{
+		query: make(chan interface{}, 1),
+		quit:  make(chan struct{}),
+	}
+
+	before := time.Now()
+	s.onPeerUnresponsive(&scriptedPeer{addr: "1.2.3.4:8333"})
+
+	select {
+	case msg := <-s.query:
+		q, ok := msg.(quarantinePeerMsg)
+		require.True(t, ok, "unexpected message %T", msg)
+		require.Equal(t, "1.2.3.4:8333", q.addr)
+		require.WithinDuration(
+			t, before.Add(unresponsivePeerQuarantine), q.until,
+			time.Minute,
+		)
+		require.GreaterOrEqual(
+			t, q.until.Sub(before), unresponsivePeerQuarantine,
+		)
+
+	default:
+		t.Fatal("peer was not quarantined")
+	}
+}

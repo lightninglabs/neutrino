@@ -67,6 +67,11 @@ var (
 	// BanDuration is the duration of a ban.
 	BanDuration = time.Hour * 24
 
+	// unresponsivePeerQuarantine is how long a peer that repeatedly failed
+	// to answer queries is excluded from query dispatch. It matches the
+	// work manager's local quarantine for such peers.
+	unresponsivePeerQuarantine = 10 * time.Minute
+
 	// TargetOutbound is the number of outbound peers to target.
 	TargetOutbound = 8
 
@@ -783,18 +788,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		),
 	}
 	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		Peers:          s.eligiblePeers,
-		OnPeerUnresponsive: func(peer querysyncwm.Peer) {
-			err := s.BanPeer(peer.Addr(), banman.NonResponsivePeer)
-			if err != nil {
-				log.Errorf("Unable to ban non-responsive peer "+
-					"%v: %v", peer.Addr(), err)
-			}
-		},
-		Ranking:         querysyncwm.NewPeerRanking(),
-		SchedulerTrace:  cfg.QuerySchedulerTrace,
-		SchedulerEvents: cfg.QuerySchedulerEvents,
+		ConnectedPeers:     s.ConnectedPeers,
+		Peers:              s.eligiblePeers,
+		OnPeerUnresponsive: s.onPeerUnresponsive,
+		Ranking:            querysyncwm.NewPeerRanking(),
+		SchedulerTrace:     cfg.QuerySchedulerTrace,
+		SchedulerEvents:    cfg.QuerySchedulerEvents,
 	})
 
 	var err error
@@ -1179,6 +1178,15 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 			addr, err)
 	}
 	return s.banStore.BanIPNet(ipNet, reason, BanDuration)
+}
+
+// onPeerUnresponsive is invoked by the query work manager once a peer has
+// repeatedly failed to answer queries. The peer is quarantined and
+// disconnected, but its IP address is deliberately not banned: slow or
+// overloaded peers are common, and an address ban would also catch unrelated
+// peers behind the same NAT or on localhost.
+func (s *ChainService) onPeerUnresponsive(peer querysyncwm.Peer) {
+	s.QuarantinePeer(peer.Addr(), unresponsivePeerQuarantine)
 }
 
 // QuarantinePeer temporarily excludes one exact peer address from peer

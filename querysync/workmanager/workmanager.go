@@ -1123,6 +1123,27 @@ Loop:
 		// Spin up a goroutine that runs a worker each time a peer
 		// connects.
 		case peer := <-peersConnected:
+			// Connection notifications are delivered
+			// asynchronously, so one can arrive after its peer has
+			// already gone away. Don't start a worker for it.
+			select {
+			case <-peer.OnDisconnect():
+				log.Debugf("Ignoring already disconnected "+
+					"peer %v", peer.Addr())
+				continue
+			default:
+			}
+
+			// A peer reconnecting under the same address replaces
+			// its stale worker. Remove that one first, so its
+			// scheduler actor is stopped and its queued jobs go
+			// back to the common queue instead of being orphaned.
+			if stale, ok := workers[peer.Addr()]; ok {
+				log.Debugf("Replacing stale worker for "+
+					"peer %v", peer.Addr())
+				removeWorker(peer.Addr(), stale)
+			}
+
 			log.Debugf("Starting worker for peer %v",
 				peer.Addr())
 
