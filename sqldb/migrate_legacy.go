@@ -3,7 +3,6 @@ package sqldb
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,8 +12,8 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Registers "bdb".
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database"
 	sqldbv2 "github.com/lightningnetwork/lnd/sqldb/v2"
@@ -23,11 +22,42 @@ import (
 )
 
 // Default file names neutrino has historically used for the append-only header
-// binaries. Callers may override via LegacyDataSource if they have non-default
-// file names.
+// binaries and the walletdb (bbolt) database. Callers may override via
+// LegacyDataSource if they have non-default file names.
 const (
 	DefaultBlockHeadersFilename     = "block_headers.bin"
 	DefaultRegFilterHeadersFilename = "reg_filter_headers.bin"
+
+	// DefaultLegacyBoltFilename is the file name lnd (and most other
+	// callers) give the walletdb that holds neutrino's filter and ban
+	// buckets. It lives next to the flat files in the neutrino DataDir.
+	DefaultLegacyBoltFilename = "neutrino.db"
+)
+
+const (
+	// blockHeaderSize is the size of a serialized bitcoin block header,
+	// which is also the record size of block_headers.bin.
+	blockHeaderSize = 80
+
+	// filterHeaderSize is the size of a filter header hash, which is also
+	// the record size of reg_filter_headers.bin.
+	filterHeaderSize = chainhash.HashSize
+
+	// prevBlockOffset is the offset of the previous block hash inside a
+	// serialized block header (after the 4 byte version).
+	prevBlockOffset = 4
+
+	// defaultImportBatchSize is the number of rows written per SQL
+	// transaction when LegacyDataSource.BatchSize is unset.
+	defaultImportBatchSize = 100_000
+
+	// boltOpenTimeout bounds how long the importer waits for the legacy
+	// walletdb file lock before failing the import.
+	boltOpenTimeout = 10 * time.Second
+
+	// backupSuffix is appended to legacy flat files after a successful
+	// import.
+	backupSuffix = ".bak"
 )
 
 // Legacy walletdb bucket and key names. They mirror the unexported names in
@@ -44,17 +74,23 @@ var (
 )
 
 // LegacyDataSource declares the legacy on-disk state to be imported into the
-// SQL backend on first start. Constructed by the caller (lnd/lit/btcwallet)
-// when transitioning from the walletdb backend, it bundles the open legacy
-// bbolt handle alongside the data directory holding the two append-only header
-// binaries.
+// SQL backend on first start. Callers normally do not need to build one:
+// NewBackendWithLegacy (and so neutrino.NewChainService) detects the legacy
+// files in the data directory by itself. A LegacyDataSource is only needed to
+// override the detected locations or to hand over an already-open walletdb.
 //
-// Pass to MakeLegacyImportMigration -> NewBackend; the import runs exactly
-// once, recorded in the neutrino_migrations tracking table at version 2.
+// The import runs exactly once, recorded in the neutrino_migrations tracking
+// table at version 2.
 type LegacyDataSource struct {
-	// DB is the pre-opened legacy walletdb. The migration only reads from
-	// it; the caller must keep it open for the lifetime of the migration.
+	// DB is an optional pre-opened legacy walletdb. The migration only
+	// reads from it; the caller must keep it open for the lifetime of the
+	// migration. When nil, the importer opens BoltPath read-only itself.
 	DB walletdb.DB
+
+	// BoltPath is the legacy walletdb file opened when DB is nil. It
+	// defaults to DataDir/neutrino.db. A missing file means there are no
+	// legacy filters or bans to import.
+	BoltPath string
 
 	// DataDir is the directory containing the legacy header binary files.
 	// Typically this is neutrino's DataDir.
@@ -70,8 +106,8 @@ type LegacyDataSource struct {
 	// FilterHeadersFilename overrides DefaultRegFilterHeadersFilename.
 	FilterHeadersFilename string
 
-	// BatchSize is the number of header rows inserted per transaction
-	// during the import. Defaults to 2000 when zero.
+	// BatchSize is the number of header rows written per SQL transaction
+	// during the import. Defaults to 100,000 when zero.
 	BatchSize int
 }
 
@@ -94,26 +130,72 @@ func (l *LegacyDataSource) filterHeadersPath() string {
 	return filepath.Join(l.DataDir, name)
 }
 
+// boltPath returns the legacy walletdb path for the source.
+func (l *LegacyDataSource) boltPath() string {
+	if l.BoltPath != "" {
+		return l.BoltPath
+	}
+	return filepath.Join(l.DataDir, DefaultLegacyBoltFilename)
+}
+
 // batchSize returns the configured batch size for the import, falling back to
 // a sensible default when zero.
 func (l *LegacyDataSource) batchSize() int {
 	if l.BatchSize > 0 {
 		return l.BatchSize
 	}
-	return 2000
+	return defaultImportBatchSize
 }
 
-// MakeLegacyImportMigration returns a MakeProgrammaticMigrations closure
-// suitable for plugging into NewBackend. When src is nil, the closure is nil
-// too (no programmatic migration registered, version 2 still recorded as a
-// contentless no-op).
-func MakeLegacyImportMigration(
-	src *LegacyDataSource) MakeProgrammaticMigrations {
+// fileExists reports whether path names an existing non-empty regular file.
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular() && fi.Size() > 0
+}
 
+// LegacyArtifactsExist returns true when at least one of the legacy neutrino
+// files (the two header binaries or the walletdb file) is present for src.
+func LegacyArtifactsExist(src *LegacyDataSource) bool {
 	if src == nil {
+		return false
+	}
+
+	return fileExists(src.blockHeadersPath()) ||
+		fileExists(src.filterHeadersPath()) ||
+		(src.DB == nil && fileExists(src.boltPath()))
+}
+
+// DetectLegacyDataSource looks for legacy neutrino state in dataDir using the
+// default file names. It returns nil when none of the header binaries or the
+// walletdb file exist, which is the case for every fresh install.
+func DetectLegacyDataSource(dataDir string,
+	params *chaincfg.Params) *LegacyDataSource {
+
+	src := &LegacyDataSource{DataDir: dataDir, Params: params}
+	if !LegacyArtifactsExist(src) {
 		return nil
 	}
 
+	return src
+}
+
+// legacyImporter runs the legacy import as programmatic migration version 2
+// and remembers which flat files to retire once the migration is recorded.
+type legacyImporter struct {
+	src *LegacyDataSource
+
+	// renameInline retires the flat files at the end of the migration
+	// itself instead of leaving it to finalize. It exists for callers of
+	// MakeLegacyImportMigration that cannot call finalize.
+	renameInline bool
+
+	// retire lists the flat files to rename once the import is durable.
+	retire []string
+}
+
+// migrations returns the MakeProgrammaticMigrations closure registering the
+// import as migration version 2.
+func (i *legacyImporter) migrations() MakeProgrammaticMigrations {
 	return func(baseDB *sqldbv2.BaseDB) (
 		map[uint]migrate.ProgrammaticMigrEntry, error) {
 
@@ -122,8 +204,7 @@ func MakeLegacyImportMigration(
 			ProgrammaticMigr: func(_ *migrate.Migration,
 				_ database.Driver) error {
 
-				ctx := context.Background()
-				return runLegacyImport(ctx, baseDB, src)
+				return i.run(context.Background(), baseDB)
 			},
 		}
 
@@ -133,72 +214,219 @@ func MakeLegacyImportMigration(
 	}
 }
 
-// runLegacyImport executes the full legacy import. The function is idempotent:
-// every retry begins by truncating the SQL tables and re-reading the
-// (read-only) legacy state from scratch.
-func runLegacyImport(ctx context.Context, baseDB *sqldbv2.BaseDB,
-	src *LegacyDataSource) error {
+// finalize renames the imported flat files to *.bak. It must only run after
+// the migration was recorded: renaming earlier would leave a crash window in
+// which the retry no longer finds the headers it has to re-import.
+func (i *legacyImporter) finalize() {
+	if err := renameLegacyArtifacts(i.retire...); err != nil {
+		// A failure to rename does not invalidate the import. Log and
+		// continue; the operator can clean up manually.
+		log.Warnf("Legacy file rename had errors: %v", err)
+	}
+	i.retire = nil
+}
 
-	if src == nil || src.DB == nil {
-		log.Infof("No legacy data source declared; skipping import")
+// MakeLegacyImportMigration returns a MakeProgrammaticMigrations closure
+// suitable for plugging into NewBackend. When src is nil, the closure is nil
+// too (no programmatic migration registered, version 2 still recorded as a
+// contentless no-op). Prefer NewBackendWithLegacy, which also detects legacy
+// data by itself and retires the flat files only after the import is
+// recorded.
+func MakeLegacyImportMigration(
+	src *LegacyDataSource) MakeProgrammaticMigrations {
+
+	if src == nil {
 		return nil
 	}
 
+	imp := &legacyImporter{src: src, renameInline: true}
+
+	return imp.migrations()
+}
+
+// legacyPlan describes which legacy artifacts exist and were validated.
+type legacyPlan struct {
+	// blockCount and filterCount are the number of records in the two
+	// flat files; zero when the file is absent or empty.
+	blockCount  uint32
+	filterCount uint32
+}
+
+// planFlatFiles stats the flat files and rejects inconsistent combinations
+// before any SQL table is touched.
+func planFlatFiles(blockBin, filterBin string) (legacyPlan, error) {
+	var plan legacyPlan
+
+	count := func(path string, recSize int64) (uint32, error) {
+		fi, err := os.Stat(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return 0, nil
+		case err != nil:
+			return 0, err
+		}
+
+		if fi.Size()%recSize != 0 {
+			return 0, fmt.Errorf("%s: size %d is not a multiple "+
+				"of the %d byte record size, the file is "+
+				"truncated or corrupt", path, fi.Size(),
+				recSize)
+		}
+
+		return uint32(fi.Size() / recSize), nil
+	}
+
+	var err error
+	plan.blockCount, err = count(blockBin, blockHeaderSize)
+	if err != nil {
+		return plan, err
+	}
+	plan.filterCount, err = count(filterBin, filterHeaderSize)
+	if err != nil {
+		return plan, err
+	}
+
+	switch {
+	// Filter headers are keyed by block hash, which is only recoverable
+	// from the block headers.
+	case plan.filterCount > 0 && plan.blockCount == 0:
+		return plan, fmt.Errorf("%s has %d filter headers but %s is "+
+			"missing or empty", filterBin, plan.filterCount,
+			blockBin)
+
+	// The filter header chain trails the block header chain, never leads.
+	case plan.filterCount > plan.blockCount:
+		return plan, fmt.Errorf("%s has %d filter headers, more than "+
+			"the %d block headers in %s", filterBin,
+			plan.filterCount, plan.blockCount, blockBin)
+	}
+
+	return plan, nil
+}
+
+// run executes the full legacy import. The function is idempotent: every
+// retry begins by truncating the SQL tables and re-reading the (read-only)
+// legacy state from scratch.
+func (i *legacyImporter) run(ctx context.Context,
+	baseDB *sqldbv2.BaseDB) error {
+
+	src := i.src
 	blockBin := src.blockHeadersPath()
 	filterBin := src.filterHeadersPath()
 
-	log.Infof("Starting neutrino SQL legacy import from %s", src.DataDir)
+	// Validate the flat files first so that a bad file fails the import
+	// before any table is touched.
+	plan, err := planFlatFiles(blockBin, filterBin)
+	if err != nil {
+		return err
+	}
+
+	// Open the legacy walletdb unless the caller handed us one. A missing
+	// file just means there are no legacy filters or bans.
+	legacyDB := src.DB
+	if legacyDB == nil && fileExists(src.boltPath()) {
+		legacyDB, err = walletdb.Open(
+			"bdb", src.boltPath(), true, boltOpenTimeout, true,
+		)
+		if err != nil {
+			return fmt.Errorf("open legacy walletdb %s: %w",
+				src.boltPath(), err)
+		}
+		defer legacyDB.Close()
+	}
+
+	log.Infof("Starting neutrino SQL legacy import from %s "+
+		"(%d block headers, %d filter headers, walletdb=%v)",
+		src.DataDir, plan.blockCount, plan.filterCount,
+		legacyDB != nil)
 	start := time.Now()
 
 	if err := truncateTables(ctx, baseDB); err != nil {
 		return fmt.Errorf("truncate target tables: %w", err)
 	}
 
-	blockTipHeight, blockTipHash, blockHashes, err := importBlockHeaders(
-		ctx, baseDB, blockBin, src.batchSize(),
+	bw := newBulkWriter(baseDB)
+
+	// Block headers. The hash of every header is kept so the filter
+	// headers can be keyed by block hash without another lookup.
+	var (
+		blockTipHash    chainhash.Hash
+		filterTipHash   chainhash.Hash
+		blockTipHeight  uint32
+		filterTipHeight uint32
+		blockHashes     []byte
 	)
-	if err != nil {
-		return fmt.Errorf("import block headers: %w", err)
+	if plan.blockCount > 0 {
+		blockHashes, err = bw.importBlockHeaders(
+			ctx, blockBin, plan.blockCount, src.batchSize(),
+			src.Params,
+		)
+		if err != nil {
+			return fmt.Errorf("import block headers: %w", err)
+		}
+
+		blockTipHeight = plan.blockCount - 1
+		copy(blockTipHash[:], blockHashes[int(blockTipHeight)*
+			chainhash.HashSize:])
 	}
 
-	filterTipHeight, filterTipHash, err := importFilterHeaders(
-		ctx, baseDB, filterBin, src.batchSize(), blockHashes,
-	)
-	if err != nil {
-		return fmt.Errorf("import filter headers: %w", err)
+	if plan.filterCount > 0 {
+		err = bw.importFilterHeaders(
+			ctx, filterBin, plan.filterCount, src.batchSize(),
+			blockHashes,
+		)
+		if err != nil {
+			return fmt.Errorf("import filter headers: %w", err)
+		}
+
+		filterTipHeight = plan.filterCount - 1
+		err = readRecord(
+			filterBin, int64(filterTipHeight), filterHeaderSize,
+			filterTipHash[:],
+		)
+		if err != nil {
+			return fmt.Errorf("read filter header tip: %w", err)
+		}
 	}
 
 	if err := upsertTips(
-		ctx, baseDB, blockTipHash, blockTipHeight, filterTipHash,
+		ctx, baseDB, plan, blockTipHash, blockTipHeight, filterTipHash,
 		filterTipHeight,
 	); err != nil {
 		return fmt.Errorf("upsert chain tips: %w", err)
 	}
 
-	if err := importFilters(
-		ctx,
-		baseDB,
-		src.DB,
-		src.batchSize(),
-	); err != nil {
-		return fmt.Errorf("import filters: %w", err)
-	}
+	var numFilters int64
+	if legacyDB != nil {
+		numFilters, err = bw.importFilters(ctx, legacyDB)
+		if err != nil {
+			return fmt.Errorf("import filters: %w", err)
+		}
 
-	if err := importBans(ctx, baseDB, src.DB); err != nil {
-		return fmt.Errorf("import bans: %w", err)
+		if err := importBans(ctx, baseDB, legacyDB); err != nil {
+			return fmt.Errorf("import bans: %w", err)
+		}
+	} else {
+		log.Infof("No legacy walletdb found; skipping filter and " +
+			"ban import")
 	}
 
 	if err := verifyImport(
-		ctx, baseDB, blockTipHeight, blockTipHash,
-		filterTipHeight, filterTipHash,
+		ctx, baseDB, plan, blockTipHash, filterTipHash, numFilters,
 	); err != nil {
 		return fmt.Errorf("verify import: %w", err)
 	}
 
-	if err := renameLegacyArtifacts(blockBin, filterBin); err != nil {
-		// A failure to rename does not invalidate the import. Log and
-		// continue; the operator can clean up manually.
-		log.Warnf("Legacy file rename had errors: %v", err)
+	// The flat files are retired once the migration is recorded, see
+	// finalize.
+	i.retire = nil
+	for _, p := range []string{blockBin, filterBin} {
+		if fileExists(p) {
+			i.retire = append(i.retire, p)
+		}
+	}
+	if i.renameInline {
+		i.finalize()
 	}
 
 	log.Infof("Neutrino SQL legacy import complete in %v "+
@@ -207,6 +435,20 @@ func runLegacyImport(ctx context.Context, baseDB *sqldbv2.BaseDB,
 		filterTipHash, filterTipHeight)
 
 	return nil
+}
+
+// readRecord reads the idx'th recSize byte record of the file at path into
+// dst.
+func readRecord(path string, idx, recSize int64, dst []byte) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = f.ReadAt(dst[:recSize], idx*recSize)
+
+	return err
 }
 
 // truncateTables wipes every neutrino table that the legacy import will
@@ -235,228 +477,9 @@ func truncateTables(ctx context.Context, baseDB *sqldbv2.BaseDB) error {
 	return tx.Commit()
 }
 
-// importBlockHeaders streams block_headers.bin into the block_headers table in
-// batches. It returns the tip height and hash so the caller can later upsert
-// the chain_tips row, plus a slice mapping height -> block hash that the
-// filter header importer needs to resolve block hashes by height.
-func importBlockHeaders(
-	ctx context.Context,
-	baseDB *sqldbv2.BaseDB,
-	binPath string,
-	batchSize int,
-) (uint32, chainhash.Hash, []chainhash.Hash,
-	error) {
-
-	var tipHash chainhash.Hash
-
-	f, err := os.Open(binPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			log.Infof("No legacy block_headers.bin found; " +
-				"skipping block header import")
-			return 0, tipHash, nil, nil
-		}
-		return 0, tipHash, nil, err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, tipHash, nil, err
-	}
-	totalBytes := fi.Size()
-	if totalBytes%80 != 0 {
-		return 0, tipHash, nil, fmt.Errorf(
-			"block_headers.bin size %d not a multiple of 80",
-			totalBytes,
-		)
-	}
-	if totalBytes == 0 {
-		return 0, tipHash, nil, nil
-	}
-
-	tipHeight := uint32(totalBytes/80) - 1
-	hashes := make([]chainhash.Hash, tipHeight+1)
-
-	for batchStart := uint32(
-		0,
-	); batchStart <= tipHeight; batchStart += uint32(
-		batchSize,
-	) {
-		batchEnd := batchStart + uint32(batchSize) - 1
-		if batchEnd > tipHeight {
-			batchEnd = tipHeight
-		}
-		nHeaders := batchEnd - batchStart + 1
-
-		buf := make([]byte, int64(nHeaders)*80)
-		if _, err := f.ReadAt(buf, int64(batchStart)*80); err != nil {
-			return 0, tipHash, nil, fmt.Errorf(
-				"read block headers at height %d: %w",
-				batchStart, err,
-			)
-		}
-
-		tx, err := baseDB.BeginTx(ctx, sqldbv2.WriteTxOpt())
-		if err != nil {
-			return 0, tipHash, nil, err
-		}
-		q := sqlc.New(tx)
-
-		for i := uint32(0); i < nHeaders; i++ {
-			height := batchStart + i
-			raw := buf[i*80 : (i+1)*80]
-
-			var hdr wire.BlockHeader
-			if err := hdr.Deserialize(
-				bytes.NewReader(raw),
-			); err != nil {
-				_ = tx.Rollback()
-				return 0, tipHash, nil, fmt.Errorf(
-					"deserialize block header at height "+
-						"%d: %w", height, err,
-				)
-			}
-			hash := hdr.BlockHash()
-			rawCopy := make([]byte, 80)
-			copy(rawCopy, raw)
-
-			err := q.InsertBlockHeader(
-				ctx, sqlc.InsertBlockHeaderParams{
-					Height:    int64(height),
-					BlockHash: hash[:],
-					RawHeader: rawCopy,
-				},
-			)
-			if err != nil {
-				_ = tx.Rollback()
-				return 0, tipHash, nil, fmt.Errorf(
-					"insert block header at height %d: %w",
-					height, err,
-				)
-			}
-
-			hashes[height] = hash
-			tipHash = hash
-		}
-
-		if err := tx.Commit(); err != nil {
-			return 0, tipHash, nil, err
-		}
-	}
-
-	log.Infof("Imported %d block headers (tip %s)",
-		tipHeight+1, tipHash)
-
-	return tipHeight, tipHash, hashes, nil
-}
-
-// importFilterHeaders streams reg_filter_headers.bin into the filter_headers
-// table in batches. It uses the height->blockHash slice produced by
-// importBlockHeaders to populate the block_hash column (the .bin file only
-// stores filter hashes).
-func importFilterHeaders(ctx context.Context, baseDB *sqldbv2.BaseDB,
-	binPath string, batchSize int,
-	blockHashes []chainhash.Hash) (uint32, chainhash.Hash, error) {
-
-	var tipFilterHash chainhash.Hash
-
-	f, err := os.Open(binPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			log.Infof("No legacy reg_filter_headers.bin found; " +
-				"skipping filter header import")
-			return 0, tipFilterHash, nil
-		}
-		return 0, tipFilterHash, err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, tipFilterHash, err
-	}
-	totalBytes := fi.Size()
-	if totalBytes%32 != 0 {
-		return 0, tipFilterHash, fmt.Errorf(
-			"reg_filter_headers.bin size %d not a multiple of 32",
-			totalBytes,
-		)
-	}
-	if totalBytes == 0 {
-		return 0, tipFilterHash, nil
-	}
-
-	tipHeight := uint32(totalBytes/32) - 1
-	if int(tipHeight) >= len(blockHashes) {
-		return 0, tipFilterHash, fmt.Errorf(
-			"filter header tip height %d exceeds block header "+
-				"tip %d", tipHeight, len(blockHashes)-1,
-		)
-	}
-
-	for batchStart := uint32(
-		0,
-	); batchStart <= tipHeight; batchStart += uint32(
-		batchSize,
-	) {
-		batchEnd := batchStart + uint32(batchSize) - 1
-		if batchEnd > tipHeight {
-			batchEnd = tipHeight
-		}
-		nHeaders := batchEnd - batchStart + 1
-
-		buf := make([]byte, int64(nHeaders)*32)
-		if _, err := f.ReadAt(buf, int64(batchStart)*32); err != nil {
-			return 0, tipFilterHash, fmt.Errorf(
-				"read filter headers at height %d: %w",
-				batchStart, err,
-			)
-		}
-
-		tx, err := baseDB.BeginTx(ctx, sqldbv2.WriteTxOpt())
-		if err != nil {
-			return 0, tipFilterHash, err
-		}
-		q := sqlc.New(tx)
-
-		for i := uint32(0); i < nHeaders; i++ {
-			height := batchStart + i
-			var filterHash chainhash.Hash
-			copy(filterHash[:], buf[i*32:(i+1)*32])
-			blockHash := blockHashes[height]
-
-			err := q.InsertFilterHeader(
-				ctx, sqlc.InsertFilterHeaderParams{
-					Height:     int64(height),
-					BlockHash:  blockHash[:],
-					FilterHash: filterHash[:],
-				},
-			)
-			if err != nil {
-				_ = tx.Rollback()
-				return 0, tipFilterHash, fmt.Errorf(
-					"insert filter header at height %d: %w",
-					height, err,
-				)
-			}
-
-			tipFilterHash = filterHash
-		}
-
-		if err := tx.Commit(); err != nil {
-			return 0, tipFilterHash, err
-		}
-	}
-
-	log.Infof("Imported %d filter headers (tip %s)",
-		tipHeight+1, tipFilterHash)
-
-	return tipHeight, tipFilterHash, nil
-}
-
-// upsertTips writes the chain_tips rows for both header chains.
-func upsertTips(ctx context.Context, baseDB *sqldbv2.BaseDB,
+// upsertTips writes the chain_tips rows for the header chains that were
+// imported.
+func upsertTips(ctx context.Context, baseDB *sqldbv2.BaseDB, plan legacyPlan,
 	blockHash chainhash.Hash, blockHeight uint32,
 	filterHash chainhash.Hash, filterHeight uint32) error {
 
@@ -469,100 +492,29 @@ func upsertTips(ctx context.Context, baseDB *sqldbv2.BaseDB,
 	}()
 	q := sqlc.New(tx)
 
-	if err := q.UpsertChainTip(
-		ctx, sqlc.UpsertChainTipParams{
+	if plan.blockCount > 0 {
+		err := q.UpsertChainTip(ctx, sqlc.UpsertChainTipParams{
 			ChainType: ChainTypeBlock,
 			TipHash:   blockHash[:],
 			TipHeight: int64(blockHeight),
-		},
-	); err != nil {
-		return err
-	}
-
-	if err := q.UpsertChainTip(
-		ctx, sqlc.UpsertChainTipParams{
-			ChainType: ChainTypeFilter,
-			TipHash:   filterHash[:],
-			TipHeight: int64(filterHeight),
-		},
-	); err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
-// importFilters copies every regular_filter row from the legacy walletdb
-// filter-store/regular bucket into the regular_filters table.
-func importFilters(ctx context.Context, baseDB *sqldbv2.BaseDB,
-	legacyDB walletdb.DB, batchSize int) error {
-
-	type filterRow struct {
-		blockHash []byte
-		bytes     []byte
-	}
-
-	var rows []filterRow
-	err := walletdb.View(legacyDB, func(tx walletdb.ReadTx) error {
-		root := tx.ReadBucket(legacyFilterStoreBucket)
-		if root == nil {
-			return nil
-		}
-		reg := root.NestedReadBucket(legacyRegFilterBucket)
-		if reg == nil {
-			return nil
-		}
-
-		return reg.ForEach(func(k, v []byte) error {
-			// bbolt may return nil for keys whose value was stored
-			// as nil (the legacy "deleted filter" sentinel).
-			// Coerce to a non-nil empty slice so the row inserts
-			// cleanly into the NOT NULL filter_bytes column;
-			// FetchFilter still treats zero-length as the nil
-			// sentinel on read.
-			val := append([]byte{}, v...)
-			row := filterRow{
-				blockHash: append([]byte(nil), k...),
-				bytes:     val,
-			}
-			rows = append(rows, row)
-			return nil
 		})
-	})
-	if err != nil {
-		return err
-	}
-
-	for start := 0; start < len(rows); start += batchSize {
-		end := start + batchSize
-		if end > len(rows) {
-			end = len(rows)
-		}
-
-		tx, err := baseDB.BeginTx(ctx, sqldbv2.WriteTxOpt())
 		if err != nil {
 			return err
 		}
-		q := sqlc.New(tx)
+	}
 
-		for _, row := range rows[start:end] {
-			err := q.PutFilter(ctx, sqlc.PutFilterParams{
-				BlockHash:   row.blockHash,
-				FilterBytes: row.bytes,
-			})
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
+	if plan.filterCount > 0 {
+		err := q.UpsertChainTip(ctx, sqlc.UpsertChainTipParams{
+			ChainType: ChainTypeFilter,
+			TipHash:   filterHash[:],
+			TipHeight: int64(filterHeight),
+		})
+		if err != nil {
 			return err
 		}
 	}
 
-	log.Infof("Imported %d regular filters", len(rows))
-	return nil
+	return tx.Commit()
 }
 
 // importBans copies every banned_peer row from the legacy walletdb ban-store
@@ -655,14 +607,12 @@ func importBans(ctx context.Context, baseDB *sqldbv2.BaseDB,
 	return nil
 }
 
-// verifyImport runs a few sanity checks comparing the freshly populated SQL
-// tables to the legacy store. If the legacy header binaries report no rows
-// (e.g. the caller is migrating a partially-populated state) verification
-// short-circuits to success.
+// verifyImport runs sanity checks comparing the freshly populated SQL tables
+// to what was read from the legacy state: row counts, chain tips and, when a
+// walletdb was imported, the number of filters.
 func verifyImport(ctx context.Context, baseDB *sqldbv2.BaseDB,
-	blockTipHeight uint32,
-	blockTipHash chainhash.Hash, filterTipHeight uint32,
-	filterTipHash chainhash.Hash) error {
+	plan legacyPlan, blockTipHash, filterTipHash chainhash.Hash,
+	numFilters int64) error {
 
 	tx, err := baseDB.BeginTx(ctx, sqldbv2.ReadTxOpt())
 	if err != nil {
@@ -677,47 +627,65 @@ func verifyImport(ctx context.Context, baseDB *sqldbv2.BaseDB,
 	if err != nil {
 		return err
 	}
-	if blockCount != int64(blockTipHeight)+1 {
+	if blockCount != int64(plan.blockCount) {
 		return fmt.Errorf("block_headers row count %d != "+
-			"expected %d", blockCount, blockTipHeight+1)
+			"expected %d", blockCount, plan.blockCount)
 	}
 
 	filterCount, err := q.CountFilterHeaders(ctx)
 	if err != nil {
 		return err
 	}
-	if filterCount != int64(filterTipHeight)+1 {
+	if filterCount != int64(plan.filterCount) {
 		return fmt.Errorf("filter_headers row count %d != "+
-			"expected %d", filterCount, filterTipHeight+1)
+			"expected %d", filterCount, plan.filterCount)
 	}
 
-	blockTip, err := q.GetChainTip(ctx, ChainTypeBlock)
+	var storedFilters int64
+	err = tx.QueryRowContext(
+		ctx, "SELECT COUNT(*) FROM regular_filters",
+	).Scan(&storedFilters)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(blockTip.TipHash, blockTipHash[:]) {
-		return fmt.Errorf("block chain tip mismatch: got %x, "+
-			"want %x", blockTip.TipHash, blockTipHash[:])
+	if storedFilters != numFilters {
+		return fmt.Errorf("regular_filters row count %d != "+
+			"expected %d", storedFilters, numFilters)
 	}
 
-	filterTip, err := q.GetChainTip(ctx, ChainTypeFilter)
-	if err != nil {
-		return err
+	if plan.blockCount > 0 {
+		blockTip, err := q.GetChainTip(ctx, ChainTypeBlock)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(blockTip.TipHash, blockTipHash[:]) {
+			return fmt.Errorf("block chain tip mismatch: got "+
+				"%x, want %x", blockTip.TipHash,
+				blockTipHash[:])
+		}
 	}
-	if !bytes.Equal(filterTip.TipHash, filterTipHash[:]) {
-		return fmt.Errorf("filter chain tip mismatch: got %x, "+
-			"want %x", filterTip.TipHash, filterTipHash[:])
+
+	if plan.filterCount > 0 {
+		filterTip, err := q.GetChainTip(ctx, ChainTypeFilter)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(filterTip.TipHash, filterTipHash[:]) {
+			return fmt.Errorf("filter chain tip mismatch: got "+
+				"%x, want %x", filterTip.TipHash,
+				filterTipHash[:])
+		}
 	}
 
 	return nil
 }
 
-// renameLegacyArtifacts renames the legacy header binaries to .bak after a
-// successful import. Failure to rename is non-fatal (the import has already
-// completed and is recorded in neutrino_migrations).
-func renameLegacyArtifacts(blockBin, filterBin string) error {
+// renameLegacyArtifacts renames the given legacy files to *.bak. Failure to
+// rename is non-fatal for the caller (the import has already completed and is
+// recorded in neutrino_migrations).
+func renameLegacyArtifacts(paths ...string) error {
 	var rerr error
-	for _, p := range []string{blockBin, filterBin} {
+	for _, p := range paths {
 		if p == "" {
 			continue
 		}
@@ -728,8 +696,7 @@ func renameLegacyArtifacts(blockBin, filterBin string) error {
 			continue
 		}
 
-		bak := p + ".bak"
-		if err := os.Rename(p, bak); err != nil {
+		if err := os.Rename(p, p+backupSuffix); err != nil {
 			rerr = errors.Join(rerr, fmt.Errorf("rename %s: %w",
 				p, err))
 		}
@@ -737,27 +704,57 @@ func renameLegacyArtifacts(blockBin, filterBin string) error {
 	return rerr
 }
 
-// LegacyArtifactsExist returns true when at least one of the legacy neutrino
-// files (block_headers.bin or reg_filter_headers.bin) is present in
-// src.DataDir. Callers can use this to decide whether to bother passing a
-// LegacyDataSource to NewBackend at all.
-func LegacyArtifactsExist(src *LegacyDataSource) bool {
-	if src == nil {
-		return false
-	}
-	for _, p := range []string{
-		src.blockHeadersPath(), src.filterHeadersPath(),
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return true
+// NewBackendWithLegacy opens the SQL backend like NewBackend and, on the first
+// start, imports any legacy walletdb + flat-file state into it.
+//
+// Which legacy state is imported:
+//   - explicit, when non-nil, is used as given (its DataDir and Params default
+//     to dataDir and params).
+//   - otherwise the legacy files are detected in dataDir under their default
+//     names. A fresh install has none and nothing is imported.
+//   - cfg.SkipLegacyMigration disables the import entirely. The migration
+//     version is still recorded, so a later start without the flag will NOT
+//     import; a warning is logged when legacy files are being skipped.
+//
+// The import runs inside migration version 2, so it only ever runs once. If
+// it fails, the error is returned, the version stays unrecorded and the next
+// start retries from scratch. Legacy flat files are renamed to *.bak only
+// after the import has been recorded.
+func NewBackendWithLegacy(dataDir string, cfg *Config,
+	params *chaincfg.Params, explicit *LegacyDataSource) (*Backend, error) {
+
+	if cfg != nil && cfg.SkipLegacyMigration {
+		if DetectLegacyDataSource(dataDir, params) != nil {
+			log.Warnf("SkipLegacyMigration set, legacy neutrino "+
+				"files in %s will not be imported", dataDir)
 		}
+
+		return NewBackend(dataDir, cfg, nil)
 	}
-	return false
+
+	src := explicit
+	if src == nil {
+		src = DetectLegacyDataSource(dataDir, params)
+	}
+	if src == nil {
+		return NewBackend(dataDir, cfg, nil)
+	}
+
+	// Fill in the defaults on a copy so the caller's value is untouched.
+	resolved := *src
+	if resolved.DataDir == "" {
+		resolved.DataDir = dataDir
+	}
+	if resolved.Params == nil {
+		resolved.Params = params
+	}
+
+	imp := &legacyImporter{src: &resolved}
+	backend, err := NewBackend(dataDir, cfg, imp.migrations())
+	if err != nil {
+		return nil, err
+	}
+	imp.finalize()
+
+	return backend, nil
 }
-
-// Compile-time assertion: chainhash.Hash size matches the schema assumption.
-var _ = [chainhash.HashSize]byte{}
-
-// Sentinel sql.ErrNoRows reference to avoid an unused-import warning when the
-// package is built without legacy_test.go in scope.
-var _ = sql.ErrNoRows
