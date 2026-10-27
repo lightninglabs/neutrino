@@ -192,6 +192,34 @@ func TestSyncPeerCandidateOrdering(t *testing.T) {
 	require.True(t, syncPeerOrdersBefore(addrA, addrB))
 }
 
+func TestCheckpointedCFHeadersBatchTimeoutScales(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t, checkpointedCFHeadersMinBatchTimeout,
+		checkpointedCFHeadersBatchTimeout(1),
+	)
+
+	scaledQueries := int(
+		(checkpointedCFHeadersMinBatchTimeout /
+			checkpointedCFHeadersPerQueryTimeout) + 1,
+	)
+	require.Equal(
+		t, time.Duration(scaledQueries)*
+			checkpointedCFHeadersPerQueryTimeout,
+		checkpointedCFHeadersBatchTimeout(scaledQueries),
+	)
+
+	hugeQueries := int(
+		(checkpointedCFHeadersMaxBatchTimeout /
+			checkpointedCFHeadersPerQueryTimeout) + 1,
+	)
+	require.Equal(
+		t, checkpointedCFHeadersMaxBatchTimeout,
+		checkpointedCFHeadersBatchTimeout(hugeQueries),
+	)
+}
+
 func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 	t.Parallel()
 

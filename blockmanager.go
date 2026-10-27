@@ -98,6 +98,22 @@ const (
 	// Early agreement is not authentication: collect remaining peers so a
 	// prompt honest conflict still reaches mismatch detection.
 	cfHeaderCollectTimeout = 2 * time.Second
+
+	// checkpointedCFHeadersMinBatchTimeout is the minimum total timeout
+	// for checkpointed cfheader batch queries. The legacy default of 30s
+	// is too short for large initial-sync batches because it cancels all
+	// remaining 2,000-header range requests after one slow segment.
+	checkpointedCFHeadersMinBatchTimeout = 2 * time.Minute
+
+	// checkpointedCFHeadersPerQueryTimeout scales the total batch timeout
+	// with the number of range requests. This is an upper bound only; fast
+	// batches still finish as soon as all requests return.
+	checkpointedCFHeadersPerQueryTimeout = 250 * time.Millisecond
+
+	// checkpointedCFHeadersMaxBatchTimeout keeps a pathological peer mix
+	// from pinning cfheader sync forever while still allowing
+	// testnet3-size batches enough room to retry and steal work.
+	checkpointedCFHeadersMaxBatchTimeout = 15 * time.Minute
 )
 
 // zeroHash is the zero value hash (all zeros). It is defined as a convenience.
@@ -1427,28 +1443,10 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// one response every (progressTimeout - epsilon) could keep the idle
 	// timer alive for hours and amplify a slow-peer attack.
 	//
-	// perRequestBudget matches the work manager's per-query upper
-	// bound (maxQueryTimeout = 32s), so a healthy worker pool can run
-	// each sub-request through one full retry-doubling cycle before
-	// the cap fires. The 60s floor ensures the trailing single-batch
-	// sync near tip still has runway (the pre-PR default was 30s);
-	// without it, batchesCount=1 would give a 32s cap that is tighter
-	// than progressTimeout itself. The trickle-defeat invariant —
-	// progressTimeout < perRequestBudget — is preserved: an attacker
-	// trickling responses just under the idle window cannot accumulate
-	// more than progressTimeout per request, which is strictly less
-	// than the per-request budget.
-	const (
-		perRequestBudget = 32 * time.Second
-		hardCapFloor     = 60 * time.Second
-	)
-	hardCap := time.Duration(batchesCount) * perRequestBudget
-	if hardCap < hardCapFloor {
-		hardCap = hardCapFloor
-	}
 	errChan := b.cfg.QueryDispatcher.Query(
 		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
-		query.Timeout(hardCap), query.ProgressTimeout(30*time.Second),
+		query.Timeout(checkpointedCFHeadersBatchTimeout(batchesCount)),
+		query.ProgressTimeout(30*time.Second),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
@@ -1626,6 +1624,18 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			break
 		}
 	}
+}
+
+func checkpointedCFHeadersBatchTimeout(batches int) time.Duration {
+	timeout := time.Duration(batches) * checkpointedCFHeadersPerQueryTimeout
+	if timeout < checkpointedCFHeadersMinBatchTimeout {
+		timeout = checkpointedCFHeadersMinBatchTimeout
+	}
+	if timeout > checkpointedCFHeadersMaxBatchTimeout {
+		timeout = checkpointedCFHeadersMaxBatchTimeout
+	}
+
+	return timeout
 }
 
 // writeCFHeadersMsg writes a cfheaders message to the specified store. It
