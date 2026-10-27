@@ -1,6 +1,6 @@
 module github.com/lightninglabs/neutrino/cache
 
-go 1.18
+go 1.25
 
 require (
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.8
