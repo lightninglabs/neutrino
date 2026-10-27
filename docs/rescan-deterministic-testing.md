@@ -53,3 +53,9 @@ saved case with `go test ./rescan -run 'FuzzRescanDST/<seed-name>'`. The
 `9cc2bc806a385370` input exposed independently scheduled retry deadlines that
 could interleave with a rewind; the fixture now separates deadlines for
 successive stimuli rather than assuming synctest orders equal timers.
+
+The seed `b15b16f1ef330f91` combines a failed initial subscription, block
+fetch failure, historical reorg, and rewind reorg. It exposed a fixture bug:
+the second replacement had the same header hash as the first, but the fixture
+marked that hash unavailable as an orphan. Replacement headers now use a
+distinct nonce and the seed remains in the corpus.

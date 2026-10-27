@@ -421,9 +421,15 @@ func runRescanDST(t *testing.T, script []byte) dstOutcome {
 				chain.mu.Lock()
 				oldBlock := chain.blocks[replacement.Hash]
 				block := oldBlock.MsgBlock().Copy()
-				block.Header.Nonce++
+				block.Header.Nonce = old4.Nonce + 1
 				hdr := block.Header
 				newHash := hdr.BlockHash()
+				if newHash == old4.BlockHash() {
+					chain.mu.Unlock()
+					return fmt.Errorf(
+						"replacement equals orphan %s", newHash,
+					)
+				}
 				filter, err := builder.BuildBasicFilter(
 					block, nil,
 				)
