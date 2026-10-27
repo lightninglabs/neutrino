@@ -212,6 +212,11 @@ type blockManagerCfg struct {
 	// collects their responses. It backs the all-peer checks used to
 	// sanity check compact filter headers and checkpoints.
 	Broadcaster querysyncwm.Broadcaster
+
+	// headerSyncAskFault lets deterministic tests report a caller-side
+	// deadline before or after selected headersync actor asks apply.
+	// Production leaves it nil.
+	headerSyncAskFault func(headerSyncAskOp) headerSyncAskFault
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -2834,6 +2839,13 @@ func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 		return 0, nil
 	}
 
+	// Planning moves the FSM to the durable tip, so bring the cache and
+	// the next checkpoint along first. Otherwise a write that landed but
+	// reported an error leaves planning aimed at a stale checkpoint.
+	if err := b.reconcileHeaderTipWithStore(); err != nil {
+		return 0, err
+	}
+
 	header, height, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
 		return 0, err
@@ -3360,6 +3372,14 @@ func (b *blockManager) resetHeaderListToTip() error {
 		Header: *header,
 		Height: int32(height),
 	})
+
+	// The visible tip must describe the same header as the validation
+	// cache, or a later write can start from one and report the other.
+	b.newHeadersMtx.Lock()
+	b.headerTip = height
+	b.headerTipHash = header.BlockHash()
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
 
 	return nil
 }
@@ -4282,11 +4302,25 @@ func (b *blockManager) replanHeaderSyncRange(ctx context.Context,
 }
 
 func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
+	// A write that reported an error may still have landed, so the store,
+	// not the validation cache, decides where the next write starts.
+	if err := b.reconcileHeaderTipWithStore(); err != nil {
+		b.scheduleHeaderCommitRetry()
+		return err
+	}
+
 	ready, err := b.headerSync.Manager().ReadyRanges(ctx)
 	if err != nil {
 		return err
 	}
 	if len(ready) == 0 {
+		// A commit ask that applied but reported an error leaves its
+		// payloads behind with nothing left to commit them.
+		err := b.headerSync.Controller().PruneRetiredStaging(ctx)
+		if err != nil {
+			b.scheduleHeaderCommitRetry()
+			return err
+		}
 		b.cancelHeaderCommitRetry()
 		return nil
 	}
@@ -4312,10 +4346,18 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 				rangeID)
 		}
 
-		commitRanges = append(commitRanges, headerSyncRangeCommit{
-			Range:  rng,
-			Staged: staged,
-		})
+		// Skip whatever part of the range is already durable. The
+		// FSM still commits the whole range below.
+		commitRange, pending, err := b.trimDurableHeaderSyncRange(
+			rng, staged,
+		)
+		if err != nil {
+			b.scheduleHeaderCommitRetry()
+			return err
+		}
+		if pending {
+			commitRanges = append(commitRanges, commitRange)
+		}
 	}
 
 	if _, err := b.commitHeaderSyncRangeHeaders(commitRanges); err != nil {
@@ -4351,8 +4393,13 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	commitCtx, commitCancel := b.headerSyncOpCtx()
 	defer commitCancel()
 
-	commitResult, err := b.headerSync.Controller().
-		CommitReadyRanges(commitCtx)
+	var commitResult headersync.CommitReadyResult
+	err = b.headerSyncAsk(headerSyncAskCommitReady, func() error {
+		var err error
+		commitResult, err = b.headerSync.Controller().
+			CommitReadyRanges(commitCtx)
+		return err
+	})
 	if err != nil {
 		b.scheduleHeaderCommitRetry()
 		return err
@@ -4377,6 +4424,98 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// reconcileHeaderTipWithStore fast-forwards the visible tip and validation
+// cache to the durable block header tip.
+//
+// A header write can report an error after it landed: a SQL commit whose
+// acknowledgement was lost, or a store that wrote part of a batch before
+// failing. Memory then trails disk. Retrying the same batch from memory would
+// either rewrite durable heights (a primary-key conflict on SQL, a duplicate
+// append that corrupts the legacy flat file) or, once planning has moved the
+// FSM to the durable tip, stage ranges that never connect to the stale cache.
+// Either way header sync stalls until restart. Every header on disk passed
+// contextual validation before it was written, so adopting it here is safe.
+func (b *blockManager) reconcileHeaderTipWithStore() error {
+	back := b.headerList.Back()
+	if back == nil {
+		return fmt.Errorf("header list missing previous element")
+	}
+	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return err
+	}
+	if height <= uint32(back.Height) {
+		return nil
+	}
+
+	prev := *back
+	for next := uint32(back.Height) + 1; next <= height; next++ {
+		header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(next)
+		if err != nil {
+			return err
+		}
+
+		// A durable chain that does not extend the cache is a reorg,
+		// which the serial path owns. Leave the cache alone.
+		if header.PrevBlock != prev.Header.BlockHash() {
+			return fmt.Errorf("durable header height=%d does not "+
+				"extend cached tip height=%d", next,
+				prev.Height)
+		}
+		prev = headerlist.Node{Header: *header, Height: int32(next)}
+		b.headerList.PushBack(prev)
+	}
+
+	log.Infof("headersync reconciled visible tip height=%d -> %d with "+
+		"durable store", back.Height, height)
+
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+	b.newHeadersMtx.Lock()
+	b.headerTip = height
+	b.headerTipHash = prev.Header.BlockHash()
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
+
+	return nil
+}
+
+// trimDurableHeaderSyncRange drops the prefix of a ready range that is already
+// durable, so a retry after an ambiguous write appends only the missing
+// suffix. It reports pending=false when the whole range is durable; the
+// caller then skips the write and only commits the range in the FSM. A range
+// whose durable prefix disagrees with its staged headers is returned
+// unchanged, so validation classifies it as before.
+func (b *blockManager) trimDurableHeaderSyncRange(rng headersync.HeaderRange,
+	staged headersync.StagedRange) (headerSyncRangeCommit, bool, error) {
+
+	commit := headerSyncRangeCommit{Range: rng, Staged: staged}
+	tip := b.headerTip
+	if tip <= rng.StartHeight || len(staged.Headers) == 0 {
+		return commit, true, nil
+	}
+
+	durable := min(tip-rng.StartHeight, uint32(len(staged.Headers)))
+	last := staged.Headers[durable-1]
+	stored, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
+		rng.StartHeight + durable,
+	)
+	if err != nil {
+		return commit, false, err
+	}
+	if stored.BlockHash() != last.BlockHash() {
+		return commit, true, nil
+	}
+	if int(durable) == len(staged.Headers) {
+		return commit, false, nil
+	}
+
+	commit.Range.StartHeight += durable
+	commit.Range.StartHash = last.BlockHash()
+	commit.Staged.Headers = staged.Headers[durable:]
+
+	return commit, true, nil
 }
 
 // scheduleHeaderCommitRetry keeps one wakeup while staging waits for storage.

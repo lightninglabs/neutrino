@@ -125,9 +125,7 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	if _, err := c.manager.AdvanceCommittedTip(
-		ctx, tip.Height, tip.Hash,
-	); err != nil {
+	if err := c.advanceCommittedTip(ctx, tip); err != nil {
 		return CheckpointRangePlan{}, err
 	}
 
@@ -156,6 +154,47 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 	}, nil
 }
 
+// advanceCommittedTip moves the FSM to a durable tip that was persisted
+// outside the staged commit path, then drops the staged payloads of every range
+// that move retired. Without the sweep those payloads stay in memory for the
+// life of the session, and nothing else ever deletes them.
+func (c *Controller) advanceCommittedTip(ctx context.Context,
+	tip ChainPoint) error {
+
+	advanced, err := c.manager.AdvanceCommittedTip(
+		ctx, tip.Height, tip.Hash,
+	)
+	if err != nil || !advanced {
+		return err
+	}
+
+	return c.PruneRetiredStaging(ctx)
+}
+
+// PruneRetiredStaging drops staged payloads whose range the FSM no longer
+// treats as staged. A range can leave the staged state without its payload
+// being deleted when the durable tip moves outside the staged commit path, or
+// when a commit ask applies in the actor but reports an error to its caller.
+// The sweep costs one snapshot per staged payload, which is bounded by the
+// outstanding range limit.
+func (c *Controller) PruneRetiredStaging(ctx context.Context) error {
+	if c == nil || c.manager == nil || c.session == nil {
+		return nil
+	}
+
+	for id := range c.session.stagedRanges {
+		rng, ok, err := c.manager.SnapshotRange(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok || rng.State != RangeStaged {
+			c.session.DeleteStagedRange(id)
+		}
+	}
+
+	return nil
+}
+
 // PlanFrontierRanges plans any already-known confirmed frontier spans after
 // the current persisted block-header tip. This is the recovery path for
 // discovery that learned anchors out of order: missing spans can be fetched as
@@ -170,9 +209,7 @@ func (c *Controller) PlanFrontierRanges(ctx context.Context,
 		return PlanRangesResult{}, nil
 	}
 
-	if _, err := c.manager.AdvanceCommittedTip(
-		ctx, tip.Height, tip.Hash,
-	); err != nil {
+	if err := c.advanceCommittedTip(ctx, tip); err != nil {
 		return PlanRangesResult{}, err
 	}
 
@@ -555,6 +592,9 @@ func (c *Controller) CommitReadyRanges(ctx context.Context) (
 	var pruned int
 	if c.session != nil && len(commit.Committed) > 0 {
 		pruned = c.session.PruneAnchorsAtOrBefore(commit.TipHeight)
+		if err := c.PruneRetiredStaging(ctx); err != nil {
+			return CommitReadyResult{}, err
+		}
 	}
 
 	return CommitReadyResult{
