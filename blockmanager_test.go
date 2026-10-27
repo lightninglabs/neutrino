@@ -1480,7 +1480,9 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 			test.name,
 		)
 		require.NoError(
-			t, assertBadPeers(test.expUnresponsive, unresponsivePeers),
+			t, assertBadPeers(
+				test.expUnresponsive, unresponsivePeers,
+			),
 			test.name,
 		)
 	}
@@ -1633,7 +1635,9 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 	var banned, disconnected []string
 	bm := &blockManager{cfg: &blockManagerCfg{
 		BlockHeaders: store,
-		GetBlock: func(chainhash.Hash, ...QueryOption) (*btcutil.Block, error) {
+		GetBlock: func(chainhash.Hash, ...QueryOption) (
+			*btcutil.Block, error) {
+
 			return btcutil.NewBlock(block), nil
 		},
 		BanPeer: func(addr string, _ banman.Reason) error {
@@ -1646,7 +1650,8 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 		},
 	}}
 	bm.cfg.queryAllPeers = func(_ wire.Message,
-		respond func(*ServerPeer, wire.Message, chan<- struct{}, chan<- struct{}),
+		respond func(*ServerPeer, wire.Message,
+			chan<- struct{}, chan<- struct{}),
 		_ ...QueryOption) {
 
 		for addr, filter := range map[string]*gcs.Filter{

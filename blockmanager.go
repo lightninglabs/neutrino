@@ -2224,23 +2224,26 @@ func (b *blockManager) resolveCFHeaderMismatches(
 
 	for i := 0; i < numHeaders; i++ {
 		for checkForCFHeaderMismatch(headers, i) {
+			height := startHeight + uint32(i)
 			invalid, unresponsive, err := b.detectBadPeers(
-				headers, startHeight+uint32(i), uint32(i), fType,
+				headers, height, uint32(i), fType,
 			)
 			if err != nil {
 				return err
 			}
 
 			before := len(headers)
-			for _, peer := range b.banAndDisconnect(
-				invalid, unresponsive, banman.InvalidFilterHeader,
-			) {
+			actedOn := b.banAndDisconnect(
+				invalid, unresponsive,
+				banman.InvalidFilterHeader,
+			)
+			for _, peer := range actedOn {
 				delete(headers, peer)
 				delete(checkpoints, peer)
 			}
 			if len(headers) == before {
-				return fmt.Errorf("unable to resolve filter header "+
-					"mismatch at height %d", startHeight+uint32(i))
+				return fmt.Errorf("filter header mismatch "+
+					"at height %d", height)
 			}
 		}
 	}

@@ -20,18 +20,26 @@ func TestWatchedAddressScripts(t *testing.T) {
 		t.Helper()
 		program := make([]byte, 32)
 		program[0] = n
-		addr, err := address.NewAddressWitnessScriptHash(program, &chaincfg.SimNetParams)
+		addr, err := address.NewAddressWitnessScriptHash(
+			program, &chaincfg.SimNetParams,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return addr
 	}
 	a, b, other := makeAddr(1), makeAddr(2), makeAddr(3)
-	rs, err := newRescanState(newMockChainSource(0), WatchAddrs(a, a), QuitChan(make(chan struct{})))
+	rs, err := newRescanState(
+		newMockChainSource(0), WatchAddrs(a, a),
+		QuitChan(make(chan struct{})),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = rs.opts.updateFilter(rs.chain, &updateOptions{addrs: []address.Address{b}}, &headerfs.BlockStamp{}, &wire.BlockHeader{})
+	_, err = rs.opts.updateFilter(
+		rs.chain, &updateOptions{addrs: []address.Address{b}},
+		&headerfs.BlockStamp{}, &wire.BlockHeader{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +58,16 @@ func TestWatchedAddressScripts(t *testing.T) {
 		t.Fatalf("matched=%v err=%v", matched, err)
 	}
 	if len(rs.opts.watchInputs) != 3 || len(rs.opts.watchList) != 6 {
-		t.Fatalf("unexpected input or filter count: %d %d", len(rs.opts.watchInputs), len(rs.opts.watchList))
+		t.Fatalf("unexpected input or filter count: %d %d",
+			len(rs.opts.watchInputs), len(rs.opts.watchList))
 	}
 	for i, index := range []uint32{0, 2, 3} {
 		input := rs.opts.watchInputs[i]
-		if input.OutPoint.Hash != *tx.Hash() || input.OutPoint.Index != index || string(input.PkScript) != string(msg.TxOut[index].PkScript) {
+		outputScript := msg.TxOut[index].PkScript
+		if input.OutPoint.Hash != *tx.Hash() ||
+			input.OutPoint.Index != index ||
+			string(input.PkScript) != string(outputScript) {
+
 			t.Fatalf("incorrect watched input %d: %+v", i, input)
 		}
 	}
@@ -78,13 +91,17 @@ func BenchmarkWatchedAddressScripts(b *testing.B) {
 			ro := defaultRescanOptions()
 			for i := 0; i < size; i++ {
 				script := make([]byte, 34)
-				binary.LittleEndian.PutUint64(script[2:], uint64(i))
+				binary.LittleEndian.PutUint64(
+					script[2:], uint64(i),
+				)
 				ro.watchScripts[string(script)] = struct{}{}
 			}
 			msg := wire.NewMsgTx(2)
 			for i := 0; i < 2000; i++ {
 				script := make([]byte, 34)
-				binary.LittleEndian.PutUint64(script[2:], uint64(size+i))
+				binary.LittleEndian.PutUint64(
+					script[2:], uint64(size+i),
+				)
 				msg.AddTxOut(wire.NewTxOut(1, script))
 			}
 			tx := btcutil.NewTx(msg)

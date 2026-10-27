@@ -549,7 +549,8 @@ type Config struct {
 	LegacyImport *sqldb.LegacyDataSource
 
 	// ChainParams is the chain that we're running on. Retarget parameters
-	// must be valid whole-second values, as checked by chainsync.NewRetarget.
+	// must be valid whole-second values, as checked by
+	// chainsync.NewRetarget.
 	ChainParams chaincfg.Params
 
 	// ConnectPeers is a slice of hosts that should be connected to on
@@ -732,7 +733,8 @@ type ChainService struct { // nolint:maligned
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
 	if _, err := chainsync.NewRetarget(cfg.ChainParams); err != nil {
-		return nil, fmt.Errorf("unable to create chain service: %w", err)
+		return nil, fmt.Errorf("unable to create chain service: %w",
+			err)
 	}
 
 	// Validate that the caller provided at least one of the two supported
