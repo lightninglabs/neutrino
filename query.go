@@ -3,6 +3,7 @@
 package neutrino
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -97,6 +98,9 @@ type queryOptions struct {
 	// used when publishing a transaction.
 	rejectTimeout time.Duration
 
+	// cancelChan cancels a single network query.
+	cancelChan <-chan struct{}
+
 	// doneChan lets the query signal the caller when it's done, in case
 	// it's run in a goroutine.
 	doneChan chan<- struct{}
@@ -162,6 +166,54 @@ func defaultQueryOptions() *queryOptions {
 func (qo *queryOptions) applyQueryOptions(options ...QueryOption) {
 	for _, option := range options {
 		option(qo)
+	}
+}
+
+// CancelQuery cancels a GetBlock or GetCFilter network request when cancel is
+// closed. The request returns context.Canceled when canceled by the caller.
+func CancelQuery(cancel <-chan struct{}) QueryOption {
+	return func(qo *queryOptions) {
+		qo.cancelChan = cancel
+	}
+}
+
+// queryCancel combines the service and caller cancellation channels. The
+// returned stop function releases the forwarding goroutine after completion.
+func queryCancel(serviceQuit, callerQuit <-chan struct{}) (chan struct{},
+	func()) {
+
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	closeCancel := func() { once.Do(func() { close(cancel) }) }
+	go func() {
+		select {
+		case <-serviceQuit:
+			closeCancel()
+		case <-callerQuit:
+			closeCancel()
+		case <-done:
+		}
+	}()
+	return cancel, func() {
+		closeCancel()
+		close(done)
+	}
+}
+
+// queryCancellation returns the appropriate cancellation error, preferring
+// service shutdown when both channels are closed.
+func queryCancellation(serviceQuit, callerQuit <-chan struct{}) error {
+	select {
+	case <-serviceQuit:
+		return ErrShuttingDown
+	default:
+	}
+	select {
+	case <-callerQuit:
+		return context.Canceled
+	default:
+		return nil
 	}
 }
 
@@ -584,10 +636,28 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		return nil, err
 	}
 
-	// We acquire the mutex ensuring we don't have several redundant
-	// CFilter queries running in parallel.
+	qo := defaultQueryOptions()
+	qo.applyQueryOptions(options...)
+
+	// Serialize filter requests while allowing callers to cancel while
+	// another request owns the slot. The mutex only guards initialization.
 	s.mtxCFilter.Lock()
-	defer s.mtxCFilter.Unlock()
+	if s.filterQuerySem == nil {
+		s.filterQuerySem = make(chan struct{}, 1)
+	}
+	sem := s.filterQuerySem
+	s.mtxCFilter.Unlock()
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-s.quit:
+		return nil, ErrShuttingDown
+	case <-qo.cancelChan:
+		return nil, queryCancellation(s.quit, qo.cancelChan)
+	}
+	if err := queryCancellation(s.quit, qo.cancelChan); err != nil {
+		return nil, err
+	}
 
 	// Since another request might have added the filter to the cache while
 	// we were waiting for the mutex, we do a final lookup before starting
@@ -599,9 +669,6 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	if err != nil && err != cache.ErrElementNotFound {
 		return nil, err
 	}
-
-	qo := defaultQueryOptions()
-	qo.applyQueryOptions(options...)
 
 	// We didn't get the filter from the DB, so we'll try to get it from
 	// the network.
@@ -618,11 +685,12 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		filterQuery.startHeight, filterQuery.stopHeight,
 		filterQuery.stopHash)
 
+	cancel, stop := queryCancel(s.quit, qo.cancelChan)
+	defer stop()
 	opts := []querysyncwm.QueryOption{
-		querysyncwm.Cancel(s.quit),
+		querysyncwm.Cancel(cancel),
 		querysyncwm.Encoding(qo.encoding),
-		querysyncwm.NumRetries(qo.numRetries),
-	}
+		querysyncwm.NumRetries(qo.numRetries)}
 
 	errChan := s.workManager.Query(
 		[]*querysyncwm.Request{filterQuery.request()}, opts...,
@@ -630,12 +698,20 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 
 	select {
 	case err := <-errChan:
+		if cancelErr := queryCancellation(
+			s.quit, qo.cancelChan,
+		); cancelErr != nil {
+			return nil, cancelErr
+		}
 		if err != nil {
 			return nil, err
 		}
 
 	case <-s.quit:
 		return nil, ErrShuttingDown
+
+	case <-qo.cancelChan:
+		return nil, queryCancellation(s.quit, qo.cancelChan)
 	}
 
 	// If there are elements left to receive, the query failed.
@@ -782,11 +858,12 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	}
 
 	// Prepare the query options.
+	cancel, stop := queryCancel(s.quit, qo.cancelChan)
+	defer stop()
 	queryOpts := []querysyncwm.QueryOption{
 		querysyncwm.Encoding(qo.encoding),
 		querysyncwm.NumRetries(qo.numRetries),
-		querysyncwm.Cancel(s.quit),
-	}
+		querysyncwm.Cancel(cancel)}
 
 	// Send the request to the work manager and await a response.
 	errChan := s.workManager.Query(
@@ -794,11 +871,20 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	)
 	select {
 	case err := <-errChan:
+		if cancelErr := queryCancellation(
+			s.quit, qo.cancelChan,
+		); cancelErr != nil {
+			return nil, cancelErr
+		}
 		if err != nil {
 			return nil, err
 		}
+
 	case <-s.quit:
 		return nil, ErrShuttingDown
+
+	case <-qo.cancelChan:
+		return nil, queryCancellation(s.quit, qo.cancelChan)
 	}
 
 	if foundBlock == nil {

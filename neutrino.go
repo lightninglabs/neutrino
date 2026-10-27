@@ -717,7 +717,8 @@ type ChainService struct { // nolint:maligned
 	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
-	mtxCFilter sync.Mutex
+	mtxCFilter     sync.Mutex
+	filterQuerySem chan struct{}
 
 	userAgentName    string
 	userAgentVersion string

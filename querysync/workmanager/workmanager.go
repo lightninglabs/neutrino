@@ -374,6 +374,8 @@ func (w *peerWorkManager) Query(requests []*Request,
 	}:
 	case <-w.quit:
 		errChan <- ErrWorkManagerShuttingDown
+	case <-qo.CancelChan:
+		errChan <- ErrJobCanceled
 	}
 
 	return errChan
