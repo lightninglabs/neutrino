@@ -304,11 +304,12 @@ func TestBlockCache(t *testing.T) {
 		workManager: &mockDispatcher{},
 	}
 
-	// We'll set up the queryPeers method to make sure we are only querying
+	// We'll set up the work manager to make sure we are only querying
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.workManager.(*mockDispatcher).query = func(reqs []*querysyncwm.Request,
+	mock := cs.workManager.(*mockDispatcher)
+	mock.query = func(reqs []*querysyncwm.Request,
 		opts ...querysyncwm.QueryOption) chan error {
 
 		errChan := make(chan error, 1)

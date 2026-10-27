@@ -139,19 +139,6 @@ func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
-// spMsg represents a message over the wire from a specific peer.
-type spMsg struct {
-	sp  *ServerPeer
-	msg wire.Message
-}
-
-// spMsgSubscription sends all messages from a peer over a channel, allowing
-// pluggable filtering of the messages.
-type spMsgSubscription struct {
-	msgChan  chan<- spMsg
-	quitChan <-chan struct{}
-}
-
 // msgSubscription sends all messages from a peer over a channel, allowing
 // pluggable filtering of the messages.
 type msgSubscription struct {
@@ -179,23 +166,19 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	// TODO(halseth): remove one of the maps when all queries go through
-	// work manager.
-	recvSubscribers  map[spMsgSubscription]struct{}
-	recvSubscribers2 map[msgSubscription]struct{}
-	mtxSubscribers   sync.RWMutex
+	recvSubscribers map[msgSubscription]struct{}
+	mtxSubscribers  sync.RWMutex
 }
 
 // NewServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:           s,
-		persistent:       isPersistent,
-		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
-		quit:             make(chan struct{}),
-		recvSubscribers:  make(map[spMsgSubscription]struct{}),
-		recvSubscribers2: make(map[msgSubscription]struct{}),
+		server:          s,
+		persistent:      isPersistent,
+		knownAddresses:  lru.NewCache[string, *cachedAddr](5000),
+		quit:            make(chan struct{}),
+		recvSubscribers: make(map[msgSubscription]struct{}),
 	}
 }
 
@@ -464,22 +447,11 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	sp.mtxSubscribers.RLock()
 	defer sp.mtxSubscribers.RUnlock()
 	for subscription := range sp.recvSubscribers {
-		go func(subscription spMsgSubscription) {
-			select {
-			case <-subscription.quitChan:
-			case subscription.msgChan <- spMsg{
-				msg: msg,
-				sp:  sp,
-			}:
-			}
-		}(subscription)
-	}
-	for subscription := range sp.recvSubscribers2 {
 		// Quickly determine if this subscription has been canceled, if
 		// so delete it.
 		select {
 		case <-subscription.quitChan:
-			delete(sp.recvSubscribers2, subscription)
+			delete(sp.recvSubscribers, subscription)
 			continue
 		default:
 		}
@@ -493,23 +465,8 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	}
 }
 
-// subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
-func (sp *ServerPeer) subscribeRecvMsg(subscription spMsgSubscription) {
-	sp.mtxSubscribers.Lock()
-	defer sp.mtxSubscribers.Unlock()
-	sp.recvSubscribers[subscription] = struct{}{}
-}
-
-// unsubscribeRecvMsgs handles removing OnRead subscriptions from the server
-// peer.
-func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
-	sp.mtxSubscribers.Lock()
-	defer sp.mtxSubscribers.Unlock()
-	delete(sp.recvSubscribers, subscription)
-}
-
-// A compile-time check to ensure that ServerPeer implements the querysyncwm.Peer
-// interface.
+// A compile-time check to ensure that ServerPeer implements the
+// querysyncwm.Peer interface.
 var _ querysyncwm.Peer = (*ServerPeer)(nil)
 
 // SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
@@ -530,7 +487,7 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
-	sp.recvSubscribers2[sub] = struct{}{}
+	sp.recvSubscribers[sub] = struct{}{}
 
 	return msgChan, func() {
 		close(quitChan)
@@ -827,6 +784,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
 		ConnectedPeers: s.ConnectedPeers,
+		Peers:          s.eligiblePeers,
 		OnPeerUnresponsive: func(peer querysyncwm.Peer) {
 			err := s.BanPeer(peer.Addr(), banman.NonResponsivePeer)
 			if err != nil {
@@ -948,7 +906,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		QuarantinePeer:   s.QuarantinePeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
-		queryAllPeers:    s.queryAllPeers,
+		Broadcaster:      s.workManager,
 	})
 	if err != nil {
 		return nil, err

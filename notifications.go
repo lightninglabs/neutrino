@@ -214,7 +214,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case forAllPeersMsg:
 		// TODO: Remove this when it's unnecessary due to wider use of
-		// queryPeers.
+		// the work manager.
 		// Run the closure on all peers in the passed state.
 		state.forAllPeers(msg.closure)
 		// Even though this is a query, there's no reply channel as the
@@ -296,6 +296,19 @@ func (s *ChainService) Peers() []*ServerPeer {
 	case <-s.quit:
 		return nil
 	}
+}
+
+// eligiblePeers returns the connected peers that are currently eligible to
+// receive queries, as a snapshot suitable for the work manager's broadcasts.
+func (s *ChainService) eligiblePeers() []querysyncwm.Peer {
+	serverPeers := s.Peers()
+
+	peers := make([]querysyncwm.Peer, len(serverPeers))
+	for i, sp := range serverPeers {
+		peers[i] = sp
+	}
+
+	return peers
 }
 
 // DisconnectNodeByAddr disconnects a peer by target address. Both outbound and

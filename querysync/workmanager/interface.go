@@ -260,6 +260,7 @@ type Request struct {
 // peers that must be started and stopped in order to perform these queries.
 type WorkManager interface {
 	Dispatcher
+	Broadcaster
 
 	// Start sets up any resources that the WorkManager requires. It must
 	// be called before any of the Dispatcher calls can be made.

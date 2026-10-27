@@ -131,6 +131,10 @@ type Config struct {
 	// The returned function closure is called to cancel the subscription.
 	ConnectedPeers func() (<-chan Peer, func(), error)
 
+	// Peers returns a snapshot of the connected peers that are eligible to
+	// receive work. It is used to pick the recipients of a Broadcast.
+	Peers func() []Peer
+
 	// NewWorker is function closure that should start a new worker. We
 	// make this configurable to easily mock the worker used during tests.
 	NewWorker func(Peer) Worker

@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,8 +41,8 @@ const (
 	dbOpenTimeout = time.Second * 10
 )
 
-// mockDispatcher implements the querysyncwm.Dispatcher interface and allows us to
-// set up a custom Query method during tests.
+// mockDispatcher implements the querysyncwm.Dispatcher interface and allows us
+// to set up a custom Query method during tests.
 type mockDispatcher struct {
 	querysyncwm.WorkManager
 
@@ -357,6 +358,107 @@ func newTestServerPeer(t *testing.T, addr string,
 	return sp
 }
 
+// scriptedPeer is a querysyncwm.Peer that answers every message queued to it
+// with a fixed script of responses.
+type scriptedPeer struct {
+	addr      string
+	responses []wire.Message
+	recv      chan wire.Message
+	quit      chan struct{}
+
+	// first ensures the script only plays in answer to the first message.
+	first sync.Once
+
+	mu     sync.Mutex
+	queued []wire.Message
+}
+
+var _ querysyncwm.Peer = (*scriptedPeer)(nil)
+
+func (p *scriptedPeer) QueueMessageWithEncoding(msg wire.Message,
+	_ chan<- struct{}, _ wire.MessageEncoding) {
+
+	p.mu.Lock()
+	p.queued = append(p.queued, msg)
+	p.mu.Unlock()
+
+	p.first.Do(func() {
+		go func() {
+			for _, resp := range p.responses {
+				select {
+				case p.recv <- resp:
+				case <-p.quit:
+					return
+				}
+			}
+		}()
+	})
+}
+
+// numQueued returns the number of messages queued to the peer so far.
+func (p *scriptedPeer) numQueued() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return len(p.queued)
+}
+
+func (p *scriptedPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	return p.recv, func() {}
+}
+
+func (p *scriptedPeer) Addr() string { return p.addr }
+
+func (p *scriptedPeer) LastPingMicros() int64 { return 0 }
+
+func (p *scriptedPeer) OnDisconnect() <-chan struct{} { return p.quit }
+
+// broadcastFunc adapts a function to the querysyncwm.Broadcaster interface.
+type broadcastFunc func(*querysyncwm.Broadcast,
+	...querysyncwm.QueryOption) error
+
+// Broadcast calls the underlying function.
+func (f broadcastFunc) Broadcast(b *querysyncwm.Broadcast,
+	opts ...querysyncwm.QueryOption) error {
+
+	return f(b, opts...)
+}
+
+// newScriptedBroadcaster returns a Broadcaster backed by the real work
+// manager, whose peers answer a broadcast with the scripted responses for
+// their address.
+func newScriptedBroadcaster(
+	scripts map[string][]wire.Message) querysyncwm.WorkManager {
+
+	peers := newScriptedPeers(scripts)
+
+	return querysyncwm.NewWorkManager(&querysyncwm.Config{
+		Peers: func() []querysyncwm.Peer {
+			out := make([]querysyncwm.Peer, len(peers))
+			for i, p := range peers {
+				out[i] = p
+			}
+
+			return out
+		},
+	})
+}
+
+// newScriptedPeers creates a peer for each address in the scripts.
+func newScriptedPeers(scripts map[string][]wire.Message) []*scriptedPeer {
+	peers := make([]*scriptedPeer, 0, len(scripts))
+	for addr, responses := range scripts {
+		peers = append(peers, &scriptedPeer{
+			addr:      addr,
+			responses: responses,
+			recv:      make(chan wire.Message),
+			quit:      make(chan struct{}),
+		})
+	}
+
+	return peers
+}
+
 func TestCFHeadersCollectsHonestConflict(t *testing.T) {
 	t.Parallel()
 
@@ -364,42 +466,28 @@ func TestCFHeadersCollectsHonestConflict(t *testing.T) {
 	store := &headerfs.MockBlockHeaderStore{}
 	store.On("ChainTip").Return(stop, uint32(1), nil)
 	stopHash := stop.BlockHash()
+
+	// Keep collecting timely honest conflicts: the last peer disagrees
+	// with the other three.
+	scripts := make(map[string][]wire.Message)
+	for i := 0; i < 4; i++ {
+		hash := chainhash.Hash{1}
+		if i == 3 {
+			hash = chainhash.Hash{2}
+		}
+
+		scripts[fmt.Sprintf("127.0.0.%d:8333", i+1)] = []wire.Message{
+			&wire.MsgCFHeaders{
+				FilterType:   wire.GCSFilterRegular,
+				StopHash:     stopHash,
+				FilterHashes: []*chainhash.Hash{&hash},
+			},
+		}
+	}
+
 	bm := &blockManager{cfg: &blockManagerCfg{
 		BlockHeaders: store,
-		queryAllPeers: func(_ wire.Message,
-			check func(*ServerPeer, wire.Message,
-				chan<- struct{}, chan<- struct{}),
-			_ ...QueryOption) {
-
-			quit := make(chan struct{})
-			for i := 0; i < 4; i++ {
-				select {
-				case <-quit:
-					return
-				default:
-				}
-
-				// Keep collecting timely honest conflicts.
-				hash := chainhash.Hash{1}
-				if i == 3 {
-					hash = chainhash.Hash{2}
-				}
-				sp := newTestServerPeer(t,
-					fmt.Sprintf("127.0.0.%d:8333", i+1), 1,
-				)
-				peerQuit := make(chan struct{})
-				check(sp, &wire.MsgCFHeaders{
-					FilterType:   wire.GCSFilterRegular,
-					StopHash:     stopHash,
-					FilterHashes: []*chainhash.Hash{&hash},
-				}, quit, peerQuit)
-				select {
-				case <-peerQuit:
-				default:
-					t.Fatal("peer still collecting")
-				}
-			}
-		},
+		Broadcaster:  newScriptedBroadcaster(scripts),
 	}}
 	headers, count := bm.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
 	require.Equal(t, 1, count)
@@ -1245,32 +1333,21 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 			&blockHeader, nil,
 		)
 
-		// We set up the mock queryAllPeers to only respond according to
-		// the active testcase.
+		// We set up the scripted broadcaster to only respond according
+		// to the active testcase.
 		answers := make(map[string]wire.Message)
-		queryAllPeers := func(
-			queryMsg wire.Message,
-			checkResponse func(sp *ServerPeer, resp wire.Message,
-				quit chan<- struct{}, peerQuit chan<- struct{}),
-			options ...QueryOption) {
+		broadcaster := broadcastFunc(func(b *querysyncwm.Broadcast,
+			opts ...querysyncwm.QueryOption) error {
 
+			scripts := make(map[string][]wire.Message)
 			for p, resp := range answers {
-				pp, err := peer.NewOutboundPeer(
-					&peer.Config{}, p,
-				)
-				if err != nil {
-					panic(err)
-				}
-
-				sp := &ServerPeer{
-					Peer: pp,
-				}
-				checkResponse(
-					sp, resp, make(chan struct{}),
-					make(chan struct{}),
-				)
+				scripts[p] = []wire.Message{resp}
 			}
-		}
+
+			return newScriptedBroadcaster(scripts).Broadcast(
+				b, opts...,
+			)
+		})
 
 		for _, p := range peers {
 			test.filterAnswers(p, answers)
@@ -1295,8 +1372,8 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		bm := &blockManager{
 			cfg: &blockManagerCfg{
-				BlockHeaders:  mBlockHeaderStore,
-				queryAllPeers: queryAllPeers,
+				BlockHeaders: mBlockHeaderStore,
+				Broadcaster:  broadcaster,
 			},
 		}
 
