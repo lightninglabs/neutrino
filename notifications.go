@@ -238,7 +238,9 @@ func (s *ChainService) ConnectedCount() int32 {
 // ConnectedPeers is a function that returns a channel where all connected
 // peers will be sent. It is assumed that all current peers will be sent
 // imemdiately, and new peers as they connect.
-func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(), error) {
+func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(),
+	error) {
+
 	replyChan := make(chan subConnPeersReply, 1)
 
 	select {

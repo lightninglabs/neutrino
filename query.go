@@ -933,9 +933,10 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					}
 
 					addr := peer.Addr()
-					broadcastErr := pushtx.ParseBroadcastError(
-						response, addr,
-					)
+					broadcastErr :=
+						pushtx.ParseBroadcastError(
+							response, addr,
+						)
 					rejections[addr] = broadcastErr
 					rejectCodes[broadcastErr.Code]++
 
