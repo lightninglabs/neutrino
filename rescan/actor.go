@@ -145,7 +145,7 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		Inputs: make([]neutrino.InputWithScript, len(cfg.WatchInputs)),
 	}
 	copy(watch.Addrs, cfg.WatchAddrs)
-	copy(watch.Inputs, cfg.WatchInputs)
+	watch.Inputs = copyInputsWithScripts(cfg.WatchInputs)
 
 	// Convert addresses to pkScripts for the watch list.
 	for _, addr := range watch.Addrs {
@@ -358,6 +358,17 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		)
 
 	case *blockConnectedMsg:
+		if m.RetryAnchor != nil {
+			state, err := a.fsm.CurrentState()
+			if err != nil {
+				return fn.Err[RescanActorResp](err)
+			}
+			cur, ok := state.(*StateCurrent)
+			if !ok || cur.CurStamp.Hash != m.RetryAnchor.Hash ||
+				cur.CurStamp.Height != m.RetryAnchor.Height {
+				return fn.Ok[RescanActorResp](&rescanActorAck{})
+			}
+		}
 		return a.handleRetriableEvent(
 			actorCtx, m, BlockConnectedEvent{
 				Header: m.Header,
@@ -422,6 +433,15 @@ func (a *RescanActor) handleRetriableEvent(actorCtx context.Context,
 			a.cfg.OnError(err)
 		}
 
+		if connected, ok := msg.(*blockConnectedMsg); ok {
+			state, stateErr := a.fsm.CurrentState()
+			if stateErr == nil {
+				if cur, ok := state.(*StateCurrent); ok {
+					anchor := cur.CurStamp
+					connected.RetryAnchor = &anchor
+				}
+			}
+		}
 		a.scheduleRetry(msg)
 	}
 
@@ -638,12 +658,22 @@ func (a *RescanActor) startBridge(bestHeight uint32) {
 
 		log.Errorf("RescanActor: failed to subscribe at height %d: %v",
 			bestHeight, err)
+		if a.cfg.OnError != nil {
+			a.cfg.OnError(err)
+		}
+		a.scheduleRetry(&subscriptionClosedMsg{})
 
 		return
 	}
 
 	a.bridgeCancel = bridgeCancel
 	a.sub = sub
+
+	// A reorg can occur between catch-up and subscribing at the same height.
+	// Check the scanned tip after installing the subscription.
+	if ref, err := a.requireActorRef(); err == nil {
+		ref.Tell(context.Background(), &processNextBlockMsg{})
+	}
 
 	a.asyncWG.Add(1)
 	go func() {

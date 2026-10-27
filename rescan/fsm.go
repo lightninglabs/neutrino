@@ -305,10 +305,34 @@ func (s *StateMachine) driveMachine() {
 
 		// State query from external caller.
 		case query := <-s.stateQuery:
-			query.result <- currentState
+			query.result <- snapshotState(currentState)
 
 		case <-s.quit:
 			return
 		}
+	}
+}
+
+// snapshotState keeps callers from mutating the state owned by the driver.
+func snapshotState(state RescanState) RescanState {
+	switch s := state.(type) {
+	case *StateInitializing:
+		copy := *s
+		copy.Watch = s.Watch.Clone()
+		return &copy
+	case *StateSyncing:
+		copy := *s
+		copy.Watch = s.Watch.Clone()
+		return &copy
+	case *StateCurrent:
+		copy := *s
+		copy.Watch = s.Watch.Clone()
+		return &copy
+	case *StateRewinding:
+		copy := *s
+		copy.Watch = s.Watch.Clone()
+		return &copy
+	default:
+		return state
 	}
 }

@@ -399,11 +399,13 @@ func TestStateRewindingToSyncing(t *testing.T) {
 
 	disconnectCount := 0
 	for _, out := range transition.Events.Outbox {
-		if _, ok := out.(BlockDisconnectedOutbox); ok {
+		if disconnected, ok := out.(BlockDisconnectedOutbox); ok {
+			require.Equal(t, int32(8-disconnectCount), disconnected.Height)
+			require.Equal(t, disconnected.Hash, disconnected.Header.BlockHash())
 			disconnectCount++
 		}
 	}
-	require.Greater(t, disconnectCount, 0)
+	require.Equal(t, 3, disconnectCount)
 }
 
 // TestStateMachineFullCycle tests the full state machine lifecycle:

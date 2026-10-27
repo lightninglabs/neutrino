@@ -2,6 +2,7 @@ package rescan
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -66,6 +67,23 @@ func (s *StateSyncing) processNextBatch(
 
 	var outbox []OutboxEvent
 
+	// Commit a completed prefix before retrying a failed block. Otherwise a
+	// transient failure later in the batch discards already emitted work.
+	partial := func(err error) (*StateTransition, error) {
+		if len(outbox) == 0 {
+			return nil, err
+		}
+		return &StateTransition{
+			NextState: &StateSyncing{
+				CurStamp: curStamp, CurHeader: curHeader,
+				Watch: watch, Scanning: scanning,
+			},
+			Events: &EmittedEvent{Outbox: append(outbox, SelfTellOutbox{
+				Event: ProcessNextBlockEvent{},
+			})},
+		}, nil
+	}
+
 	batchSize := env.BatchSize
 	if batchSize <= 0 {
 		batchSize = DefaultBatchSize
@@ -96,7 +114,30 @@ func (s *StateSyncing) processNextBatch(
 		// Check if we've caught up to the chain tip.
 		bestBlock, err := env.Chain.BestBlock()
 		if err != nil {
-			return nil, err
+			return partial(err)
+		}
+
+		// A historical fetch can race a reorg. Never advance from an
+		// orphaned tip or publish a child from a different chain.
+		if curStamp.Height <= bestBlock.Height {
+			active, err := env.Chain.GetBlockHeaderByHeight(uint32(curStamp.Height))
+			if err != nil {
+				return partial(err)
+			}
+			if active.BlockHash() != curStamp.Hash {
+				if curStamp.Height == 0 {
+					return partial(fmt.Errorf("genesis block changed"))
+				}
+				return &StateTransition{
+					NextState: &StateRewinding{
+						CurStamp: curStamp, CurHeader: curHeader, Watch: watch,
+						TargetHeight: uint32(curStamp.Height - 1),
+					},
+					Events: &EmittedEvent{Outbox: append(outbox, SelfTellOutbox{
+						Event: ProcessNextBlockEvent{},
+					})},
+				}, nil
+			}
 		}
 
 		if curStamp.Height >= bestBlock.Height {
@@ -118,6 +159,7 @@ func (s *StateSyncing) processNextBatch(
 					CurStamp:  curStamp,
 					CurHeader: curHeader,
 					Watch:     watch,
+					Scanning:  scanning,
 				},
 				Events: &EmittedEvent{
 					Outbox: outbox,
@@ -129,9 +171,12 @@ func (s *StateSyncing) processNextBatch(
 		nextHeight := uint32(curStamp.Height + 1)
 		header, err := env.Chain.GetBlockHeaderByHeight(nextHeight)
 		if err != nil {
-			return nil, err
+			return partial(err)
 		}
 
+		if header.PrevBlock != curStamp.Hash {
+			return partial(fmt.Errorf("block at height %d does not extend scanned tip", nextHeight))
+		}
 		blockHash := header.BlockHash()
 		nextStamp := headerfs.BlockStamp{
 			Hash:   blockHash,
@@ -139,11 +184,7 @@ func (s *StateSyncing) processNextBatch(
 		}
 
 		// Check if we've passed the birthday threshold.
-		if !scanning {
-			if header.Timestamp.After(env.StartTime) {
-				scanning = true
-			}
-		}
+		nextScanning := scanning || header.Timestamp.After(env.StartTime)
 
 		// Track relevant transactions for this block. The
 		// FilteredBlockOutbox is emitted for EVERY block (with
@@ -151,14 +192,14 @@ func (s *StateSyncing) processNextBatch(
 		// relies on it to advance its sync state.
 		var relevantTxs []*btcutil.Tx
 
-		if scanning && len(watch.List) > 0 {
+		if nextScanning && len(watch.List) > 0 {
 			// Fetch filter and check for matches.
 			matched, filter, err := FetchAndMatchFilter(
 				env.Chain, &blockHash, watch.List,
 				env.QueryOpts...,
 			)
 			if err != nil {
-				return nil, err
+				return partial(err)
 			}
 
 			if matched {
@@ -168,7 +209,7 @@ func (s *StateSyncing) processNextBatch(
 					watch, env.QueryOpts...,
 				)
 				if err != nil {
-					return nil, err
+					return partial(err)
 				}
 			}
 		}
@@ -200,6 +241,7 @@ func (s *StateSyncing) processNextBatch(
 
 		curStamp = nextStamp
 		curHeader = *header
+		scanning = nextScanning
 	}
 
 	// Batch complete but not yet current. Emit self-Tell to continue

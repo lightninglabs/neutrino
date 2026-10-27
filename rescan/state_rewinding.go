@@ -84,10 +84,11 @@ func (s *StateRewinding) processRewind(
 		}
 
 		// Emit disconnection notification for the current block.
+		headerCopy := curHeader
 		outbox = append(outbox, BlockDisconnectedOutbox{
 			Hash:   curStamp.Hash,
 			Height: int32(curStamp.Height),
-			Header: &curHeader,
+			Header: &headerCopy,
 		})
 
 		// Walk back to the previous block.

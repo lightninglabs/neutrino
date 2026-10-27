@@ -22,6 +22,9 @@ type StateCurrent struct {
 
 	// Watch holds the current watch list state.
 	Watch WatchState
+
+	// Scanning records whether the birthday threshold has been reached.
+	Scanning bool
 }
 
 // ProcessEvent handles events in the Current state.
@@ -31,6 +34,9 @@ func (s *StateCurrent) ProcessEvent(_ context.Context, event RescanEvent,
 	env *Environment) (*StateTransition, error) {
 
 	switch e := event.(type) {
+	case ProcessNextBlockEvent:
+		return s.reconcileTip(env)
+
 	case BlockConnectedEvent:
 		return s.handleBlockConnected(&e, env)
 
@@ -55,6 +61,30 @@ func (s *StateCurrent) ProcessEvent(_ context.Context, event RescanEvent,
 
 		return &StateTransition{NextState: s}, nil
 	}
+}
+
+// reconcileTip checks the scanned tip after the subscription is installed.
+func (s *StateCurrent) reconcileTip(env *Environment) (*StateTransition, error) {
+	header, err := env.Chain.GetBlockHeaderByHeight(uint32(s.CurStamp.Height))
+	if err != nil {
+		return nil, err
+	}
+	if header.BlockHash() == s.CurStamp.Hash {
+		return &StateTransition{NextState: s}, nil
+	}
+	if s.CurStamp.Height <= 0 {
+		return nil, fmt.Errorf("genesis block changed")
+	}
+	return &StateTransition{
+		NextState: &StateRewinding{
+			CurStamp: s.CurStamp, CurHeader: s.CurHeader,
+			Watch: s.Watch, TargetHeight: uint32(s.CurStamp.Height - 1),
+		},
+		Events: &EmittedEvent{Outbox: []OutboxEvent{
+			CancelSubscriptionOutbox{},
+			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+		}},
+	}, nil
 }
 
 // handleBlockConnected processes a new block from the subscription.
@@ -91,7 +121,8 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 		relevantTxs []*btcutil.Tx
 	)
 
-	if len(watch.List) > 0 {
+	scanning := s.Scanning || event.Header.Timestamp.After(env.StartTime)
+	if scanning && len(watch.List) > 0 {
 		// Fetch the filter for this block.
 		filter, err := FetchFilterForBlock(
 			env.Chain, blockHash, env.QueryOpts...,
@@ -144,6 +175,7 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 			CurStamp:  newStamp,
 			CurHeader: event.Header,
 			Watch:     watch,
+			Scanning:  scanning,
 		},
 		Events: &EmittedEvent{
 			Outbox: outbox,
@@ -165,6 +197,7 @@ func (s *StateCurrent) handleBlockDisconnected(
 		return &StateTransition{NextState: s}, nil
 	}
 
+	headerCopy := s.CurHeader
 	return &StateTransition{
 		NextState: &StateCurrent{
 			CurStamp: headerfs.BlockStamp{
@@ -173,13 +206,14 @@ func (s *StateCurrent) handleBlockDisconnected(
 			},
 			CurHeader: event.ChainTip,
 			Watch:     s.Watch,
+			Scanning:  s.Scanning,
 		},
 		Events: &EmittedEvent{
 			Outbox: []OutboxEvent{
 				BlockDisconnectedOutbox{
 					Hash:   s.CurStamp.Hash,
 					Height: int32(s.CurStamp.Height),
-					Header: &s.CurHeader,
+					Header: &headerCopy,
 				},
 			},
 		},
@@ -225,6 +259,7 @@ func (s *StateCurrent) handleAddWatch(
 			CurStamp:  s.CurStamp,
 			CurHeader: s.CurHeader,
 			Watch:     newWatch,
+			Scanning:  s.Scanning,
 		},
 	}, nil
 }

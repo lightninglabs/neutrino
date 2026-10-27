@@ -29,6 +29,9 @@ type WatchState struct {
 	// List holds the serialized pkScripts used for GCS filter matching.
 	// This is the union of scripts derived from Addrs and Inputs.
 	List [][]byte
+
+	// addrScripts indexes payment scripts for matching transaction outputs.
+	addrScripts map[string]struct{}
 }
 
 // Clone returns a deep copy of the WatchState so that state transitions
@@ -40,8 +43,16 @@ func (ws *WatchState) Clone() WatchState {
 		List:   make([][]byte, len(ws.List)),
 	}
 	copy(clone.Addrs, ws.Addrs)
-	copy(clone.Inputs, ws.Inputs)
-	copy(clone.List, ws.List)
+	clone.Inputs = copyInputsWithScripts(ws.Inputs)
+	for i, script := range ws.List {
+		clone.List[i] = append([]byte(nil), script...)
+	}
+	if ws.addrScripts != nil {
+		clone.addrScripts = make(map[string]struct{}, len(ws.addrScripts))
+		for script := range ws.addrScripts {
+			clone.addrScripts[script] = struct{}{}
+		}
+	}
 
 	return clone
 }
@@ -54,6 +65,9 @@ func (ws *WatchState) ApplyUpdate(
 	event *AddWatchAddrsEvent) (WatchState, error) {
 
 	newWS := ws.Clone()
+	if err := newWS.cacheAddrScripts(); err != nil {
+		return *ws, err
+	}
 
 	newWS.Addrs = append(newWS.Addrs, event.Addrs...)
 	newWS.Inputs = append(newWS.Inputs, event.Inputs...)
@@ -65,6 +79,7 @@ func (ws *WatchState) ApplyUpdate(
 		}
 
 		newWS.List = append(newWS.List, script)
+		newWS.addrScripts[string(script)] = struct{}{}
 	}
 
 	for _, input := range event.Inputs {
@@ -72,6 +87,23 @@ func (ws *WatchState) ApplyUpdate(
 	}
 
 	return newWS, nil
+}
+
+// cacheAddrScripts builds the output lookup once for this watch state.
+func (ws *WatchState) cacheAddrScripts() error {
+	if ws.addrScripts != nil {
+		return nil
+	}
+	ws.addrScripts = make(map[string]struct{}, len(ws.Addrs))
+	for _, addr := range ws.Addrs {
+		script, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			ws.addrScripts = nil
+			return err
+		}
+		ws.addrScripts[string(script)] = struct{}{}
+	}
+	return nil
 }
 
 // MatchBlockFilter checks whether the block filter matches any items in the
@@ -104,10 +136,6 @@ func FetchAndMatchFilter(chain neutrino.ChainSource,
 		*blockHash, wire.GCSFilterRegular, opts...,
 	)
 	if err != nil {
-		if err == headerfs.ErrHashNotFound {
-			// Block has been reorged out from under us.
-			return false, nil, nil
-		}
 		return false, nil, err
 	}
 
@@ -131,6 +159,7 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 	ws WatchState,
 	queryOpts ...neutrino.QueryOption) ([]*btcutil.Tx, WatchState, error) {
 
+	ws = ws.Clone()
 	block, err := chain.GetBlock(curStamp.Hash, queryOpts...)
 	if err != nil {
 		return nil, ws, err
@@ -138,6 +167,10 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 	if block == nil {
 		return nil, ws, fmt.Errorf("couldn't get block %d (%s) from "+
 			"network", curStamp.Height, curStamp.Hash)
+	}
+
+	if err := ws.cacheAddrScripts(); err != nil {
+		return nil, ws, err
 	}
 
 	// Verify the filter against the downloaded block.
@@ -169,10 +202,7 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 		// Even though the transaction may already be known as
 		// relevant, we need to call PaysWatchedAddr anyway as it
 		// discovers new inputs to watch.
-		pays, newInputs, err := PaysWatchedAddr(tx, ws.Addrs)
-		if err != nil {
-			return nil, ws, err
-		}
+		pays, newInputs := paysWatchedScripts(tx, ws.addrScripts)
 
 		if pays {
 			relevant = true
@@ -237,43 +267,28 @@ func PaysWatchedAddr(tx *btcutil.Tx,
 	watchAddrs []address.Address) (bool, []neutrino.InputWithScript,
 	error) {
 
-	var (
-		anyMatch  bool
-		newInputs []neutrino.InputWithScript
-	)
-
-txOutLoop:
-	for outIdx, out := range tx.MsgTx().TxOut {
-		pkScript := out.PkScript
-
-		for _, addr := range watchAddrs {
-			addrScript, err := txscript.PayToAddrScript(addr)
-			if err != nil {
-				return false, nil, err
-			}
-
-			if !bytes.Equal(pkScript, addrScript) {
-				continue
-			}
-
-			anyMatch = true
-
-			// Watch this output for future spends.
-			hash := tx.Hash()
-			outPoint := wire.OutPoint{
-				Hash:  *hash,
-				Index: uint32(outIdx),
-			}
-			newInputs = append(newInputs, neutrino.InputWithScript{
-				PkScript: pkScript,
-				OutPoint: outPoint,
-			})
-
-			continue txOutLoop
-		}
+	ws := WatchState{Addrs: watchAddrs}
+	if err := ws.cacheAddrScripts(); err != nil {
+		return false, nil, err
 	}
+	matched, inputs := paysWatchedScripts(tx, ws.addrScripts)
+	return matched, inputs, nil
+}
 
-	return anyMatch, newInputs, nil
+func paysWatchedScripts(tx *btcutil.Tx,
+	scripts map[string]struct{}) (bool, []neutrino.InputWithScript) {
+
+	var newInputs []neutrino.InputWithScript
+	for outIdx, out := range tx.MsgTx().TxOut {
+		if _, ok := scripts[string(out.PkScript)]; !ok {
+			continue
+		}
+		newInputs = append(newInputs, neutrino.InputWithScript{
+			PkScript: out.PkScript,
+			OutPoint: wire.OutPoint{Hash: *tx.Hash(), Index: uint32(outIdx)},
+		})
+	}
+	return len(newInputs) > 0, newInputs
 }
 
 // BlockStamp is a convenience type alias for headerfs.BlockStamp to avoid
