@@ -915,6 +915,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
+		DisconnectPeer:   s.DisconnectPeer,
 		QuarantinePeer:   s.QuarantinePeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
@@ -1200,6 +1201,14 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 // peers behind the same NAT or on localhost.
 func (s *ChainService) onPeerUnresponsive(peer querysyncwm.Peer) {
 	s.QuarantinePeer(peer.Addr(), unresponsivePeerQuarantine)
+}
+
+// DisconnectPeer disconnects a peer without recording a ban.
+func (s *ChainService) DisconnectPeer(addr string) error {
+	if sp := s.PeerByAddr(addr); sp != nil {
+		sp.Disconnect()
+	}
+	return nil
 }
 
 // QuarantinePeer temporarily excludes one exact peer address from peer
