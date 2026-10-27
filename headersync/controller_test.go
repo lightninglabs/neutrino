@@ -154,6 +154,42 @@ func TestControllerFrontierDiscoverySpan(t *testing.T) {
 	require.Equal(t, Hash{}, span.StopHash)
 }
 
+// TestControllerFrontierDiscoveryDoneAtBestHeight checks that a confirmed
+// anchor at the best height ends frontier discovery. Skipping it used to
+// re-request the final span forever, which kept every peer busy with
+// discovery and starved queued gap ranges below the staged frontier.
+func TestControllerFrontierDiscoveryDoneAtBestHeight(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	cfg := DefaultConfig()
+	cfg.MaxRangeHeaders = 5
+
+	manager := NewManagerActor(
+		NewHeaderSyncFSM(0, testHash(100), cfg), 8,
+	)
+	manager.Start(ctx)
+	defer manager.Stop()
+
+	controller := NewController(manager, NewSession(), cfg)
+	for _, height := range []uint32{5, 10} {
+		for i := 0; i < 2; i++ {
+			_, ok, err := manager.AddAnchor(
+				ctx, height, testHash(100+byte(height)), false,
+			)
+			require.NoError(t, err)
+			require.True(t, ok)
+		}
+	}
+
+	_, ok, err := controller.FrontierDiscoverySpan(
+		ctx, ChainPoint{Height: 0, Hash: testHash(100)}, 10,
+	)
+	require.NoError(t, err)
+	require.False(t, ok, "discovery requested past a confirmed best "+
+		"height anchor")
+}
+
 func TestControllerPlanFrontierRangesFillsGapBeforeStagedRanges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()

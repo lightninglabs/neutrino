@@ -292,7 +292,11 @@ func (c *Controller) FrontierDiscoverySpan(ctx context.Context,
 		return AnchorRequest{}, false, err
 	}
 	for _, anchor := range anchors {
-		if anchor.Height < tip.Height || anchor.Height >= bestHeight {
+		// An anchor at the best height counts: once it is confirmed
+		// there is nothing left to discover. Skipping it re-requested
+		// the final span forever, which kept every peer busy with
+		// discovery and starved queued gap ranges below it.
+		if anchor.Height < tip.Height || anchor.Height > bestHeight {
 			continue
 		}
 		if !c.AnchorConfirmed(anchor) {
