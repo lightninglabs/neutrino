@@ -5226,6 +5226,15 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 					// Should we panic here?
 				}
 
+				// The loop above already pushed this batch's
+				// rejected headers into the validation cache.
+				// Rebuild it from the durable tip, or the next
+				// batch validates against the rejected chain.
+				if err := b.resetHeaderListToTip(); err != nil {
+					log.Errorf("Unable to reset header "+
+						"list: %v", err)
+				}
+
 				hmsg.peer.Disconnect()
 				return
 			}
