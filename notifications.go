@@ -8,6 +8,7 @@ package neutrino
 
 import (
 	"errors"
+	"time"
 
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/connmgr"
@@ -24,6 +25,11 @@ type subConnPeersReply struct {
 }
 type subConnPeersMsg struct {
 	reply chan subConnPeersReply
+}
+
+type quarantinePeerMsg struct {
+	addr  string
+	until time.Time
 }
 
 type getPeersMsg struct {
@@ -77,8 +83,12 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case getPeersMsg:
 		peers := make([]*ServerPeer, 0, state.Count())
+		now := time.Now()
 		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
+				return
+			}
+			if s.peerQuarantined(sp.Addr(), now) {
 				return
 			}
 			peers = append(peers, sp)
@@ -91,8 +101,12 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// connected peers.
 		cancelChan := make(chan struct{})
 		peerChan := make(chan query.Peer, state.Count())
+		now := time.Now()
 		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
+				return
+			}
+			if s.peerQuarantined(sp.Addr(), now) {
 				return
 			}
 			peerChan <- sp
@@ -106,6 +120,14 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			peerChan:   peerChan,
 			cancelChan: cancelChan,
 		}
+
+	case quarantinePeerMsg:
+		s.trackPeerQuarantine(msg.addr, msg.until)
+		state.forAllPeers(func(sp *ServerPeer) {
+			if sp.Addr() == msg.addr {
+				sp.Disconnect()
+			}
+		})
 
 	case connectNodeMsg:
 		// TODO: duplicate oneshots?
