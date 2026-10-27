@@ -12,6 +12,11 @@ type PlanRangesResult struct {
 	Ranges          []HeaderRange
 	NextID          RangeID
 	SkippedExisting int
+
+	// SkippedOverlap counts adjacent anchor pairs whose span overlaps
+	// existing work, such as a short discovery reply's anchor inside an
+	// already staged span.
+	SkippedOverlap int
 }
 
 // SeedCommittedAnchor makes the current committed tip available as a trusted
@@ -79,6 +84,14 @@ func (h *HeaderSyncFSM) PlanConfirmedAnchorRanges(nextID RangeID,
 		stop := anchors[i]
 		if _, ok := h.rangeBySpan(start.Height, stop.Height); ok {
 			result.SkippedExisting++
+			continue
+		}
+
+		// One overlapping pair must not abort the whole batch:
+		// the spans after it are still plannable, and the overlap
+		// heals once the tip passes it.
+		if h.rangeOverlaps(start.Height, stop.Height) {
+			result.SkippedOverlap++
 			continue
 		}
 
