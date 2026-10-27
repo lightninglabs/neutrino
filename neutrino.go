@@ -529,10 +529,14 @@ type Config struct {
 	// SQLite or PostgreSQL backend. Mutually exclusive with Database.
 	SQLConfig *sqldb.Config
 
-	// LegacyImport, when non-nil, declares legacy walletdb + flat-file
-	// state to be imported into the SQL backend on first start. The
-	// import runs exactly once, recorded in the neutrino_migrations
-	// table at version 2. Ignored when SQLConfig is nil.
+	// LegacyImport optionally overrides where the legacy walletdb +
+	// flat-file state is imported from when the SQL backend is first
+	// started. When nil, the legacy files are detected in DataDir
+	// (block_headers.bin, reg_filter_headers.bin and neutrino.db) and
+	// imported automatically; a fresh install has none. The import runs
+	// exactly once, recorded in the neutrino_migrations table at version
+	// 2, and is disabled by SQLConfig.SkipLegacyMigration. Ignored when
+	// SQLConfig is nil.
 	LegacyImport *sqldb.LegacyDataSource
 
 	// ChainParams is the chain that we're running on.
@@ -802,15 +806,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// schema migrations and any registered legacy import) and inject the
 	// resulting per-domain TransactionExecutors into each store below.
 	if cfg.SQLConfig != nil {
-		var legacyMigration sqldb.MakeProgrammaticMigrations
-		if !cfg.SQLConfig.SkipLegacyMigration {
-			legacyMigration = sqldb.MakeLegacyImportMigration(
-				cfg.LegacyImport,
-			)
-		}
-
-		s.sqlBackend, err = sqldb.NewBackend(
-			cfg.DataDir, cfg.SQLConfig, legacyMigration,
+		s.sqlBackend, err = sqldb.NewBackendWithLegacy(
+			cfg.DataDir, cfg.SQLConfig, &cfg.ChainParams,
+			cfg.LegacyImport,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to open SQL "+
