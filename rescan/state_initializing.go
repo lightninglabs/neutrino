@@ -20,24 +20,37 @@ type StateInitializing struct {
 
 	// Watch holds the current watch list state.
 	Watch WatchState
+
+	// rewindTo records the earliest rewind before scanning.
+	rewindTo *uint32
 }
 
 // ProcessEvent handles events in the Initializing state.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateInitializing) ProcessEvent(_ context.Context, event RescanEvent,
-	_ *Environment) (*StateTransition, error) {
+func (s *StateInitializing) ProcessEvent(
+	_ context.Context,
+	event RescanEvent,
+	_ *Environment,
+) (*StateTransition, error) {
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
-		// Transition to syncing and kick off the first batch.
-		return &StateTransition{
-			NextState: &StateSyncing{
+		// Apply a rewind accepted during subscription setup.
+		var next RescanState = &StateSyncing{
+			CurStamp:  s.StartStamp,
+			CurHeader: s.StartHeader,
+			Watch:     s.Watch,
+		}
+		if s.rewindTo != nil {
+			next = &StateRewinding{
 				CurStamp:  s.StartStamp,
 				CurHeader: s.StartHeader,
-				Watch:     s.Watch,
-				Scanning:  false,
-			},
+				Watch:     s.Watch, TargetHeight: *s.rewindTo,
+			}
+		}
+		return &StateTransition{
+			NextState: next,
 			Events: &EmittedEvent{
 				Outbox: []OutboxEvent{
 					SelfTellOutbox{
@@ -54,11 +67,21 @@ func (s *StateInitializing) ProcessEvent(_ context.Context, event RescanEvent,
 			return nil, err
 		}
 
+		rewindTo := s.rewindTo
+		if e.RewindTo != nil &&
+			int32(*e.RewindTo) < s.StartStamp.Height &&
+			(rewindTo == nil || *e.RewindTo < *rewindTo) {
+
+			height := *e.RewindTo
+			rewindTo = &height
+		}
+
 		return &StateTransition{
 			NextState: &StateInitializing{
 				StartStamp:  s.StartStamp,
 				StartHeader: s.StartHeader,
 				Watch:       newWatch,
+				rewindTo:    rewindTo,
 			},
 		}, nil
 

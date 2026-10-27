@@ -1,11 +1,12 @@
 package rescan
 
 import (
-	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -68,7 +69,9 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 			defer wg.Done()
 
 			// Small random delay to vary timing.
-			time.Sleep(time.Duration(idx) * time.Millisecond)
+			time.Sleep(
+				time.Duration(idx) * time.Millisecond,
+			)
 
 			mu.Lock()
 			addr := addrs[idx]
@@ -78,16 +81,22 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 				[]address.Address{addr}, nil, nil,
 			)
 			if err != nil {
-				t.Errorf("AddWatchAddrs failed: %v", err)
+				t.Errorf(
+					"AddWatchAddrs failed: %v",
+					err,
+				)
 			}
 		}(i)
 	}
 
 	// Wait for sync to finish.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 10*time.Second, 10*time.Millisecond,
-		"actor should finish syncing")
+	require.Eventually(
+		t,
+		finished.Load,
+		10*time.Second,
+		10*time.Millisecond,
+		"actor should finish syncing",
+	)
 
 	// Wait for all concurrent AddWatchAddrs to complete.
 	wg.Wait()
@@ -145,9 +154,12 @@ func TestChaosBlockNotificationBurst(t *testing.T) {
 	actor.Start()
 
 	// Wait for initial sync.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(
+		t,
+		finished.Load,
+		5*time.Second,
+		10*time.Millisecond,
+	)
 
 	initialBlocks := blocksProcessed.Load()
 
@@ -227,9 +239,12 @@ func TestChaosAddWatchWithRewindDuringCurrent(t *testing.T) {
 	actor.Start()
 
 	// Wait for initial sync (no addresses watched, so no matches).
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(
+		t,
+		finished.Load,
+		5*time.Second,
+		10*time.Millisecond,
+	)
 
 	require.Equal(t, int32(0), filteredBlocks.Load(),
 		"should have no matches initially")
@@ -292,6 +307,8 @@ func TestChaosStopDuringSync(t *testing.T) {
 	case <-done:
 		// Success — shutdown completed.
 	case <-time.After(5 * time.Second):
-		t.Fatal("actor shutdown timed out — possible deadlock")
+		t.Fatal(
+			"actor shutdown timed out — possible deadlock",
+		)
 	}
 }

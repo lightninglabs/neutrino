@@ -33,15 +33,18 @@ type StateSyncing struct {
 // continue. This allows AddWatchAddrs to interleave between batches.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateSyncing) ProcessEvent(_ context.Context, event RescanEvent,
-	env *Environment) (*StateTransition, error) {
+func (s *StateSyncing) ProcessEvent(
+	_ context.Context,
+	event RescanEvent,
+	env *Environment,
+) (*StateTransition, error) {
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		return s.processNextBatch(env)
 
 	case AddWatchAddrsEvent:
-		return s.handleAddWatch(&e, env)
+		return s.handleAddWatch(&e)
 
 	case BlockDisconnectedEvent:
 		return s.handleDisconnect(&e)
@@ -81,9 +84,14 @@ func (s *StateSyncing) processNextBatch(
 				CurStamp: curStamp, CurHeader: curHeader,
 				Watch: watch, Scanning: scanning,
 			},
-			Events: &EmittedEvent{Outbox: append(outbox, SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			})},
+			Events: &EmittedEvent{
+				Outbox: append(
+					outbox,
+					SelfTellOutbox{
+						Event: ProcessNextBlockEvent{},
+					},
+				),
+			},
 		}, nil
 	}
 
@@ -98,18 +106,16 @@ func (s *StateSyncing) processNextBatch(
 			if curStamp.Hash == env.EndBlock.Hash ||
 				curStamp.Height >= env.EndBlock.Height {
 
+				finished := RescanFinishedOutbox{
+					Hash:   curStamp.Hash,
+					Height: curStamp.Height,
+				}
+				events := &EmittedEvent{
+					Outbox: append(outbox, finished),
+				}
 				return &StateTransition{
 					NextState: &StateTerminal{},
-					Events: &EmittedEvent{
-						Outbox: append(outbox,
-							RescanFinishedOutbox{
-								Hash: curStamp.Hash,
-								Height: int32(
-									curStamp.Height,
-								),
-							},
-						),
-					},
+					Events:    events,
 				}, nil
 			}
 		}
@@ -121,18 +127,33 @@ func (s *StateSyncing) processNextBatch(
 		}
 
 		if curStamp.Height > bestBlock.Height {
-			return partial(fmt.Errorf("scanned tip height %d exceeds chain tip %d", curStamp.Height, bestBlock.Height))
+			return partial(
+				fmt.Errorf(
+					"scanned height %d exceeds tip %d",
+					curStamp.Height,
+					bestBlock.Height,
+				),
+			)
 		}
 
 		// A historical fetch can race a reorg. Never advance from an
 		// orphaned tip or publish a child from a different chain.
 		if curStamp.Height <= bestBlock.Height {
-			active, err := env.Chain.GetBlockHeaderByHeight(uint32(curStamp.Height))
+			active, err := env.Chain.GetBlockHeaderByHeight(
+				uint32(curStamp.Height),
+			)
 			if err != nil {
 				return partial(err)
 			}
 			if active.BlockHash() != curStamp.Hash {
-				return partial(fmt.Errorf("scanned tip %s at height %d is no longer active", curStamp.Hash, curStamp.Height))
+				return partial(
+					fmt.Errorf(
+						"scanned %s at height %d is"+
+							" no longer active",
+						curStamp.Hash,
+						curStamp.Height,
+					),
+				)
 			}
 		}
 
@@ -142,11 +163,13 @@ func (s *StateSyncing) processNextBatch(
 			// followed by the subscription and finished events.
 			outbox = append(outbox,
 				StartSubscriptionOutbox{
-					BestHeight: uint32(curStamp.Height),
+					BestHeight: uint32(
+						curStamp.Height,
+					),
 				},
 				RescanFinishedOutbox{
 					Hash:   curStamp.Hash,
-					Height: int32(curStamp.Height),
+					Height: curStamp.Height,
 				},
 			)
 
@@ -165,13 +188,21 @@ func (s *StateSyncing) processNextBatch(
 
 		// Advance to the next block.
 		nextHeight := uint32(curStamp.Height + 1)
-		header, err := env.Chain.GetBlockHeaderByHeight(nextHeight)
+		header, err := env.Chain.GetBlockHeaderByHeight(
+			nextHeight,
+		)
 		if err != nil {
 			return partial(err)
 		}
 
 		if header.PrevBlock != curStamp.Hash {
-			return partial(fmt.Errorf("block at height %d does not extend scanned tip", nextHeight))
+			return partial(
+				fmt.Errorf(
+					"block at height %d does not "+
+						"extend scanned tip",
+					nextHeight,
+				),
+			)
 		}
 		blockHash := header.BlockHash()
 		nextStamp := headerfs.BlockStamp{
@@ -180,7 +211,8 @@ func (s *StateSyncing) processNextBatch(
 		}
 
 		// Check if we've passed the birthday threshold.
-		nextScanning := scanning || header.Timestamp.After(env.StartTime)
+		nextScanning := scanning ||
+			header.Timestamp.After(env.StartTime)
 
 		// Track relevant transactions for this block. The
 		// FilteredBlockOutbox is emitted for EVERY block (with
@@ -191,7 +223,9 @@ func (s *StateSyncing) processNextBatch(
 		if nextScanning && len(watch.List) > 0 {
 			// Fetch filter and check for matches.
 			matched, filter, err := FetchAndMatchFilter(
-				env.Chain, &blockHash, watch.List,
+				env.Chain,
+				&blockHash,
+				watch.List,
 				env.QueryOpts...,
 			)
 			if err != nil {
@@ -201,8 +235,11 @@ func (s *StateSyncing) processNextBatch(
 			if matched {
 				// Fetch full block and extract matches.
 				relevantTxs, watch, err = ExtractBlockMatches(
-					env.Chain, &nextStamp, filter,
-					watch, env.QueryOpts...,
+					env.Chain,
+					&nextStamp,
+					filter,
+					watch,
+					env.QueryOpts...,
 				)
 				if err != nil {
 					return partial(err)
@@ -230,9 +267,14 @@ func (s *StateSyncing) processNextBatch(
 
 		// Emit progress periodically.
 		if nextHeight%ProgressInterval == 0 {
-			outbox = append(outbox, RescanProgressOutbox{
-				Height: int32(nextHeight),
-			})
+			outbox = append(
+				outbox,
+				RescanProgressOutbox{
+					Height: int32(
+						nextHeight,
+					),
+				},
+			)
 		}
 
 		curStamp = nextStamp
@@ -258,27 +300,42 @@ func (s *StateSyncing) processNextBatch(
 }
 
 // handleDisconnect applies a queued chain disconnection to the scanned tip.
-func (s *StateSyncing) handleDisconnect(event *BlockDisconnectedEvent) (*StateTransition, error) {
+func (s *StateSyncing) handleDisconnect(
+	event *BlockDisconnectedEvent,
+) (*StateTransition, error) {
+
 	if event.Header.BlockHash() != s.CurStamp.Hash ||
 		int32(event.Height) != s.CurStamp.Height {
+
 		return &StateTransition{NextState: s}, nil
 	}
 	header := event.Header
 	return &StateTransition{
 		NextState: &StateSyncing{
-			CurStamp:  headerfs.BlockStamp{Hash: event.ChainTip.BlockHash(), Height: s.CurStamp.Height - 1},
-			CurHeader: event.ChainTip, Watch: s.Watch, Scanning: s.Scanning,
+			CurStamp: headerfs.BlockStamp{
+				Hash:   event.ChainTip.BlockHash(),
+				Height: s.CurStamp.Height - 1,
+			},
+			CurHeader: event.ChainTip,
+			Watch:     s.Watch,
+			Scanning:  s.Scanning,
 		},
 		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			BlockDisconnectedOutbox{Hash: s.CurStamp.Hash, Height: s.CurStamp.Height, Header: &header},
-			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+			BlockDisconnectedOutbox{
+				Hash:   s.CurStamp.Hash,
+				Height: s.CurStamp.Height,
+				Header: &header,
+			},
+			SelfTellOutbox{
+				Event: ProcessNextBlockEvent{},
+			},
 		}},
 	}, nil
 }
 
 // handleAddWatch handles an AddWatchAddrsEvent during syncing.
-func (s *StateSyncing) handleAddWatch(event *AddWatchAddrsEvent,
-	env *Environment) (*StateTransition, error) {
+func (s *StateSyncing) handleAddWatch(
+	event *AddWatchAddrsEvent) (*StateTransition, error) {
 
 	newWatch, err := s.Watch.ApplyUpdate(event)
 	if err != nil {
@@ -287,7 +344,9 @@ func (s *StateSyncing) handleAddWatch(event *AddWatchAddrsEvent,
 
 	// If a rewind is requested and target is below our current height,
 	// transition to rewinding.
-	if event.RewindTo != nil && int32(*event.RewindTo) < s.CurStamp.Height {
+	if event.RewindTo != nil &&
+		int32(*event.RewindTo) < s.CurStamp.Height {
+
 		return &StateTransition{
 			NextState: &StateRewinding{
 				CurStamp:     s.CurStamp,

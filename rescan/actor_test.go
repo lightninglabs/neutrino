@@ -1,10 +1,11 @@
 package rescan
 
 import (
-	"github.com/btcsuite/btcd/address/v2"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -139,13 +140,11 @@ func TestRescanActorLifecycle(t *testing.T) {
 	actor.Start()
 
 	// Wait for the actor to finish syncing.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond,
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond,
 		"actor should finish syncing")
 
 	// Should have connected blocks from genesis to tip.
-	require.Greater(t, blocksConnected.Load(), int32(0),
+	require.Positive(t, blocksConnected.Load(),
 		"should have connected at least 1 block")
 
 	// Should be in Current state.
@@ -187,9 +186,7 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 	actor.Start()
 
 	// Wait for sync to complete.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond)
 
 	// Add a watch address (no rewind).
 	addr, _ := address.NewAddressPubKeyHash(
@@ -299,12 +296,10 @@ func TestRescanActorWithTxMatch(t *testing.T) {
 
 	actor.Start()
 
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond)
 
 	// Should have found the matching transaction.
-	require.Greater(t, filteredBlocks.Load(), int32(0),
+	require.Positive(t, filteredBlocks.Load(),
 		"should have found at least 1 filtered block")
 
 	actor.Stop()
@@ -348,9 +343,7 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 
 	actor.Start()
 
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond)
 
 	// Now add a block and send it through the subscription channel.
 	newBest := chain.addBlock()

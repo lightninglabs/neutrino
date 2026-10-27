@@ -30,8 +30,11 @@ type StateCurrent struct {
 // ProcessEvent handles events in the Current state.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateCurrent) ProcessEvent(_ context.Context, event RescanEvent,
-	env *Environment) (*StateTransition, error) {
+func (s *StateCurrent) ProcessEvent(
+	_ context.Context,
+	event RescanEvent,
+	env *Environment,
+) (*StateTransition, error) {
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
@@ -64,8 +67,13 @@ func (s *StateCurrent) ProcessEvent(_ context.Context, event RescanEvent,
 }
 
 // reconcileTip checks the scanned tip after the subscription is installed.
-func (s *StateCurrent) reconcileTip(env *Environment) (*StateTransition, error) {
-	header, err := env.Chain.GetBlockHeaderByHeight(uint32(s.CurStamp.Height))
+func (s *StateCurrent) reconcileTip(
+	env *Environment,
+) (*StateTransition, error) {
+
+	header, err := env.Chain.GetBlockHeaderByHeight(
+		uint32(s.CurStamp.Height),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -78,17 +86,22 @@ func (s *StateCurrent) reconcileTip(env *Environment) (*StateTransition, error) 
 	return &StateTransition{
 		NextState: &StateRewinding{
 			CurStamp: s.CurStamp, CurHeader: s.CurHeader,
-			Watch: s.Watch, TargetHeight: uint32(s.CurStamp.Height - 1),
+			Watch:        s.Watch,
+			TargetHeight: uint32(s.CurStamp.Height - 1),
 		},
 		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+			SelfTellOutbox{
+				Event: ProcessNextBlockEvent{},
+			},
 		}},
 	}, nil
 }
 
 // handleBlockConnected processes a new block from the subscription.
-func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
-	env *Environment) (*StateTransition, error) {
+func (s *StateCurrent) handleBlockConnected(
+	event *BlockConnectedEvent,
+	env *Environment,
+) (*StateTransition, error) {
 
 	blockHash := event.Header.BlockHash()
 
@@ -104,9 +117,13 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 
 	// Validate the block connects to our current tip.
 	if event.Header.PrevBlock != s.CurStamp.Hash {
-		return nil, fmt.Errorf("block at height %d has prev hash "+
-			"%v, expected %v", event.Height,
-			event.Header.PrevBlock, s.CurStamp.Hash)
+		return nil, fmt.Errorf(
+			"block at height %d has prev hash "+
+				"%v, expected %v",
+			event.Height,
+			event.Header.PrevBlock,
+			s.CurStamp.Hash,
+		)
 	}
 
 	newStamp := headerfs.BlockStamp{
@@ -120,7 +137,8 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 		relevantTxs []*btcutil.Tx
 	)
 
-	scanning := s.Scanning || event.Header.Timestamp.After(env.StartTime)
+	scanning := s.Scanning ||
+		event.Header.Timestamp.After(env.StartTime)
 	if scanning && len(watch.List) > 0 {
 		// Fetch the filter for this block.
 		filter, err := FetchFilterForBlock(
@@ -140,8 +158,11 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 
 			if matched {
 				relevantTxs, watch, err = ExtractBlockMatches(
-					env.Chain, &newStamp, filter,
-					watch, env.QueryOpts...,
+					env.Chain,
+					&newStamp,
+					filter,
+					watch,
+					env.QueryOpts...,
 				)
 				if err != nil {
 					return nil, err
@@ -185,13 +206,17 @@ func (s *StateCurrent) handleBlockConnected(event *BlockConnectedEvent,
 // handleBlockDisconnected processes a block disconnection (reorg) from the
 // subscription.
 func (s *StateCurrent) handleBlockDisconnected(
-	event *BlockDisconnectedEvent) (*StateTransition, error) {
+	event *BlockDisconnectedEvent,
+) (*StateTransition, error) {
 
 	// Only handle if this is the block at our current tip.
 	if event.Header.BlockHash() != s.CurStamp.Hash {
-		log.Debugf("StateCurrent: ignoring disconnect for block %v "+
-			"(current tip: %v)", event.Header.BlockHash(),
-			s.CurStamp.Hash)
+		log.Debugf(
+			"StateCurrent: ignoring disconnect for block %v "+
+				"(current tip: %v)",
+			event.Header.BlockHash(),
+			s.CurStamp.Hash,
+		)
 
 		return &StateTransition{NextState: s}, nil
 	}
@@ -211,7 +236,7 @@ func (s *StateCurrent) handleBlockDisconnected(
 			Outbox: []OutboxEvent{
 				BlockDisconnectedOutbox{
 					Hash:   s.CurStamp.Hash,
-					Height: int32(s.CurStamp.Height),
+					Height: s.CurStamp.Height,
 					Header: &headerCopy,
 				},
 			},

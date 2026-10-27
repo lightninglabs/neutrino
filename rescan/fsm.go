@@ -317,21 +317,21 @@ func (s *StateMachine) driveMachine() {
 func snapshotState(state RescanState) RescanState {
 	switch s := state.(type) {
 	case *StateInitializing:
-		copy := *s
-		copy.Watch = s.Watch.Clone()
-		return &copy
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
 	case *StateSyncing:
-		copy := *s
-		copy.Watch = s.Watch.Clone()
-		return &copy
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
 	case *StateCurrent:
-		copy := *s
-		copy.Watch = s.Watch.Clone()
-		return &copy
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
 	case *StateRewinding:
-		copy := *s
-		copy.Watch = s.Watch.Clone()
-		return &copy
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
 	default:
 		return state
 	}

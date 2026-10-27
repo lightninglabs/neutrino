@@ -2,6 +2,7 @@ package rescan
 
 import (
 	"fmt"
+
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/wire/v2"
@@ -32,7 +33,9 @@ type RescanActorResp interface {
 
 // RescanActorServiceKey returns the service key used to spawn and discover the
 // rescan actor within an actor system.
-func RescanActorServiceKey() lndactor.ServiceKey[RescanActorMsg, RescanActorResp] {
+func RescanActorServiceKey() lndactor.ServiceKey[
+	RescanActorMsg, RescanActorResp] {
+
 	return lndactor.NewServiceKey[RescanActorMsg, RescanActorResp](
 		RescanActorServiceKeyName,
 	)
@@ -42,7 +45,9 @@ type processNextBlockMsg struct {
 	lndactor.BaseMessage
 }
 
-func (*processNextBlockMsg) MessageType() string   { return "process_next_block" }
+func (*processNextBlockMsg) MessageType() string {
+	return "process_next_block"
+}
 func (*processNextBlockMsg) rescanActorMsgSealed() {}
 
 type stopRescanMsg struct {
@@ -116,8 +121,11 @@ type currentStateResp struct {
 
 func (*currentStateResp) rescanActorRespSealed() {}
 
-func newAddWatchAddrsMsg(addrs []address.Address,
-	inputs []neutrino.InputWithScript, rewindTo *uint32) *addWatchAddrsMsg {
+func newAddWatchAddrsMsg(
+	addrs []address.Address,
+	inputs []neutrino.InputWithScript,
+	rewindTo *uint32,
+) *addWatchAddrsMsg {
 
 	msg := &addWatchAddrsMsg{
 		Addrs:  append([]address.Address(nil), addrs...),
@@ -133,7 +141,8 @@ func newAddWatchAddrsMsg(addrs []address.Address,
 }
 
 func copyInputsWithScripts(
-	inputs []neutrino.InputWithScript) []neutrino.InputWithScript {
+	inputs []neutrino.InputWithScript,
+) []neutrino.InputWithScript {
 
 	if len(inputs) == 0 {
 		return nil
@@ -150,7 +159,10 @@ func copyInputsWithScripts(
 	return cloned
 }
 
-func actorMsgFromFSMEvent(event RescanEvent) (RescanActorMsg, error) {
+func actorMsgFromFSMEvent(
+	event RescanEvent,
+) (RescanActorMsg, error) {
+
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		return &processNextBlockMsg{}, nil

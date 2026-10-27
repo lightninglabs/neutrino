@@ -3,6 +3,7 @@ package rescan
 import (
 	"bytes"
 	"fmt"
+
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -38,9 +39,12 @@ type WatchState struct {
 // don't share underlying slice memory.
 func (ws *WatchState) Clone() WatchState {
 	clone := WatchState{
-		Addrs:  make([]address.Address, len(ws.Addrs)),
-		Inputs: make([]neutrino.InputWithScript, len(ws.Inputs)),
-		List:   make([][]byte, len(ws.List)),
+		Addrs: make([]address.Address, len(ws.Addrs)),
+		Inputs: make(
+			[]neutrino.InputWithScript,
+			len(ws.Inputs),
+		),
+		List: make([][]byte, len(ws.List)),
 	}
 	copy(clone.Addrs, ws.Addrs)
 	clone.Inputs = copyInputsWithScripts(ws.Inputs)
@@ -48,7 +52,10 @@ func (ws *WatchState) Clone() WatchState {
 		clone.List[i] = append([]byte(nil), script...)
 	}
 	if ws.addrScripts != nil {
-		clone.addrScripts = make(map[string]struct{}, len(ws.addrScripts))
+		clone.addrScripts = make(
+			map[string]struct{},
+			len(ws.addrScripts),
+		)
 		for script := range ws.addrScripts {
 			clone.addrScripts[script] = struct{}{}
 		}
@@ -109,8 +116,11 @@ func (ws *WatchState) cacheAddrScripts() error {
 // MatchBlockFilter checks whether the block filter matches any items in the
 // watch list. If this returns false, the block is certainly not interesting
 // to us.
-func MatchBlockFilter(filter *gcs.Filter,
-	blockHash *chainhash.Hash, watchList [][]byte) (bool, error) {
+func MatchBlockFilter(
+	filter *gcs.Filter,
+	blockHash *chainhash.Hash,
+	watchList [][]byte,
+) (bool, error) {
 
 	key := builder.DeriveKey(blockHash)
 	matched, err := filter.MatchAny(key, watchList)
@@ -125,11 +135,17 @@ func MatchBlockFilter(filter *gcs.Filter,
 // and checks it against the watch list. Returns the match result and the
 // filter (for potential later use in block extraction). Uses optimistic
 // batch queries for performance during historical catch-up.
-func FetchAndMatchFilter(chain neutrino.ChainSource,
-	blockHash *chainhash.Hash, watchList [][]byte,
-	queryOpts ...neutrino.QueryOption) (bool, *gcs.Filter, error) {
+func FetchAndMatchFilter(
+	chain neutrino.ChainSource,
+	blockHash *chainhash.Hash,
+	watchList [][]byte,
+	queryOpts ...neutrino.QueryOption,
+) (bool, *gcs.Filter, error) {
 
-	opts := append([]neutrino.QueryOption{neutrino.OptimisticBatch()},
+	opts := append(
+		[]neutrino.QueryOption{
+			neutrino.OptimisticBatch(),
+		},
 		queryOpts...)
 
 	filter, err := chain.GetCFilter(
@@ -144,7 +160,11 @@ func FetchAndMatchFilter(chain neutrino.ChainSource,
 		return false, nil, nil
 	}
 
-	matched, err := MatchBlockFilter(filter, blockHash, watchList)
+	matched, err := MatchBlockFilter(
+		filter,
+		blockHash,
+		watchList,
+	)
 
 	return matched, filter, err
 }
@@ -154,10 +174,13 @@ func FetchAndMatchFilter(chain neutrino.ChainSource,
 // with new inputs discovered from matching outputs (so future spends are
 // also watched). Returns the relevant transactions and the updated watch
 // state.
-func ExtractBlockMatches(chain neutrino.ChainSource,
-	curStamp *headerfs.BlockStamp, filter *gcs.Filter,
+func ExtractBlockMatches(
+	chain neutrino.ChainSource,
+	curStamp *headerfs.BlockStamp,
+	filter *gcs.Filter,
 	ws WatchState,
-	queryOpts ...neutrino.QueryOption) ([]*btcutil.Tx, WatchState, error) {
+	queryOpts ...neutrino.QueryOption,
+) ([]*btcutil.Tx, WatchState, error) {
 
 	ws = ws.Clone()
 	block, err := chain.GetBlock(curStamp.Hash, queryOpts...)
@@ -165,8 +188,12 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 		return nil, ws, err
 	}
 	if block == nil {
-		return nil, ws, fmt.Errorf("couldn't get block %d (%s) from "+
-			"network", curStamp.Height, curStamp.Hash)
+		return nil, ws, fmt.Errorf(
+			"couldn't get block %d (%s) from "+
+				"network",
+			curStamp.Height,
+			curStamp.Hash,
+		)
 	}
 
 	if err := ws.cacheAddrScripts(); err != nil {
@@ -174,11 +201,16 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 	}
 
 	// Verify the filter against the downloaded block.
-	if _, err := neutrino.VerifyBasicBlockFilter(filter, block); err != nil {
-		return nil, ws, fmt.Errorf("error verifying filter against "+
-			"downloaded block %d (%s), possibly got invalid "+
-			"filter from peer: %v", curStamp.Height, curStamp.Hash,
-			err)
+	_, err = neutrino.VerifyBasicBlockFilter(filter, block)
+	if err != nil {
+		return nil, ws, fmt.Errorf(
+			"error verifying filter against "+
+				"block %d (%s), possibly invalid "+
+				"filter from peer: %v",
+			curStamp.Height,
+			curStamp.Hash,
+			err,
+		)
 	}
 
 	blockHeader := block.MsgBlock().Header
@@ -188,7 +220,11 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 		Time:   blockHeader.Timestamp.Unix(),
 	}
 
-	relevantTxs := make([]*btcutil.Tx, 0, len(block.Transactions()))
+	relevantTxs := make(
+		[]*btcutil.Tx,
+		0,
+		len(block.Transactions()),
+	)
 	for txIdx, tx := range block.Transactions() {
 		txDetails := blockDetails
 		txDetails.Index = txIdx
@@ -202,7 +238,10 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 		// Even though the transaction may already be known as
 		// relevant, we need to call PaysWatchedAddr anyway as it
 		// discovers new inputs to watch.
-		pays, newInputs := paysWatchedScripts(tx, ws.addrScripts)
+		pays, newInputs := paysWatchedScripts(
+			tx,
+			ws.addrScripts,
+		)
 
 		if pays {
 			relevant = true
@@ -210,9 +249,14 @@ func ExtractBlockMatches(chain neutrino.ChainSource,
 
 		// Add any new inputs discovered from matching outputs.
 		if len(newInputs) > 0 {
-			ws.Inputs = append(ws.Inputs, newInputs...)
+			ws.Inputs = append(
+				ws.Inputs,
+				newInputs...)
 			for _, input := range newInputs {
-				ws.List = append(ws.List, input.PkScript)
+				ws.List = append(
+					ws.List,
+					input.PkScript,
+				)
 			}
 		}
 
@@ -238,15 +282,18 @@ func SpendsWatchedInput(tx *btcutil.Tx,
 			switch {
 			case input.OutPoint == zeroOutPoint:
 				pkScript, err := txscript.ComputePkScript(
-					in.SignatureScript, in.Witness,
+					in.SignatureScript,
+					in.Witness,
 				)
 				if err != nil {
 					continue
 				}
 
 				if bytes.Equal(
-					pkScript.Script(), input.PkScript,
+					pkScript.Script(),
+					input.PkScript,
 				) {
+
 					return true
 				}
 
@@ -263,8 +310,10 @@ func SpendsWatchedInput(tx *btcutil.Tx,
 // of the watched addresses. It also returns any new InputWithScript entries
 // for the matching outputs, so that future spends of these outputs are also
 // watched.
-func PaysWatchedAddr(tx *btcutil.Tx,
-	watchAddrs []address.Address) (bool, []neutrino.InputWithScript,
+func PaysWatchedAddr(
+	tx *btcutil.Tx,
+	watchAddrs []address.Address,
+) (bool, []neutrino.InputWithScript,
 	error) {
 
 	ws := WatchState{Addrs: watchAddrs}
@@ -275,18 +324,26 @@ func PaysWatchedAddr(tx *btcutil.Tx,
 	return matched, inputs, nil
 }
 
-func paysWatchedScripts(tx *btcutil.Tx,
-	scripts map[string]struct{}) (bool, []neutrino.InputWithScript) {
+func paysWatchedScripts(
+	tx *btcutil.Tx,
+	scripts map[string]struct{},
+) (bool, []neutrino.InputWithScript) {
 
 	var newInputs []neutrino.InputWithScript
 	for outIdx, out := range tx.MsgTx().TxOut {
 		if _, ok := scripts[string(out.PkScript)]; !ok {
 			continue
 		}
-		newInputs = append(newInputs, neutrino.InputWithScript{
-			PkScript: out.PkScript,
-			OutPoint: wire.OutPoint{Hash: *tx.Hash(), Index: uint32(outIdx)},
-		})
+		newInputs = append(
+			newInputs,
+			neutrino.InputWithScript{
+				PkScript: out.PkScript,
+				OutPoint: wire.OutPoint{
+					Hash:  *tx.Hash(),
+					Index: uint32(outIdx),
+				},
+			},
+		)
 	}
 	return len(newInputs) > 0, newInputs
 }
@@ -297,8 +354,11 @@ type BlockStamp = headerfs.BlockStamp
 
 // FetchFilterForBlock fetches the compact filter for a single block. Used
 // when the block is received from a subscription (not during batch catch-up).
-func FetchFilterForBlock(chain neutrino.ChainSource, blockHash chainhash.Hash,
-	queryOpts ...neutrino.QueryOption) (*gcs.Filter, error) {
+func FetchFilterForBlock(
+	chain neutrino.ChainSource,
+	blockHash chainhash.Hash,
+	queryOpts ...neutrino.QueryOption,
+) (*gcs.Filter, error) {
 
 	filter, err := chain.GetCFilter(
 		blockHash, wire.GCSFilterRegular, queryOpts...,

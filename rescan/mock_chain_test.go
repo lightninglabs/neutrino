@@ -38,9 +38,11 @@ var _ neutrino.ChainSource = (*mockChainSource)(nil)
 // genesis. All blocks have empty filters (no matching transactions).
 func newMockChain(numBlocks int) *mockChainSource {
 	chain := &mockChainSource{
-		blockHeightIndex:      make(map[chainhash.Hash]uint32),
-		blockHashesByHeight:   make(map[uint32]*chainhash.Hash),
-		blockHeaders:          make(map[chainhash.Hash]*wire.BlockHeader),
+		blockHeightIndex:    make(map[chainhash.Hash]uint32),
+		blockHashesByHeight: make(map[uint32]*chainhash.Hash),
+		blockHeaders: make(
+			map[chainhash.Hash]*wire.BlockHeader,
+		),
 		blocks:                make(map[chainhash.Hash]*btcutil.Block),
 		filters:               make(map[chainhash.Hash]*gcs.Filter),
 		filterHeadersByHeight: make(map[uint32]*chainhash.Hash),

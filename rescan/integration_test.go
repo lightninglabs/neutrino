@@ -1,10 +1,11 @@
 package rescan
 
 import (
-	"github.com/btcsuite/btcd/address/v2"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -79,12 +80,10 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	actor.Start()
 
 	// Wait for sync to finish.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond)
 
 	// Verify: blocks were received but no tx found (no address watched).
-	require.Greater(t, blocksReceived.Load(), int32(0))
+	require.Positive(t, blocksReceived.Load())
 	require.Equal(t, int32(0), filteredCount.Load(),
 		"should not find tx without watching the address")
 
@@ -190,9 +189,7 @@ func TestIntegrationRaceConditionPrevention(t *testing.T) {
 	actor.Start()
 
 	// Wait for sync to complete.
-	require.Eventually(t, func() bool {
-		return finished.Load()
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, finished.Load, 5*time.Second, 10*time.Millisecond)
 
 	// Now simultaneously: add a block with a tx AND add the address.
 	// In the old rescan, if the select picked the block first, the tx

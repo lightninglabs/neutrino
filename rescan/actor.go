@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -132,6 +133,9 @@ type RescanActor struct {
 	sub          *blockntfns.Subscription
 
 	asyncWG sync.WaitGroup
+
+	// continuationPending is owned by the actor mailbox.
+	continuationPending bool
 }
 
 // NewRescanActor creates a new rescan actor with the given configuration.
@@ -141,8 +145,14 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 
 	// Build the initial watch state from config.
 	watch := WatchState{
-		Addrs:  make([]address.Address, len(cfg.WatchAddrs)),
-		Inputs: make([]neutrino.InputWithScript, len(cfg.WatchInputs)),
+		Addrs: make(
+			[]address.Address,
+			len(cfg.WatchAddrs),
+		),
+		Inputs: make(
+			[]neutrino.InputWithScript,
+			len(cfg.WatchInputs),
+		),
 	}
 	copy(watch.Addrs, cfg.WatchAddrs)
 	watch.Inputs = copyInputsWithScripts(cfg.WatchInputs)
@@ -151,7 +161,10 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 	for _, addr := range watch.Addrs {
 		script, err := txscript.PayToAddrScript(addr)
 		if err != nil {
-			log.Errorf("Failed to convert addr to script: %v", err)
+			log.Errorf(
+				"Failed to convert addr to script: %v",
+				err,
+			)
 			continue
 		}
 
@@ -166,6 +179,9 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		batchSize = DefaultBatchSize
 	}
 
+	queryOpts := append([]neutrino.QueryOption(nil), cfg.QueryOpts...)
+	queryOpts = append(queryOpts, neutrino.CancelQuery(ctx.Done()))
+
 	// Create the FSM with initial state and immutable environment.
 	fsm := NewStateMachine(StateMachineCfg{
 		ErrorReporter: &logErrorReporter{},
@@ -177,7 +193,7 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		Env: &Environment{
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
-			QueryOpts: cfg.QueryOpts,
+			QueryOpts: queryOpts,
 			BatchSize: batchSize,
 		},
 	})
@@ -199,10 +215,16 @@ func (a *RescanActor) Start() {
 		a.fsm.Start()
 
 		system := lndactor.NewActorSystem()
-		ref, err := a.serviceKey.Spawn(system, a.actorID, a)
+		ref, err := a.serviceKey.Spawn(
+			system,
+			a.actorID,
+			a,
+		)
 		if err != nil {
-			log.Errorf("RescanActor: failed to spawn actor runtime: %v",
-				err)
+			log.Errorf(
+				"RescanActor: spawn failed: %v",
+				err,
+			)
 
 			a.mu.Lock()
 			a.startErr = err
@@ -221,7 +243,10 @@ func (a *RescanActor) Start() {
 		a.mu.Unlock()
 
 		if a.startBridge(0) {
-			ref.Tell(context.Background(), &processNextBlockMsg{})
+			ref.Tell(
+				context.Background(),
+				&processNextBlockMsg{},
+			)
 		}
 	})
 }
@@ -231,31 +256,43 @@ func (a *RescanActor) Start() {
 // actor's work, then tears down the runtime and FSM.
 func (a *RescanActor) Stop() {
 	a.stopOnce.Do(func() {
+		// Cancel a network query before waiting for the actor mailbox.
+		a.cancel()
 		ref, system, startErr := a.runtimeSnapshot()
 		if startErr == nil && ref != nil {
 			stopCtx, cancel := context.WithTimeout(
-				context.Background(), time.Second,
+				context.Background(),
+				time.Second,
 			)
-			result := ref.Ask(stopCtx, &stopRescanMsg{}).Await(stopCtx)
+			result := ref.Ask(stopCtx, &stopRescanMsg{}).
+				Await(stopCtx)
 			cancel()
 
 			if result.IsErr() {
-				log.Debugf("RescanActor: graceful stop via mailbox "+
-					"failed: %v", result.Err())
+				log.Debugf(
+					"RescanActor: graceful stop "+
+						"failed: %v",
+					result.Err(),
+				)
 			}
 		}
 
-		a.cancel()
 		a.cancelBridge()
 
 		if system != nil {
 			if ref != nil {
-				a.serviceKey.Unregister(system, ref)
+				a.serviceKey.Unregister(
+					system,
+					ref,
+				)
 			}
 
 			if err := system.Shutdown(); err != nil {
-				log.Debugf("RescanActor: actor system shutdown "+
-					"failed: %v", err)
+				log.Debugf(
+					"RescanActor: actor system shutdown "+
+						"failed: %v",
+					err,
+				)
 			}
 		}
 
@@ -276,8 +313,11 @@ func (a *RescanActor) WaitForShutdown() {
 // AddWatchAddrs sends an AddWatchAddrs mailbox request so watch-list changes
 // are serialized with all other actor work and any FSM failure is surfaced to
 // the caller.
-func (a *RescanActor) AddWatchAddrs(addrs []address.Address,
-	inputs []neutrino.InputWithScript, rewindTo *uint32) error {
+func (a *RescanActor) AddWatchAddrs(
+	addrs []address.Address,
+	inputs []neutrino.InputWithScript,
+	rewindTo *uint32,
+) error {
 
 	ref, err := a.requireActorRef()
 	if err != nil {
@@ -312,14 +352,17 @@ func (a *RescanActor) CurrentState() (RescanState, error) {
 	)
 	defer cancel()
 
-	result := ref.Ask(queryCtx, &currentStateReq{}).Await(queryCtx)
+	result := ref.Ask(queryCtx, &currentStateReq{}).
+		Await(queryCtx)
 	if result.IsErr() {
 		return nil, result.Err()
 	}
 
 	resp, ok := result.UnwrapOr(nil).(*currentStateResp)
 	if !ok || resp == nil {
-		return nil, fmt.Errorf("unexpected current state response")
+		return nil, fmt.Errorf(
+			"unexpected current state response",
+		)
 	}
 
 	return resp.State, nil
@@ -343,7 +386,9 @@ func (a *RescanActor) requireActorRef() (
 		return nil, startErr
 	}
 	if ref == nil {
-		return nil, fmt.Errorf("rescan actor not started")
+		return nil, fmt.Errorf(
+			"rescan actor not started",
+		)
 	}
 
 	return ref, nil
@@ -355,6 +400,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 
 	switch m := msg.(type) {
 	case *processNextBlockMsg:
+		a.continuationPending = false
 		return a.handleRetriableEvent(
 			actorCtx, m, ProcessNextBlockEvent{},
 		)
@@ -366,8 +412,26 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 				return fn.Err[RescanActorResp](err)
 			}
 			cur, ok := state.(*StateCurrent)
-			if !ok || cur.CurStamp.Hash != m.RetryAnchor.Hash ||
-				cur.CurStamp.Height != m.RetryAnchor.Height {
+			if !ok {
+				return fn.Ok[RescanActorResp](&rescanActorAck{})
+			}
+			if int32(m.Height) <= cur.CurStamp.Height {
+				return fn.Ok[RescanActorResp](&rescanActorAck{})
+			}
+			header, err := a.cfg.Chain.GetBlockHeaderByHeight(
+				m.Height,
+			)
+			if err != nil {
+				a.scheduleRetry(m)
+				return fn.Ok[RescanActorResp](&rescanActorAck{})
+			}
+			if header.BlockHash() != m.Header.BlockHash() {
+				return fn.Ok[RescanActorResp](&rescanActorAck{})
+			}
+			if m.Header.PrevBlock != cur.CurStamp.Hash {
+				anchor := cur.CurStamp
+				m.RetryAnchor = &anchor
+				a.scheduleRetry(m)
 				return fn.Ok[RescanActorResp](&rescanActorAck{})
 			}
 		}
@@ -420,16 +484,23 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 	}
 }
 
-func (a *RescanActor) handleRetriableEvent(actorCtx context.Context,
-	msg RescanActorMsg, event RescanEvent) fn.Result[RescanActorResp] {
+func (a *RescanActor) handleRetriableEvent(
+	actorCtx context.Context,
+	msg RescanActorMsg,
+	event RescanEvent,
+) fn.Result[RescanActorResp] {
 
 	result := a.handleFSMEvent(actorCtx, event)
 	if result.IsErr() {
 		err := result.Err()
 
-		log.Warnf("RescanActor: error processing %s: %v, "+
-			"retrying in %v", msg.MessageType(), err,
-			filterRetryInterval)
+		log.Warnf(
+			"RescanActor: error processing %s: %v, "+
+				"retrying in %v",
+			msg.MessageType(),
+			err,
+			filterRetryInterval,
+		)
 
 		if a.cfg.OnError != nil {
 			a.cfg.OnError(err)
@@ -458,7 +529,7 @@ func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 		return fn.Err[RescanActorResp](err)
 	}
 
-	a.dispatchOutbox(actorCtx, outbox)
+	a.dispatchOutbox(outbox)
 
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
@@ -466,8 +537,11 @@ func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
 	retryMsg, err := cloneRetryMsg(msg)
 	if err != nil {
-		log.Errorf("RescanActor: unable to clone retry message %T: %v",
-			msg, err)
+		log.Errorf(
+			"RescanActor: unable to clone retry message %T: %v",
+			msg,
+			err,
+		)
 
 		return
 	}
@@ -491,7 +565,7 @@ func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
 			return
 		}
 
-		ref.Tell(context.Background(), retryMsg)
+		ref.Tell(a.ctx, retryMsg)
 	}()
 }
 
@@ -499,12 +573,15 @@ func (a *RescanActor) handleStop(
 	actorCtx context.Context) fn.Result[RescanActorResp] {
 
 	if a.fsm.IsRunning() {
-		outbox, err := a.fsm.AskEvent(actorCtx, StopEvent{})
+		outbox, err := a.fsm.AskEvent(
+			actorCtx,
+			StopEvent{},
+		)
 		if err != nil {
 			return fn.Err[RescanActorResp](err)
 		}
 
-		a.dispatchOutbox(actorCtx, outbox)
+		a.dispatchOutbox(outbox)
 	}
 
 	a.cancelBridge()
@@ -512,7 +589,10 @@ func (a *RescanActor) handleStop(
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
 
-func (a *RescanActor) handleSubscriptionClosed(msg *subscriptionClosedMsg) fn.Result[RescanActorResp] {
+func (a *RescanActor) handleSubscriptionClosed(
+	msg *subscriptionClosedMsg,
+) fn.Result[RescanActorResp] {
+
 	a.bridgeMu.Lock()
 	active := a.sub
 	a.bridgeMu.Unlock()
@@ -539,24 +619,23 @@ func (a *RescanActor) handleSubscriptionClosed(msg *subscriptionClosedMsg) fn.Re
 		height = uint32(cur.CurStamp.Height)
 	}
 
-	log.Warnf("RescanActor: restarting closed subscription from height %d", height)
+	log.Warnf(
+		"RescanActor: restarting closed subscription from height %d",
+		height,
+	)
 	if a.cfg.OnError != nil {
 		a.cfg.OnError(errSubscriptionClosed)
 	}
 	a.cancelBridge()
 	if a.startBridge(height) {
-		if ref, refErr := a.requireActorRef(); refErr == nil {
-			ref.Tell(context.Background(), &processNextBlockMsg{})
-		}
+		a.enqueueContinuation()
 	}
 
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
 
 // dispatchOutbox processes outbox events emitted by FSM state transitions.
-func (a *RescanActor) dispatchOutbox(actorCtx context.Context,
-	outbox []OutboxEvent) {
-
+func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
 	for _, event := range outbox {
 		select {
 		case <-a.ctx.Done():
@@ -574,30 +653,27 @@ func (a *RescanActor) dispatchOutbox(actorCtx context.Context,
 
 			if a.cfg.Callbacks.OnTxConfirmed != nil {
 				for _, tx := range e.RelevantTxs {
-					a.cfg.Callbacks.OnTxConfirmed(*tx.Hash())
+					confirm := a.cfg.Callbacks.OnTxConfirmed
+					confirm(*tx.Hash())
 				}
 			}
 
 		case BlockConnectedOutbox:
-			if a.cfg.Callbacks.OnBlockConnected != nil {
-				header := e.Header
-				if header == nil {
-					var err error
-					header, err = a.cfg.Chain.GetBlockHeaderByHeight(
-						uint32(e.Height),
-					)
-					if err != nil {
-						log.Errorf("Failed to get header for "+
-							"height %d: %v", e.Height, err)
-						continue
-					}
-				}
-
-				a.cfg.Callbacks.OnBlockConnected(
-					e.Height, header,
-					time.Unix(e.Timestamp, 0),
-				)
+			callback := a.cfg.Callbacks.OnBlockConnected
+			if callback == nil {
+				continue
 			}
+			header := e.Header
+			getHeader := a.cfg.Chain.GetBlockHeaderByHeight
+			if header == nil {
+				var err error
+				header, err = getHeader(uint32(e.Height))
+				if err != nil {
+					log.Errorf("%d: %v", e.Height, err)
+					continue
+				}
+			}
+			callback(e.Height, header, time.Unix(e.Timestamp, 0))
 
 		case BlockDisconnectedOutbox:
 			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {
@@ -630,8 +706,7 @@ func (a *RescanActor) dispatchOutbox(actorCtx context.Context,
 		case SelfTellOutbox:
 			selfMsg, err := actorMsgFromFSMEvent(e.Event)
 			if err != nil {
-				log.Errorf("RescanActor: unable to map self-tell "+
-					"event %T: %v", e.Event, err)
+				log.Errorf("Self-tell %T: %v", e.Event, err)
 
 				if a.cfg.OnError != nil {
 					a.cfg.OnError(err)
@@ -640,14 +715,30 @@ func (a *RescanActor) dispatchOutbox(actorCtx context.Context,
 				continue
 			}
 
-			ref, err := a.requireActorRef()
-			if err != nil {
+			if _, ok := selfMsg.(*processNextBlockMsg); ok {
+				a.enqueueContinuation()
 				continue
 			}
-
-			ref.Tell(actorCtx, selfMsg)
+			log.Errorf("unexpected self-tell message %T", selfMsg)
 		}
 	}
+}
+
+// enqueueContinuation avoids blocking the mailbox on its own bounded queue.
+func (a *RescanActor) enqueueContinuation() {
+	if a.continuationPending {
+		return
+	}
+	ref, err := a.requireActorRef()
+	if err != nil {
+		return
+	}
+	a.continuationPending = true
+	a.asyncWG.Add(1)
+	go func() {
+		defer a.asyncWG.Done()
+		ref.Tell(a.ctx, &processNextBlockMsg{})
+	}()
 }
 
 // startBridge starts the subscription bridge goroutine that converts block
@@ -665,8 +756,11 @@ func (a *RescanActor) startBridge(bestHeight uint32) bool {
 	if err != nil {
 		bridgeCancel()
 
-		log.Errorf("RescanActor: failed to subscribe at height %d: %v",
-			bestHeight, err)
+		log.Errorf(
+			"RescanActor: failed to subscribe at height %d: %v",
+			bestHeight,
+			err,
+		)
 		if a.cfg.OnError != nil {
 			a.cfg.OnError(err)
 		}
@@ -717,13 +811,17 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 					return
 				}
 
-				log.Info("RescanActor: subscription channel closed")
+				log.Info(
+					"RescanActor: subscription closed",
+				)
 
 				ref, err := a.requireActorRef()
 				if err == nil {
 					ref.Tell(
-						context.Background(),
-						&subscriptionClosedMsg{Sub: sub},
+						ctx,
+						&subscriptionClosedMsg{
+							Sub: sub,
+						},
 					)
 				}
 
@@ -757,7 +855,7 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 				return
 			}
 
-			ref.Tell(context.Background(), msg)
+			ref.Tell(ctx, msg)
 		}
 	}
 }
@@ -770,7 +868,9 @@ func (r *logErrorReporter) ReportError(err error) {
 }
 
 // Ensure the mailbox behavior implements the lnd actor behavior interface.
-var _ lndactor.ActorBehavior[RescanActorMsg, RescanActorResp] = (*RescanActor)(nil)
+var _ lndactor.ActorBehavior[RescanActorMsg, RescanActorResp] = (*RescanActor)(
+	nil,
+)
 
 // Ensure all states implement the RescanState interface at compile time.
 var _ RescanState = (*StateInitializing)(nil)

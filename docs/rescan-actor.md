@@ -14,11 +14,15 @@ than reporting a completed scan. The caller must reconcile its wallet state
 and restart from a known active-chain anchor when the missing ancestry cannot
 be recovered.
 
-ChainSource block and filter queries do not expose per-query cancellation. A
-shutdown can therefore wait for an in-flight query to return; retry delays are
-cancelled on shutdown. Closing the underlying ChainService also cancels its
-network queries.
+The actor cancels its block and filter queries before waiting for the mailbox
+on shutdown. The underlying ChainSource must honor the cancellation query
+option for an in-flight fetch to return promptly. Retry delays and bridge sends
+are also cancelled on shutdown.
 
 The P model captures early subscription and idempotent start requests. Its
 historical scan still abstracts disconnect delivery and does not establish the
 runtime ordering covered by the deterministic reorg tests.
+
+An `AddWatchAddrs` update with no rewind applies to future scanning only. To
+cover blocks already processed or concurrent with registration, callers must
+provide a prior active-chain rewind height. Scanning resumes after that anchor.

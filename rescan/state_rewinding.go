@@ -28,8 +28,11 @@ type StateRewinding struct {
 // ProcessEvent handles events in the Rewinding state.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateRewinding) ProcessEvent(_ context.Context, event RescanEvent,
-	env *Environment) (*StateTransition, error) {
+func (s *StateRewinding) ProcessEvent(
+	_ context.Context,
+	event RescanEvent,
+	env *Environment,
+) (*StateTransition, error) {
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
@@ -71,6 +74,9 @@ func (s *StateRewinding) processRewind(
 		// Check if we've reached the target.
 		if curStamp.Height <= int32(s.TargetHeight) {
 			// Transition to syncing from this point.
+			continuation := SelfTellOutbox{
+				Event: ProcessNextBlockEvent{},
+			}
 			return &StateTransition{
 				NextState: &StateSyncing{
 					CurStamp:  curStamp,
@@ -79,9 +85,7 @@ func (s *StateRewinding) processRewind(
 					Scanning:  true,
 				},
 				Events: &EmittedEvent{
-					Outbox: append(outbox, SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					}),
+					Outbox: append(outbox, continuation),
 				},
 			}, nil
 		}
@@ -90,7 +94,7 @@ func (s *StateRewinding) processRewind(
 		headerCopy := curHeader
 		outbox = append(outbox, BlockDisconnectedOutbox{
 			Hash:   curStamp.Hash,
-			Height: int32(curStamp.Height),
+			Height: curStamp.Height,
 			Header: &headerCopy,
 		})
 
@@ -126,20 +130,35 @@ func (s *StateRewinding) processRewind(
 }
 
 // handleDisconnect applies a reorg notification while rewinding.
-func (s *StateRewinding) handleDisconnect(event *BlockDisconnectedEvent) (*StateTransition, error) {
+func (s *StateRewinding) handleDisconnect(
+	event *BlockDisconnectedEvent,
+) (*StateTransition, error) {
+
 	if event.Header.BlockHash() != s.CurStamp.Hash ||
 		int32(event.Height) != s.CurStamp.Height {
+
 		return &StateTransition{NextState: s}, nil
 	}
 	header := event.Header
 	return &StateTransition{
 		NextState: &StateRewinding{
-			CurStamp:  headerfs.BlockStamp{Hash: event.ChainTip.BlockHash(), Height: s.CurStamp.Height - 1},
-			CurHeader: event.ChainTip, Watch: s.Watch, TargetHeight: s.TargetHeight,
+			CurStamp: headerfs.BlockStamp{
+				Hash:   event.ChainTip.BlockHash(),
+				Height: s.CurStamp.Height - 1,
+			},
+			CurHeader:    event.ChainTip,
+			Watch:        s.Watch,
+			TargetHeight: s.TargetHeight,
 		},
 		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			BlockDisconnectedOutbox{Hash: s.CurStamp.Hash, Height: s.CurStamp.Height, Header: &header},
-			SelfTellOutbox{Event: ProcessNextBlockEvent{}},
+			BlockDisconnectedOutbox{
+				Hash:   s.CurStamp.Hash,
+				Height: s.CurStamp.Height,
+				Header: &header,
+			},
+			SelfTellOutbox{
+				Event: ProcessNextBlockEvent{},
+			},
 		}},
 	}, nil
 }
@@ -155,7 +174,9 @@ func (s *StateRewinding) handleAddWatch(
 	}
 
 	targetHeight := s.TargetHeight
-	if event.RewindTo != nil && *event.RewindTo < targetHeight {
+	if event.RewindTo != nil &&
+		*event.RewindTo < targetHeight {
+
 		targetHeight = *event.RewindTo
 	}
 

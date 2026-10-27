@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -33,7 +32,7 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	}
 
 	transition, err := state.ProcessEvent(
-		context.Background(), ProcessNextBlockEvent{}, env,
+		t.Context(), ProcessNextBlockEvent{}, env,
 	)
 	require.NoError(t, err)
 
@@ -62,7 +61,7 @@ func TestStateInitializingAddWatch(t *testing.T) {
 	env := &Environment{}
 
 	transition, err := state.ProcessEvent(
-		context.Background(),
+		t.Context(),
 		AddWatchAddrsEvent{
 			Addrs: nil, // No addresses for this test.
 		},
@@ -81,7 +80,7 @@ func TestStateInitializingStop(t *testing.T) {
 	env := &Environment{}
 
 	transition, err := state.ProcessEvent(
-		context.Background(), StopEvent{}, env,
+		t.Context(), StopEvent{}, env,
 	)
 	require.NoError(t, err)
 
@@ -115,7 +114,7 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	}
 
 	transition, err := state.ProcessEvent(
-		context.Background(), ProcessNextBlockEvent{}, env,
+		t.Context(), ProcessNextBlockEvent{}, env,
 	)
 	require.NoError(t, err)
 
@@ -168,7 +167,7 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	}
 
 	transition, err := state.ProcessEvent(
-		context.Background(), ProcessNextBlockEvent{}, env,
+		t.Context(), ProcessNextBlockEvent{}, env,
 	)
 	require.NoError(t, err)
 
@@ -206,7 +205,7 @@ func TestStateSyncingAddWatchRewind(t *testing.T) {
 
 	rewindTo := uint32(2)
 	transition, err := state.ProcessEvent(
-		context.Background(),
+		t.Context(),
 		AddWatchAddrsEvent{RewindTo: &rewindTo},
 		env,
 	)
@@ -247,7 +246,7 @@ func TestStateCurrentBlockConnected(t *testing.T) {
 	newHeader := chain.blockHeaders[newBest.Hash]
 
 	transition, err := state.ProcessEvent(
-		context.Background(),
+		t.Context(),
 		BlockConnectedEvent{
 			Header: *newHeader,
 			Height: uint32(newBest.Height),
@@ -295,7 +294,7 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 	env := &Environment{Chain: chain}
 
 	transition, err := state.ProcessEvent(
-		context.Background(),
+		t.Context(),
 		BlockDisconnectedEvent{
 			Header:   *curHeader,
 			Height:   uint32(bestBlock.Height),
@@ -334,7 +333,7 @@ func TestStateCurrentAddWatchRewind(t *testing.T) {
 
 	rewindTo := uint32(5)
 	transition, err := state.ProcessEvent(
-		context.Background(),
+		t.Context(),
 		AddWatchAddrsEvent{RewindTo: &rewindTo},
 		env,
 	)
@@ -384,7 +383,7 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	}
 
 	transition, err := state.ProcessEvent(
-		context.Background(), ProcessNextBlockEvent{}, env,
+		t.Context(), ProcessNextBlockEvent{}, env,
 	)
 	require.NoError(t, err)
 
@@ -400,8 +399,16 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	disconnectCount := 0
 	for _, out := range transition.Events.Outbox {
 		if disconnected, ok := out.(BlockDisconnectedOutbox); ok {
-			require.Equal(t, int32(8-disconnectCount), disconnected.Height)
-			require.Equal(t, disconnected.Hash, disconnected.Header.BlockHash())
+			require.Equal(
+				t,
+				int32(8-disconnectCount),
+				disconnected.Height,
+			)
+			require.Equal(
+				t,
+				disconnected.Hash,
+				disconnected.Header.BlockHash(),
+			)
 			disconnectCount++
 		}
 	}
@@ -438,7 +445,7 @@ func TestStateMachineFullCycle(t *testing.T) {
 
 	// Send ProcessNextBlockEvent to kick off.
 	outbox, err := fsm.AskEvent(
-		context.Background(), ProcessNextBlockEvent{},
+		t.Context(), ProcessNextBlockEvent{},
 	)
 	require.NoError(t, err)
 
@@ -450,7 +457,7 @@ func TestStateMachineFullCycle(t *testing.T) {
 	for _, out := range outbox {
 		if selfTell, ok := out.(SelfTellOutbox); ok {
 			outbox2, err := fsm.AskEvent(
-				context.Background(), selfTell.Event,
+				t.Context(), selfTell.Event,
 			)
 			require.NoError(t, err)
 
@@ -483,7 +490,7 @@ func TestStateTerminal(t *testing.T) {
 	require.Equal(t, "Terminal", state.String())
 
 	transition, err := state.ProcessEvent(
-		context.Background(), ProcessNextBlockEvent{}, &Environment{},
+		t.Context(), ProcessNextBlockEvent{}, &Environment{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, state, transition.NextState)

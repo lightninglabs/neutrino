@@ -1,10 +1,10 @@
 package rescan
 
 import (
-	"context"
-	"github.com/btcsuite/btcd/address/v2"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
@@ -33,14 +33,17 @@ func newMockChainWithTxs(numBlocks int) *mockChainWithTxs {
 	base := newMockChain(numBlocks)
 	return &mockChainWithTxs{
 		mockChainSource: base,
-		txsByBlock:      make(map[chainhash.Hash][]*wire.MsgTx),
+		txsByBlock: make(
+			map[chainhash.Hash][]*wire.MsgTx,
+		),
 	}
 }
 
 // addBlockWithTx adds a block containing a transaction that pays to the
 // given address. Returns the block stamp and the transaction.
 func (c *mockChainWithTxs) addBlockWithTx(
-	addr address.Address) (headerfs.BlockStamp, *wire.MsgTx) {
+	addr address.Address,
+) (headerfs.BlockStamp, *wire.MsgTx) {
 
 	c.mu.Lock()
 	newHeight := uint32(c.bestBlock.Height + 1)
@@ -52,7 +55,11 @@ func (c *mockChainWithTxs) addBlockWithTx(
 	tx := &wire.MsgTx{
 		Version: 1,
 		TxIn: []*wire.TxIn{
-			{PreviousOutPoint: wire.OutPoint{Index: 0}},
+			{
+				PreviousOutPoint: wire.OutPoint{
+					Index: 0,
+				},
+			},
 		},
 		TxOut: []*wire.TxOut{
 			{Value: 100000, PkScript: pkScript},
@@ -63,7 +70,9 @@ func (c *mockChainWithTxs) addBlockWithTx(
 	header := &wire.BlockHeader{
 		PrevBlock: prevHash,
 		Timestamp: genesisTimestamp.Add(
-			time.Duration(newHeight) * 10 * time.Minute,
+			time.Duration(
+				newHeight,
+			) * 10 * time.Minute,
 		),
 	}
 
@@ -109,10 +118,12 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Generate a random number of empty blocks before the
 		// interesting block.
-		numEmptyBlocks := rapid.IntRange(1, 20).Draw(t, "numEmpty")
+		numEmptyBlocks := rapid.IntRange(1, 20).
+			Draw(t, "numEmpty")
 
 		// Generate a random batch size.
-		batchSize := rapid.IntRange(1, 10).Draw(t, "batchSize")
+		batchSize := rapid.IntRange(1, 10).
+			Draw(t, "batchSize")
 
 		// Create chain with empty blocks.
 		chain := newMockChainWithTxs(numEmptyBlocks + 1)
@@ -157,11 +168,15 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 
 		for i := 0; i < 200; i++ { // Safety limit.
 			transition, err := currentState.ProcessEvent(
-				context.Background(),
-				ProcessNextBlockEvent{}, env,
+				t.Context(),
+				ProcessNextBlockEvent{},
+				env,
 			)
 			if err != nil {
-				t.Fatalf("ProcessEvent error: %v", err)
+				t.Fatalf(
+					"ProcessEvent error: %v",
+					err,
+				)
 			}
 
 			if transition.Events != nil {
@@ -198,9 +213,11 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 		}
 
 		if !foundFiltered {
-			t.Fatal("INVARIANT VIOLATED: transaction paying " +
-				"watched address was not reported via " +
-				"FilteredBlockOutbox")
+			t.Fatal(
+				"INVARIANT VIOLATED: transaction paying " +
+					"address was not reported via " +
+					"FilteredBlockOutbox",
+			)
 		}
 	})
 }
@@ -212,8 +229,10 @@ func TestPropertySyncNeverMissesTx(t *testing.T) {
 func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Chain: [genesis] + N empty blocks + [block with tx].
-		numEmpty := rapid.IntRange(3, 15).Draw(t, "numEmpty")
-		batchSize := rapid.IntRange(1, 5).Draw(t, "batchSize")
+		numEmpty := rapid.IntRange(3, 15).
+			Draw(t, "numEmpty")
+		batchSize := rapid.IntRange(1, 5).
+			Draw(t, "batchSize")
 
 		chain := newMockChainWithTxs(numEmpty + 1)
 
@@ -249,11 +268,15 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		var currentState RescanState = state
 		for i := 0; i < 100; i++ {
 			transition, err := currentState.ProcessEvent(
-				context.Background(),
-				ProcessNextBlockEvent{}, env,
+				t.Context(),
+				ProcessNextBlockEvent{},
+				env,
 			)
 			if err != nil {
-				t.Fatalf("ProcessEvent error: %v", err)
+				t.Fatalf(
+					"ProcessEvent error: %v",
+					err,
+				)
 			}
 
 			currentState = transition.NextState
@@ -269,9 +292,11 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		pkScript, _ := txscript.PayToAddrScript(privKey)
 
 		transition, err := currentState.ProcessEvent(
-			context.Background(),
+			t.Context(),
 			AddWatchAddrsEvent{
-				Addrs:    []address.Address{privKey},
+				Addrs: []address.Address{
+					privKey,
+				},
 				RewindTo: &rewindTo,
 			},
 			env,
@@ -285,19 +310,26 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		if !isRewinding {
 			// If we were already past it and the state was
 			// Current, we should have gotten Rewinding.
-			t.Fatalf("expected Rewinding after AddWatchAddrs "+
-				"with rewind, got %T", currentState)
+			t.Fatalf(
+				"expected Rewinding after AddWatchAddrs "+
+					"with rewind, got %T",
+				currentState,
+			)
 		}
 
 		// Process through rewind and re-sync.
 		var allOutbox []OutboxEvent
 		for i := 0; i < 200; i++ {
 			transition, err := currentState.ProcessEvent(
-				context.Background(),
-				ProcessNextBlockEvent{}, env,
+				t.Context(),
+				ProcessNextBlockEvent{},
+				env,
 			)
 			if err != nil {
-				t.Fatalf("ProcessEvent error: %v", err)
+				t.Fatalf(
+					"ProcessEvent error: %v",
+					err,
+				)
 			}
 
 			if transition.Events != nil {
@@ -328,10 +360,12 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		_ = pkScript // Used in watch list via ApplyUpdate.
 
 		if !foundFiltered {
-			t.Fatal("INVARIANT VIOLATED: transaction paying " +
-				"watched address was not found after " +
-				"rewind — this is the race condition the " +
-				"FSM is designed to prevent")
+			t.Fatal(
+				"INVARIANT VIOLATED: transaction paying " +
+					"watched address was not found after " +
+					"rewind — the race the " +
+					"FSM is designed to prevent",
+			)
 		}
 	})
 }
@@ -340,7 +374,8 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 // reorg leave the state consistent.
 func TestPropertyReorgConsistency(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		chainLen := rapid.IntRange(5, 20).Draw(t, "chainLen")
+		chainLen := rapid.IntRange(5, 20).
+			Draw(t, "chainLen")
 		chain := newMockChain(chainLen + 1)
 
 		bestBlock, _ := chain.BestBlock()
@@ -358,9 +393,10 @@ func TestPropertyReorgConsistency(t *testing.T) {
 		env := &Environment{Chain: chain}
 
 		// Disconnect some blocks.
-		numDisconnect := rapid.IntRange(1, chainLen/2).Draw(
-			t, "numDisconnect",
-		)
+		numDisconnect := rapid.IntRange(1, chainLen/2).
+			Draw(
+				t, "numDisconnect",
+			)
 
 		var currentState RescanState = state
 		for i := 0; i < numDisconnect; i++ {
@@ -370,22 +406,28 @@ func TestPropertyReorgConsistency(t *testing.T) {
 			}
 
 			curHeader := cur.CurHeader
-			prevHeader, ok := chain.blockHeaders[curHeader.PrevBlock]
+			prevHash := curHeader.PrevBlock
+			prevHeader, ok := chain.blockHeaders[prevHash]
 			if !ok {
 				break
 			}
 
 			transition, err := currentState.ProcessEvent(
-				context.Background(),
+				t.Context(),
 				BlockDisconnectedEvent{
-					Header:   curHeader,
-					Height:   uint32(cur.CurStamp.Height),
+					Header: curHeader,
+					Height: uint32(
+						cur.CurStamp.Height,
+					),
 					ChainTip: *prevHeader,
 				},
 				env,
 			)
 			if err != nil {
-				t.Fatalf("ProcessEvent error: %v", err)
+				t.Fatalf(
+					"ProcessEvent error: %v",
+					err,
+				)
 			}
 
 			currentState = transition.NextState
@@ -394,15 +436,26 @@ func TestPropertyReorgConsistency(t *testing.T) {
 		// Verify state is still consistent.
 		cur, ok := currentState.(*StateCurrent)
 		if !ok {
-			t.Fatalf("expected StateCurrent after disconnects, "+
-				"got %T", currentState)
+			t.Fatalf(
+				"expected StateCurrent after disconnects, "+
+					"got %T",
+				currentState,
+			)
 		}
 
 		// Height should have decreased.
-		require.Less(t, cur.CurStamp.Height, bestBlock.Height)
+		require.Less(
+			t,
+			cur.CurStamp.Height,
+			bestBlock.Height,
+		)
 
 		// CurHeader's BlockHash should match CurStamp.Hash.
-		require.Equal(t, cur.CurHeader.BlockHash(), cur.CurStamp.Hash)
+		require.Equal(
+			t,
+			cur.CurHeader.BlockHash(),
+			cur.CurStamp.Hash,
+		)
 	})
 }
 
