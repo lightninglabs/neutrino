@@ -546,7 +546,13 @@ func (b *blockManager) Stop() error {
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.wg.Wait()
+
+	// Stop every block handler timer. A callback that fires after quit
+	// closed sees both quit and a buffered peerChan ready, and select may
+	// still enqueue a message nobody will read.
 	b.cancelHeaderCommitRetry()
+	b.disarmHeaderSyncTimeout()
+	b.clearHeaderSyncBootstrapDelay()
 	b.stopHeaderSyncActors()
 
 	close(done)
