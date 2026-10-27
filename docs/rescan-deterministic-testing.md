@@ -36,8 +36,17 @@ Run the fixed corpus and a fuzz campaign with:
 ```sh
 go test ./rescan -run '^TestRescanDST$'
 go test ./rescan -run '^$' -fuzz '^FuzzRescanDST$' -fuzztime=60s -parallel=1
+go test ./rescan -run '^$' -fuzz '^FuzzDSTCatchupMailboxBurst$' -fuzztime=60s -parallel=1
 go test -race ./rescan
 ```
+
+`TestDSTCatchupMailboxBurst` gates a historical filter fetch, queues 101 to
+164 connected notifications, and checks the complete callback sequence and a
+watched payment. Its fuzz target varies the burst size and whether the first
+subscription fails, then runs the same input twice. The fixed regression tests
+also cover a canonical successor arriving while its predecessor retries and a
+rewind accepted before the first subscription succeeds. All three regressions
+fail on commit `3482e82` and pass with the corresponding fixes.
 
 Go saves minimized inputs under `rescan/testdata/fuzz/FuzzRescanDST`. Replay a
 saved case with `go test ./rescan -run 'FuzzRescanDST/<seed-name>'`. The
