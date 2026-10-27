@@ -99,10 +99,13 @@ type rescanOptions struct {
 
 	endBlock *headerfs.BlockStamp
 
-	watchAddrs  []address.Address
-	watchInputs []InputWithScript
-	watchList   [][]byte
-	txIdx       uint32
+	watchAddrs []address.Address
+
+	// watchScripts contains only scripts derived from watched addresses.
+	watchScripts map[string]struct{}
+	watchInputs  []InputWithScript
+	watchList    [][]byte
+	txIdx        uint32
 
 	update <-chan *updateOptions
 	quit   <-chan struct{}
@@ -114,7 +117,7 @@ type rescanOptions struct {
 type RescanOption func(ro *rescanOptions)
 
 func defaultRescanOptions() *rescanOptions {
-	return &rescanOptions{}
+	return &rescanOptions{watchScripts: make(map[string]struct{})}
 }
 
 // QueryOptions pass onto the underlying queries.
@@ -344,6 +347,7 @@ func newRescanState(chain ChainSource, options ...RescanOption) (*rescanState,
 		}
 
 		ro.watchList = append(ro.watchList, script)
+		ro.watchScripts[string(script)] = struct{}{}
 	}
 	for _, input := range ro.watchInputs {
 		ro.watchList = append(ro.watchList, input.PkScript)
@@ -1288,6 +1292,7 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 		}
 
 		ro.watchList = append(ro.watchList, script)
+		ro.watchScripts[string(script)] = struct{}{}
 	}
 	for _, input := range update.inputs {
 		ro.watchList = append(ro.watchList, input.PkScript)
@@ -1380,45 +1385,22 @@ func (ro *rescanOptions) spendsWatchedInput(tx *btcutil.Tx) bool {
 // updates the filter to watch the newly created output going forward.
 func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) (bool, error) {
 	anyMatchingOutputs := false
-
-txOutLoop:
 	for outIdx, out := range tx.MsgTx().TxOut {
 		pkScript := out.PkScript
-
-		for _, addr := range ro.watchAddrs {
-			// We'll convert the address into its matching pkScript
-			// to in order to check for a match.
-			addrScript, err := txscript.PayToAddrScript(addr)
-			if err != nil {
-				return false, err
-			}
-
-			// If the script doesn't match, we'll move onto the
-			// next one.
-			if !bytes.Equal(pkScript, addrScript) {
-				continue
-			}
-
-			// At this state, we have a matching output so we'll
-			// mark this transaction as matching.
-			anyMatchingOutputs = true
-
-			// Update the filter by also watching this created
-			// outpoint for the event in the future that it's
-			// spent.
-			hash := tx.Hash()
-			outPoint := wire.OutPoint{
-				Hash:  *hash,
-				Index: uint32(outIdx),
-			}
-			ro.watchInputs = append(ro.watchInputs, InputWithScript{
-				PkScript: pkScript,
-				OutPoint: outPoint,
-			})
-			ro.watchList = append(ro.watchList, pkScript)
-
-			continue txOutLoop
+		if _, ok := ro.watchScripts[string(pkScript)]; !ok {
+			continue
 		}
+
+		anyMatchingOutputs = true
+		outPoint := wire.OutPoint{
+			Hash:  *tx.Hash(),
+			Index: uint32(outIdx),
+		}
+		ro.watchInputs = append(ro.watchInputs, InputWithScript{
+			PkScript: pkScript,
+			OutPoint: outPoint,
+		})
+		ro.watchList = append(ro.watchList, pkScript)
 	}
 
 	return anyMatchingOutputs, nil
