@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btclog"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headersync"
@@ -452,13 +453,17 @@ func (d *dstRun) poisonedAnchor() bool {
 	return false
 }
 
-// conflictsWithAnchor reports whether an honest reply from peer ending at
-// height will meet a liar's boundary: an anchor known at that height, or the
-// stop hash of the range the peer is running.
-func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, height uint32) bool {
+// conflictsWithAnchor reports whether an honest reply from peer covering
+// (start, stop] can meet a liar's boundary: an anchor known in that span, or
+// the stop hash of a range the peer owns there.
+func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, start,
+	stop uint32) bool {
+
 	honest := dstChains().honest
-	if int(height) >= len(honest) {
-		return false
+	liar := func(height uint32, hash chainhash.Hash) bool {
+		return height > start && height <= stop &&
+			int(height) < len(honest) &&
+			hash != honest[height].BlockHash()
 	}
 	ctx := d.t.Context()
 	manager := d.bm.headerSync.Manager()
@@ -467,8 +472,7 @@ func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, height uint32) bool {
 		rng, ok, err := manager.SnapshotRange(ctx, id)
 		require.NoError(d.t, err)
 		if ok && rng.OwnerPeer == peer.Addr() &&
-			rng.StopHeight == height &&
-			rng.StopHash != honest[height].BlockHash() {
+			liar(rng.StopHeight, rng.StopHash) {
 
 			return true
 		}
@@ -476,8 +480,7 @@ func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, height uint32) bool {
 	anchors, err := manager.Anchors(ctx)
 	require.NoError(d.t, err)
 	for _, anchor := range anchors {
-		if anchor.Height == height &&
-			anchor.Hash != honest[height].BlockHash() {
+		if liar(anchor.Height, anchor.Hash) {
 
 			return true
 		}

@@ -790,7 +790,7 @@ func (d *dstRun) reply(slot int, kind dstReplyKind) bool {
 		// Remember an honest reply that conflicts with a liar's
 		// anchor already known at its final height: production
 		// quarantines its sender (known gap F12).
-		if d.conflictsWithAnchor(peer, request.stop) {
+		if d.conflictsWithAnchor(peer, request.start, request.stop) {
 			d.anchorConflicts[peer.Addr()] = true
 		}
 	}
