@@ -190,6 +190,46 @@ func TestControllerFrontierDiscoveryDoneAtBestHeight(t *testing.T) {
 		"height anchor")
 }
 
+// TestControllerPlansAfterAskAppliedThenFailed checks that planning survives a
+// session whose next range ID fell behind the FSM. A planning ask that applies
+// but reports a deadline to the caller leaves the session unadvanced; the next
+// plan then reused an ID and every later batch failed with ErrDuplicateRange.
+func TestControllerPlansAfterAskAppliedThenFailed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	manager := NewManagerActor(newTestFSM(), 8)
+	manager.Start(ctx)
+	defer manager.Stop()
+
+	faults := []AskFault{AskFailAfter}
+	controller := NewController(manager, NewSession(), DefaultConfig())
+	controller.askFault = func(AskOp) AskFault {
+		if len(faults) == 0 {
+			return AskOK
+		}
+		fault := faults[0]
+		faults = faults[1:]
+		return fault
+	}
+	addManagerAnchor(t, ctx, manager, 10, 110)
+	addManagerAnchor(t, ctx, manager, 20, 120)
+	tip := ChainPoint{Height: 0, Hash: testHash(100)}
+
+	// The first plan applies in the FSM but reports an error.
+	_, err := controller.PlanFrontierRanges(ctx, tip, 10)
+	require.ErrorIs(t, err, ErrAskFault)
+	require.EqualValues(t, 1, controller.Session().NextRangeID())
+
+	// The next plan reuses the stale ID and must still succeed.
+	result, err := controller.PlanFrontierRanges(ctx, tip, 20)
+	require.NoError(t, err)
+	require.Len(t, result.Ranges, 1)
+	require.NotEqual(t, RangeID(1), result.Ranges[0].ID)
+	require.Greater(t, controller.Session().NextRangeID(),
+		result.Ranges[0].ID)
+}
+
 func TestControllerPlanFrontierRangesFillsGapBeforeStagedRanges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()

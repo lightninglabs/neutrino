@@ -524,12 +524,26 @@ func (h *HeaderSyncFSM) StageDiscoveredRange(
 		return HeaderRange{}, false, nil
 	}
 
-	rng, ok, err := h.PlanRange(id, startHeight, stopHeight)
+	rng, ok, err := h.PlanRange(
+		h.unusedRangeID(id), startHeight, stopHeight,
+	)
 	if err != nil || !ok {
 		return rng, ok, err
 	}
 
 	return h.stageRangeFromDiscovery(rng, peerID, now), true, nil
+}
+
+// unusedRangeID returns the first range ID at or after id that no range uses.
+// Range IDs are allocated by the caller's session, which falls behind the FSM
+// when an ask applies but reports an error to its caller.
+func (h *HeaderSyncFSM) unusedRangeID(id RangeID) RangeID {
+	for {
+		if _, used := h.ranges[id]; !used && id != NoRange {
+			return id
+		}
+		id++
+	}
 }
 
 func (h *HeaderSyncFSM) stageRangeFromDiscovery(rng HeaderRange,

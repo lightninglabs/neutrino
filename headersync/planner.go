@@ -81,6 +81,11 @@ func (h *HeaderSyncFSM) PlanConfirmedAnchorRanges(nextID RangeID,
 
 	result := PlanRangesResult{NextID: nextID}
 	for i := 1; i < len(anchors); i++ {
+		// The caller's next ID can lag the FSM when an earlier ask
+		// applied but reported an error, so skip IDs already in use
+		// rather than fail every later batch with a duplicate.
+		result.NextID = h.unusedRangeID(result.NextID)
+
 		start := anchors[i-1]
 		stop := anchors[i]
 		if _, ok := h.rangeBySpan(start.Height, stop.Height); ok {
