@@ -273,6 +273,10 @@ type dstRun struct {
 	// anchor that conflicted with a liar's (known policy gap F12).
 	conflictPunishments int
 
+	// anchorConflicts records peers that sent an honest reply ending at a
+	// height where a liar's anchor was already known.
+	anchorConflicts map[string]bool
+
 	// ntfns records every block notification in delivery order.
 	ntfns   []string
 	ntfnMtx sync.Mutex
@@ -351,10 +355,11 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 				&chaincfg.SimNetParams,
 			),
 		},
-		peers:     list.New(),
-		faulted:   make(map[string]string),
-		punished:  make(map[string]string),
-		askFaults: make(map[headerSyncAskOp]headerSyncAskFault),
+		peers:           list.New(),
+		faulted:         make(map[string]string),
+		anchorConflicts: make(map[string]bool),
+		punished:        make(map[string]string),
+		askFaults:       make(map[headerSyncAskOp]headerSyncAskFault),
 		controllerFaults: make(
 			map[headersync.AskOp]headersync.AskFault,
 		),
@@ -780,6 +785,14 @@ func (d *dstRun) reply(slot int, kind dstReplyKind) bool {
 		dstReplyCorrupt:
 
 		d.anchorLiar = true
+
+	case dstReplyHonest:
+		// Remember an honest reply that conflicts with a liar's
+		// anchor already known at its final height: production
+		// quarantines its sender (known gap F12).
+		if d.conflictsWithAnchor(peer, request.stop) {
+			d.anchorConflicts[peer.Addr()] = true
+		}
 	}
 	log.Debugf("dst reply slot=%d %d..%d %s", slot, request.start,
 		request.stop, kind)
@@ -1171,7 +1184,7 @@ func (d *dstRun) snapshot() dstSnapshot {
 		return snapshot
 	}
 	manager := d.bm.headerSync.Manager()
-	nextID := d.bm.headerSync.Session().NextRangeID()
+	nextID := d.rangeIDLimit()
 	for id := headersync.RangeID(1); id < nextID; id++ {
 		rng, ok, err := manager.SnapshotRange(ctx, id)
 		require.NoError(d.t, err)
@@ -1198,7 +1211,7 @@ func (d *dstRun) describe() string {
 	fmt.Fprintf(&out, "mode=%s faults=%#x\n", d.cfg.mode, d.cfg.faults)
 	if !d.stopped {
 		manager := d.bm.headerSync.Manager()
-		nextID := d.bm.headerSync.Session().NextRangeID()
+		nextID := d.rangeIDLimit()
 		for id := headersync.RangeID(1); id < nextID; id++ {
 			rng, _, _ := manager.SnapshotRange(d.t.Context(), id)
 			fmt.Fprintf(&out, "range=%+v\n", rng)
@@ -1309,6 +1322,8 @@ var dstRegressionSeeds = []string{
 	// A blocked peer whose cooldown expired with nothing to wake it.
 	"594a287c17b7ef352630f8133cea52e3f222a8451e7a1c1575c1b2",
 	"7f594edd1aa359a3df8e520794782a7397b87325138fd79aeef7cdc3f5384d",
+	// A reply judged against a range the serial writer already committed.
+	"1b66426e6b5a8ed82ea0095936fa89bca0430d",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.

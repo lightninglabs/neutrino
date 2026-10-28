@@ -210,7 +210,7 @@ func (v *dstInvariants) rangeTable(event string) {
 	}
 
 	honest := dstChains().honest
-	for id := headersync.RangeID(1); id < session.NextRangeID(); id++ {
+	for id := headersync.RangeID(1); id < d.rangeIDLimit(); id++ {
 		rng, ok, err := manager.SnapshotRange(ctx, id)
 		require.NoError(d.t, err)
 		if !ok {
@@ -321,9 +321,9 @@ func (v *dstInvariants) honestImmunity(event string) {
 
 		// Known policy gap (F12): when a lying peer answers anchor
 		// discovery first, the honest reporter of the conflicting
-		// anchor is the one quarantined. Count it instead of failing
-		// so the run can still find other bugs.
-		if d.anchorLiar && d.cfg.mode.discovery() {
+		// anchor is the one quarantined. Count exactly that case
+		// instead of failing, so the run can still find other bugs.
+		if d.anchorConflicts[addr] {
 			d.faulted[addr] = "anchor_conflict"
 			d.conflictPunishments++
 			continue
@@ -376,7 +376,7 @@ func (d *dstRun) quiescent() error {
 		return fmt.Errorf("commit retry still armed")
 	}
 	manager := d.bm.headerSync.Manager()
-	for id := headersync.RangeID(1); id < session.NextRangeID(); id++ {
+	for id := headersync.RangeID(1); id < d.rangeIDLimit(); id++ {
 		if _, ok := session.StagedRange(id); ok {
 			return fmt.Errorf("range %d still staged", id)
 		}
@@ -408,13 +408,19 @@ func (d *dstRun) quiescent() error {
 // reply confirms its own boundary. When its payload is never staged (an
 // overlap kept it out), commit-time validation never runs, nothing rejects the
 // anchor, and honest replies for the span fail its stop hash (known gap F13).
+//
+// Only a run stuck exactly there is excused: the durable tip must sit at the
+// start of a range that ends at the poisoned anchor.
 func (d *dstRun) poisonedAnchor() bool {
 	if !d.anchorLiar || !d.cfg.mode.discovery() {
 		return false
 	}
-	anchors, err := d.bm.headerSync.Manager().Anchors(d.t.Context())
+	ctx := d.t.Context()
+	manager := d.bm.headerSync.Manager()
+	anchors, err := manager.Anchors(ctx)
 	require.NoError(d.t, err)
 	honest := dstChains().honest
+	poisoned := make(map[uint32]bool)
 	for _, anchor := range anchors {
 		if anchor.Trusted || int(anchor.Height) >= len(honest) {
 			continue
@@ -422,10 +428,61 @@ func (d *dstRun) poisonedAnchor() bool {
 		if anchor.Hash != honest[anchor.Height].BlockHash() &&
 			d.bm.headerSync.Controller().AnchorConfirmed(anchor) {
 
+			poisoned[anchor.Height] = true
+		}
+	}
+	nextID := d.rangeIDLimit()
+	for id := headersync.RangeID(1); id < nextID; id++ {
+		rng, ok, err := manager.SnapshotRange(ctx, id)
+		require.NoError(d.t, err)
+		if ok && poisoned[rng.StopHeight] &&
+			rng.StartHeight == d.inv.lastTip {
+
 			return true
 		}
 	}
 	return false
+}
+
+// conflictsWithAnchor reports whether an honest reply from peer ending at
+// height will meet a liar's boundary: an anchor known at that height, or the
+// stop hash of the range the peer is running.
+func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, height uint32) bool {
+	honest := dstChains().honest
+	if int(height) >= len(honest) {
+		return false
+	}
+	ctx := d.t.Context()
+	manager := d.bm.headerSync.Manager()
+	nextID := d.rangeIDLimit()
+	for id := headersync.RangeID(1); id < nextID; id++ {
+		rng, ok, err := manager.SnapshotRange(ctx, id)
+		require.NoError(d.t, err)
+		if ok && rng.OwnerPeer == peer.Addr() &&
+			rng.StopHeight == height &&
+			rng.StopHash != honest[height].BlockHash() {
+
+			return true
+		}
+	}
+	anchors, err := manager.Anchors(ctx)
+	require.NoError(d.t, err)
+	for _, anchor := range anchors {
+		if anchor.Height == height &&
+			anchor.Hash != honest[height].BlockHash() {
+
+			return true
+		}
+	}
+	return false
+}
+
+// rangeIDLimit bounds scans of the FSM range table. The session's next ID can
+// trail the IDs the FSM used after an ask applied but reported an error, so
+// scan a margin past it.
+func (d *dstRun) rangeIDLimit() headersync.RangeID {
+	const margin = 32
+	return d.bm.headerSync.Session().NextRangeID() + margin
 }
 
 // dstMatchesChain reports whether headers continue chain after start.
