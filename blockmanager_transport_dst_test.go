@@ -1676,9 +1676,13 @@ func runAmbiguousCommit(t *testing.T, mode dstMode, store dstStoreMode,
 			time.Sleep(headerSyncBootstrapMaxWait)
 			d.pump()
 		}
-		require.True(t, d.store.ambiguous > 0 ||
-			d.store.mode == dstStoreDown ||
-			len(d.askFaults) == 0, "fault never fired")
+		// Each case's fault must actually have fired: a store fault
+		// reports one ambiguous write, an ask fault is consumed.
+		if store != dstStoreOK {
+			require.Equal(t, 1, d.store.ambiguous,
+				"store fault never fired")
+		}
+		require.Empty(t, d.askFaults, "ask fault never fired")
 		d.heal()
 		require.NoError(t, d.quiescent(), d.describe())
 	})
