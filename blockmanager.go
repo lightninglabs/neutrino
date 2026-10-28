@@ -3432,6 +3432,11 @@ func (b *blockManager) resetHeaderListToTip() error {
 	b.newHeadersMtx.Unlock()
 	b.newHeadersSignal.Broadcast()
 
+	// A failed serial write may still have landed. Planning stops
+	// advancing the FSM once the tip reaches the best height, so move it
+	// here, or ranges the write covered stay staged forever.
+	b.advanceHeaderSyncTip(height, header.BlockHash())
+
 	return nil
 }
 
