@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1597,17 +1598,18 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 	})
 }
 
-// flakyTipStore fails one ChainTip call and counts calls.
+// flakyTipStore fails one ChainTip call and counts calls. The count is
+// atomic because cfHandler reads the tip on its own goroutine while the test
+// inspects it.
 type flakyTipStore struct {
 	*memBlockHeaderStore
-	failAt int
-	calls  int
+	failAt int32
+	calls  atomic.Int32
 }
 
 // ChainTip fails the failAt-th call.
 func (s *flakyTipStore) ChainTip() (*wire.BlockHeader, uint32, error) {
-	s.calls++
-	if s.calls == s.failAt {
+	if s.calls.Add(1) == s.failAt {
 		return nil, 0, errDSTWrite
 	}
 	return s.memBlockHeaderStore.ChainTip()
@@ -1636,8 +1638,8 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 			bm.cfHandler()
 		}()
 		synctest.Wait()
-		require.GreaterOrEqual(t, flaky.calls, 2, "tip was never read")
-		calls := flaky.calls
+		calls := flaky.calls.Load()
+		require.GreaterOrEqual(t, calls, int32(2), "tip was never read")
 
 		select {
 		case <-done:
@@ -1646,7 +1648,7 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 		}
 		time.Sleep(retryTimeout)
 		synctest.Wait()
-		require.Greater(t, flaky.calls, calls,
+		require.Greater(t, flaky.calls.Load(), calls,
 			"cfHandler never read the tip again")
 
 		close(bm.quit)
