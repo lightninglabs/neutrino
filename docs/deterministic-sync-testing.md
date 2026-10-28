@@ -78,13 +78,19 @@ Fault classes:
 - Store faults: down, a write that lands but reports an error, and a write
   that lands its first half and then fails.
 - Actor asks that report a caller deadline before or after the actor applies
-  them, at CompleteRange, FinishAnchorHeaders, RequestRange and
-  CommitReadyRanges (the unexported `headerSyncAskFault` seam).
+  them. Blockmanager call sites (CompleteRange, RequestRange and
+  CommitReadyRanges) go through the unexported `headerSyncAskFault` seam;
+  the controller's own asks (planning, discovered-range staging and anchor
+  recording) go through the test-only `RuntimeConfig.AskFault`.
 - Byzantine replies: corrupt, partial, empty, overlong, reordered, gapped,
   a PoW-valid fork (checkpoint modes only), a stale timestamp, an unexpected
   difficulty, and replies to another peer's request.
 - Restarts over the same stores, shutdown at an arbitrary point, and RTT
   updates that change peer ranking.
+- With the reorg class enabled, a phase after healing: peers announce three
+  more blocks, and in the frontier modes a heavier branch forking below the
+  tip, which drives the serial extension and reorg paths and the block
+  notifications.
 
 Callbacks that are ready at the same virtual instant are sorted and then
 shuffled by the seed: `synctest` makes the set deterministic, not its order.
@@ -98,7 +104,8 @@ shuffled by the seed: `synctest` makes the set deterministic, not its order.
 - Every durable header is on the honest chain, and heights are written in
   order, a height again only after a rollback removed it.
 - The visible tip and validation cache agree with each other, and trail the
-  store only while a commit retry is armed to reconcile them.
+  store only while a commit retry is armed to reconcile them. The next
+  checkpoint is always above the visible tip.
 - Ranges have one owner, lease epochs never decrease, committed ranges are at
   or below the durable tip, and no range commits twice.
 - A peer holding a lease has a wire request outstanding, and an active range
@@ -106,22 +113,27 @@ shuffled by the seed: `synctest` makes the set deterministic, not its order.
 - A peer that never misbehaved or stalled is never quarantined, banned or
   disconnected, and no peer is ever IP-banned for being unresponsive.
 
-After the scripted phase, the heal phase restores storage and keeps every
-peer slot filled with an honest peer, then lets replies and real deadlines
-finish. The run must reach the honest tip with nothing active, staged,
+After the scripted phase, the heal phase restores storage and gives every
+empty peer slot a fresh honest peer. A faulted peer that is still connected
+stays: replacing it would run the done-peer reset and hide a stall it left
+behind. Replies and real deadlines then finish the work; virtual time moves
+every round, and after a few idle rounds the phase waits out a peer
+cooldown. The run must reach the honest tip with nothing active, staged,
 retrying, or non-terminal. Two runs of a seed must produce the same events,
 steps, writes, bans and final range and peer tables.
 
 Two known gaps are counted rather than failed, so the swarm keeps finding
-other bugs:
+other bugs. Each excuse is narrow, and anything outside it still fails:
 
 - F12: when a lying peer answers anchor discovery first, the honest reporter
-  of the conflicting anchor is quarantined. Which reporter to punish is a
-  policy decision.
+  of the conflicting anchor is quarantined. Only a peer whose honest reply
+  covered a liar's anchor or range stop is excused. Which reporter to punish
+  is a policy decision.
 - F13: under the one-observation policy, a liar's discovery reply confirms
   its own boundary. If its payload is never staged, commit-time validation
   never runs, the anchor is never rejected, and honest replies for the span
-  fail its stop hash.
+  fail its stop hash. Only a run stuck exactly at the start of a range that
+  ends at such an anchor is excused.
 
 ## Model And Trace Boundaries
 
@@ -136,12 +148,17 @@ These are Go scheduler traces, not P checker schedules.
 
 ## Remaining DST Work
 
-- The filter-header (cfheader) path and querysync's work manager are not
-  driven by the DST; they need a cfheader runner with a query transport.
-- Tip following and reorgs after sync completes, including the
-  forward-only `AdvanceCommittedTip` (F3) and filter headers left above a
-  fork point, need a dedicated phase.
+- There is no cfheader DST. The filter-header path, cfHandler and querysync's
+  work manager are not driven, so neither is the producer-side invariant that
+  after a reorg every stored filter header's block hash equals the block
+  header store's hash at that height: `rollBackToHeight` reads the filter tip
+  once while cfHandler can still write old-fork filter headers. A cfheader
+  runner needs a query transport over the work manager.
+- Block notifications are recorded and compared across runs, but their order
+  is not asserted. A connected notification for an old-fork block can arrive
+  after its disconnected notification; subscribers must tolerate that.
 - SQL stores are not run inside the bubble; their rollback tests run
   separately.
-- The P models still script single timelines; they do not explore
-  nondeterminism, and nothing derives P scenarios from DST traces.
+- `tcHeaderSyncExplore` explores interleavings of three peer machines and
+  the explorer's choices, but P scenarios are not yet derived from DST
+  traces, and the query model has no exploration test.
