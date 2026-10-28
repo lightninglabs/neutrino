@@ -103,6 +103,9 @@ const (
 	// AskStageDiscovered is the ask that stages a discovered range.
 	AskStageDiscovered
 
+	// AskAddAnchor is the ask that records a discovered anchor.
+	AskAddAnchor
+
 	// AskOps is the number of faultable controller asks.
 	AskOps
 )
@@ -527,9 +530,14 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	}
 	result.Response = response
 
-	anchor, ok, err := c.manager.AddAnchor(
-		ctx, response.Height, response.Hash, response.Trusted,
-	)
+	var anchor Anchor
+	err = c.ask(AskAddAnchor, func() error {
+		var err error
+		anchor, ok, err = c.manager.AddAnchor(
+			ctx, response.Height, response.Hash, response.Trusted,
+		)
+		return err
+	})
 	if err != nil {
 		return result, true, err
 	}

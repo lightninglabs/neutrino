@@ -4192,27 +4192,10 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 	ctx, cancel := b.headerSyncOpCtx()
 	defer cancel()
 
-	var (
-		result headersync.AnchorHeadersResult
-		ok     bool
+	result, ok, err := b.headerSync.Controller().FinishAnchorHeaders(
+		ctx, peerID, hmsg.headers.Headers,
+		headersync.DefaultMaxRangeHeaders,
 	)
-	finish := func() error {
-		var err error
-		result, ok, err = b.headerSync.Controller().FinishAnchorHeaders(
-			ctx, peerID, hmsg.headers.Headers,
-			headersync.DefaultMaxRangeHeaders,
-		)
-		return err
-	}
-
-	// Only a reply matching an active anchor request reaches an actor
-	// ask, so only that case can see an ask deadline.
-	var err error
-	if b.headerSync.Session().AnchorActive(peerID) {
-		err = b.headerSyncAsk(headerSyncAskFinishAnchor, finish)
-	} else {
-		err = finish()
-	}
 
 	// Check the error before the match flag, so an actor failure is never
 	// mistaken for an unmatched reply. The request is already finished, so

@@ -37,10 +37,6 @@ const (
 	// range reply arrives.
 	headerSyncAskCompleteRange
 
-	// headerSyncAskFinishAnchor is the anchor discovery ask that may
-	// stage a discovered range.
-	headerSyncAskFinishAnchor
-
 	// headerSyncAskRequestRange is the ask that starts a peer's next
 	// range.
 	headerSyncAskRequestRange
