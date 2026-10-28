@@ -1,6 +1,7 @@
 package sqldb
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -190,20 +191,6 @@ func closeStore(store sqldbv2.DB) error {
 type MakeProgrammaticMigrations = func(*sqldbv2.BaseDB) (
 	map[uint]migrate.ProgrammaticMigrEntry, error)
 
-// neutrinoSqliteTables lists every table a neutrino SQL database may contain.
-// migration_tracker and schema_migrations are created by sqldb/v2 and
-// golang-migrate respectively.
-var neutrinoSqliteTables = map[string]struct{}{
-	"migration_tracker": {},
-	"schema_migrations": {},
-	trackingTable:       {},
-	"chain_tips":        {},
-	"block_headers":     {},
-	"filter_headers":    {},
-	"regular_filters":   {},
-	"banned_peers":      {},
-}
-
 // checkSqliteFileIsOurs refuses to run neutrino's migrations against an
 // existing SQLite file that holds anything but neutrino tables, such as the
 // key-value database lnd keeps for its own neutrino backend. A missing or
@@ -230,34 +217,52 @@ func checkSqliteFileIsOurs(path string) error {
 	}
 	defer rows.Close()
 
+	// The file is ours once it has the migration tracking table. Before
+	// that, only the tracker sqldb/v2 creates on open may exist.
+	var foreign string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return err
 		}
-		if _, ok := neutrinoSqliteTables[name]; !ok {
-			return fmt.Errorf("sqldb: %s already holds a table %q "+
-				"that does not belong to neutrino's SQL "+
-				"schema; it is probably another database, set "+
-				"Config.SqliteFilename to use a different file",
-				path, name)
+		if name == trackingTable {
+			return nil
+		}
+		if name != "migration_tracker" {
+			foreign = name
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
-	return rows.Err()
+	if foreign != "" {
+		return fmt.Errorf("sqldb: %s already holds a table %q and is "+
+			"not a neutrino SQL database; it is probably another "+
+			"database, set Config.SqliteFilename to use a "+
+			"different file", path, foreign)
+	}
+
+	return nil
 }
 
 // resetDirtyLegacyImport rewinds a dirty migration version 2 to version 1.
 // The legacy import is the only migration that can be interrupted mid-way
 // without returning an error, and it starts over from a clean slate.
 func resetDirtyLegacyImport(base *sqldbv2.BaseDB) error {
-	_, err := base.Exec(fmt.Sprintf(
+	res, err := base.Exec(fmt.Sprintf(
 		"UPDATE %s SET version = 1, dirty = %s "+
 			"WHERE version = 2 AND dirty = %s",
 		trackingTable, dirtyLiteral(base, false),
 		dirtyLiteral(base, true),
 	))
 	if err == nil {
+		// Discard what the killed import wrote, so that the rows
+		// cannot outlive a retry that finds no legacy data to import.
+		if n, _ := res.RowsAffected(); n > 0 {
+			return truncateTables(context.Background(), base)
+		}
+
 		return nil
 	}
 

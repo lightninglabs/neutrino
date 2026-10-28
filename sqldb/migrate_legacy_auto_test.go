@@ -552,7 +552,7 @@ func TestSqliteFileGuard(t *testing.T) {
 	_, err = openAuto(
 		t, dataDir, &chaincfg.SimNetParams, false, nil,
 	)
-	require.ErrorContains(t, err, "does not belong to neutrino")
+	require.ErrorContains(t, err, "not a neutrino SQL database")
 }
 
 // TestDirtyLegacyImportIsRetried verifies that a process killed in the middle

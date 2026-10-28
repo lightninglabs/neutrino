@@ -194,11 +194,6 @@ func DetectLegacyDataSource(dataDir string,
 type legacyImporter struct {
 	src *LegacyDataSource
 
-	// renameInline retires the flat files at the end of the migration
-	// itself instead of leaving it to finalize. It exists for callers of
-	// MakeLegacyImportMigration that cannot call finalize.
-	renameInline bool
-
 	// retire lists the flat files to rename once the import is durable.
 	retire []string
 }
@@ -241,7 +236,8 @@ func (i *legacyImporter) finalize() {
 // too (no programmatic migration registered, version 2 still recorded as a
 // contentless no-op). Prefer NewBackendWithLegacy, which also detects legacy
 // data by itself and retires the flat files only after the import is
-// recorded.
+// recorded. The flat files are left in place by the closure returned here;
+// retiring them before the migration is recorded would risk losing them.
 func MakeLegacyImportMigration(
 	src *LegacyDataSource) MakeProgrammaticMigrations {
 
@@ -249,7 +245,7 @@ func MakeLegacyImportMigration(
 		return nil
 	}
 
-	imp := &legacyImporter{src: src, renameInline: true}
+	imp := &legacyImporter{src: src}
 
 	return imp.migrations()
 }
@@ -536,9 +532,6 @@ func (i *legacyImporter) run(ctx context.Context,
 		if fileExists(p) {
 			i.retire = append(i.retire, p)
 		}
-	}
-	if i.renameInline {
-		i.finalize()
 	}
 
 	log.Infof("Neutrino SQL legacy import complete in %v "+
@@ -867,6 +860,13 @@ func NewBackendWithLegacy(dataDir string, cfg *Config,
 		return nil, err
 	}
 	imp.finalize()
+
+	// Files that are still around now were not imported by this start.
+	if LegacyArtifactsExist(&resolved) && explicit == nil {
+		log.Warnf("Legacy neutrino files in %s were not imported "+
+			"because the SQL backend had already completed its "+
+			"legacy import", dataDir)
+	}
 
 	return backend, nil
 }
