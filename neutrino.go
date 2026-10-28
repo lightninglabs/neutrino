@@ -1198,13 +1198,18 @@ func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
 	log.Warnf("Quarantining peer %v until %s", addr,
 		until.Format(time.RFC3339))
 
-	select {
-	case s.query <- quarantinePeerMsg{
-		addr:  addr,
-		until: until,
-	}:
-	case <-s.quit:
-	}
+	// Hand off without blocking the caller. The block handler calls this,
+	// and peerHandler, the only reader of s.query, can itself be blocked
+	// handing a new peer to the block handler's full peerChan: a
+	// synchronous send deadlocks both until shutdown. Quarantines keep the
+	// latest expiry, so their arrival order does not matter.
+	msg := quarantinePeerMsg{addr: addr, until: until}
+	go func() {
+		select {
+		case s.query <- msg:
+		case <-s.quit:
+		}
+	}()
 }
 
 func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {

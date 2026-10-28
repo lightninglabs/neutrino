@@ -193,7 +193,9 @@ func TestOnPeerUnresponsiveQuarantines(t *testing.T) {
 			t, q.until.Sub(before), unresponsivePeerQuarantine,
 		)
 
-	default:
+	// QuarantinePeer hands off asynchronously so the block handler can't
+	// deadlock against peerHandler, so wait briefly for the message.
+	case <-time.After(5 * time.Second):
 		t.Fatal("peer was not quarantined")
 	}
 }
