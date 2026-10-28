@@ -4257,6 +4257,19 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 
+	// Replies are matched by their first parent hash, so a late answer to
+	// an earlier, longer request from the same locator (say an anchor
+	// discovery request the session already dropped) lands here. If it
+	// reaches the range's stop hash at the right height, the range is in
+	// it: keep that prefix rather than punish an honest peer.
+	expected := int(rng.StopHeight - rng.StartHeight)
+	if headers := hmsg.headers.Headers; len(headers) > expected &&
+		expected > 0 &&
+		headers[expected-1].BlockHash() == rng.StopHash {
+
+		hmsg.headers.Headers = headers[:expected]
+	}
+
 	valid := true
 	if err := headersync.ValidateHeaderRange(
 		rng,
