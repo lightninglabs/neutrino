@@ -368,7 +368,9 @@ Every range must be committed, failed or stale, or start at or above the
 target.
 
 Two known gaps are counted rather than failed, so the swarm keeps finding
-other bugs. Each excuse is narrow, and anything outside it still fails:
+other bugs. Both are policy decisions, tracked in
+[#417](https://github.com/lightninglabs/neutrino/issues/417). Each excuse is
+narrow, and anything outside it still fails:
 
 - **F12.** When a peer answers anchor discovery with a lie first, the honest
   peer reporting the conflicting anchor is quarantined. Only a peer whose
@@ -442,7 +444,8 @@ than a millisecond. Those are Go scheduler traces, not P checker schedules.
   manager are not driven. So the producer-side invariant is unchecked: after
   a reorg, every stored filter header's block hash must equal the block-header
   store's hash at that height. `rollBackToHeight` on `blockHandler` and
-  `cfHandler` both write the filter-header store today.
+  `cfHandler` both write the filter-header store today. Tracked in
+  [#416](https://github.com/lightninglabs/neutrino/issues/416).
 - **Notification order is recorded, not asserted.** A connected notification
   for an old-fork block can reach subscribers after its disconnected
   notification.
