@@ -76,12 +76,27 @@ func TestSkipLegacyMigration(t *testing.T) {
 	))
 }
 
-// TestAutoLegacyImport verifies that NewChainService with only SQLConfig set
-// imports the legacy flat files and walletdb found in DataDir, without any
-// LegacyImport being declared.
+// TestAutoLegacyImport verifies that NewChainService with SQLConfig set
+// imports the legacy flat files found in DataDir and the walletdb, without any
+// LegacyImport being declared. The walletdb is either found as
+// DataDir/neutrino.db or handed in as Config.Database.
 func TestAutoLegacyImport(t *testing.T) {
 	t.Parallel()
 
+	for _, passDatabase := range []bool{false, true} {
+		name := "detect walletdb"
+		if passDatabase {
+			name = "walletdb as Config.Database"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			testAutoLegacyImport(t, passDatabase)
+		})
+	}
+}
+
+func testAutoLegacyImport(t *testing.T, passDatabase bool) {
 	dataDir := t.TempDir()
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
@@ -109,11 +124,18 @@ func TestAutoLegacyImport(t *testing.T) {
 	_, err = filterdb.New(db, params)
 	require.NoError(t, err)
 
-	// The legacy owner must release the walletdb before the upgrade.
-	require.NoError(t, db.Close())
+	// Without Config.Database, the legacy owner must release the walletdb
+	// before the upgrade so it can be opened by neutrino.
+	cfgDB := db
+	if !passDatabase {
+		require.NoError(t, db.Close())
+		cfgDB = nil
+	} else {
+		t.Cleanup(func() { _ = db.Close() })
+	}
 
 	service, err := NewChainService(Config{
-		DataDir: dataDir, ChainParams: params,
+		DataDir: dataDir, ChainParams: params, Database: cfgDB,
 		SQLConfig: &sqldb.Config{
 			Backend: sqldb.BackendSqlite,
 			Sqlite:  &sqldbv2.SqliteConfig{},

@@ -520,20 +520,28 @@ type Config struct {
 	DataDir string
 
 	// Database is an *open* database instance that we'll use to storm
-	// indexes of the chain. Mutually exclusive with SQLConfig: exactly
-	// one of the two must be set when calling NewChainService.
+	// indexes of the chain. At least one of Database and SQLConfig must be
+	// set. When only Database is set, it backs all persistent stores.
+	// When SQLConfig is set too, the SQL backend is used for storage and
+	// Database is treated as the legacy walletdb to import filters and
+	// bans from (the flat header files are read from DataDir). The caller
+	// keeps ownership of Database and may close it once NewChainService
+	// returns.
 	Database walletdb.DB
 
 	// SQLConfig, when non-nil, switches all persistent stores
 	// (block headers, filter headers, filter DB, ban store) to a
-	// SQLite or PostgreSQL backend. Mutually exclusive with Database.
+	// SQLite or PostgreSQL backend. If Database is also set, it is the
+	// source of the legacy import, see Database.
 	SQLConfig *sqldb.Config
 
 	// LegacyImport optionally overrides where the legacy walletdb +
 	// flat-file state is imported from when the SQL backend is first
-	// started. When nil, the legacy files are detected in DataDir
-	// (block_headers.bin, reg_filter_headers.bin and neutrino.db) and
-	// imported automatically; a fresh install has none. The import runs
+	// started. When nil, the flat files are detected in DataDir
+	// (block_headers.bin, reg_filter_headers.bin) and the walletdb is
+	// Database, or DataDir/neutrino.db if Database is nil, and everything
+	// found is imported automatically; a fresh install has none. The
+	// import runs
 	// exactly once, recorded in the neutrino_migrations table at version
 	// 2, and is disabled by SQLConfig.SkipLegacyMigration. Ignored when
 	// SQLConfig is nil.
@@ -725,9 +733,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// persistent backends. This is checked before any other side effect
 	// so misconfigurations fail fast.
 	switch {
-	case cfg.Database != nil && cfg.SQLConfig != nil:
-		return nil, errors.New("neutrino: cfg.Database and " +
-			"cfg.SQLConfig are mutually exclusive")
 	case cfg.Database == nil && cfg.SQLConfig == nil:
 		return nil, errors.New("neutrino: one of cfg.Database " +
 			"or cfg.SQLConfig must be set")
@@ -806,9 +811,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	// schema migrations and any registered legacy import) and inject the
 	// resulting per-domain TransactionExecutors into each store below.
 	if cfg.SQLConfig != nil {
+		// A walletdb handed in next to the SQL config is the legacy
+		// state to import from.
+		legacy := cfg.LegacyImport
+		if cfg.Database != nil && (legacy == nil || legacy.DB == nil) {
+			var src sqldb.LegacyDataSource
+			if legacy != nil {
+				src = *legacy
+			}
+			src.DB = cfg.Database
+			legacy = &src
+		}
+
 		s.sqlBackend, err = sqldb.NewBackendWithLegacy(
-			cfg.DataDir, cfg.SQLConfig, &cfg.ChainParams,
-			cfg.LegacyImport,
+			cfg.DataDir, cfg.SQLConfig, &cfg.ChainParams, legacy,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to open SQL "+

@@ -68,8 +68,10 @@ Calling `Stop` on the `ChainService` client allows the user to stop the client;
 the method doesn't return until the `ChainService` is cleanly shut down.
 
 ## Storage backends
-Neutrino supports two persistent storage backends. They are mutually exclusive
-and the caller selects exactly one when calling `NewChainService`.
+Neutrino supports two persistent storage backends. The caller selects one when
+calling `NewChainService`: `Config.Database` alone selects `walletdb`, and
+`Config.SQLConfig` selects SQL. Setting both uses SQL and treats the
+`walletdb` as the source of the legacy import, see below.
 
 ### `walletdb` (default, legacy)
 Pre-existing deployments pass an open `walletdb.DB` (bbolt) handle via
@@ -123,16 +125,19 @@ SQLConfig: &sqldb.Config{
 
 ### Migrating from `walletdb` to SQL
 Upgrading is automatic. On the first start with `SQLConfig` set, neutrino
-looks in `DataDir` for the legacy state and, if it finds any, imports it into
-the SQL tables before the chain service comes up:
+imports the legacy state it finds into the SQL tables before the chain service
+comes up:
 
-* `block_headers.bin` and `reg_filter_headers.bin`, the flat header files,
-* `neutrino.db`, the `walletdb` file (the name lnd uses) holding the filter
-  and ban buckets. It is opened read-only.
+* `block_headers.bin` and `reg_filter_headers.bin` from `DataDir`, the flat
+  header files,
+* the filters and bans in the legacy `walletdb`. Pass the open handle as
+  `Config.Database` (alongside `SQLConfig`); if you pass none, neutrino opens
+  `DataDir/neutrino.db` read-only when that file exists.
 
 ```go
 cs, err := neutrino.NewChainService(neutrino.Config{
-    DataDir:     dataDir, // Where block_headers.bin and neutrino.db live.
+    DataDir:     dataDir, // Where block_headers.bin lives.
+    Database:    legacyDB, // The walletdb you used before. Optional.
     ChainParams: chaincfg.MainNetParams,
     SQLConfig: &sqldb.Config{
         Backend: sqldb.BackendSqlite,
@@ -141,40 +146,43 @@ cs, err := neutrino.NewChainService(neutrino.Config{
 })
 ```
 
-Do not also pass `Config.Database`: it is mutually exclusive with `SQLConfig`,
-and the `walletdb` must be closed by its previous owner before neutrino can
-open it for the import.
+Neutrino only reads `Database` and does not close it, so a caller such as lnd
+can keep its existing walletdb setup (bolt, SQLite or Postgres key-value
+store) and just add `SQLConfig`. The SQLite database is created as
+`DataDir/neutrino_chain.sqlite` (override with `SqliteFilename`); neutrino
+refuses to use an existing SQLite file that holds tables that are not its own.
 
-The import is a fixed pipeline: the flat files are read in large chunks, block
+The import is a pipeline: the flat files are read in large chunks, block
 hashes are computed on parallel workers, and a single writer inserts each chunk
-with one bulk statement (a `generate_series`/recursive CTE over the raw bytes,
-so no per-row parameters are bound). Filters stream out of the `walletdb`
-without being held in memory. On a synthetic mainnet-sized chain (900k block
-and filter headers, 20k filters) this takes a few seconds on either backend.
-While importing, neutrino also validates the data: the first header must be
-the genesis block of `ChainParams`, every header must commit to the hash of
-the one before it, and the filter header file may be shorter than the block
-header file but never longer. Violations, as well as truncated or corrupt
+with one bulk statement (a recursive CTE or `generate_series` over the raw
+bytes, so no per-row parameters are bound). Filters stream out of the
+`walletdb` without being held in memory. On a synthetic mainnet-sized chain
+(900k block and filter headers, 20k filters) this takes a few seconds on either
+backend. While importing, neutrino also validates the data: the first header
+must be the genesis block of `ChainParams`, every header must commit to the
+hash of the one before it, and the filter header file may be shorter than the
+block header file but never longer. The chain tips recorded in the `walletdb`
+header index win over the file lengths, as they did in the legacy stores:
+records past them are ignored. Violations, as well as truncated or corrupt
 files, fail the start with an error naming the problem instead of silently
 dropping the data.
 
 The import runs inside migration version 2 of the `neutrino_migrations`
 tracking table, so it happens at most once:
 
-* A fresh install has no legacy files; version 2 is recorded as a no-op.
-* If the import fails or the process dies part way, version 2 is not
-  recorded. The next start wipes the partial SQL rows and imports again from
-  the (untouched) legacy state.
+* A fresh install has no legacy state; version 2 is recorded as a no-op.
+* If the import fails or the process dies part way (even a hard kill, which
+  leaves version 2 marked dirty), version 2 is not recorded. The next start
+  wipes the partial SQL rows and imports again from the untouched legacy state.
 * Only after the import was recorded are `block_headers.bin` and
-  `reg_filter_headers.bin` renamed to `*.bak`. The `walletdb` file is left in
+  `reg_filter_headers.bin` renamed to `*.bak`. The `walletdb` is left in
   place; delete it, and the `*.bak` files, once you are happy with the SQL
   state.
 
 Two knobs override the automatic behavior:
 
 * `Config.LegacyImport` points the importer at non-default locations (custom
-  file names, a `walletdb` at a different path via `BoltPath`) or hands it an
-  already-open `walletdb.DB`.
+  file names, a `walletdb` file at another path via `BoltPath`).
 * `SQLConfig.SkipLegacyMigration` disables the import. Note that version 2 is
   still recorded, so the legacy files will **not** be imported by a later
   start without the flag; neutrino logs a warning when it skips files that

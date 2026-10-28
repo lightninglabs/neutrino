@@ -3,10 +3,8 @@ package neutrino_test
 import (
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	sqldbv2 "github.com/lightningnetwork/lnd/sqldb/v2"
 	"github.com/stretchr/testify/require"
@@ -17,34 +15,13 @@ import (
 	"github.com/lightninglabs/neutrino/sqldb"
 )
 
-// TestNewChainServiceSQLValidation verifies the mutual-exclusion rule between
-// Config.Database and Config.SQLConfig.
+// TestNewChainServiceSQLValidation verifies that one of Config.Database and
+// Config.SQLConfig is required.
 func TestNewChainServiceSQLValidation(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	db, err := walletdb.Create(
-		"bdb", filepath.Join(tempDir, "neutrino.db"),
-		true, 10*time.Second, false,
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-
-	// Both backends set -> error.
-	_, err = neutrino.NewChainService(neutrino.Config{
-		DataDir:     tempDir,
-		ChainParams: chaincfg.SimNetParams,
-		Database:    db,
-		SQLConfig: &sqldb.Config{
-			Backend: sqldb.BackendSqlite,
-			Sqlite:  &sqldbv2.SqliteConfig{},
-		},
-	})
-	require.Error(t, err)
-
-	// Neither backend set -> error.
-	_, err = neutrino.NewChainService(neutrino.Config{
-		DataDir:     tempDir,
+	_, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:     t.TempDir(),
 		ChainParams: chaincfg.SimNetParams,
 	})
 	require.Error(t, err)
