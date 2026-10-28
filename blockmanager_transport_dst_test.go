@@ -1308,7 +1308,10 @@ var dstCorpus = [][]byte{
 }
 
 // dstRegressionSeeds are swarm seeds that found bugs, in hex. Each one is
-// replayed by TestHeaderTransportDST so the fix stays fixed.
+// replayed by TestHeaderTransportDST so the fix stays fixed. Seeds found
+// before the serial mode existed whose first byte ended in 0xf were
+// re-encoded to a first byte with the same remainder mod five, so they keep
+// their original mode.
 var dstRegressionSeeds = []string{
 	// Ambiguous commit stall, B2 ban, torn write in frontier discovery.
 	"01ffff180f0f", "00ffff280f0f", "03ffff000c0f",
@@ -1317,15 +1320,15 @@ var dstRegressionSeeds = []string{
 	"5479161c102b44973f909820a050fd3e8a5e6804bcf7de019326",
 	// Staged leaks after serial writes and below-tip staging.
 	"40732f9e5a32e68ede3bca6f1c12489bf5098721c492ae923a196503",
-	"ef395d762a43ac360572c13572e5441c614e0973842cdf34b27ccb7ac94e08",
+	"f4395d762a43ac360572c13572e5441c614e0973842cdf34b27ccb7ac94e08",
 	// Overlap abort in anchor discovery.
-	"2f65cc0de558c6aa",
+	"3465cc0de558c6aa",
 	// Serial path cache and tip consistency.
 	"4a1de7e96a0717c39ab32fbf0d1277596fb8b7a39d", "c4eb4a04faf7f3c5",
 	"0e1b043680dbd3cd07e0df85e4b36d6ac7f867a544f1d718fd25941b",
 	// F1 asks that apply then fail, and the new-peer dispatch stall.
 	"7a6fa024c529a8e9abc0eb2e03b0b23f8c233fae580d45",
-	"ffbaceae8c60fb040cf599bcb6a96b9296187a1b84081bf190f7120a25c4d67ab2ca",
+	"05baceae8c60fb040cf599bcb6a96b9296187a1b84081bf190f7120a25c4d67ab2ca",
 	"4b68e926ec48d9f1cfc8d123e73b08af8001434a9e289865",
 	"66fa4297a69e52879dae65edd0af69832a418111e2d2e4a19d547675c48ccf4dbf",
 	"3c7b937a39a6f46f3021287c317877d3",
@@ -1335,7 +1338,7 @@ var dstRegressionSeeds = []string{
 	"d77bb606ee817e1a5b31f65e4e6905ccf1855ce8db5a79de89bd96fa12e126530d45",
 	"195120c67404a29dc585cb8637de9b98c333e983a88d92704c",
 	"ded4487caf9a7882f5425aeef6378aab1779baf98a6629f1bde352",
-	"6f53a47a3d22a22f18b5abbffa735e7e8c81bf47ada842d000dc95854477",
+	"7453a47a3d22a22f18b5abbffa735e7e8c81bf47ada842d000dc95854477",
 	// A late discovery reply matched to a range from the same locator,
 	// and heal phases that lost peers mid-recovery.
 	"c549a8254d53ba71b6c1416f29523562a5",
@@ -1345,11 +1348,11 @@ var dstRegressionSeeds = []string{
 	// A corrupt discovery reply winning an anchor, a lagging peer asked
 	// for blocks it never had, and work queued above every peer's tip.
 	"81cbc61289d3bc6f773c1341504a585a1a1d6e1055bcad",
-	"3ff9cd239f8f0c0caa711003bea0fe34e8ce7bd3aa3919ced732cf38cef0",
+	"44f9cd239f8f0c0caa711003bea0fe34e8ce7bd3aa3919ced732cf38cef0",
 	"17d1c2321aed3719ba5dda26f1eb1020cf00ffa933c8e3f193c7ba",
 	// A blocked peer whose cooldown expired with nothing to wake it.
 	"594a287c17b7ef352630f8133cea52e3f222a8451e7a1c1575c1b2",
-	"7f594edd1aa359a3df8e520794782a7397b87325138fd79aeef7cdc3f5384d",
+	"84594edd1aa359a3df8e520794782a7397b87325138fd79aeef7cdc3f5384d",
 	// A reply judged against a range the serial writer already committed.
 	"1b66426e6b5a8ed82ea0095936fa89bca0430d",
 	// Serial mode: a follow-up request to a non-sync peer cancelling the
