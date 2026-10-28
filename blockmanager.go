@@ -855,8 +855,43 @@ func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
 		log.Infof("headersync peer_recovered peer=%s "+
 			"cooldown_until=%s",
 			peerID, until.Format(time.RFC3339))
+		b.releaseOrphanedHeaderSyncRange(sp)
 		b.updateHeaderSyncPeerState(sp, headersync.PeerReady)
 	}
+}
+
+// releaseOrphanedHeaderSyncRange returns the active range of a peer that has
+// no request outstanding to the queue. An ask that applied but reported an
+// error can leave such a lease behind. While the peer was blocked, another
+// peer could steal it; with no other peer, recovering the peer to ready
+// would otherwise leave the range active forever with nothing running it.
+func (b *blockManager) releaseOrphanedHeaderSyncRange(sp *ServerPeer) {
+	ctx, cancel := b.headerSyncOpCtx()
+	defer cancel()
+
+	peerID := sp.Addr()
+	manager := b.headerSync.Manager()
+	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
+	if err != nil || !ok || peer.ActiveRange == headersync.NoRange {
+		return
+	}
+	rng, ok, err := manager.SnapshotRange(ctx, peer.ActiveRange)
+	if err != nil || !ok || rng.State != headersync.RangeActive ||
+		rng.OwnerPeer != peerID {
+
+		return
+	}
+
+	// Fail the lease under its current epoch, then plan the span again.
+	result, err := manager.CompleteRange(
+		ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
+	)
+	if err != nil || !result.Accepted {
+		return
+	}
+	log.Infof("headersync orphaned_range_released peer=%s range_id=%d",
+		peerID, rng.ID)
+	b.replanHeaderSyncRange(ctx, rng)
 }
 
 func headerSyncPeerRank(sp *ServerPeer) int {
@@ -3129,12 +3164,7 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 			continue
 		}
 
-		var assignment headersync.RangeAssignment
-		err := b.headerSyncAsk(headerSyncAskRequestRange, func() error {
-			var err error
-			assignment, ok, err = peerActor.RequestRange(ctx)
-			return err
-		})
+		assignment, ok, err := b.requestPeerRange(ctx, sp, peerActor)
 		if err != nil {
 			log.Warnf(
 				"headersync peer %s failed to request range: "+
@@ -3142,12 +3172,6 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 				peerID,
 				err,
 			)
-
-			// The ask may have started a range in the actor even
-			// though it reported an error, leaving an active lease
-			// with no request behind it. Blocking the peer lets
-			// the existing steal of blocked owners recover it.
-			b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
 			continue
 		}
 		if !ok {
@@ -3169,8 +3193,8 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 					steal.LeaseEpoch, steal.Reason)
 				b.markHeaderSyncRangeStolen(ctx, steal)
 
-				assignment, ok, err = peerActor.RequestRange(
-					ctx,
+				assignment, ok, err = b.requestPeerRange(
+					ctx, sp, peerActor,
 				)
 				if err != nil {
 					log.Warnf("headersync peer %s failed "+
@@ -3195,6 +3219,31 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 	}
 
 	return started
+}
+
+// requestPeerRange asks a peer actor to start its next range. The ask may
+// have started a range in the actor even though it reported an error, which
+// leaves an active lease with no request behind it. On an error the peer is
+// blocked, so the steal of blocked owners or the release on cooldown recovery
+// takes the range back.
+func (b *blockManager) requestPeerRange(ctx context.Context, sp *ServerPeer,
+	peerActor *headersync.PeerActor) (headersync.RangeAssignment, bool,
+	error) {
+
+	var (
+		assignment headersync.RangeAssignment
+		ok         bool
+	)
+	err := b.headerSyncAsk(headerSyncAskRequestRange, func() error {
+		var err error
+		assignment, ok, err = peerActor.RequestRange(ctx)
+		return err
+	})
+	if err != nil {
+		b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
+	}
+
+	return assignment, ok, err
 }
 
 func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,

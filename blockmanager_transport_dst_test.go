@@ -1489,6 +1489,52 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 	})
 }
 
+// TestHeaderOrphanedRangeReleased checks that a peer recovering from its
+// cooldown gives back an active range it holds with no request behind it, as
+// a RequestRange ask that applied but reported an error leaves. With no other
+// peer to steal it, the lease used to stay active with nothing running it;
+// only a serial batch that happened to cover the span retired it.
+func TestHeaderOrphanedRangeReleased(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
+		d.disconnect(1)
+		d.disconnect(2)
+		d.askFaults[headerSyncAskRequestRange] = headerSyncAskFailAfter
+		require.True(t, d.reply(0, dstReplyHonest))
+		require.Empty(t, d.askFaults, "fault never fired")
+
+		// Expire the peer's cooldown and run the recovery pass at once,
+		// before any timeout or serial batch can retire the lease.
+		peerID := d.current[0].Addr()
+		session := d.bm.headerSync.Session()
+		session.TrackPeerCooldown(
+			peerID, headersync.PeerBlocked,
+			time.Now().Add(-time.Second), 0,
+		)
+		d.bm.recoverHeaderSyncPeers(d.peers)
+		synctest.Wait()
+
+		manager := d.bm.headerSync.Manager()
+		peer, ok, err := manager.SnapshotPeer(t.Context(), peerID)
+		require.NoError(t, err)
+		require.True(t, ok)
+		nextID := session.NextRangeID()
+		for id := headersync.RangeID(1); id < nextID; id++ {
+			rng, ok, err := manager.SnapshotRange(t.Context(), id)
+			require.NoError(t, err)
+			if !ok || rng.State != headersync.RangeActive ||
+				rng.OwnerPeer != peerID {
+
+				continue
+			}
+			require.True(t, session.RangeActive(peerID) ||
+				peer.State == headersync.PeerBlocked,
+				"range %d active on a ready peer with no "+
+					"request", id)
+		}
+	})
+}
+
 // TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
 // actor asks. The op context used to derive from context.Background, so Stop
 // could wait out the full deadline for every ask still pending.
