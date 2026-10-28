@@ -88,16 +88,27 @@ func isAllOnes(b []byte) bool {
 
 // ipNetParts reduces an address and its mask to the pieces of a ban key: the
 // address at the byte width of its own family, and the mask at that same
-// width. A 16-byte mask paired with a 4-byte IPv4 address is an IPv4 mask
-// written in IPv6 form whenever its leading 12 bytes are all ones, so it is
-// cut down to the 4 bytes that apply; this is the same pairing rule that
-// net.IP.Mask and net.IPNet's own network-number helper apply. Any other width
-// mismatch is refused, which is what keeps a key from carrying an address and
-// a mask that disagree.
+// width.
 //
-// The address is deliberately left unmasked: the on-disk record for an IP
-// network has always held the address as given, and masking here would rewrite
-// every existing ban record.
+// The family comes from the address that will be stored, which is the rule the
+// encoder has always applied, and the address is stored as given. Masking is
+// the caller's job: ParseIPNet masks before it builds the key, so a mask wide
+// enough to discard a v4 mapping leaves an IPv6 network behind and that is what
+// gets keyed.
+//
+// Two pairings are refused here because the record they describe cannot be read
+// back, and both need an explicit mask to reach -- every ParseIPNet call in the
+// tree passes nil. A 4-byte address beside a 16-byte mask was written as a
+// 21-byte record: the decoder reads as many mask bytes as the address is wide,
+// so it read that back as the 9-byte form, and a ban recorded through one
+// spelling of an address was invisible to Status through the other, which made
+// a ban evadable by reconnecting with the other spelling. The leading 12
+// all-ones bytes are the ones net.IP.Mask itself discards, so a mask that
+// begins that way is trimmed to the 4 bytes that apply, describing exactly the
+// IPv4 network the caller asked for; one that does not begin that way cannot
+// describe an IPv4 network at all. An IPv6 address beside a 4-byte mask was
+// accepted by the parser and then refused by the encoder, so no record could be
+// written for it; it is refused where the mistake was made instead.
 func ipNetParts(ip net.IP, mask net.IPMask) ([]byte, net.IPMask, error) {
 	addr := ip.To4()
 	if addr == nil {
@@ -107,17 +118,17 @@ func ipNetParts(ip net.IP, mask net.IPMask) ([]byte, net.IPMask, error) {
 		return nil, nil, ErrUnsupportedIP
 	}
 
-	switch {
-	case len(addr) == net.IPv4len && len(mask) == net.IPv6len &&
-		isAllOnes(mask[:net.IPv6len-net.IPv4len]):
-
-		mask = mask[net.IPv6len-net.IPv4len:]
-
-	case len(addr) != len(mask):
-		return nil, nil, ErrUnsupportedIP
+	if len(mask) == len(addr) {
+		return addr, mask, nil
 	}
 
-	return addr, mask, nil
+	if len(addr) == net.IPv4len && len(mask) == net.IPv6len &&
+		isAllOnes(mask[:net.IPv6len-net.IPv4len]) {
+
+		return addr, mask[net.IPv6len-net.IPv4len:], nil
+	}
+
+	return nil, nil, ErrUnsupportedIP
 }
 
 // keyFromIPNet converts an IP network into a typed ban key.

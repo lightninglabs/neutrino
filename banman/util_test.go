@@ -1,6 +1,7 @@
 package banman
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"strings"
@@ -254,26 +255,6 @@ func TestParseAddrBracketedIPv6WithoutPort(t *testing.T) {
 	require.Equal(t, keyWithPort, keyWithoutPort)
 }
 
-// TestParseIPNetIPv4WithIPv6WidthMask ensures a 4-byte IPv4 address paired
-// with a 16-byte mask keeps resolving to the network it names. Callers reach
-// this shape through net.ParseCIDR on a v4-mapped address, and it worked
-// before ban keys were introduced, so it has to keep working.
-func TestParseIPNetIPv4WithIPv6WidthMask(t *testing.T) {
-	t.Parallel()
-
-	ipNet, err := ParseIPNet("1.2.3.4", net.CIDRMask(128, 128))
-	require.NoError(t, err)
-	require.Equal(t, "1.2.3.4/32", ipNet.String())
-
-	// A 16-byte mask whose leading 12 bytes are not all ones does not
-	// describe an IPv4 network, so it is refused rather than guessed at.
-	mask := net.IPMask(make([]byte, net.IPv6len))
-	mask[0] = 0xff
-
-	_, err = ParseIPNet("1.2.3.4", mask)
-	require.ErrorIs(t, err, ErrUnsupportedIP)
-}
-
 // TestParseAddrIPv4MappedCIDR ensures a v4-mapped address from net.ParseCIDR
 // resolves to an IPv4 key, and that the ban record it produces is the same one
 // the plain dotted form produces.
@@ -364,5 +345,123 @@ func TestParseAddrRealTorV3Services(t *testing.T) {
 			require.Equal(t, NetworkTorV3, key.Net)
 			require.Equal(t, testCase.pubKey, key.Addr[:8])
 		})
+	}
+}
+
+// TestParseIPNetWideMaskCompat pins the behaviour of an explicit mask wider
+// than the address family, which is where ban keys were closest to changing an
+// existing answer.
+//
+// The mask is applied to the address as given, before the family is decided, so
+// a mask wide enough to discard a v4 mapping yields the IPv6 network it leaves
+// behind. That is what this package has always done and it is deliberately
+// preserved: ::ffff:1.2.3.4 with a /80 is ::/80, not an error.
+func TestParseIPNetWideMaskCompat(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		addr string
+		mask net.IPMask
+		want string
+	}{
+		{
+			name: "v4 mapped, mask discards the mapping",
+			addr: "::ffff:1.2.3.4",
+			mask: net.CIDRMask(80, 128),
+			want: "::/80",
+		},
+		{
+			name: "v4 mapped, ones prefix lands on the v4 address",
+			addr: "::ffff:1.2.3.4",
+			mask: net.CIDRMask(128, 128),
+			want: "1.2.3.4/32",
+		},
+		{
+			name: "v4 mapped, /104 narrows to an IPv4 /8",
+			addr: "::ffff:1.2.3.4",
+			mask: net.CIDRMask(104, 128),
+			want: "1.0.0.0/8",
+		},
+		{
+			name: "v4 text with a mask that keeps the v6 prefix",
+			addr: "1.2.3.4",
+			mask: net.CIDRMask(80, 128),
+			want: "::/80",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			ipNet, err := ParseIPNet(testCase.addr, testCase.mask)
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, ipNet.String())
+		})
+	}
+}
+
+// TestParseIPNetRepairsUnencodablePairings pins the two pairings where the
+// record this package wrote could not be read back, so the previous answer is
+// not one worth preserving.
+//
+// Both are explicit-mask cases, and neither is reachable from neutrino itself:
+// every ParseIPNet call site in the tree passes a nil mask.
+func TestParseIPNetRepairsUnencodablePairings(t *testing.T) {
+	t.Parallel()
+
+	// A 16-byte mask beside a 4-byte address used to be written as the
+	// 21-byte record, which the decoder read back as the 9-byte form. The
+	// network is the same either way; only the record had to change.
+	wide, err := ParseIPNet("1.2.3.4", net.CIDRMask(128, 128))
+	require.NoError(t, err)
+	require.Equal(t, "1.2.3.4/32", wide.String())
+
+	var encoded bytes.Buffer
+	require.NoError(t, encodeIPNet(&encoded, wide))
+	require.Len(t, encoded.Bytes(), 1+net.IPv4len+net.IPv4len)
+
+	// Encoding must be a fixed point: what comes out decodes to what went
+	// in. The 21-byte form did not have this property.
+	decoded, err := decodeIPNet(bytes.NewReader(encoded.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, wide.String(), decoded.String())
+
+	// An IPv6 address with a 4-byte mask used to parse into a net.IPNet
+	// that the encoder then refused, so no record could be written for it
+	// at all. It is refused where the mistake is made instead.
+	_, err = ParseIPNet("2001:db8::1", net.CIDRMask(32, 32))
+	require.ErrorIs(t, err, ErrUnsupportedIP)
+}
+
+// TestIPv4RecordsMatchAcrossMaskForms ensures one peer has one record no
+// matter which accepted spelling its address arrives in. This is the property
+// that keeps a ban from being evaded by reconnecting with a different form of
+// the same address.
+func TestIPv4RecordsMatchAcrossMaskForms(t *testing.T) {
+	t.Parallel()
+
+	record := func(addr string) []byte {
+		key, err := ParseAddr(addr)
+		require.NoError(t, err)
+
+		encoded, err := serializeKey(key)
+		require.NoError(t, err)
+
+		return encoded
+	}
+
+	// Every spelling of one IPv4 peer must give one record.
+	want := record("1.2.3.4:8333")
+	require.Len(t, want, 1+net.IPv4len+net.IPv4len)
+
+	for _, addr := range []string{
+		"1.2.3.4",
+		"1.2.3.4:18333",
+		"[::ffff:1.2.3.4]:8333",
+		"::ffff:1.2.3.4",
+	} {
+		require.Equal(t, want, record(addr), "addr %v", addr)
 	}
 }

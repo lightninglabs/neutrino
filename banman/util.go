@@ -96,25 +96,24 @@ func parseIPKey(host string, mask net.IPMask) (*Key, error) {
 		return nil, ErrUnsupportedIP
 	}
 
-	// Narrow the address to the width of its own family before picking a
-	// default, so a v4-mapped address gets the IPv4 default rather than the
-	// IPv6 one its 16-byte form would suggest.
-	addr := ip.To4()
-	switch {
-	case addr != nil && mask == nil:
-		mask = defaultIPv4Mask
-
-	case addr == nil:
-		addr = ip.To16()
-		if mask == nil {
+	// The family decides which default applies, so ask the address how it
+	// will be stored rather than how wide the mask happens to be: a
+	// v4-mapped address takes the IPv4 default, not the IPv6 one its
+	// 16-byte form would suggest.
+	if mask == nil {
+		if ip.To4() != nil {
+			mask = defaultIPv4Mask
+		} else {
 			mask = defaultIPv6Mask
 		}
 	}
 
-	// The address is masked here, rather than in keyFromIPNet, because an
-	// address given as host:port names a single peer: the stored network
-	// has to be the one the mask describes, not the address as typed.
-	masked := addr.Mask(mask)
+	// Mask the original, not the narrowed form: a 16-byte mask is applied
+	// to the 16-byte address it was written for, and a mask wide enough to
+	// discard a v4 mapping is meant to yield the IPv6 network it leaves
+	// behind. Masking the narrowed address instead would refuse every mask
+	// wider than 32 bits.
+	masked := ip.Mask(mask)
 	if masked == nil {
 		return nil, ErrUnsupportedIP
 	}
