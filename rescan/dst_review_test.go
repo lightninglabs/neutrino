@@ -226,3 +226,125 @@ func TestDSTInitializingRewind(t *testing.T) {
 		require.Equal(t, []int32{1, 2, 3}, heights)
 	})
 }
+
+// TestDSTWatchUpdateAfterTimeout records whether an already enqueued update
+// takes effect after its caller's deadline expires.
+func TestDSTWatchUpdateAfterTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := &dstChain{mockChainWithTxs: newMockChainWithTxs(2)}
+		entered, release := make(chan struct{}), make(chan struct{})
+		chain.filterEntered, chain.filterRelease = entered, release
+		genesis := chain.ChainParams().GenesisBlock.Header
+		initial, err := address.NewAddressPubKeyHash(
+			make([]byte, 20), &chaincfg.MainNetParams,
+		)
+		require.NoError(t, err)
+		nextBytes := make([]byte, 20)
+		nextBytes[0] = 1
+		next, err := address.NewAddressPubKeyHash(
+			nextBytes, &chaincfg.MainNetParams,
+		)
+		require.NoError(t, err)
+		actor := NewRescanActor(ActorConfig{
+			Chain: chain,
+			StartStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			StartHeader: genesis,
+			WatchAddrs:  []address.Address{initial},
+		})
+		actor.Start()
+		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+		<-entered
+		done := make(chan error, 1)
+		go func() {
+			done <- actor.AddWatchAddrs(
+				[]address.Address{next}, nil, nil,
+			)
+		}()
+		synctest.Wait()
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+		require.Error(t, <-done)
+		close(release)
+		synctest.Wait()
+		state, err := actor.CurrentState()
+		require.NoError(t, err)
+		current, ok := state.(*StateCurrent)
+		require.True(t, ok, "state %T", state)
+		require.Contains(t, current.Watch.Addrs, next)
+	})
+}
+
+// TestDSTDelayedConnectAfterCatchup checks a notification captured during
+// historical scanning but delivered after the scan reaches the tip.
+func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := &dstChain{mockChainWithTxs: newMockChainWithTxs(7)}
+		genesis := chain.ChainParams().GenesisBlock.Header
+		second, err := chain.GetBlockHeaderByHeight(2)
+		require.NoError(t, err)
+		third, err := chain.GetBlockHeaderByHeight(3)
+		require.NoError(t, err)
+		entered, release := make(chan struct{}), make(chan struct{})
+		chain.onFilter = func(hash chainhash.Hash) error {
+			if hash == third.BlockHash() {
+				chain.muFault.Lock()
+				chain.onFilter = nil
+				chain.muFault.Unlock()
+				close(entered)
+				<-release
+			}
+			return nil
+		}
+		addr, err := address.NewAddressPubKeyHash(
+			make([]byte, 20), &chaincfg.MainNetParams,
+		)
+		require.NoError(t, err)
+		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
+		var errorsReported int
+		actor := NewRescanActor(ActorConfig{
+			Chain: chain,
+			StartStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			StartHeader: genesis,
+			WatchAddrs:  []address.Address{addr},
+			BatchSize:   1,
+			OnError:     func(error) { errorsReported++ },
+			Callbacks: Callbacks{
+				OnBlockConnected: func(h int32,
+					hdr *wire.BlockHeader, _ time.Time) {
+
+					oracle.connect(h, hdr)
+				},
+			},
+		})
+		actor.Start()
+		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+		<-entered
+		close(release)
+		synctest.Wait()
+		state, err := actor.CurrentState()
+		require.NoError(t, err)
+		_, ok := state.(*StateCurrent)
+		require.True(t, ok, "state %T", state)
+		chain.ntfnChan <- blockntfns.NewBlockConnected(*second, 2)
+		synctest.Wait()
+		for i := 0; i < 3; i++ {
+			time.Sleep(filterRetryInterval)
+			synctest.Wait()
+		}
+		state, err = actor.CurrentState()
+		require.NoError(t, err)
+		current, ok := state.(*StateCurrent)
+		require.True(t, ok, "state %T", state)
+		best, err := chain.BestBlock()
+		require.NoError(t, err)
+		require.Equal(t, best.Hash, current.CurStamp.Hash)
+		require.Equal(t, best.Height, current.CurStamp.Height)
+		require.Empty(t, oracle.err)
+		require.Len(t, oracle.events, int(best.Height))
+		require.Zero(t, errorsReported)
+	})
+}
