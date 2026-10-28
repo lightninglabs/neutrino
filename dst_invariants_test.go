@@ -387,9 +387,14 @@ func (d *dstRun) quiescent() error {
 		if !ok {
 			continue
 		}
-		switch rng.State {
-		case headersync.RangeCommitted, headersync.RangeFailed,
-			headersync.RangeStale:
+		// An overlong reply can teach an honest anchor past what any
+		// peer advertises. Work above the target waits for a peer that
+		// has it, which is not a stall.
+		switch {
+		case rng.State == headersync.RangeCommitted,
+			rng.State == headersync.RangeFailed,
+			rng.State == headersync.RangeStale,
+			rng.StartHeight >= d.target:
 
 		default:
 			return fmt.Errorf("range %+v not terminal", rng)

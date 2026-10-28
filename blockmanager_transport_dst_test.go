@@ -1245,6 +1245,11 @@ var dstRegressionSeeds = []string{
 	"277d75d4a62964a270d68e72b3131be1f056dbf0",
 	"5efcd649b1dba97bb29b86658bf2a2bad9c4a9900330885243bf",
 	"2c32dc3e81d1e62029fc492b6b9029a02395adcd82d151cc",
+	// A corrupt discovery reply winning an anchor, a lagging peer asked
+	// for blocks it never had, and work queued above every peer's tip.
+	"81cbc61289d3bc6f773c1341504a585a1a1d6e1055bcad",
+	"3ff9cd239f8f0c0caa711003bea0fe34e8ce7bd3aa3919ced732cf38cef0",
+	"17d1c2321aed3719ba5dda26f1eb1020cf00ffa933c8e3f193c7ba",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.
