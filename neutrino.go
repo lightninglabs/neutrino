@@ -729,11 +729,10 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
-	// Validate that the caller provided exactly one of the two supported
+	// Validate that the caller provided at least one of the two supported
 	// persistent backends. This is checked before any other side effect
 	// so misconfigurations fail fast.
-	switch {
-	case cfg.Database == nil && cfg.SQLConfig == nil:
+	if cfg.Database == nil && cfg.SQLConfig == nil {
 		return nil, errors.New("neutrino: one of cfg.Database " +
 			"or cfg.SQLConfig must be set")
 	}
