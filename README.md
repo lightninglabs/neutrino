@@ -17,6 +17,11 @@ filter headers specifying the correct filters for each block. Filters are loaded
 lazily and stored in the database upon request; blocks are loaded lazily and not
 saved.
 
+[docs/sync-architecture.md](docs/sync-architecture.md) describes the sync
+pipeline in detail: which component owns which state, how header ranges move
+from planning to durable commit, how filter headers are verified, and how the
+storage backends are laid out.
+
 ## Usage
 The client is instantiated as an object using `NewChainService` and then
 started. Upon start, the client sets up its database and other relevant files
