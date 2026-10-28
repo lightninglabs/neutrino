@@ -13,16 +13,16 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/stretchr/testify/require"
 )
 
@@ -247,6 +247,21 @@ func TestBigFilterEvictsEverything(t *testing.T) {
 	assertEqual(t, getFilter(cs, b3, t), f3, "")
 }
 
+// TestTransactionInv ensures transaction announcements use the txid-based
+// inventory type. Witness serialization is negotiated later when a peer sends
+// getdata, so it must not change the preceding announcement.
+func TestTransactionInv(t *testing.T) {
+	t.Parallel()
+
+	tx := wire.NewMsgTx(2)
+	txHash := tx.TxHash()
+	inv := newTransactionInv(tx)
+
+	require.Len(t, inv.InvList, 1)
+	require.Equal(t, wire.InvTypeTx, inv.InvList[0].Type)
+	require.Equal(t, txHash, inv.InvList[0].Hash)
+}
+
 // TestBlockCache checks that blocks are inserted and fetched from the cache
 // before peers are queried.
 func TestBlockCache(t *testing.T) {
@@ -289,12 +304,13 @@ func TestBlockCache(t *testing.T) {
 		workManager: &mockDispatcher{},
 	}
 
-	// We'll set up the queryPeers method to make sure we are only querying
+	// We'll set up the work manager to make sure we are only querying
 	// for blocks, and send the block hashes queried over the queries
 	// channel.
 	queries := make(chan chainhash.Hash, 1)
-	cs.workManager.(*mockDispatcher).query = func(reqs []*query.Request,
-		opts ...query.QueryOption) chan error {
+	mock := cs.workManager.(*mockDispatcher)
+	mock.query = func(reqs []*querysyncwm.Request,
+		opts ...querysyncwm.QueryOption) chan error {
 
 		errChan := make(chan error, 1)
 		defer close(errChan)

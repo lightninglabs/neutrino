@@ -3,10 +3,10 @@ package filterdb
 import (
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -168,7 +168,7 @@ func putFilter(bucket walletdb.ReadWriteBucket, hash *chainhash.Hash,
 // NOTE: This method is a part of the FilterDatabase interface.
 func (f *FilterStore) PutFilters(filterList ...*FilterData) error {
 	var updateErr error
-	err := walletdb.Batch(f.db, func(tx walletdb.ReadWriteTx) error {
+	putFilters := func(tx walletdb.ReadWriteTx) error {
 		filters := tx.ReadWriteBucket(filterBucket)
 		regularFilterBkt := filters.NestedReadWriteBucket(regBucket)
 
@@ -197,7 +197,19 @@ func (f *FilterStore) PutFilters(filterList ...*FilterData) error {
 		}
 
 		return nil
-	})
+	}
+
+	var err error
+
+	// Batch is an optimization that some walletdb backends, such as bdb,
+	// implement to coalesce concurrent write transactions. Other backends
+	// only satisfy the base walletdb.DB interface, so fall back to a normal
+	// write transaction when batching is unavailable.
+	if _, ok := f.db.(walletdb.BatchDB); ok {
+		err = walletdb.Batch(f.db, putFilters)
+	} else {
+		err = walletdb.Update(f.db, putFilters)
+	}
 	if err != nil {
 		return err
 	}

@@ -1,8 +1,8 @@
 package banman
 
 import (
+	"errors"
 	"net"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -35,6 +35,7 @@ func TestParseIPNet(t *testing.T) {
 		addr   string
 		mask   net.IPMask
 		result *net.IPNet
+		err    error
 	}{
 		{
 			name: "ipv4 with default mask",
@@ -72,6 +73,12 @@ func TestParseIPNet(t *testing.T) {
 				Mask: net.CIDRMask(32, 128),
 			},
 		},
+		{
+			name: "onion address with port",
+			addr: "52kldxh5vexi3gmwnbfwoa5ixx65icsuceattoqc2szoh" +
+				"owfibzruyid.onion:8333",
+			err: ErrUnsupportedIP,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -79,6 +86,13 @@ func TestParseIPNet(t *testing.T) {
 			// Parse the IP network from each test's address and
 			// mask.
 			ipNet, err := ParseIPNet(testCase.addr, testCase.mask)
+			if testCase.err != nil {
+				if !errors.Is(err, testCase.err) {
+					t.Fatalf("expected error %v, got %v",
+						testCase.err, err)
+				}
+				return
+			}
 			if testCase.result != nil && err != nil {
 				t.Fatalf("unable to parse IP network for "+
 					"addr=%v and mask=%v: %v",
@@ -96,10 +110,9 @@ func TestParseIPNet(t *testing.T) {
 				t.Fatalf("expected IP %v, got %v",
 					testCase.result.IP, ipNet.IP)
 			}
-			if !reflect.DeepEqual(ipNet.Mask, testCase.result.Mask) {
-				t.Fatalf("expected mask %#v, got %#v",
-					testCase.result.Mask, ipNet.Mask)
-			}
+			require.Equal(
+				t, testCase.result.Mask, ipNet.Mask,
+			)
 		})
 		if !success {
 			return
@@ -239,4 +252,117 @@ func TestParseAddrBracketedIPv6WithoutPort(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, keyWithPort, keyWithoutPort)
+}
+
+// TestParseIPNetIPv4WithIPv6WidthMask ensures a 4-byte IPv4 address paired
+// with a 16-byte mask keeps resolving to the network it names. Callers reach
+// this shape through net.ParseCIDR on a v4-mapped address, and it worked
+// before ban keys were introduced, so it has to keep working.
+func TestParseIPNetIPv4WithIPv6WidthMask(t *testing.T) {
+	t.Parallel()
+
+	ipNet, err := ParseIPNet("1.2.3.4", net.CIDRMask(128, 128))
+	require.NoError(t, err)
+	require.Equal(t, "1.2.3.4/32", ipNet.String())
+
+	// A 16-byte mask whose leading 12 bytes are not all ones does not
+	// describe an IPv4 network, so it is refused rather than guessed at.
+	mask := net.IPMask(make([]byte, net.IPv6len))
+	mask[0] = 0xff
+
+	_, err = ParseIPNet("1.2.3.4", mask)
+	require.ErrorIs(t, err, ErrUnsupportedIP)
+}
+
+// TestParseAddrIPv4MappedCIDR ensures a v4-mapped address from net.ParseCIDR
+// resolves to an IPv4 key, and that the ban record it produces is the same one
+// the plain dotted form produces.
+func TestParseAddrIPv4MappedCIDR(t *testing.T) {
+	t.Parallel()
+
+	_, mapped, err := net.ParseCIDR("::ffff:1.2.3.4/128")
+	require.NoError(t, err)
+
+	key, err := keyFromIPNet(mapped)
+	require.NoError(t, err)
+	require.Equal(t, NetworkIPv4, key.Net)
+
+	plain, err := ParseAddr("1.2.3.4")
+	require.NoError(t, err)
+	require.Equal(t, plain, key)
+
+	// The deprecated IP path has to reach the same place.
+	ipNet, err := ParseIPNet(mapped.IP.String(), mapped.Mask)
+	require.NoError(t, err)
+	require.Equal(t, "1.2.3.4/32", ipNet.String())
+}
+
+// TestParseAddrTorV3NoMask ensures a Tor v3 key never carries an IP mask, so
+// it cannot be mistaken for an IP record by a reader that dispatches on the
+// mask alone.
+func TestParseAddrTorV3NoMask(t *testing.T) {
+	t.Parallel()
+
+	key, err := ParseAddr(testTorV3Host)
+	require.NoError(t, err)
+	require.Equal(t, NetworkTorV3, key.Net)
+	require.Nil(t, key.Mask)
+	require.Len(t, key.Addr, torV3KeySize)
+
+	// A Tor v3 host with a mask is not a shape the encoder accepts.
+	_, err = keyToIPNet(key)
+	require.ErrorIs(t, err, ErrUnsupportedIP)
+}
+
+// TestParseAddrRealTorV3Services checks the parser against addresses of real,
+// public Tor v3 services. The parser had to agree on their checksums and
+// versions to accept them at all, so a vector that was only ever produced by
+// the same code under test cannot hide a wrong checksum.
+func TestParseAddrRealTorV3Services(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		host   string
+		pubKey []byte
+	}{
+		{
+			host: "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6" +
+				"twagswzczad.onion",
+			pubKey: []byte{
+				0x1d, 0x04, 0xa1, 0xd0, 0x4a, 0x33, 0x8c, 0x6e,
+			},
+		},
+		{
+			host: "facebookwkhpilnemxj7asaniu7vnjjbiltxjqhye3mhbs" +
+				"hg7kx5tfyd.onion",
+			pubKey: []byte{
+				0x28, 0x04, 0x40, 0xb9, 0xca, 0xb2, 0x8e, 0xf4,
+			},
+		},
+		{
+			host: "protonmailrmez3lotccipshtkleegetolb73fuirgj7r4" +
+				"o4vfu7ozyd.onion",
+			pubKey: []byte{
+				0x7c, 0x5d, 0x37, 0x35, 0x80, 0x42, 0xe2, 0xc2,
+			},
+		},
+		{
+			host: "mempoolhqx4isw62xs7abwphsq7ldayuidyx2v2oethdh" +
+				"hj6mlo2r6ad.onion",
+			pubKey: []byte{
+				0x61, 0x18, 0xf7, 0x39, 0x67, 0x85, 0xf8, 0x89,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.host[:16], func(t *testing.T) {
+			t.Parallel()
+
+			key, err := ParseAddr(testCase.host + ":8333")
+			require.NoError(t, err)
+			require.Equal(t, NetworkTorV3, key.Net)
+			require.Equal(t, testCase.pubKey, key.Addr[:8])
+		})
+	}
 }

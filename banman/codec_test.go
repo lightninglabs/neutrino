@@ -243,3 +243,107 @@ func TestTorV3KeyEncodingBytes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expected, b.Bytes())
 }
+
+// TestDecodeKeyRejectsUnencodableRecords ensures that decodeKey refuses any
+// record it could not write back out. The store never decodes keys today, but
+// a decoder laxer than the encoder is how a record that the encoder rejects
+// ends up in the database, so the two are held to the same shape.
+func TestDecodeKeyRejectsUnencodableRecords(t *testing.T) {
+	t.Parallel()
+
+	// A v4-mapped address carries 16 bytes but belongs to the IPv4
+	// family, so a record that states the IPv6 family for it decodes to a
+	// key the encoder would re-encode under a different family byte.
+	_, mapped, err := net.ParseCIDR("::ffff:1.2.3.4/128")
+	require.NoError(t, err)
+
+	mismatchedFamily := append(
+		[]byte{byte(NetworkIPv6)}, mapped.IP...,
+	)
+	mismatchedFamily = append(mismatchedFamily, mapped.Mask...)
+
+	testCases := []struct {
+		name   string
+		record []byte
+	}{
+		{
+			name: "ipv6 family byte with a 4-byte address",
+			record: []byte{
+				byte(NetworkIPv6),
+				0x01, 0x02, 0x03, 0x04,
+			},
+		},
+		{
+			name:   "ipv6 family byte with a v4-mapped address",
+			record: mismatchedFamily,
+		},
+		{
+			name: "truncated torv3 payload",
+			record: append(
+				[]byte{byte(NetworkTorV3)}, make([]byte, 4)...,
+			),
+		},
+		{
+			name:   "unknown family byte",
+			record: []byte{0x07},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			key, err := decodeKey(bytes.NewReader(testCase.record))
+			require.Error(t, err)
+			require.Nil(t, key)
+		})
+	}
+}
+
+// TestDecodeKeyAcceptsEverythingEncodeKeyWrites is the converse of the test
+// above: whatever encodeKey emits, decodeKey reads back into a key that
+// encodes to the same bytes.
+func TestDecodeKeyAcceptsEverythingEncodeKeyWrites(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string]*Key{
+		"ipv4": {
+			Net:  NetworkIPv4,
+			Addr: []byte{0x01, 0x02, 0x03, 0x04},
+			Mask: []byte(defaultIPv4Mask),
+		},
+		"ipv4 unpadded network": {
+			Net:  NetworkIPv4,
+			Addr: []byte{0x01, 0x02, 0x00, 0x00},
+			Mask: []byte{0xff, 0xff, 0x00, 0x00},
+		},
+		"ipv6": {
+			Net:  NetworkIPv6,
+			Addr: bytes.Repeat([]byte{0x01}, net.IPv6len),
+			Mask: []byte(defaultIPv6Mask),
+		},
+		"torv3": {
+			Net:  NetworkTorV3,
+			Addr: testTorV3PubKey,
+		},
+	}
+
+	for name, key := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var encoded bytes.Buffer
+			require.NoError(t, encodeKey(&encoded, key))
+
+			// Keep the record aside: decoding consumes the reader.
+			want := bytes.Clone(encoded.Bytes())
+
+			decoded, err := decodeKey(bytes.NewReader(want))
+			require.NoError(t, err)
+
+			var got bytes.Buffer
+			require.NoError(t, encodeKey(&got, decoded))
+			require.Equal(t, want, got.Bytes())
+		})
+	}
+}

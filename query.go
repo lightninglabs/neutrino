@@ -4,20 +4,19 @@ package neutrino
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/cache"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/pushtx"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
 var (
@@ -64,9 +63,9 @@ var (
 	// fails.
 	ErrFilterFetchFailed = fmt.Errorf("unable to fetch cfilter")
 
-	// noProgress will be used to indicate to a query.WorkManager that a
-	// response makes no progress towards the completion of the query.
-	noProgress = query.Progress{
+	// noProgress will be used to indicate to a querysyncwm.WorkManager that
+	// a response makes no progress towards the completion of the query.
+	noProgress = querysyncwm.Progress{
 		Finished:   false,
 		Progressed: false,
 	}
@@ -253,142 +252,6 @@ func MaxBatchSize(maxSize int64) QueryOption {
 	}
 }
 
-// We provide 3 kinds of queries:
-//
-// * queryAllPeers allows a single query to be broadcast to all peers, and
-//   then waits for as many peers as possible to answer that query within
-//   a timeout. This allows for doing things like checking cfilter checkpoints.
-//
-// * queryPeers allows a single query to be passed to one peer at a time until
-//   the query is deemed answered. This is good for getting a single piece of
-//   data, such as a filter or a block.
-//
-// * queryBatch allows a batch of queries to be distributed among all peers,
-//   recirculating upon timeout.
-//
-// TODO(aakselrod): maybe abstract the query scheduler into a functional option
-// and provide some presets (including the ones below) prior to factoring out
-// the query API into its own package?
-
-// queryAllPeers is a helper function that sends a query to all peers and waits
-// for a timeout specified by the QueryTimeout package-level variable or the
-// Timeout functional option. The NumRetries option is set to 1 by default
-// unless overridden by the caller.
-func (s *ChainService) queryAllPeers(
-	// queryMsg is the message to broadcast to all peers.
-	queryMsg wire.Message,
-
-	// checkResponse is called for every message within the timeout period.
-	// The quit channel lets the query know to terminate because the
-	// required response has been found. This is done by closing the
-	// channel. The peerQuit lets the query know to terminate the query for
-	// the peer which sent the response, allowing releasing resources for
-	// peers which respond quickly while continuing to wait for slower
-	// peers to respond and nonresponsive peers to time out.
-	checkResponse func(sp *ServerPeer, resp wire.Message,
-		quit chan<- struct{}, peerQuit chan<- struct{}),
-
-	// options takes functional options for executing the query.
-	options ...QueryOption) {
-
-	// Starting with the set of default options, we'll apply any specified
-	// functional options to the query.
-	qo := defaultQueryOptions()
-	qo.numRetries = 1
-	qo.applyQueryOptions(options...)
-
-	// This is done in a single-threaded query because the peerState is
-	// held in a single thread. This is the only part of the query
-	// framework that requires access to peerState, so it's done once per
-	// query.
-	peers := s.Peers()
-
-	// This will be shared state between the per-peer goroutines.
-	queryQuit := make(chan struct{})
-	allQuit := make(chan struct{})
-	var wg sync.WaitGroup
-	msgChan := make(chan spMsg)
-	subscription := spMsgSubscription{
-		msgChan:  msgChan,
-		quitChan: allQuit,
-	}
-
-	// Now we start a goroutine for each peer which manages the peer's
-	// message subscription.
-	peerQuits := make(map[string]chan struct{})
-	for _, sp := range peers {
-		sp.subscribeRecvMsg(subscription)
-		wg.Add(1)
-		peerQuits[sp.Addr()] = make(chan struct{})
-		go func(sp *ServerPeer, peerQuit <-chan struct{}) {
-			defer wg.Done()
-
-			defer sp.unsubscribeRecvMsgs(subscription)
-
-			for i := uint8(0); i < qo.numRetries; i++ {
-				timeout := time.After(qo.timeout)
-				sp.QueueMessageWithEncoding(queryMsg,
-					nil, qo.encoding)
-				select {
-				case <-queryQuit:
-					return
-				case <-s.quit:
-					return
-				case <-peerQuit:
-					return
-				case <-timeout:
-				}
-			}
-		}(sp, peerQuits[sp.Addr()])
-	}
-
-	// This goroutine will wait until all of the peer-query goroutines have
-	// terminated, and then initiate a query shutdown.
-	go func() {
-		wg.Wait()
-
-		// Make sure our main goroutine and the subscription know to
-		// quit.
-		close(allQuit)
-
-		// Close the done channel, if any.
-		if qo.doneChan != nil {
-			close(qo.doneChan)
-		}
-	}()
-
-	// Loop for any messages sent to us via our subscription channel and
-	// check them for whether they satisfy the query. Break the loop when
-	// allQuit is closed.
-checkResponses:
-	for {
-		select {
-		case <-queryQuit:
-			break checkResponses
-
-		case <-s.quit:
-			break checkResponses
-
-		case <-allQuit:
-			break checkResponses
-
-		// A message has arrived over the subscription channel, so we
-		// execute the checkResponses callback to see if this ends our
-		// query session.
-		case sm := <-msgChan:
-			// TODO: This will get stuck if checkResponse gets
-			// stuck. This is a caveat for callers that should be
-			// fixed before exposing this function for public use.
-			select {
-			case <-peerQuits[sm.sp.Addr()]:
-			default:
-				checkResponse(sm.sp, sm.msg, queryQuit,
-					peerQuits[sm.sp.Addr()])
-			}
-		}
-	}
-}
-
 // getFilterFromCache returns a filter from ChainService's FilterCache if it
 // exists, returning nil and error if it doesn't.
 func (s *ChainService) getFilterFromCache(blockHash *chainhash.Hash,
@@ -433,13 +296,13 @@ type cfiltersQuery struct {
 }
 
 // request couples a query message with the handler to be used for the response
-// in a query.Request struct.
-func (q *cfiltersQuery) request() *query.Request {
+// in a querysyncwm.Request struct.
+func (q *cfiltersQuery) request() *querysyncwm.Request {
 	msg := wire.NewMsgGetCFilters(
 		q.filterType, uint32(q.startHeight), q.stopHash,
 	)
 
-	return &query.Request{
+	return &querysyncwm.Request{
 		Req:        msg,
 		HandleResp: q.handleResponse,
 	}
@@ -448,7 +311,7 @@ func (q *cfiltersQuery) request() *query.Request {
 // handleResponse validates that the cfilter response we get from a peer is
 // sane given the getcfilter query that we made.
 func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
-	_ string) query.Progress {
+	_ string) querysyncwm.Progress {
 
 	// The request must have been a "getcfilters" msg.
 	request, ok := req.(*wire.MsgGetCFilters)
@@ -548,14 +411,14 @@ func (q *cfiltersQuery) handleResponse(req, resp wire.Message,
 	// If there are still entries left in the headerIndex then the query
 	// has made progress but has not yet completed.
 	if len(q.headerIndex) != 0 {
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: true,
 		}
 	}
 
 	// The headerIndex is empty and so this query is complete.
-	return query.Progress{
+	return querysyncwm.Progress{
 		Finished:   true,
 		Progressed: true,
 	}
@@ -755,14 +618,14 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		filterQuery.startHeight, filterQuery.stopHeight,
 		filterQuery.stopHash)
 
-	opts := []query.QueryOption{
-		query.Cancel(s.quit),
-		query.Encoding(qo.encoding),
-		query.NumRetries(qo.numRetries),
+	opts := []querysyncwm.QueryOption{
+		querysyncwm.Cancel(s.quit),
+		querysyncwm.Encoding(qo.encoding),
+		querysyncwm.NumRetries(qo.numRetries),
 	}
 
 	errChan := s.workManager.Query(
-		[]*query.Request{filterQuery.request()}, opts...,
+		[]*querysyncwm.Request{filterQuery.request()}, opts...,
 	)
 
 	select {
@@ -839,7 +702,9 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	// handleResp will be called for each message received from a peer. It
 	// will be used to signal to the work manager whether progress has been
 	// made or not.
-	handleResp := func(req, resp wire.Message, peer string) query.Progress {
+	handleResp := func(req, resp wire.Message,
+		peer string) querysyncwm.Progress {
+
 		// The request must have been a "getdata" msg.
 		_, ok := req.(*wire.MsgGetData)
 		if !ok {
@@ -904,27 +769,29 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 		// we declare it sane. We can kill the query and pass the
 		// response back to the caller.
 		foundBlock = block
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   true,
 			Progressed: true,
 		}
 	}
 
 	// Prepare the query request.
-	request := &query.Request{
+	request := &querysyncwm.Request{
 		Req:        getData,
 		HandleResp: handleResp,
 	}
 
 	// Prepare the query options.
-	queryOpts := []query.QueryOption{
-		query.Encoding(qo.encoding),
-		query.NumRetries(qo.numRetries),
-		query.Cancel(s.quit),
+	queryOpts := []querysyncwm.QueryOption{
+		querysyncwm.Encoding(qo.encoding),
+		querysyncwm.NumRetries(qo.numRetries),
+		querysyncwm.Cancel(s.quit),
 	}
 
 	// Send the request to the work manager and await a response.
-	errChan := s.workManager.Query([]*query.Request{request}, queryOpts...)
+	errChan := s.workManager.Query(
+		[]*querysyncwm.Request{request}, queryOpts...,
+	)
 	select {
 	case err := <-errChan:
 		if err != nil {
@@ -948,6 +815,28 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	return foundBlock, nil
 }
 
+// newTransactionInv creates the inventory used to announce a transaction.
+// BIP-144 reserves witness inventory types for getdata, where the requesting
+// peer selects the transaction encoding. The preceding inv therefore always
+// identifies the transaction by its txid using MSG_TX.
+func newTransactionInv(tx *wire.MsgTx) *wire.MsgInv {
+	txHash := tx.TxHash()
+	inv := wire.NewMsgInv()
+	_ = inv.AddInvVect(wire.NewInvVect(wire.InvTypeTx, &txHash))
+
+	return inv
+}
+
+// broadcastOptions converts the options relevant to a broadcast into their
+// work manager counterparts.
+func (qo *queryOptions) broadcastOptions() []querysyncwm.QueryOption {
+	return []querysyncwm.QueryOption{
+		querysyncwm.Timeout(qo.timeout),
+		querysyncwm.NumRetries(qo.numRetries),
+		querysyncwm.Encoding(qo.encoding),
+	}
+}
+
 // sendTransaction sends a transaction to all peers. It returns an error if any
 // peer rejects the transaction.
 //
@@ -958,55 +847,52 @@ func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 // cannot be done at the moment due to circular dependencies.
 func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) error {
 	// Starting with the set of default options, we'll apply any specified
-	// functional options to the query so that we can check what inv type
-	// to use. Broadcast the inv to all peers, responding to any getdata
-	// messages for the transaction.
+	// functional options to the query so we know which encoding to serve
+	// the transaction with. We broadcast an inv to all peers and respond to
+	// any getdata messages for the transaction.
+	// As the inv is only sent to each peer once by default, the retry count
+	// is overridden here, before the caller's options are applied.
+	options = append(
+		[]QueryOption{Timeout(s.broadcastTimeout), NumRetries(1)},
+		options...,
+	)
 	qo := defaultQueryOptions()
 	qo.applyQueryOptions(options...)
-	invType := wire.InvTypeWitnessTx
-	if qo.encoding == wire.BaseEncoding {
-		invType = wire.InvTypeTx
-	}
+	broadcastOpts := qo.broadcastOptions()
 
-	// Create an inv.
+	// Announce the transaction by txid. A peer can request its preferred
+	// serialization in getdata, which we answer using qo.encoding below.
 	txHash := tx.TxHash()
-	inv := wire.NewMsgInv()
-	_ = inv.AddInvVect(wire.NewInvVect(invType, &txHash))
+	inv := newTransactionInv(tx)
 
 	// We'll gather all the peers who replied to our query, along with
 	// the ones who rejected it and their reason for rejecting it. We'll use
-	// this to determine whether our transaction was actually rejected.
-	replies := make(map[int32]struct{})
-	rejections := make(map[int32]*pushtx.BroadcastError)
+	// this to determine whether our transaction was actually rejected. The
+	// broadcast serializes calls to the response handler, so these maps
+	// need no locking.
+	replies := make(map[string]struct{})
+	rejections := make(map[string]*pushtx.BroadcastError)
 	rejectCodes := make(map[pushtx.BroadcastErrorCode]int)
 
-	// closers is a map that tracks the delayed closers we need to make sure
-	// the peer quit channel is closed after a timeout.
-	closers := make(map[int32]*delayedCloser)
+	// Send the inv to all peers and listen for getdata and reject
+	// messages.
+	err := s.workManager.Broadcast(
+		&querysyncwm.Broadcast{
+			Msg: inv,
+			HandleResp: func(peer querysyncwm.Peer,
+				resp wire.Message,
+				ctl *querysyncwm.BroadcastControl) {
 
-	// Send the peer query and listen for getdata.
-	s.queryAllPeers(
-		inv,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+				switch response := resp.(type) {
+				// A peer has replied with a GetData message, so
+				// we'll send them the transaction.
+				case *wire.MsgGetData:
+					for _, vec := range response.InvList {
+						if vec.Hash != txHash {
+							continue
+						}
 
-			// The "closer" can be used to either close the peer
-			// quit channel after a certain timeout or immediately.
-			closer, ok := closers[sp.ID()]
-			if !ok {
-				closer = newDelayedCloser(
-					peerQuit, qo.rejectTimeout,
-				)
-				closers[sp.ID()] = closer
-			}
-
-			switch response := resp.(type) {
-			// A peer has replied with a GetData message, so we'll
-			// send them the transaction.
-			case *wire.MsgGetData:
-				for _, vec := range response.InvList {
-					if vec.Hash == txHash {
-						sp.QueueMessageWithEncoding(
+						peer.QueueMessageWithEncoding(
 							tx, nil, qo.encoding,
 						)
 
@@ -1014,7 +900,8 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 						// request multiple times, we
 						// need to de-duplicate them
 						// using a map.
-						replies[sp.ID()] = struct{}{}
+						replies[peer.Addr()] =
+							struct{}{}
 
 						// Okay, so the peer responded
 						// with an INV message, and we
@@ -1027,43 +914,59 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 						// respond? We'll give them
 						// another bit of time to
 						// respond.
-						closer.closeEventually(s.quit)
+						ctl.PeerDoneAfter(
+							qo.rejectTimeout,
+						)
 					}
+
+				// A peer has rejected our transaction for
+				// whatever reason. Rather than returning to the
+				// caller upon the first rejection, we'll gather
+				// them all to determine whether it is
+				// critical/fatal.
+				case *wire.MsgReject:
+					// Ensure this rejection is for the
+					// transaction we're attempting to
+					// broadcast.
+					if response.Hash != txHash {
+						return
+					}
+
+					addr := peer.Addr()
+					broadcastErr :=
+						pushtx.ParseBroadcastError(
+							response, addr,
+						)
+					rejections[addr] = broadcastErr
+					rejectCodes[broadcastErr.Code]++
+
+					log.Debugf("Transaction %v rejected "+
+						"by peer %v: code = %v, "+
+						"reason = %q", txHash,
+						peer.Addr(), broadcastErr.Code,
+						broadcastErr.Reason)
+
+					// A reject message is final, so we can
+					// stop listening to this peer now, we
+					// don't expect any further messages.
+					ctl.PeerDone()
 				}
-
-			// A peer has rejected our transaction for whatever
-			// reason. Rather than returning to the caller upon the
-			// first rejection, we'll gather them all to determine
-			// whether it is critical/fatal.
-			case *wire.MsgReject:
-				// Ensure this rejection is for the transaction
-				// we're attempting to broadcast.
-				if response.Hash != txHash {
-					return
-				}
-
-				broadcastErr := pushtx.ParseBroadcastError(
-					response, sp.Addr(),
-				)
-				rejections[sp.ID()] = broadcastErr
-				rejectCodes[broadcastErr.Code]++
-
-				log.Debugf("Transaction %v rejected by peer "+
-					"%v: code = %v, reason = %q", txHash,
-					sp.Addr(), broadcastErr.Code,
-					broadcastErr.Reason)
-
-				// A reject message is final, so we can close
-				// the peer quit channel now, we don't expect
-				// any further messages.
-				closer.closeNow()
-			}
+			},
 		},
-		append(
-			[]QueryOption{Timeout(s.broadcastTimeout)},
-			options...,
-		)...,
+		broadcastOpts...,
 	)
+
+	// Let the caller know that the broadcast is finished, in case it was
+	// run in a goroutine.
+	if qo.doneChan != nil {
+		close(qo.doneChan)
+	}
+
+	// A shutdown or cancellation means we can't draw any conclusion from
+	// the replies gathered so far.
+	if err != nil {
+		return err
+	}
 
 	// If none of our peers replied to our query, we'll avoid returning an
 	// error as the reliable broadcaster will take care of broadcasting this
@@ -1141,43 +1044,4 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	}
 
 	return nil
-}
-
-// delayedCloser is a struct that makes sure a subject channel is closed at some
-// point, either after a delay or immediately.
-type delayedCloser struct {
-	subject chan<- struct{}
-	timeout time.Duration
-	once    sync.Once
-}
-
-// newDelayedCloser creates a new delayed closer for the given subject channel.
-func newDelayedCloser(subject chan<- struct{},
-	timeout time.Duration) *delayedCloser {
-
-	return &delayedCloser{
-		subject: subject,
-		timeout: timeout,
-	}
-}
-
-// closeEventually closes the subject channel after the configured timeout or
-// immediately if the quit channel is closed.
-func (t *delayedCloser) closeEventually(quit chan struct{}) {
-	go func() {
-		defer t.closeNow()
-
-		select {
-		case <-time.After(t.timeout):
-		case <-quit:
-		}
-	}()
-}
-
-// closeNow immediately closes the subject channel. This can safely be called
-// multiple times as it will only attempt to close the channel at most once.
-func (t *delayedCloser) closeNow() {
-	t.once.Do(func() {
-		close(t.subject)
-	})
 }

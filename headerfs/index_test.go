@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
@@ -24,7 +24,7 @@ func createTestIndex(t testing.TB) (func(), *headerIndex, error) {
 	}
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/test.db", true, time.Second*10,
+		"bdb", tempDir+"/test.db", true, time.Second*10, false,
 	)
 	if err != nil {
 		return nil, nil, err

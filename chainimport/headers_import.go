@@ -9,14 +9,14 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 const (
 	// defaultWriteBatchSizePerRegion defines the default number of headers
 	// to process in a single batch when no specific batch size is provided.
-	defaultWriteBatchSizePerRegion = 16384
+	defaultWriteBatchSizePerRegion = 65536
 )
 
 // processingRegions contains regions to process. The divergence and new headers

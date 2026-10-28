@@ -7,7 +7,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/wire/v2"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -87,47 +87,42 @@ func parseHost(addr string) string {
 	return host
 }
 
-// parseIPKey parses an IPv4 or IPv6 host into a typed ban key.
+// parseIPKey parses an IPv4 or IPv6 host into a typed ban key. When no mask is
+// given the network covers exactly the one address, so that banning a peer
+// does not also ban its neighbours.
 func parseIPKey(host string, mask net.IPMask) (*Key, error) {
 	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, ErrUnsupportedIP
+	}
+
+	// Narrow the address to the width of its own family before picking a
+	// default, so a v4-mapped address gets the IPv4 default rather than the
+	// IPv6 one its 16-byte form would suggest.
+	addr := ip.To4()
 	switch {
-	case ip.To4() != nil:
-		ip = ip.To4()
-		if mask == nil {
-			mask = defaultIPv4Mask
-		}
+	case addr != nil && mask == nil:
+		mask = defaultIPv4Mask
 
-		maskedIP := ip.Mask(mask)
-		if maskedIP == nil {
-			return nil, ErrUnsupportedIP
-		}
-
-		return &Key{
-			Net:  NetworkIPv4,
-			Addr: bytes.Clone(maskedIP),
-			Mask: bytes.Clone([]byte(mask)),
-		}, nil
-
-	case ip.To16() != nil:
-		ip = ip.To16()
+	case addr == nil:
+		addr = ip.To16()
 		if mask == nil {
 			mask = defaultIPv6Mask
 		}
+	}
 
-		maskedIP := ip.Mask(mask)
-		if maskedIP == nil {
-			return nil, ErrUnsupportedIP
-		}
-
-		return &Key{
-			Net:  NetworkIPv6,
-			Addr: bytes.Clone(maskedIP),
-			Mask: bytes.Clone([]byte(mask)),
-		}, nil
-
-	default:
+	// The address is masked here, rather than in keyFromIPNet, because an
+	// address given as host:port names a single peer: the stored network
+	// has to be the one the mask describes, not the address as typed.
+	masked := addr.Mask(mask)
+	if masked == nil {
 		return nil, ErrUnsupportedIP
 	}
+
+	return keyFromIPNet(&net.IPNet{
+		IP:   masked,
+		Mask: mask,
+	})
 }
 
 // parseTorV3Key parses a Tor v3 onion address into a typed ban key.

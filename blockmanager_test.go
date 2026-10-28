@@ -1,28 +1,33 @@
 package neutrino
 
 import (
+	"container/list"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcutil/gcs"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/peer"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
-	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/lightninglabs/neutrino/headersync"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
+	"github.com/lightninglabs/neutrino/sqldb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,21 +41,56 @@ const (
 	dbOpenTimeout = time.Second * 10
 )
 
-// mockDispatcher implements the query.Dispatcher interface and allows us to
-// set up a custom Query method during tests.
+// mockDispatcher implements the querysyncwm.Dispatcher interface and allows us
+// to set up a custom Query method during tests.
 type mockDispatcher struct {
-	query.WorkManager
+	querysyncwm.WorkManager
 
-	query func(requests []*query.Request,
-		options ...query.QueryOption) chan error
+	query func(requests []*querysyncwm.Request,
+		options ...querysyncwm.QueryOption) chan error
 }
 
-var _ query.Dispatcher = (*mockDispatcher)(nil)
+var _ querysyncwm.Dispatcher = (*mockDispatcher)(nil)
 
-func (m *mockDispatcher) Query(requests []*query.Request,
-	options ...query.QueryOption) chan error {
+func (m *mockDispatcher) Query(requests []*querysyncwm.Request,
+	options ...querysyncwm.QueryOption) chan error {
 
 	return m.query(requests, options...)
+}
+
+func TestHeaderSyncValidationChain(t *testing.T) {
+	t.Parallel()
+
+	base := headerlist.NewBoundedMemoryChain(4)
+	base.ResetHeaderState(headerlist.Node{
+		Height: 10,
+		Header: wire.BlockHeader{Nonce: 10},
+	})
+	baseTip := base.PushBack(headerlist.Node{
+		Height: 11,
+		Header: wire.BlockHeader{Nonce: 11},
+	})
+
+	validationChain := newHeaderSyncValidationChain(base, *baseTip)
+	pendingTip := validationChain.PushBack(headerlist.Node{
+		Height: 12,
+		Header: wire.BlockHeader{Nonce: 12},
+	})
+
+	require.Equal(t, int32(12), validationChain.Back().Height)
+	require.Equal(t, uint32(12), validationChain.Back().Header.Nonce)
+	require.Equal(t, pendingTip, validationChain.Back())
+
+	pending, ok := validationChain.AtHeight(12)
+	require.True(t, ok)
+	require.Equal(t, uint32(12), pending.Header.Nonce)
+
+	cached, ok := validationChain.AtHeight(10)
+	require.True(t, ok)
+	require.Equal(t, uint32(10), cached.Header.Nonce)
+
+	_, ok = validationChain.AtHeight(9)
+	require.False(t, ok)
 }
 
 // setupBlockManager initialises a blockManager to be used in tests.
@@ -60,7 +100,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	// Set up the block and filter header stores.
 	tempDir := t.TempDir()
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error opening DB: %s", err)
@@ -104,6 +144,495 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	}
 
 	return bm, hdrStore, cfStore, nil
+}
+
+func TestSyncPeerCandidateOrdering(t *testing.T) {
+	highHeight := syncPeerCandidate{
+		height: 100,
+		rtt:    500 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	lowHeight := syncPeerCandidate{
+		height: 99,
+		rtt:    10 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(highHeight, lowHeight))
+
+	fast := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	slow := syncPeerCandidate{
+		height: 100,
+		rtt:    200 * time.Millisecond,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(fast, slow))
+
+	knownRTT := syncPeerCandidate{
+		height: 100,
+		rtt:    20 * time.Millisecond,
+		addr:   "peer-b",
+	}
+	unknownRTT := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	require.True(t, syncPeerOrdersBefore(knownRTT, unknownRTT))
+
+	addrA := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-a",
+	}
+	addrB := syncPeerCandidate{
+		height: 100,
+		addr:   "peer-b",
+	}
+	require.True(t, syncPeerOrdersBefore(addrA, addrB))
+}
+
+func TestCheckpointedCFHeadersBatchTimeoutScales(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t, checkpointedCFHeadersMinBatchTimeout,
+		checkpointedCFHeadersBatchTimeout(1),
+	)
+
+	scaledQueries := int(
+		(checkpointedCFHeadersMinBatchTimeout /
+			checkpointedCFHeadersPerQueryTimeout) + 1,
+	)
+	require.Equal(
+		t, time.Duration(scaledQueries)*
+			checkpointedCFHeadersPerQueryTimeout,
+		checkpointedCFHeadersBatchTimeout(scaledQueries),
+	)
+
+	hugeQueries := int(
+		(checkpointedCFHeadersMaxBatchTimeout /
+			checkpointedCFHeadersPerQueryTimeout) + 1,
+	)
+	require.Equal(
+		t, checkpointedCFHeadersMaxBatchTimeout,
+		checkpointedCFHeadersBatchTimeout(hugeQueries),
+	)
+}
+
+func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
+	t.Parallel()
+
+	backend := sqldb.NewTestBackend(t)
+	ctx := t.Context()
+	blockStore, err := headerfs.NewSQLBlockHeaderStore(
+		ctx, backend.HeaderTxer, &chaincfg.SimNetParams,
+	)
+	require.NoError(t, err)
+	filterStore, err := headerfs.NewSQLFilterHeaderStore(
+		ctx, backend.HeaderTxer, headerfs.RegularFilter,
+		&chaincfg.SimNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	bm, err := newBlockManager(&blockManagerCfg{
+		ChainParams:      chaincfg.SimNetParams,
+		BlockHeaders:     blockStore,
+		RegFilterHeaders: filterStore,
+		QueryDispatcher:  &mockDispatcher{},
+		TimeSource:       blockchain.NewMedianTime(),
+		BanPeer: func(string, banman.Reason) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	ntfnDone := make(chan struct{})
+	defer close(ntfnDone)
+	go func() {
+		for {
+			select {
+			case <-bm.blockNtfnChan:
+			case <-ntfnDone:
+				return
+			}
+		}
+	}()
+
+	const numHeaders = 3
+	blockHeaders := make([]headerfs.BlockHeader, 0, numHeaders)
+	prevHeader := &chaincfg.SimNetParams.GenesisBlock.Header
+	for height := uint32(1); height <= numHeaders; height++ {
+		header := &wire.BlockHeader{
+			Bits:      uint32(rand.Int31()),
+			Nonce:     uint32(rand.Int31()),
+			Timestamp: prevHeader.Timestamp.Add(time.Minute),
+			PrevBlock: prevHeader.BlockHash(),
+		}
+		blockHeaders = append(blockHeaders, headerfs.BlockHeader{
+			BlockHeader: header,
+			Height:      height,
+		})
+		prevHeader = header
+	}
+	require.NoError(t, blockStore.WriteHeaders(blockHeaders...))
+
+	prevFilterHeader, _, err := filterStore.ChainTip()
+	require.NoError(t, err)
+
+	filterHashValues := []chainhash.Hash{
+		chainhash.DoubleHashH([]byte("filter-1")),
+		chainhash.DoubleHashH([]byte("filter-2")),
+		chainhash.DoubleHashH([]byte("filter-3")),
+	}
+	filterHashes := make([]*chainhash.Hash, len(filterHashValues))
+	for i := range filterHashValues {
+		filterHashes[i] = &filterHashValues[i]
+	}
+
+	var expectedFilterHeaders []chainhash.Hash
+	lastFilterHeader := *prevFilterHeader
+	for _, filterHash := range filterHashes {
+		lastFilterHeader = chainhash.DoubleHashH(
+			append(filterHash[:], lastFilterHeader[:]...),
+		)
+		expectedFilterHeaders = append(
+			expectedFilterHeaders, lastFilterHeader,
+		)
+	}
+
+	stopHash := blockHeaders[len(blockHeaders)-1].BlockHash()
+	tip, tipHeight, err := bm.writeCFHeadersMsgs(
+		[]*wire.MsgCFHeaders{{
+			FilterType:       wire.GCSFilterRegular,
+			StopHash:         blockHeaders[1].BlockHash(),
+			PrevFilterHeader: *prevFilterHeader,
+			FilterHashes:     filterHashes[:2],
+		}, {
+			FilterType:       wire.GCSFilterRegular,
+			StopHash:         stopHash,
+			PrevFilterHeader: expectedFilterHeaders[1],
+			FilterHashes:     filterHashes[2:],
+		}},
+		filterStore,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(numHeaders), tipHeight)
+	require.Equal(
+		t,
+		expectedFilterHeaders[len(expectedFilterHeaders)-1],
+		*tip,
+	)
+
+	for i, expected := range expectedFilterHeaders {
+		height := uint32(i + 1)
+		got, err := filterStore.FetchHeaderByHeight(height)
+		require.NoError(t, err)
+		require.Equal(t, expected, *got)
+	}
+
+	ancestors, startHeight, err := filterStore.FetchHeaderAncestors(
+		numHeaders-1, &stopHash,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), startHeight)
+	require.Equal(t, expectedFilterHeaders, ancestors)
+}
+
+func newTestServerPeer(t *testing.T, addr string,
+	lastBlock int32) *ServerPeer {
+
+	pp, err := peer.NewOutboundPeer(&peer.Config{
+		ChainParams:      &chaincfg.SimNetParams,
+		Services:         wire.SFNodeNetwork,
+		UserAgentName:    "neutrino-test",
+		UserAgentVersion: "0.0.0",
+	}, addr)
+	require.NoError(t, err)
+
+	sp := &ServerPeer{
+		Peer: pp,
+	}
+	sp.UpdateLastBlockHeight(lastBlock)
+
+	return sp
+}
+
+// scriptedPeer is a querysyncwm.Peer that answers every message queued to it
+// with a fixed script of responses.
+type scriptedPeer struct {
+	addr      string
+	responses []wire.Message
+	recv      chan wire.Message
+	quit      chan struct{}
+
+	// first ensures the script only plays in answer to the first message.
+	first sync.Once
+
+	mu     sync.Mutex
+	queued []wire.Message
+}
+
+var _ querysyncwm.Peer = (*scriptedPeer)(nil)
+
+func (p *scriptedPeer) QueueMessageWithEncoding(msg wire.Message,
+	_ chan<- struct{}, _ wire.MessageEncoding) {
+
+	p.mu.Lock()
+	p.queued = append(p.queued, msg)
+	p.mu.Unlock()
+
+	p.first.Do(func() {
+		go func() {
+			for _, resp := range p.responses {
+				select {
+				case p.recv <- resp:
+				case <-p.quit:
+					return
+				}
+			}
+		}()
+	})
+}
+
+// numQueued returns the number of messages queued to the peer so far.
+func (p *scriptedPeer) numQueued() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return len(p.queued)
+}
+
+func (p *scriptedPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	return p.recv, func() {}
+}
+
+func (p *scriptedPeer) Addr() string { return p.addr }
+
+func (p *scriptedPeer) LastPingMicros() int64 { return 0 }
+
+func (p *scriptedPeer) OnDisconnect() <-chan struct{} { return p.quit }
+
+// broadcastFunc adapts a function to the querysyncwm.Broadcaster interface.
+type broadcastFunc func(*querysyncwm.Broadcast,
+	...querysyncwm.QueryOption) error
+
+// Broadcast calls the underlying function.
+func (f broadcastFunc) Broadcast(b *querysyncwm.Broadcast,
+	opts ...querysyncwm.QueryOption) error {
+
+	return f(b, opts...)
+}
+
+// newScriptedBroadcaster returns a Broadcaster backed by the real work
+// manager, whose peers answer a broadcast with the scripted responses for
+// their address.
+func newScriptedBroadcaster(
+	scripts map[string][]wire.Message) querysyncwm.WorkManager {
+
+	peers := newScriptedPeers(scripts)
+
+	return querysyncwm.NewWorkManager(&querysyncwm.Config{
+		Peers: func() []querysyncwm.Peer {
+			out := make([]querysyncwm.Peer, len(peers))
+			for i, p := range peers {
+				out[i] = p
+			}
+
+			return out
+		},
+	})
+}
+
+// newScriptedPeers creates a peer for each address in the scripts.
+func newScriptedPeers(scripts map[string][]wire.Message) []*scriptedPeer {
+	peers := make([]*scriptedPeer, 0, len(scripts))
+	for addr, responses := range scripts {
+		peers = append(peers, &scriptedPeer{
+			addr:      addr,
+			responses: responses,
+			recv:      make(chan wire.Message),
+			quit:      make(chan struct{}),
+		})
+	}
+
+	return peers
+}
+
+func TestCFHeadersCollectsHonestConflict(t *testing.T) {
+	t.Parallel()
+
+	stop := &wire.BlockHeader{Nonce: 1}
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("ChainTip").Return(stop, uint32(1), nil)
+	stopHash := stop.BlockHash()
+
+	// Keep collecting timely honest conflicts: the last peer disagrees
+	// with the other three.
+	scripts := make(map[string][]wire.Message)
+	for i := 0; i < 4; i++ {
+		hash := chainhash.Hash{1}
+		if i == 3 {
+			hash = chainhash.Hash{2}
+		}
+
+		scripts[fmt.Sprintf("127.0.0.%d:8333", i+1)] = []wire.Message{
+			&wire.MsgCFHeaders{
+				FilterType:   wire.GCSFilterRegular,
+				StopHash:     stopHash,
+				FilterHashes: []*chainhash.Hash{&hash},
+			},
+		}
+	}
+
+	bm := &blockManager{cfg: &blockManagerCfg{
+		BlockHeaders: store,
+		Broadcaster:  newScriptedBroadcaster(scripts),
+	}}
+	headers, count := bm.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
+	require.Equal(t, 1, count)
+	require.Len(t, headers, 4)
+	require.NotEqual(t,
+		*headers["127.0.0.1:8333"].FilterHashes[0],
+		*headers["127.0.0.4:8333"].FilterHashes[0],
+	)
+}
+
+// TestHeaderAnchorDiscoveryUsesDurableTip verifies that discovery never mixes
+// a store height with a hash from an older blockmanager notification snapshot.
+func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
+	t.Parallel()
+
+	bm, store, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSync.Start(t.Context())
+	t.Cleanup(bm.headerSync.Stop)
+
+	genesis, _, err := store.ChainTip()
+	require.NoError(t, err)
+	header := wire.BlockHeader{
+		PrevBlock: genesis.BlockHash(),
+		Nonce:     1,
+	}
+	require.NoError(t, store.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &header,
+		Height:      1,
+	}))
+
+	// The durable tip has advanced, while headerTipHash still identifies
+	// genesis. A request must take both boundary fields from the store.
+	require.Equal(t, genesis.BlockHash(), bm.headerTipHash)
+	stopHash := chainhash.Hash{1}
+	bm.nextCheckpoint = &chaincfg.Checkpoint{
+		Height: 3001,
+		Hash:   &stopHash,
+	}
+	sp := newTestServerPeer(t, "127.0.0.1:18333", 3001)
+	peers := list.New()
+	peers.PushBack(sp)
+
+	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3001))
+	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	require.True(t, ok)
+	require.Equal(t, uint32(1), request.StartHeight)
+	require.Equal(t, header.BlockHash(), request.StartHash)
+}
+
+// TestPrunedAnchorResponseKeepsTip checks that a late, already-known response
+// cannot republish an older hash after its anchor request has been pruned.
+func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
+	t.Parallel()
+
+	bm, store, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSync.Start(t.Context())
+	t.Cleanup(func() {
+		bm.headerSync.Stop()
+		if bm.headerSyncTimer != nil {
+			bm.headerSyncTimer.Stop()
+		}
+	})
+
+	genesis, _, err := store.ChainTip()
+	require.NoError(t, err)
+	first := wire.BlockHeader{PrevBlock: genesis.BlockHash(), Nonce: 1}
+	second := wire.BlockHeader{PrevBlock: first.BlockHash(), Nonce: 2}
+	require.NoError(t, store.WriteHeaders(
+		headerfs.BlockHeader{BlockHeader: &first, Height: 1},
+		headerfs.BlockHeader{BlockHeader: &second, Height: 2},
+	))
+	bm.headerList.PushBack(headerlist.Node{Header: first, Height: 1})
+	bm.headerList.PushBack(headerlist.Node{Header: second, Height: 2})
+	bm.headerTip = 2
+	bm.headerTipHash = second.BlockHash()
+	stopHash := chainhash.Hash{1}
+	bm.nextCheckpoint = &chaincfg.Checkpoint{Height: 3002, Hash: &stopHash}
+	sp := newTestServerPeer(t, "127.0.0.1:18333", 3002)
+	bm.syncPeer = sp
+	peers := list.New()
+	peers.PushBack(sp)
+
+	bm.headerSync.Session().TrackAnchor(sp.Addr(), headersync.AnchorRequest{
+		StartHeight: 0,
+		StartHash:   genesis.BlockHash(),
+		StopHeight:  1,
+		StopHash:    first.BlockHash(),
+	})
+	require.Equal(t, 1, bm.headerSync.Session().PruneAnchorsAtOrBefore(2))
+	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+		peer: sp,
+		headers: &wire.MsgHeaders{
+			Headers: []*wire.BlockHeader{&first},
+		},
+	})
+
+	require.Equal(t, uint32(2), bm.headerTip)
+	require.Equal(t, second.BlockHash(), bm.headerTipHash)
+	tip, height, err := store.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), height)
+	require.Equal(t, second.BlockHash(), tip.BlockHash())
+
+	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3002))
+	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	require.True(t, ok)
+	require.Equal(t, height, request.StartHeight)
+	require.Equal(t, tip.BlockHash(), request.StartHash)
+}
+
+func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSyncTimeout = time.Hour
+
+	var banned []string
+	bm.cfg.BanPeer = func(addr string, reason banman.Reason) error {
+		require.Equal(t, banman.NonResponsivePeer, reason)
+		banned = append(banned, addr)
+		return nil
+	}
+
+	slowPeer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	fastPeer := newTestServerPeer(t, "127.0.0.2:8333", 200)
+
+	peers := list.New()
+	peers.PushBack(slowPeer)
+
+	bm.startSync(peers)
+	require.Equal(t, slowPeer, bm.SyncPeer())
+
+	peers.PushBack(fastPeer)
+	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
+		peer:        slowPeer,
+		requestID:   bm.headerRequestID,
+		startHeight: 0,
+		timeout:     bm.headerSyncTimeout,
+	})
+
+	require.Equal(t, []string{slowPeer.Addr()}, banned)
+	require.Equal(t, fastPeer, bm.SyncPeer())
 }
 
 // headers wraps the different headers and filters used throughout the tests.
@@ -346,8 +875,8 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		// will use this to feed the blockmanager with our crafted
 		// responses.
 		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
-			requests []*query.Request,
-			options ...query.QueryOption) chan error {
+			requests []*querysyncwm.Request,
+			options ...querysyncwm.QueryOption) chan error {
 
 			var msgs []wire.Message
 			for _, q := range requests {
@@ -575,8 +1104,8 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		}
 
 		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
-			requests []*query.Request,
-			options ...query.QueryOption) chan error {
+			requests []*querysyncwm.Request,
+			options ...querysyncwm.QueryOption) chan error {
 
 			var msgs []wire.Message
 			for _, q := range requests {
@@ -804,32 +1333,21 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 			&blockHeader, nil,
 		)
 
-		// We set up the mock queryAllPeers to only respond according to
-		// the active testcase.
+		// We set up the scripted broadcaster to only respond according
+		// to the active testcase.
 		answers := make(map[string]wire.Message)
-		queryAllPeers := func(
-			queryMsg wire.Message,
-			checkResponse func(sp *ServerPeer, resp wire.Message,
-				quit chan<- struct{}, peerQuit chan<- struct{}),
-			options ...QueryOption) {
+		broadcaster := broadcastFunc(func(b *querysyncwm.Broadcast,
+			opts ...querysyncwm.QueryOption) error {
 
+			scripts := make(map[string][]wire.Message)
 			for p, resp := range answers {
-				pp, err := peer.NewOutboundPeer(
-					&peer.Config{}, p,
-				)
-				if err != nil {
-					panic(err)
-				}
-
-				sp := &ServerPeer{
-					Peer: pp,
-				}
-				checkResponse(
-					sp, resp, make(chan struct{}),
-					make(chan struct{}),
-				)
+				scripts[p] = []wire.Message{resp}
 			}
-		}
+
+			return newScriptedBroadcaster(scripts).Broadcast(
+				b, opts...,
+			)
+		})
 
 		for _, p := range peers {
 			test.filterAnswers(p, answers)
@@ -854,8 +1372,8 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		bm := &blockManager{
 			cfg: &blockManagerCfg{
-				BlockHeaders:  mBlockHeaderStore,
-				queryAllPeers: queryAllPeers,
+				BlockHeaders: mBlockHeaderStore,
+				Broadcaster:  broadcaster,
 			},
 		}
 
@@ -945,4 +1463,30 @@ func TestHandleHeaders(t *testing.T) {
 	})
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
+}
+
+// TestAllPeerBroadcastsUseQueryTimeout checks that the cfilter and
+// checkpoint all-peer queries bound each attempt by the QueryTimeout setting.
+func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
+	t.Parallel()
+
+	var timeouts []time.Duration
+	bm := &blockManager{cfg: &blockManagerCfg{
+		Broadcaster: broadcastFunc(func(_ *querysyncwm.Broadcast,
+			opts ...querysyncwm.QueryOption) error {
+
+			timeouts = append(
+				timeouts,
+				querysyncwm.ResolveOptions(opts...).Timeout,
+			)
+
+			return nil
+		}),
+	}}
+
+	hash := chainhash.Hash{1}
+	bm.fetchFilterFromAllPeers(1, hash, wire.GCSFilterRegular)
+	bm.getCheckpts(&hash, wire.GCSFilterRegular)
+
+	require.Equal(t, []time.Duration{QueryTimeout, QueryTimeout}, timeouts)
 }

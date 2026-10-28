@@ -15,11 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,7 +67,7 @@ func createTestBlockHeaderStore() (func(), walletdb.DB, string,
 
 	dbPath := filepath.Join(tempDir, "test.db")
 	db, err := walletdb.Create(
-		"bdb", dbPath, true, time.Second*10,
+		"bdb", dbPath, true, time.Second*10, false,
 	)
 	if err != nil {
 		return nil, nil, "", nil, err
@@ -301,7 +302,8 @@ func TestBlockHeaderStoreOnDBWriteRecovery(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -350,9 +352,9 @@ func TestBlockHeaderStoreOnDBWriteRecovery(t *testing.T) {
 				// failure.
 				mWalletDB := &MockWalletDB{}
 
-				mWalletDB.On("BeginReadWriteTx").Return(
-					nil, errors.New("I/O write error"),
-				)
+				mWalletDB.On(
+					"Update", mock.Anything, mock.Anything,
+				).Return(errors.New("I/O write error"))
 
 				bS.db = mWalletDB
 
@@ -433,7 +435,7 @@ func createTestFilterHeaderStore() (func(), walletdb.DB, string, FilterHeaderSto
 	}
 
 	dbPath := filepath.Join(tempDir, "test.db")
-	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10)
+	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10, false)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -696,7 +698,8 @@ func TestFilterHeaderStoreDBWriteRecovery(t *testing.T) {
 
 				dbPath := filepath.Join(tempDir, "test.db")
 				db, err := walletdb.Create(
-					"bdb", dbPath, true, time.Second*10,
+					"bdb", dbPath, true,
+					time.Second*10, false,
 				)
 				cleanup := func() {
 					db.Close()
@@ -746,9 +749,9 @@ func TestFilterHeaderStoreDBWriteRecovery(t *testing.T) {
 				// failure.
 				mWalletDB := &MockWalletDB{}
 
-				mWalletDB.On("BeginReadWriteTx").Return(
-					nil, errors.New("I/O write error"),
-				)
+				mWalletDB.On(
+					"Update", mock.Anything, mock.Anything,
+				).Return(errors.New("I/O write error"))
 
 				fS.db = mWalletDB
 
@@ -1007,7 +1010,7 @@ func TestRollbackBlockHeaders(t *testing.T) {
 
 		dbPath := filepath.Join(tempDir, "test.db")
 		db, err := walletdb.Create(
-			"bdb", dbPath, true, time.Second*10,
+			"bdb", dbPath, true, time.Second*10, false,
 		)
 		cleanup := func() {
 			db.Close()

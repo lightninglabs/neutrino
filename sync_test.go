@@ -3,7 +3,6 @@ package neutrino_test
 import (
 	"bytes"
 	"compress/bzip2"
-	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -17,17 +16,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -61,13 +61,10 @@ var (
 
 	// The logged sequence of events we want to see. The value of i
 	// represents the block for which a loop is generating a log entry,
-	// given for readability only.
-	// "bc":	OnBlockConnected
-	// "fc" xx:	OnFilteredBlockConnected with xx (uint8) relevant TXs
-	// "rv":	OnRecvTx
-	// "rd":	OnRedeemingTx
-	// "bd":	OnBlockDisconnected
-	// "fd":	OnFilteredBlockDisconnected.
+	// given for readability only. "bc": OnBlockConnected "fc" xx:
+	// OnFilteredBlockConnected with xx (uint8) relevant TXs "rv": OnRecvTx
+	// "rd": OnRedeemingTx "bd": OnBlockDisconnected "fd":
+	// OnFilteredBlockDisconnected.
 	wantLog = func() []byte {
 		var log []byte
 		for i := 1096; i <= 1100; i++ {
@@ -96,8 +93,8 @@ var (
 		log = append(log, []byte("fc")...)
 		log = append(log, 0x00)
 		log = append(log, []byte("bc")...)
-		// Update with rewind - rewind back to 1095, add another address,
-		// and see more interesting transactions.
+		// Update with rewind - rewind back to 1095, add another
+		// address, and see more interesting transactions.
 		for i := 1227; i >= 1096; i-- {
 			// BlockDisconnected and FilteredBlockDisconnected
 			log = append(log, []byte("bdfd")...)
@@ -215,9 +212,9 @@ type secSource struct {
 	params  *chaincfg.Params
 }
 
-func (s *secSource) add(privKey *btcec.PrivateKey) (btcutil.Address, error) {
-	pubKeyHash := btcutil.Hash160(privKey.PubKey().SerializeCompressed())
-	addr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, s.params)
+func (s *secSource) add(privKey *btcec.PrivateKey) (address.Address, error) {
+	pubKeyHash := address.Hash160(privKey.PubKey().SerializeCompressed())
+	addr, err := address.NewAddressWitnessPubKeyHash(pubKeyHash, s.params)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +236,7 @@ func (s *secSource) add(privKey *btcec.PrivateKey) (btcutil.Address, error) {
 }
 
 // GetKey is required by the txscript.KeyDB interface.
-func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
+func (s *secSource) GetKey(addr address.Address) (*btcec.PrivateKey, bool,
 	error) {
 
 	privKey, ok := s.keys[addr.String()]
@@ -250,7 +247,7 @@ func (s *secSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool,
 }
 
 // GetScript is required by the txscript.ScriptDB interface.
-func (s *secSource) GetScript(addr btcutil.Address) ([]byte, error) {
+func (s *secSource) GetScript(addr address.Address) ([]byte, error) {
 	script, ok := s.scripts[addr.String()]
 	if !ok {
 		return nil, fmt.Errorf("No script for address %s", addr)
@@ -319,21 +316,21 @@ var (
 	rescan                    *neutrino.Rescan
 	startBlock                headerfs.BlockStamp
 	secSrc                    *secSource
-	addr1, addr2, addr3       btcutil.Address
+	addr1, addr2, addr3       address.Address
 	script1, script2, script3 []byte
 	tx1, tx2                  *wire.MsgTx
 	ourOutPoint               wire.OutPoint
 )
 
-// testRescan tests several rescan modes. This should be broken up into
-// smaller tests.
+// testRescan tests several rescan modes. This should be broken up into smaller
+// tests.
 func testRescan(harness *neutrinoHarness, t *testing.T) {
 	// Generate an address and send it some coins on the h1 chain. We use
 	// this to test rescans and notifications.
 	modParams := harness.svc.ChainParams()
 	secSrc = newSecSource(&modParams)
 
-	newPkScript := func() (btcutil.Address, []byte, *wire.TxOut) {
+	newPkScript := func() (address.Address, []byte, *wire.TxOut) {
 		t.Helper()
 
 		privKey, err := btcec.NewPrivateKey()
@@ -362,11 +359,17 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 			txOuts, 1000, true,
 		)
 		if err != nil {
-			t.Fatalf("Couldn't create transaction from script: %s", err)
+			t.Fatalf(
+				"Couldn't create transaction from script: %s",
+				err,
+			)
 		}
 		_, err = harness.h1.Client.SendRawTransaction(tx, true)
 		if err != nil {
-			t.Fatalf("Unable to send raw transaction to node: %s", err)
+			t.Fatalf(
+				"Unable to send raw transaction to node: %s",
+				err,
+			)
 		}
 		return tx
 	}
@@ -415,7 +418,10 @@ func testRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("UTXO's block height field not set")
 	}
 	if spendReport.BlockIndex < 1 || spendReport.BlockIndex > 2 {
-		t.Fatalf("UTXO at unexpeced block index %d", spendReport.BlockIndex)
+		t.Fatalf(
+			"UTXO at unexpeced block index %d",
+			spendReport.BlockIndex,
+		)
 	}
 }
 
@@ -438,7 +444,8 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 1 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 1, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 1, "+
+			"got:"+
 			" %d", numTXs)
 	}
 
@@ -585,7 +592,8 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 2 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 2, "+
+			"got:"+
 			" %d", numTXs)
 	}
 	// Spend the second transaction and mine a block.
@@ -631,7 +639,8 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 2 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 2, "+
+			"got:"+
 			" %d", numTXs)
 	}
 
@@ -652,7 +661,8 @@ func testStartRescan(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 4 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 4, "+
+			"got:"+
 			" %d", numTXs)
 	}
 
@@ -704,7 +714,9 @@ func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]b
 		for _, txIn := range tx.TxIn {
 			prevTxHash := txIn.PreviousOutPoint.Hash
 
-			prevTx, err := client.Client.GetRawTransaction(&prevTxHash)
+			prevTx, err := client.Client.GetRawTransaction(
+				&prevTxHash,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -720,15 +732,45 @@ func fetchPrevInputScripts(block *wire.MsgBlock, client *rpctest.Harness) ([][]b
 }
 
 func testRescanResults(harness *neutrinoHarness, t *testing.T) {
+	// This subtest reorgs the chain multiple times and waits for the
+	// rescan to catch up, which can be slow under -race on busy CI
+	// machines. Give every waitForSync call in this function the longer
+	// timeout instead of only the final one further down.
+	origSyncTimeout := syncTimeout
+	syncTimeout *= 2
+	defer func() { syncTimeout = origSyncTimeout }()
+
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2. This will reorg the chain, including the
 	// transactions broadcast earlier, so we'll have to check that the
 	// rescan status has updated for the correct number of transactions.
-	// However, with the addition of the reliable broadcaster, the
-	// transaction will confirm once again on the h2 chain so the rescan
-	// should still show the two received transactions in addition to the
-	// two other transactions spending them.
-	_, err := harness.h2.Client.Generate(5)
+	// Seed the replacement miner with the spends before mining. The
+	// previous subtest deliberately banned h2 while broadcasting to h1, so
+	// relay timing cannot establish which transactions h2 will mine. The
+	// rescan must report both receives and both spends on either fork.
+	_, forkHeight, err := harness.h2.Client.GetBestBlock()
+	require.NoError(t, err)
+	_, originalHeight, err := harness.h1.Client.GetBestBlock()
+	require.NoError(t, err)
+	for height := forkHeight + 1; height <= originalHeight; height++ {
+		hash, err := harness.h1.Client.GetBlockHash(int64(height))
+		require.NoError(t, err)
+		block, err := harness.h1.Client.GetBlock(hash)
+		require.NoError(t, err)
+		for _, tx := range block.Transactions[1:] {
+			_, err := harness.h2.Client.SendRawTransaction(tx, true)
+			if err != nil &&
+				!strings.Contains(err.Error(), "already have") {
+
+				t.Fatalf(
+					"unable to seed replacement-chain "+
+						"transaction: %v",
+					err,
+				)
+			}
+		}
+	}
+	_, err = harness.h2.Client.Generate(5)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit blocks: %s", err)
 	}
@@ -743,7 +785,8 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 4 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 4, "+
+			"got:"+
 			" %d", numTXs)
 	}
 
@@ -764,7 +807,8 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Checking rescan status failed: %s", err)
 	}
 	if numTXs != 4 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
+		t.Fatalf("Wrong number of relevant transactions. Want: 4, "+
+			"got:"+
 			" %d", numTXs)
 	}
 
@@ -807,8 +851,8 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 	// Now generate a bunch of blocks on each while they're connected,
 	// triggering many tiny reorgs, and wait for sync again. The end result
 	// is somewhat random, depending on how quickly the nodes process each
-	// other's notifications vs finding new blocks, but the two nodes should
-	// remain fully synchronized with each other at the end.
+	// other's notifications vs finding new blocks, but the two nodes
+	// should remain fully synchronized with each other at the end.
 	go harness.h2.Client.Generate(75)
 	harness.h1.Client.Generate(50)
 
@@ -818,9 +862,6 @@ func testRescanResults(harness *neutrinoHarness, t *testing.T) {
 		t.Fatalf("Couldn't sync h1 and h2: %s", err)
 	}
 
-	// We increase the timeout because running on Travis with race
-	// detection enabled can make this pretty slow.
-	syncTimeout *= 2
 	err = waitForSync(t, harness.svc, harness.h1)
 	if err != nil {
 		checkErrChan(t, errChan)
@@ -852,7 +893,10 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 	var haveBest *headerfs.BlockStamp
 	haveBest, err := harness.svc.BestBlock()
 	if err != nil {
-		t.Fatalf("Couldn't get best snapshot from ChainService: %s", err)
+		t.Fatalf(
+			"Couldn't get best snapshot from ChainService: %s",
+			err,
+		)
 	}
 	// Keep track of an error channel with enough buffer space to track one
 	// error per block.
@@ -981,7 +1025,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 			}
 			calcBytes, err := calcFilter.NBytes()
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get bytes from"+
+				errChan <- fmt.Errorf("Couldn't get bytes "+
+					"from"+
 					" calculated basic filter for block "+
 					"%d (%s): %s", height, blockHash, err)
 			}
@@ -999,7 +1044,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 				FetchHeader(&blockHeader.PrevBlock)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
-					"filter header for block %d (%s) from "+
+					"filter header for block %d (%s) "+
+					"from "+
 					"DB: %s", height-1,
 					blockHeader.PrevBlock, err)
 				return
@@ -1009,7 +1055,8 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 				FetchHeader(&blockHash)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
-					"filter header for block %d (%s) from "+
+					"filter header for block %d (%s) "+
+					"from "+
 					"DB: %s", height, blockHash, err)
 				return
 			}
@@ -1058,21 +1105,21 @@ func testRandomBlocks(harness *neutrinoHarness, t *testing.T) {
 // headers. It then prepares header files for import by copying them and adding
 // the necessary metadata.
 //
-// The first part of the test creates a new Neutrino instance that imports these
-// headers from files without connecting to any peers. It verifies that headers
-// are correctly imported and the chain is properly synchronized without network
-// assistance.
+// The first part of the test creates a new Neutrino instance that imports
+// these headers from files without connecting to any peers. It verifies that
+// headers are correctly imported and the chain is properly synchronized
+// without network assistance.
 //
 // The second part generates additional blocks and creates another Neutrino
 // instance with the same import configuration but with network connectivity.
 // This tests that Neutrino correctly handles the case where header stores are
 // already populated and continues synchronization from its current state.
 //
-// This test validates that the headers import mechanism works correctly both as
-// a way to bootstrap neutrino nodes and significantly improving sync
+// This test validates that the headers import mechanism works correctly both
+// as a way to bootstrap neutrino nodes and significantly improving sync
 // performance.
 func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks.
 	h1, err := rpctest.New(
@@ -1091,7 +1138,7 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1170,14 +1217,14 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	db, err = walletdb.Create(
-		"bdb", tempDir+"/filters.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/filters.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
 
 	// Create service with headers import but with no peers. This will test
 	// that the headers are imported correctly without network sync. No
-	// peers specified –  we want to test the import functionality by
+	// peers specified – we want to test the import functionality by
 	// itself.
 	importConfig := neutrino.Config{
 		DataDir:     tempDir,
@@ -1239,7 +1286,8 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	defer importSvcToBeSynced.Stop()
 
 	// This test demonstrates that the service can successfully sync to the
-	// chain tip after the database has already been populated with headers.
+	// chain tip after the database has already been populated with
+	// headers.
 	testHarness = &neutrinoHarness{
 		h1:  h1,
 		h2:  nil,
@@ -1249,10 +1297,142 @@ func TestNeutrinoSyncWithHeadersImport(t *testing.T) {
 	testInitialSync(testHarness, t)
 }
 
+// TestNeutrinoImportThenP2PSync verifies that a single ChainService that
+// imports headers from files can also continue syncing new blocks via P2P in
+// the same session. This exercises the ResetHeaderState path: the block
+// manager is constructed (with an empty store) before Start() runs the import,
+// so its internal tracking state must be refreshed after import to build
+// correct P2P locators for the remaining chain.
+func TestNeutrinoImportThenP2PSync(t *testing.T) {
+	rootCtx := t.Context()
+
+	// Create a btcd SimNet node and generate an initial chain.
+	h1, err := rpctest.New(
+		&chaincfg.SimNetParams, nil, []string{"--txindex"}, "",
+	)
+	require.NoError(t, err)
+	defer h1.TearDown()
+
+	err = h1.SetUp(false, 0)
+	require.NoError(t, err)
+
+	const initialBlocks = 800
+	_, err = h1.Client.Generate(initialBlocks)
+	require.NoError(t, err)
+
+	// Sync an export service to obtain header files.
+	exportDir := t.TempDir()
+	defer os.RemoveAll(exportDir)
+
+	exportDB, err := walletdb.Create(
+		"bdb", exportDir+"/filters.db", true, dbOpenTimeout, false,
+	)
+	require.NoError(t, err)
+
+	neutrino.MaxPeers = 1
+	neutrino.BanDuration = 5 * time.Second
+	neutrino.QueryPeerConnectTimeout = 10 * time.Second
+
+	exportSvc, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:     exportDir,
+		Database:    exportDB,
+		ChainParams: chaincfg.SimNetParams,
+		AddPeers:    []string{h1.P2PAddress()},
+	})
+	require.NoError(t, err)
+	exportSvc.Start(rootCtx)
+
+	err = waitForSync(t, exportSvc, h1)
+	require.NoError(t, err, "export service failed to sync")
+
+	// Copy the header files and add import metadata.
+	importDir := t.TempDir()
+	defer os.RemoveAll(importDir)
+
+	blockSrc := filepath.Join(exportDir, "block_headers.bin")
+	filterSrc := filepath.Join(exportDir, "reg_filter_headers.bin")
+	blockDst := filepath.Join(importDir, "block_headers.bin")
+	filterDst := filepath.Join(importDir, "reg_filter_headers.bin")
+
+	err = copyFile(blockSrc, blockDst)
+	require.NoError(t, err)
+	err = copyFile(filterSrc, filterDst)
+	require.NoError(t, err)
+
+	err = chainimport.AddHeadersImportMetadata(
+		blockDst, chaincfg.SimNetParams.Net, 0,
+		headerfs.Block, 0,
+	)
+	require.NoError(t, err)
+	err = chainimport.AddHeadersImportMetadata(
+		filterDst, chaincfg.SimNetParams.Net, 0,
+		headerfs.RegularFilter, 0,
+	)
+	require.NoError(t, err)
+
+	exportSvc.Stop()
+	require.NoError(t, exportDB.Close())
+
+	// Mine additional blocks AFTER the export, so the import files only
+	// cover [0, initialBlocks]. The service must fetch the rest via P2P.
+	const extraBlocks = 50
+	_, err = h1.Client.Generate(extraBlocks)
+	require.NoError(t, err)
+
+	// Create a fresh service with BOTH headers import AND a peer
+	// connection. This is the critical setup: the block manager is
+	// constructed in NewChainService (reading the empty store), then
+	// Start() runs the import (populating the store), then the block
+	// manager begins P2P sync. Without ResetHeaderState, the block manager
+	// would use a genesis locator and fail to fetch the remaining blocks.
+	svcDir := t.TempDir()
+	defer os.RemoveAll(svcDir)
+
+	svcDB, err := walletdb.Create(
+		"bdb", svcDir+"/filters.db", true, dbOpenTimeout, false,
+	)
+	require.NoError(t, err)
+	defer svcDB.Close()
+
+	svc, err := neutrino.NewChainService(neutrino.Config{
+		DataDir:     svcDir,
+		Database:    svcDB,
+		ChainParams: chaincfg.SimNetParams,
+		AddPeers:    []string{h1.P2PAddress()},
+		HeadersImport: &neutrino.HeadersImportConfig{
+			BlockHeadersSource:      blockDst,
+			FilterHeadersSource:     filterDst,
+			ValidationFlags:         blockchain.BFFastAdd,
+			WriteBatchSizePerRegion: 64,
+		},
+	})
+	require.NoError(t, err)
+
+	svc.Start(rootCtx)
+	defer svc.Stop()
+
+	// The service should sync all the way to initialBlocks + extraBlocks
+	// by importing the first batch from file and fetching the rest via
+	// P2P.
+	err = waitForSync(t, svc, h1)
+	require.NoError(t, err, "service failed to sync after import + P2P")
+
+	// Verify the service reached the expected height.
+	best, err := svc.BestBlock()
+	require.NoError(t, err)
+
+	_, expectedHeight, err := h1.Client.GetBestBlock()
+	require.NoError(t, err)
+	require.Equal(
+		t, expectedHeight, best.Height,
+		"service height should match btcd tip",
+	)
+}
+
 // TestNeutrinoSyncWithoutHeadersImport tests the standard synchronization
 // behavior of Neutrino without using the headers import feature.
 func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
-	rootCtx := context.Background()
+	rootCtx := t.Context()
 
 	// Create a btcd SimNet node and generate 800 blocks
 	h1, err := rpctest.New(
@@ -1301,16 +1481,15 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	_, err = h2.Client.Generate(350)
 	require.NoError(t, err)
 
-	// Now we have a node with 1100 blocks (h1), 1150 blocks (h2), and
-	// 1200 blocks (h3). The chains of nodes h1 and h2 match up to block
-	// 800. By default, a synchronizing wallet connected to all three
-	// should synchronize to h3. However, we're going to take checkpoints
-	// from h1 at 111, 333, 555, 777, and 999, and add those to the
-	// synchronizing wallet's chain parameters so that it should
-	// disconnect from h3 at block 111, and from h2 at block 555, and
-	// then synchronize to block 800 from h1. Order of connection is
-	// unfortunately not guaranteed, so the reorg may not happen with every
-	// test.
+	// Now we have a node with 1100 blocks (h1), 1150 blocks (h2), and 1200
+	// blocks (h3). The chains of nodes h1 and h2 match up to block 800. By
+	// default, a synchronizing wallet connected to all three should
+	// synchronize to h3. However, we're going to take checkpoints from h1
+	// at 111, 333, 555, 777, and 999, and add those to the synchronizing
+	// wallet's chain parameters so that it should disconnect from h3 at
+	// block 111, and from h2 at block 555, and then synchronize to block
+	// 800 from h1. Order of connection is unfortunately not guaranteed, so
+	// the reorg may not happen with every test.
 
 	// Copy parameters and insert checkpoints
 	modParams := chaincfg.SimNetParams
@@ -1325,12 +1504,13 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	}
 
 	// Create a temporary directory, initialize an empty walletdb with an
-	// SPV chain namespace, and create a configuration for the ChainService.
+	// SPV chain namespace, and create a configuration for the
+	// ChainService.
 	tempDir := t.TempDir()
 	defer os.RemoveAll(tempDir)
 
 	db, err := walletdb.Create(
-		"bdb", tempDir+"/weks.db", true, dbOpenTimeout,
+		"bdb", tempDir+"/weks.db", true, dbOpenTimeout, false,
 	)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1356,7 +1536,8 @@ func TestNeutrinoSyncWithoutHeadersImport(t *testing.T) {
 	svc.Start(rootCtx)
 	defer svc.Stop()
 
-	// Create a test harness with the three nodes and the neutrino instance.
+	// Create a test harness with the three nodes and the neutrino
+	// instance.
 	testHarness := &neutrinoHarness{h1, h2, h3, svc}
 
 	for _, testCase := range testCasesWithoutImport {
@@ -1412,7 +1593,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 			tempDir := b.TempDir()
 			dbPath := filepath.Join(tempDir, "test.db")
 			db, err := walletdb.Create(
-				"bdb", dbPath, true, time.Second*10,
+				"bdb", dbPath, true, time.Second*10, false,
 			)
 			require.NoError(b, err)
 			defer db.Close()
@@ -1435,6 +1616,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 				BlockHeadersSource:      blockHeadersPath,
 				FilterHeadersSource:     filterHeadersPath,
 				WriteBatchSizePerRegion: batch,
+				ValidationFlags:         blockchain.BFFastAdd,
 			}
 
 			// Get initial CPU time for measuring CPU usage during
@@ -1468,7 +1650,7 @@ func BenchmarkHeadersImport(b *testing.B) {
 
 			b.ResetTimer()
 			startTime := time.Now()
-			ctx := context.Background()
+			ctx := b.Context()
 
 			importer, err := chainimport.NewHeadersImport(opts)
 			require.NoError(b, err)
@@ -1538,9 +1720,9 @@ func decompressBZ2ToTempFile(srcPath string) (string, func(), error) {
 	return tempFile.Name(), cleanup, nil
 }
 
-// validateFileSize is a helper function that validates a file contains
-// exactly the expected number of headers with the given size per header
-// plus the constant size of header metadata at front.
+// validateFileSize is a helper function that validates a file contains exactly
+// the expected number of headers with the given size per header plus the
+// constant size of header metadata at front.
 func validateFileSize(b *testing.B, filePath string, nHeaders int,
 	hType headerfs.HeaderType) {
 
@@ -1557,9 +1739,9 @@ func validateFileSize(b *testing.B, filePath string, nHeaders int,
 		chainimport.ImportMetadataSize)
 }
 
-// csd does a connect-sync-disconnect between nodes in order to support
-// reorg testing. It brings up and tears down a temporary node, otherwise the
-// nodes try to reconnect to each other which results in unintended reorgs.
+// csd does a connect-sync-disconnect between nodes in order to support reorg
+// testing. It brings up and tears down a temporary node, otherwise the nodes
+// try to reconnect to each other which results in unintended reorgs.
 func csd(harnesses []*rpctest.Harness) error {
 	hTemp, err := rpctest.New(&chaincfg.SimNetParams, nil, nil, "")
 	if err != nil {
@@ -1649,7 +1831,9 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 				"cfheaders synchronization.\n%s", syncTimeout,
 				goroutineDump())
 		}
-		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(knownBestHash)
+		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(
+			knownBestHash,
+		)
 		if err != nil {
 			if err == io.EOF {
 				haveBasicHeader = &chainhash.Hash{}
@@ -1680,8 +1864,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		time.Sleep(syncUpdate)
 		total += syncUpdate
 		rescanMtx.RLock()
-		// We don't want to do this if we haven't started a rescan
-		// yet.
+		// We don't want to do this if we haven't started a rescan yet.
 		if len(gotLog) == 0 {
 			rescanMtx.RUnlock()
 			break
@@ -1705,10 +1888,9 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 	}
 
 	// At this point, we know the latest cfheader is stored in the
-	// ChainService database. We now compare each cfheader the
-	// harness knows about to what's stored in the ChainService
-	// database to see if we've missed anything or messed anything
-	// up.
+	// ChainService database. We now compare each cfheader the harness
+	// knows about to what's stored in the ChainService database to see if
+	// we've missed anything or messed anything up.
 	for i := int32(0); i <= haveBest.Height; i++ {
 		if total > syncTimeout {
 			return fmt.Errorf("Timed out after %v waiting for "+
@@ -1725,8 +1907,8 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 		haveBasicHeader, err = svc.RegFilterHeaders.FetchHeader(&hash)
 		if err == io.EOF {
 			// This sometimes happens due to reorgs after the
-			// service decides it's current. Just wait for the
-			// DB to catch up and try again.
+			// service decides it's current. Just wait for the DB
+			// to catch up and try again.
 			time.Sleep(syncUpdate)
 			total += syncUpdate
 			i--
@@ -1761,7 +1943,7 @@ func waitForSync(t *testing.T, svc *neutrino.ChainService,
 // from the rescan. At the end, the log should match one we precomputed based
 // on the flow of the test. The rescan starts at the genesis block and the
 // notifications continue until the `quit` channel is closed.
-func startRescan(t *testing.T, svc *neutrino.ChainService, addr btcutil.Address,
+func startRescan(t *testing.T, svc *neutrino.ChainService, addr address.Address,
 	startBlock *headerfs.BlockStamp, quit <-chan struct{}) (
 	*neutrino.Rescan, <-chan error) {
 

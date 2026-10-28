@@ -1,0 +1,369 @@
+{
+  "dispatch": [
+    {
+      "name": "skips_blocked_ranked_peer",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "blocked",
+          "local_work": []
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 50,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 100,
+          "batch_id": 1,
+          "canceled": false
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "peer_id": "2",
+        "task_id": 100,
+        "timeout_ms": 2000
+      }
+    },
+    {
+      "name": "drops_canceled_queued_work",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 100,
+          "batch_id": 1,
+          "canceled": true
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "peer_id": "",
+        "task_id": 0,
+        "timeout_ms": 0
+      }
+    },
+    {
+      "name": "skips_busy_ranked_peer",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "busy",
+          "local_work": []
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 50,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 100,
+          "batch_id": 1,
+          "canceled": false
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "peer_id": "2",
+        "task_id": 100,
+        "timeout_ms": 2000
+      }
+    },
+    {
+      "name": "uses_rtt_as_rank_tie_breaker",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 4,
+          "rtt_ms": 800,
+          "state": "ready",
+          "local_work": []
+        },
+        {
+          "id": "2",
+          "rank": 4,
+          "rtt_ms": 50,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 100,
+          "batch_id": 1,
+          "canceled": false
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "peer_id": "2",
+        "task_id": 100,
+        "timeout_ms": 2000
+      }
+    },
+    {
+      "name": "skips_quarantined_ranked_peer",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "quarantined",
+          "local_work": []
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 50,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 100,
+          "batch_id": 1,
+          "canceled": false
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "peer_id": "2",
+        "task_id": 100,
+        "timeout_ms": 2000
+      }
+    },
+    {
+      "name": "rtt_timeout_floor",
+      "base_timeout_ms": 2000,
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 750,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "tasks": [
+        {
+          "id": 200,
+          "batch_id": 1,
+          "canceled": false
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "peer_id": "1",
+        "task_id": 200,
+        "timeout_ms": 6000
+      }
+    }
+  ],
+  "steal": [
+    {
+      "name": "moves_unclaimed_work_to_idle_peer",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "ready",
+          "local_work": [10, 11, 12]
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "2",
+      "expect": {
+        "ok": true,
+        "thief_id": "2",
+        "donor_id": "1",
+        "task_id": 10,
+        "task_ids": [10, 11],
+        "donor_remaining": 1,
+        "thief_work_len": 2
+      }
+    },
+    {
+      "name": "does_not_steal_singleton",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "ready",
+          "local_work": [10]
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "2",
+      "expect": {
+        "ok": false,
+        "thief_id": "",
+        "donor_id": "",
+        "task_id": 0,
+        "donor_remaining": 0,
+        "thief_work_len": 0
+      }
+    },
+    {
+      "name": "does_not_steal_busy_singleton",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "busy",
+          "local_work": [10]
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "2",
+      "expect": {
+        "ok": false,
+        "thief_id": "",
+        "donor_id": "",
+        "task_id": 0,
+        "donor_remaining": 0,
+        "thief_work_len": 0
+      }
+    },
+    {
+      "name": "busy_donor_retains_one_local_task",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "busy",
+          "local_work": [10, 11, 12]
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "2",
+      "expect": {
+        "ok": true,
+        "thief_id": "2",
+        "donor_id": "1",
+        "task_id": 10,
+        "task_ids": [10, 11],
+        "donor_remaining": 1,
+        "thief_work_len": 2
+      }
+    },
+    {
+      "name": "ignores_busy_singleton_donor",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 100,
+          "rtt_ms": 20,
+          "state": "busy",
+          "local_work": [10]
+        },
+        {
+          "id": "2",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "ready",
+          "local_work": [20, 21]
+        },
+        {
+          "id": "3",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "3",
+      "expect": {
+        "ok": true,
+        "thief_id": "3",
+        "donor_id": "2",
+        "task_id": 20,
+        "task_ids": [20],
+        "donor_remaining": 1,
+        "thief_work_len": 1
+      }
+    },
+    {
+      "name": "drains_blocked_singleton",
+      "peers": [
+        {
+          "id": "1",
+          "rank": 0,
+          "rtt_ms": 20,
+          "state": "blocked",
+          "local_work": [10]
+        },
+        {
+          "id": "2",
+          "rank": 10,
+          "rtt_ms": 10,
+          "state": "ready",
+          "local_work": []
+        }
+      ],
+      "thief": "2",
+      "expect": {
+        "ok": true,
+        "thief_id": "2",
+        "donor_id": "1",
+        "task_id": 10,
+        "task_ids": [10],
+        "donor_remaining": 0,
+        "thief_work_len": 1
+      }
+    }
+  ]
+}

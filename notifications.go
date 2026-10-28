@@ -8,10 +8,11 @@ package neutrino
 
 import (
 	"errors"
+	"time"
 
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/connmgr"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
 type getConnCountMsg struct {
@@ -19,11 +20,16 @@ type getConnCountMsg struct {
 }
 
 type subConnPeersReply struct {
-	peerChan   chan query.Peer
+	peerChan   chan querysyncwm.Peer
 	cancelChan chan struct{}
 }
 type subConnPeersMsg struct {
 	reply chan subConnPeersReply
+}
+
+type quarantinePeerMsg struct {
+	addr  string
+	until time.Time
 }
 
 type getPeersMsg struct {
@@ -77,8 +83,12 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case getPeersMsg:
 		peers := make([]*ServerPeer, 0, state.Count())
+		now := time.Now()
 		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
+				return
+			}
+			if s.peerQuarantined(sp.Addr(), now) {
 				return
 			}
 			peers = append(peers, sp)
@@ -90,9 +100,13 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// Create a channel and fill it with the current set of
 		// connected peers.
 		cancelChan := make(chan struct{})
-		peerChan := make(chan query.Peer, state.Count())
+		peerChan := make(chan querysyncwm.Peer, state.Count())
+		now := time.Now()
 		state.forAllPeers(func(sp *ServerPeer) {
 			if !sp.Connected() {
+				return
+			}
+			if s.peerQuarantined(sp.Addr(), now) {
 				return
 			}
 			peerChan <- sp
@@ -106,6 +120,14 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			peerChan:   peerChan,
 			cancelChan: cancelChan,
 		}
+
+	case quarantinePeerMsg:
+		s.trackPeerQuarantine(msg.addr, msg.until)
+		state.forAllPeers(func(sp *ServerPeer) {
+			if sp.Addr() == msg.addr {
+				sp.Disconnect()
+			}
+		})
 
 	case connectNodeMsg:
 		// TODO: duplicate oneshots?
@@ -192,7 +214,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case forAllPeersMsg:
 		// TODO: Remove this when it's unnecessary due to wider use of
-		// queryPeers.
+		// the work manager.
 		// Run the closure on all peers in the passed state.
 		state.forAllPeers(msg.closure)
 		// Even though this is a query, there's no reply channel as the
@@ -216,7 +238,9 @@ func (s *ChainService) ConnectedCount() int32 {
 // ConnectedPeers is a function that returns a channel where all connected
 // peers will be sent. It is assumed that all current peers will be sent
 // imemdiately, and new peers as they connect.
-func (s *ChainService) ConnectedPeers() (<-chan query.Peer, func(), error) {
+func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(),
+	error) {
+
 	replyChan := make(chan subConnPeersReply, 1)
 
 	select {
@@ -274,6 +298,19 @@ func (s *ChainService) Peers() []*ServerPeer {
 	case <-s.quit:
 		return nil
 	}
+}
+
+// eligiblePeers returns the connected peers that are currently eligible to
+// receive queries, as a snapshot suitable for the work manager's broadcasts.
+func (s *ChainService) eligiblePeers() []querysyncwm.Peer {
+	serverPeers := s.Peers()
+
+	peers := make([]querysyncwm.Peer, len(serverPeers))
+	for i, sp := range serverPeers {
+		peers[i] = sp
+	}
+
+	return peers
 }
 
 // DisconnectNodeByAddr disconnects a peer by target address. Both outbound and

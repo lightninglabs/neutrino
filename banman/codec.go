@@ -5,38 +5,16 @@ import (
 	"net"
 )
 
-// encodeIPNet serializes the IP network into the given reader.
+// encodeIPNet serializes the IP network into the given writer using the same
+// record layout as encodeKey, so a row written for an IP network and one
+// written for the equivalent typed key are byte-identical.
 func encodeIPNet(w io.Writer, ipNet *net.IPNet) error {
-	// Determine the appropriate network for the IP address contained in the
-	// network.
-	var (
-		ip      []byte
-		network Network
-	)
-	switch {
-	case ipNet.IP.To4() != nil:
-		ip = ipNet.IP.To4()
-		network = NetworkIPv4
-	case ipNet.IP.To16() != nil:
-		ip = ipNet.IP.To16()
-		network = NetworkIPv6
-	default:
-		return ErrUnsupportedIP
-	}
-
-	// Write the network first in order to properly identify it when
-	// deserializing it, followed by the IP itself and its mask.
-	if _, err := w.Write([]byte{byte(network)}); err != nil {
-		return err
-	}
-	if _, err := w.Write(ip); err != nil {
-		return err
-	}
-	if _, err := w.Write([]byte(ipNet.Mask)); err != nil {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
 		return err
 	}
 
-	return nil
+	return encodeKey(w, key)
 }
 
 // encodeKey serializes a ban key into the given writer.
@@ -45,30 +23,28 @@ func encodeKey(w io.Writer, key *Key) error {
 		return ErrUnsupportedIP
 	}
 
-	switch key.Net {
-	case NetworkIPv4, NetworkIPv6:
-		ipNet, err := keyToIPNet(key)
-		if err != nil {
-			return err
-		}
-
-		return encodeIPNet(w, ipNet)
-
-	case NetworkTorV3:
-		if len(key.Addr) != torV3KeySize || len(key.Mask) != 0 {
-			return ErrUnsupportedIP
-		}
-
-		if _, err := w.Write([]byte{byte(key.Net)}); err != nil {
-			return err
-		}
-
-		_, err := w.Write(key.Addr)
+	// keyParts is the one place a key is validated, so what gets written
+	// here is exactly what every other reader of a Key accepts.
+	addr, mask, err := keyParts(key)
+	if err != nil {
 		return err
-
-	default:
-		return ErrUnsupportedIP
 	}
+
+	// The family byte comes first so the record can be identified when it
+	// is read back, followed by the address and, for an IP key, its mask.
+	if _, err := w.Write([]byte{byte(key.Net)}); err != nil {
+		return err
+	}
+	if _, err := w.Write(addr); err != nil {
+		return err
+	}
+	if mask == nil {
+		return nil
+	}
+
+	_, err = w.Write(mask)
+
+	return err
 }
 
 // decodeIPNet deserialized an IP network from the given reader.
@@ -120,7 +96,19 @@ func decodeKey(r io.Reader) (*Key, error) {
 			return nil, err
 		}
 
-		return keyFromIPNet(ipNet)
+		// A record's family byte has to agree with the width of the
+		// address it carries, so that a decoded key is one encodeKey
+		// will accept.
+		key, err := keyFromIPNet(ipNet)
+		if err != nil {
+			return nil, err
+		}
+
+		if key.Net != Network(network[0]) {
+			return nil, ErrUnsupportedIP
+		}
+
+		return key, nil
 
 	case NetworkTorV3:
 		key := &Key{

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -24,7 +25,7 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 	}
 	dbPath := filepath.Join(dbDir, "test.db")
 
-	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10)
+	db, err := walletdb.Create("bdb", dbPath, true, time.Second*10, false)
 	if err != nil {
 		os.RemoveAll(dbDir)
 		t.Fatalf("unable to create db: %v", err)
@@ -48,6 +49,13 @@ func createTestBanStore(t *testing.T) (banman.Store, func()) {
 // BanStatus of IP networks.
 func TestBanStore(t *testing.T) {
 	t.Parallel()
+
+	synctest.Test(t, testBanStore)
+}
+
+// testBanStore uses virtual time so whole-second expiration is deterministic.
+func testBanStore(t *testing.T) {
+	t.Helper()
 
 	// We'll start by creating our test BanStore backed by a boltdb
 	// instance.
@@ -83,7 +91,7 @@ func TestBanStore(t *testing.T) {
 		}
 		banDuration := time.Until(banStatus.Expiration)
 		if banDuration > duration {
-			t.Fatalf("expected ban duration to be within %v, got %v",
+			t.Fatalf("expected ban duration within %v, got %v",
 				duration, banDuration)
 		}
 	}
@@ -104,7 +112,9 @@ func TestBanStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to parse IP network from %v: %v", addr2, err)
 	}
-	err = banStore.BanIPNet(ipNet2, banman.ExceededBanThreshold, time.Second)
+	err = banStore.BanIPNet(
+		ipNet2, banman.ExceededBanThreshold, time.Second,
+	)
 	if err != nil {
 		t.Fatalf("unable to ban IP network: %v", err)
 	}
@@ -136,6 +146,17 @@ func TestBanStore(t *testing.T) {
 // persist IP address bans.
 func TestBanStoreKey(t *testing.T) {
 	t.Parallel()
+
+	// Bans have whole-second expiration, so virtual time is what keeps the
+	// expiry boundary deterministic: a real one-second sleep can be
+	// starved past the deadline by the rest of the suite and then the ban
+	// is already gone when it is read back.
+	synctest.Test(t, testBanStoreKey)
+}
+
+// testBanStoreKey is the body of TestBanStoreKey.
+func testBanStoreKey(t *testing.T) {
+	t.Helper()
 
 	banStore, cleanUp := createTestBanStore(t)
 	defer cleanUp()
@@ -178,6 +199,13 @@ func TestBanStoreKey(t *testing.T) {
 // persist overlay address bans.
 func TestBanStoreTorV3Key(t *testing.T) {
 	t.Parallel()
+
+	synctest.Test(t, testBanStoreTorV3Key)
+}
+
+// testBanStoreTorV3Key is the body of TestBanStoreTorV3Key.
+func testBanStoreTorV3Key(t *testing.T) {
+	t.Helper()
 
 	banStore, cleanUp := createTestBanStore(t)
 	defer cleanUp()

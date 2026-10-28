@@ -1,6 +1,6 @@
 package neutrino
 
-import "github.com/btcsuite/btcd/btcutil"
+import "github.com/btcsuite/btcd/btcutil/v2"
 
 // CacheableBlock is a wrapper around the btcutil.Block type which provides a
 // Size method used by the cache to target certain memory usage.

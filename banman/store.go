@@ -131,7 +131,9 @@ func newBanStore(db walletdb.DB) (*banStore, error) {
 // given duration. A reason can also be provided to note why the IP network is
 // being banned. The record will exist until a call to Status is made after the
 // ban expiration.
-func (s *banStore) BanIPNet(ipNet *net.IPNet, reason Reason, duration time.Duration) error {
+func (s *banStore) BanIPNet(ipNet *net.IPNet, reason Reason,
+	duration time.Duration) error {
+
 	key, err := keyFromIPNet(ipNet)
 	if err != nil {
 		return err

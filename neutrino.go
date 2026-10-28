@@ -16,12 +16,12 @@ import (
 
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -31,7 +31,9 @@ import (
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
-	"github.com/lightninglabs/neutrino/query"
+	"github.com/lightninglabs/neutrino/querysync"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
+	"github.com/lightninglabs/neutrino/sqldb"
 )
 
 // These are exported variables so they can be changed by users.
@@ -50,7 +52,7 @@ var (
 
 	// UserAgentVersion is the user agent version and is used to help
 	// identify ourselves to other bitcoin peers.
-	UserAgentVersion = "0.12.0-beta"
+	UserAgentVersion = "0.17.1"
 
 	// Services describes the services that are supported by the server.
 	Services = wire.SFNodeWitness | wire.SFNodeCF
@@ -64,6 +66,11 @@ var (
 
 	// BanDuration is the duration of a ban.
 	BanDuration = time.Hour * 24
+
+	// unresponsivePeerQuarantine is how long a peer that repeatedly failed
+	// to answer queries is excluded from query dispatch. It matches the
+	// work manager's local quarantine for such peers.
+	unresponsivePeerQuarantine = 10 * time.Minute
 
 	// TargetOutbound is the number of outbound peers to target.
 	TargetOutbound = 8
@@ -137,19 +144,6 @@ func (ps *peerState) forAllPeers(closure func(sp *ServerPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
-// spMsg represents a message over the wire from a specific peer.
-type spMsg struct {
-	sp  *ServerPeer
-	msg wire.Message
-}
-
-// spMsgSubscription sends all messages from a peer over a channel, allowing
-// pluggable filtering of the messages.
-type spMsgSubscription struct {
-	msgChan  chan<- spMsg
-	quitChan <-chan struct{}
-}
-
 // msgSubscription sends all messages from a peer over a channel, allowing
 // pluggable filtering of the messages.
 type msgSubscription struct {
@@ -177,23 +171,19 @@ type ServerPeer struct {
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
 	// The sends on these channels WILL NOT block; any messages the channel
 	// can't accept will be dropped silently.
-	// TODO(halseth): remove one of the maps when all queries go through
-	// work manager.
-	recvSubscribers  map[spMsgSubscription]struct{}
-	recvSubscribers2 map[msgSubscription]struct{}
-	mtxSubscribers   sync.RWMutex
+	recvSubscribers map[msgSubscription]struct{}
+	mtxSubscribers  sync.RWMutex
 }
 
 // NewServerPeer returns a new ServerPeer instance. The peer needs to be set by
 // the caller.
 func NewServerPeer(s *ChainService, isPersistent bool) *ServerPeer {
 	return &ServerPeer{
-		server:           s,
-		persistent:       isPersistent,
-		knownAddresses:   lru.NewCache[string, *cachedAddr](5000),
-		quit:             make(chan struct{}),
-		recvSubscribers:  make(map[spMsgSubscription]struct{}),
-		recvSubscribers2: make(map[msgSubscription]struct{}),
+		server:          s,
+		persistent:      isPersistent,
+		knownAddresses:  lru.NewCache[string, *cachedAddr](5000),
+		quit:            make(chan struct{}),
+		recvSubscribers: make(map[msgSubscription]struct{}),
 	}
 }
 
@@ -462,22 +452,11 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	sp.mtxSubscribers.RLock()
 	defer sp.mtxSubscribers.RUnlock()
 	for subscription := range sp.recvSubscribers {
-		go func(subscription spMsgSubscription) {
-			select {
-			case <-subscription.quitChan:
-			case subscription.msgChan <- spMsg{
-				msg: msg,
-				sp:  sp,
-			}:
-			}
-		}(subscription)
-	}
-	for subscription := range sp.recvSubscribers2 {
 		// Quickly determine if this subscription has been canceled, if
 		// so delete it.
 		select {
 		case <-subscription.quitChan:
-			delete(sp.recvSubscribers2, subscription)
+			delete(sp.recvSubscribers, subscription)
 			continue
 		default:
 		}
@@ -491,30 +470,15 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	}
 }
 
-// subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
-func (sp *ServerPeer) subscribeRecvMsg(subscription spMsgSubscription) {
-	sp.mtxSubscribers.Lock()
-	defer sp.mtxSubscribers.Unlock()
-	sp.recvSubscribers[subscription] = struct{}{}
-}
-
-// unsubscribeRecvMsgs handles removing OnRead subscriptions from the server
-// peer.
-func (sp *ServerPeer) unsubscribeRecvMsgs(subscription spMsgSubscription) {
-	sp.mtxSubscribers.Lock()
-	defer sp.mtxSubscribers.Unlock()
-	delete(sp.recvSubscribers, subscription)
-}
-
-// A compile-time check to ensure that ServerPeer implements the query.Peer
-// interface.
-var _ query.Peer = (*ServerPeer)(nil)
+// A compile-time check to ensure that ServerPeer implements the
+// querysyncwm.Peer interface.
+var _ querysyncwm.Peer = (*ServerPeer)(nil)
 
 // SubscribeRecvMsg adds a OnRead subscription to the peer. All bitcoin
 // messages received from this peer will be sent on the returned channel. A
 // closure is also returned, that should be called to cancel the subscription.
 //
-// NOTE: Part of the query.Peer interface.
+// NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 	// We won't have to buffer this channel, since we'll always send on it
 	// from a new goroutine.
@@ -528,7 +492,7 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 
 	sp.mtxSubscribers.Lock()
 	defer sp.mtxSubscribers.Unlock()
-	sp.recvSubscribers2[sub] = struct{}{}
+	sp.recvSubscribers[sub] = struct{}{}
 
 	return msgChan, func() {
 		close(quitChan)
@@ -538,7 +502,7 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 // OnDisconnect returns a channel that will be closed when this peer is
 // disconnected.
 //
-// NOTE: Part of the query.Peer interface.
+// NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) OnDisconnect() <-chan struct{} {
 	return sp.quit
 }
@@ -556,8 +520,20 @@ type Config struct {
 	DataDir string
 
 	// Database is an *open* database instance that we'll use to storm
-	// indexes of the chain.
+	// indexes of the chain. Mutually exclusive with SQLConfig: exactly
+	// one of the two must be set when calling NewChainService.
 	Database walletdb.DB
+
+	// SQLConfig, when non-nil, switches all persistent stores
+	// (block headers, filter headers, filter DB, ban store) to a
+	// SQLite or PostgreSQL backend. Mutually exclusive with Database.
+	SQLConfig *sqldb.Config
+
+	// LegacyImport, when non-nil, declares legacy walletdb + flat-file
+	// state to be imported into the SQL backend on first start. The
+	// import runs exactly once, recorded in the neutrino_migrations
+	// table at version 2. Ignored when SQLConfig is nil.
+	LegacyImport *sqldb.LegacyDataSource
 
 	// ChainParams is the chain that we're running on.
 	ChainParams chaincfg.Params
@@ -626,6 +602,16 @@ type Config struct {
 	//    not, replies with a getdata message.
 	// 3. Neutrino sends the raw transaction.
 	BroadcastTimeout time.Duration
+
+	// QuerySchedulerTrace records model-owned scheduler actor events from
+	// the production query sync path. The trace can be replayed against the
+	// querysync model to validate dispatch, retry, cooldown, and work
+	// stealing invariants.
+	QuerySchedulerTrace *querysync.TraceRecorder
+
+	// QuerySchedulerEvents receives structured production query scheduler
+	// telemetry for live sync diagnostics and validation summaries.
+	QuerySchedulerEvents querysync.SchedulerEventSink
 }
 
 // HeadersImportConfig contains configuration options for importing headers
@@ -666,7 +652,7 @@ type HeadersImportConfig struct {
 // peerSubscription holds a peer subscription which we'll notify about any
 // connected peers.
 type peerSubscription struct {
-	peers  chan<- query.Peer
+	peers  chan<- querysyncwm.Peer
 	cancel <-chan struct{}
 }
 
@@ -706,8 +692,10 @@ type ChainService struct { // nolint:maligned
 	utxoScanner          *UtxoScanner
 	broadcaster          *pushtx.Broadcaster
 	banStore             banman.Store
-	workManager          query.WorkManager
+	sqlBackend           *sqldb.Backend
+	workManager          querysyncwm.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
+	queryPeerQuarantine  map[string]time.Time
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -729,6 +717,18 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	// Validate that the caller provided exactly one of the two supported
+	// persistent backends. This is checked before any other side effect
+	// so misconfigurations fail fast.
+	switch {
+	case cfg.Database != nil && cfg.SQLConfig != nil:
+		return nil, errors.New("neutrino: cfg.Database and " +
+			"cfg.SQLConfig are mutually exclusive")
+	case cfg.Database == nil && cfg.SQLConfig == nil:
+		return nil, errors.New("neutrino: one of cfg.Database " +
+			"or cfg.SQLConfig must be set")
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout
@@ -783,15 +783,49 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
+		queryPeerQuarantine: make(
+			map[string]time.Time,
+		),
 	}
-	s.workManager = query.NewWorkManager(&query.Config{
-		ConnectedPeers: s.ConnectedPeers,
-		NewWorker:      query.NewWorker,
-		Ranking:        query.NewPeerRanking(),
+	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
+		ConnectedPeers:     s.ConnectedPeers,
+		Peers:              s.eligiblePeers,
+		OnPeerUnresponsive: s.onPeerUnresponsive,
+		Ranking:            querysyncwm.NewPeerRanking(),
+		SchedulerTrace:     cfg.QuerySchedulerTrace,
+		SchedulerEvents:    cfg.QuerySchedulerEvents,
 	})
 
 	var err error
-	s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+
+	// If the caller opted into the SQL backend, open it now (running the
+	// schema migrations and any registered legacy import) and inject the
+	// resulting per-domain TransactionExecutors into each store below.
+	if cfg.SQLConfig != nil {
+		var legacyMigration sqldb.MakeProgrammaticMigrations
+		if !cfg.SQLConfig.SkipLegacyMigration {
+			legacyMigration = sqldb.MakeLegacyImportMigration(
+				cfg.LegacyImport,
+			)
+		}
+
+		s.sqlBackend, err = sqldb.NewBackend(
+			cfg.DataDir, cfg.SQLConfig, legacyMigration,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to open SQL "+
+				"backend: %w", err)
+		}
+	}
+
+	if s.sqlBackend != nil {
+		s.FilterDB, err = filterdb.NewSQLFilterStore(
+			context.Background(), s.sqlBackend.FilterTxer,
+			cfg.ChainParams,
+		)
+	} else {
+		s.FilterDB, err = filterdb.New(cfg.Database, cfg.ChainParams)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -831,16 +865,32 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		)
 	}
 
-	s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
-		cfg.DataDir, cfg.Database, &cfg.ChainParams,
-	)
+	if s.sqlBackend != nil {
+		s.BlockHeaders, err = headerfs.NewSQLBlockHeaderStore(
+			context.Background(), s.sqlBackend.HeaderTxer,
+			&cfg.ChainParams,
+		)
+	} else {
+		s.BlockHeaders, err = headerfs.NewBlockHeaderStore(
+			cfg.DataDir, cfg.Database, &cfg.ChainParams,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
-	s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
-		cfg.DataDir, cfg.Database, headerfs.RegularFilter,
-		&cfg.ChainParams, cfg.AssertFilterHeader,
-	)
+
+	if s.sqlBackend != nil {
+		s.RegFilterHeaders, err = headerfs.NewSQLFilterHeaderStore(
+			context.Background(), s.sqlBackend.HeaderTxer,
+			headerfs.RegularFilter, &cfg.ChainParams,
+			cfg.AssertFilterHeader,
+		)
+	} else {
+		s.RegFilterHeaders, err = headerfs.NewFilterHeaderStore(
+			cfg.DataDir, cfg.Database, headerfs.RegularFilter,
+			&cfg.ChainParams, cfg.AssertFilterHeader,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -852,9 +902,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
+		QuarantinePeer:   s.QuarantinePeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
-		queryAllPeers:    s.queryAllPeers,
+		Broadcaster:      s.workManager,
 	})
 	if err != nil {
 		return nil, err
@@ -987,7 +1038,11 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RebroadcastInterval: pushtx.DefaultRebroadcastInterval,
 	})
 
-	s.banStore, err = banman.NewStore(cfg.Database)
+	if s.sqlBackend != nil {
+		s.banStore, err = banman.NewSQLStore(s.sqlBackend.BanTxer)
+	} else {
+		s.banStore, err = banman.NewStore(cfg.Database)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
 	}
@@ -1123,6 +1178,61 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 			"%v", addr, err)
 	}
 	return s.banStore.BanKey(key, reason, BanDuration)
+}
+
+// onPeerUnresponsive is invoked by the query work manager once a peer has
+// repeatedly failed to answer queries. The peer is quarantined and
+// disconnected, but its IP address is deliberately not banned: slow or
+// overloaded peers are common, and an address ban would also catch unrelated
+// peers behind the same NAT or on localhost.
+func (s *ChainService) onPeerUnresponsive(peer querysyncwm.Peer) {
+	s.QuarantinePeer(peer.Addr(), unresponsivePeerQuarantine)
+}
+
+// QuarantinePeer temporarily excludes one exact peer address from peer
+// subscriptions used by query dispatch. Unlike BanPeer, this does not ban the
+// peer's IP address, so multiple localhost or NAT-shared peers are not grouped
+// together.
+func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
+	until := time.Now().Add(duration)
+	log.Warnf("Quarantining peer %v until %s", addr,
+		until.Format(time.RFC3339))
+
+	select {
+	case s.query <- quarantinePeerMsg{
+		addr:  addr,
+		until: until,
+	}:
+	case <-s.quit:
+	}
+}
+
+func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {
+	if s.queryPeerQuarantine == nil {
+		s.queryPeerQuarantine = make(map[string]time.Time)
+	}
+
+	if current, ok := s.queryPeerQuarantine[addr]; ok &&
+		current.After(until) {
+
+		return
+	}
+
+	s.queryPeerQuarantine[addr] = until
+}
+
+func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
+	until, ok := s.queryPeerQuarantine[addr]
+	if !ok {
+		return false
+	}
+
+	if now.Before(until) {
+		return true
+	}
+
+	delete(s.queryPeerQuarantine, addr)
+	return false
 }
 
 // UnbanPeer connects and unbans a previously banned peer.
@@ -1364,6 +1474,10 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// Disconnect banned peers.
 	if s.IsBanned(sp.Addr()) {
+		sp.Disconnect()
+		return false
+	}
+	if s.peerQuarantined(sp.Addr(), time.Now()) {
 		sp.Disconnect()
 		return false
 	}
@@ -1680,6 +1794,17 @@ func (s *ChainService) Start(ctx context.Context) error {
 		if _, err := importer.Import(ctx); err != nil {
 			return err
 		}
+
+		// The block manager was constructed before the import ran,
+		// so its internal header tracking state (headerList,
+		// headerTip, filterHeaderTip, etc.) reflects the
+		// pre-import chain tips. Re-read the now-updated stores
+		// so the block manager starts syncing from the correct
+		// height rather than from genesis.
+		if err := s.blockManager.ResetHeaderState(); err != nil {
+			return fmt.Errorf("failed to reset block manager "+
+				"state after headers import: %w", err)
+		}
 	}
 
 	// Start the address manager and block manager, both of which are
@@ -1750,6 +1875,19 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	// Release the SQL backend connection if one was opened. This must
+	// happen after all background goroutines exit so no one is using
+	// the backend mid-shutdown.
+	if s.sqlBackend != nil {
+		if err := s.sqlBackend.Close(); err != nil {
+			log.Errorf("error closing sql backend: %v", err)
+			if returnErr == nil {
+				returnErr = err
+			}
+		}
+	}
+
 	return returnErr
 }
 

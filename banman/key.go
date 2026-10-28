@@ -65,59 +65,134 @@ func (k *Key) String() string {
 	return fmt.Sprintf("%v:%x", k.Net, k.Addr)
 }
 
+// networkForAddr returns the network an address payload belongs to. Only IP
+// payloads reach this: a Tor v3 payload has no family to infer from its width.
+func networkForAddr(addr []byte) Network {
+	if len(addr) == net.IPv4len {
+		return NetworkIPv4
+	}
+
+	return NetworkIPv6
+}
+
+// isAllOnes reports whether every byte of b is 0xff.
+func isAllOnes(b []byte) bool {
+	for _, v := range b {
+		if v != 0xff {
+			return false
+		}
+	}
+
+	return true
+}
+
+// ipNetParts reduces an address and its mask to the pieces of a ban key: the
+// address at the byte width of its own family, and the mask at that same
+// width. A 16-byte mask paired with a 4-byte IPv4 address is an IPv4 mask
+// written in IPv6 form whenever its leading 12 bytes are all ones, so it is
+// cut down to the 4 bytes that apply; this is the same pairing rule that
+// net.IP.Mask and net.IPNet's own network-number helper apply. Any other width
+// mismatch is refused, which is what keeps a key from carrying an address and
+// a mask that disagree.
+//
+// The address is deliberately left unmasked: the on-disk record for an IP
+// network has always held the address as given, and masking here would rewrite
+// every existing ban record.
+func ipNetParts(ip net.IP, mask net.IPMask) ([]byte, net.IPMask, error) {
+	addr := ip.To4()
+	if addr == nil {
+		addr = ip.To16()
+	}
+	if addr == nil {
+		return nil, nil, ErrUnsupportedIP
+	}
+
+	switch {
+	case len(addr) == net.IPv4len && len(mask) == net.IPv6len &&
+		isAllOnes(mask[:net.IPv6len-net.IPv4len]):
+
+		mask = mask[net.IPv6len-net.IPv4len:]
+
+	case len(addr) != len(mask):
+		return nil, nil, ErrUnsupportedIP
+	}
+
+	return addr, mask, nil
+}
+
 // keyFromIPNet converts an IP network into a typed ban key.
 func keyFromIPNet(ipNet *net.IPNet) (*Key, error) {
 	if ipNet == nil {
 		return nil, ErrUnsupportedIP
 	}
 
-	switch {
-	case ipNet.IP.To4() != nil:
-		return &Key{
-			Net:  NetworkIPv4,
-			Addr: bytes.Clone(ipNet.IP.To4()),
-			Mask: bytes.Clone([]byte(ipNet.Mask)),
-		}, nil
-
-	case ipNet.IP.To16() != nil:
-		return &Key{
-			Net:  NetworkIPv6,
-			Addr: bytes.Clone(ipNet.IP.To16()),
-			Mask: bytes.Clone([]byte(ipNet.Mask)),
-		}, nil
-
-	default:
-		return nil, ErrUnsupportedIP
+	addr, mask, err := ipNetParts(ipNet.IP, ipNet.Mask)
+	if err != nil {
+		return nil, err
 	}
+
+	return &Key{
+		Net:  networkForAddr(addr),
+		Addr: bytes.Clone(addr),
+		Mask: bytes.Clone(mask),
+	}, nil
 }
 
-// keyToIPNet converts a typed key back into an IP network.
-func keyToIPNet(key *Key) (*net.IPNet, error) {
+// keyParts validates a key and returns the address payload and mask it
+// carries. An IP key's mask is at the byte width of its own family, and a Tor
+// v3 key carries no mask, so a nil mask is what tells the two shapes apart
+// rather than a separate flag.
+//
+// Every reader of a Key goes through here, so a key that this returns is
+// exactly the key that gets encoded: there is no second, laxer path by which a
+// key could be stored in a form the store cannot read back.
+func keyParts(key *Key) ([]byte, net.IPMask, error) {
 	if key == nil {
-		return nil, ErrUnsupportedIP
+		return nil, nil, ErrUnsupportedIP
 	}
 
 	switch key.Net {
-	case NetworkIPv4:
-		if len(key.Addr) != net.IPv4len ||
-			len(key.Mask) != net.IPv4len {
-
-			return nil, ErrUnsupportedIP
+	case NetworkTorV3:
+		if len(key.Addr) != torV3KeySize || len(key.Mask) != 0 {
+			return nil, nil, ErrUnsupportedIP
 		}
 
-	case NetworkIPv6:
-		if len(key.Addr) != net.IPv6len ||
-			len(key.Mask) != net.IPv6len {
+		return bytes.Clone(key.Addr), nil, nil
 
-			return nil, ErrUnsupportedIP
-		}
+	case NetworkIPv4, NetworkIPv6:
 
 	default:
+		return nil, nil, ErrUnsupportedIP
+	}
+
+	addr, mask, err := ipNetParts(key.Addr, key.Mask)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The family byte has to agree with the address the key carries, or
+	// the key would re-encode under a different one.
+	if networkForAddr(addr) != key.Net {
+		return nil, nil, ErrUnsupportedIP
+	}
+
+	return addr, mask, nil
+}
+
+// keyToIPNet converts a typed key back into an IP network. A Tor v3 key has
+// no IP form, so it is refused.
+func keyToIPNet(key *Key) (*net.IPNet, error) {
+	addr, mask, err := keyParts(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if mask == nil {
 		return nil, ErrUnsupportedIP
 	}
 
 	return &net.IPNet{
-		IP:   net.IP(bytes.Clone(key.Addr)),
-		Mask: net.IPMask(bytes.Clone(key.Mask)),
+		IP:   net.IP(bytes.Clone(addr)),
+		Mask: net.IPMask(bytes.Clone(mask)),
 	}, nil
 }
