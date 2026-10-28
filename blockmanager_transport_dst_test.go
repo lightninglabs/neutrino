@@ -1356,6 +1356,9 @@ var dstRegressionSeeds = []string{
 	// sync peer's deadline, and a failed follow-up send to the sync peer.
 	"8fc173f7bba5c713c3f4ceaafb8a912e6a8fc5d48377eff027b7",
 	"cfc8b87fa5b27e053a45c56ba6de82f71fa3bbd6",
+	// Serial mode: a sync peer answering empty kept the role with no
+	// request and no deadline.
+	"ff6240a6106ae838014c714ad54cff39b6ba0afdbaf2842424993232d5",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.
