@@ -236,6 +236,19 @@ func (h *HeaderSyncFSM) AddPeer(peer PeerSnapshot) error {
 		peer.LocalRanges = existing.LocalRanges
 	}
 
+	// The range table owns leases. A peer actor's snapshot can still name
+	// a range the FSM took away without telling it (discovery staging the
+	// span, or a tip advance); restoring it would give the range a second
+	// owner once it is reassigned.
+	if peer.ActiveRange != NoRange {
+		rng, ok := h.ranges[peer.ActiveRange]
+		if !ok || rng.State != RangeActive ||
+			rng.OwnerPeer != peer.ID {
+
+			peer.ActiveRange = NoRange
+		}
+	}
+
 	h.peers[peer.ID] = peer.clone()
 	return nil
 }
@@ -1080,6 +1093,27 @@ func (h *HeaderSyncFSM) InvalidateRange(id RangeID) (
 		result.Ranges = append(result.Ranges, rng.ID)
 	}
 	return result, nil
+}
+
+// RequeueStagedRange returns a staged range to the queue under a new lease
+// epoch. The FSM stages a range before the caller stores its headers, so an ask
+// that applies but reports an error to the caller (an lnd actor runs a request
+// on its own context) can leave a staged range with no headers. Ordered commit
+// would then stop at it forever; requeueing fetches the span again.
+func (h *HeaderSyncFSM) RequeueStagedRange(id RangeID) bool {
+	rng, ok := h.ranges[id]
+	if !ok || rng.State != RangeStaged {
+		return false
+	}
+
+	rng.LeaseEpoch++
+	rng.OwnerPeer = NoPeer
+	rng.State = RangeQueued
+	rng.Valid = false
+	rng.StagedAt = time.Time{}
+	h.ranges[id] = rng
+
+	return true
 }
 
 // CommitReadyRanges drains all staged ranges that connect to the visible tip.

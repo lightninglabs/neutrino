@@ -204,10 +204,14 @@ func (v *dstInvariants) rangeTable(event string) {
 			}
 
 		case headersync.RangeStaged:
+			// An ask that applied but reported an error can
+			// leave a staged range without headers. The commit
+			// path requeues it once it is next, and the heal
+			// phase's quiescence check catches a range that is
+			// never recovered.
 			staged, ok := session.StagedRange(id)
 			if !ok {
-				v.fail(event, "range %+v staged without "+
-					"headers", rng)
+				continue
 			}
 			if !dstMatchesChain(staged.Headers, honest,
 				rng.StartHeight) {

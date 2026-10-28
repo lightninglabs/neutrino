@@ -33,6 +33,18 @@ const (
 	// headerSyncAskCommitReady is the post-write CommitReadyRanges ask.
 	headerSyncAskCommitReady headerSyncAskOp = iota
 
+	// headerSyncAskCompleteRange is the range completion ask made when a
+	// range reply arrives.
+	headerSyncAskCompleteRange
+
+	// headerSyncAskFinishAnchor is the anchor discovery ask that may
+	// stage a discovered range.
+	headerSyncAskFinishAnchor
+
+	// headerSyncAskRequestRange is the ask that starts a peer's next
+	// range.
+	headerSyncAskRequestRange
+
 	// headerSyncAskOps is the number of faultable asks.
 	headerSyncAskOps
 )

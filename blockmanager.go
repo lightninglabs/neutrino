@@ -3000,7 +3000,12 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 			continue
 		}
 
-		assignment, ok, err := peerActor.RequestRange(ctx)
+		var assignment headersync.RangeAssignment
+		err := b.headerSyncAsk(headerSyncAskRequestRange, func() error {
+			var err error
+			assignment, ok, err = peerActor.RequestRange(ctx)
+			return err
+		})
 		if err != nil {
 			log.Warnf(
 				"headersync peer %s failed to request range: "+
@@ -3008,6 +3013,12 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 				peerID,
 				err,
 			)
+
+			// The ask may have started a range in the actor even
+			// though it reported an error, leaving an active lease
+			// with no request behind it. Blocking the peer lets
+			// the existing steal of blocked owners recover it.
+			b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
 			continue
 		}
 		if !ok {
@@ -3993,10 +4004,27 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 	ctx, cancel := b.headerSyncOpCtx()
 	defer cancel()
 
-	result, ok, err := b.headerSync.Controller().FinishAnchorHeaders(
-		ctx, peerID, hmsg.headers.Headers,
-		headersync.DefaultMaxRangeHeaders,
+	var (
+		result headersync.AnchorHeadersResult
+		ok     bool
 	)
+	finish := func() error {
+		var err error
+		result, ok, err = b.headerSync.Controller().FinishAnchorHeaders(
+			ctx, peerID, hmsg.headers.Headers,
+			headersync.DefaultMaxRangeHeaders,
+		)
+		return err
+	}
+
+	// Only a reply matching an active anchor request reaches an actor
+	// ask, so only that case can see an ask deadline.
+	var err error
+	if b.headerSync.Session().AnchorActive(peerID) {
+		err = b.headerSyncAsk(headerSyncAskFinishAnchor, finish)
+	} else {
+		err = finish()
+	}
 
 	// Check the error before the match flag, so an actor failure is never
 	// mistaken for an unmatched reply. The request is already finished, so
@@ -4007,6 +4035,10 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 			"peer=%s "+
 			"height=%d hash=%s: %v", peerID, result.Response.Height,
 			result.Response.Hash, err)
+
+		// The ask may have staged a discovered range without its
+		// headers. The commit retry requeues such a range.
+		b.scheduleHeaderCommitRetry()
 		b.continueHeaderSync(peers)
 		return true
 	}
@@ -4207,17 +4239,21 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	}
 
 	var result headersync.CompleteResult
-	if peerActor, ok := b.headerSync.Peer(peerID); ok {
-		result, err = peerActor.CompleteRange(
-			ctx, assignment.RangeID, assignment.LeaseEpoch, valid,
-			time.Now(),
-		)
-	} else {
+	err = b.headerSyncAsk(headerSyncAskCompleteRange, func() error {
+		var err error
+		if peerActor, ok := b.headerSync.Peer(peerID); ok {
+			result, err = peerActor.CompleteRange(
+				ctx, assignment.RangeID, assignment.LeaseEpoch,
+				valid, time.Now(),
+			)
+			return err
+		}
 		result, err = b.headerSync.Manager().CompleteRange(
 			ctx, peerID, assignment.RangeID, assignment.LeaseEpoch,
 			valid, time.Now(),
 		)
-	}
+		return err
+	})
 	if err != nil {
 		log.Warnf(
 			"headersync failed to complete range_id=%d peer=%s: "+
@@ -4226,6 +4262,15 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 			peerID,
 			err,
 		)
+
+		// The ask may have staged the range without its headers;
+		// the commit retry requeues such a range. Or it may not have
+		// applied at all, leaving the range active with its request
+		// already consumed. Blocking the peer lets the existing steal
+		// of blocked owners recover that case.
+		b.scheduleHeaderCommitRetry()
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+		b.continueHeaderSync(peers)
 		return true
 	}
 
@@ -4356,13 +4401,17 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 
 	commitRanges := make([]headerSyncRangeCommit, 0, len(ready))
 	for _, rangeID := range ready {
+		// The FSM staged the range but its headers never reached the
+		// session: the completion ask applied and then reported an
+		// error. Fetch the span again rather than stop here forever.
 		staged, ok := b.headerSync.Session().StagedRange(rangeID)
 		if !ok {
-			return fmt.Errorf(
-				"headersync range_id=%d ready without "+
-					"staged headers",
-				rangeID,
+			_, err := b.headerSync.Manager().RequeueStagedRange(
+				ctx, rangeID,
 			)
+			log.Warnf("headersync range_id=%d ready without "+
+				"staged headers, requeued: %v", rangeID, err)
+			break
 		}
 
 		rng, ok, err := b.headerSync.Manager().
