@@ -163,6 +163,13 @@ type headerSyncTimeoutMsg struct {
 // after the cold-start peer admission window expires.
 type headerSyncBootstrapMsg struct{}
 
+// headerSyncCooldownMsg wakes the block handler when a header peer's cooldown
+// expires, so the peer can be scheduled again without waiting for an
+// unrelated event.
+type headerSyncCooldownMsg struct {
+	generation uint64
+}
+
 // headerSyncCommitRetryMsg retries retained staging after a storage failure.
 type headerSyncCommitRetryMsg struct {
 	generation uint64
@@ -325,6 +332,9 @@ type blockManager struct { // nolint:maligned
 	headerSyncTimer        *time.Timer
 	headerCommitRetryTimer *time.Timer
 	headerCommitRetryID    uint64
+
+	headerCooldownTimer *time.Timer
+	headerCooldownID    uint64
 
 	headerSyncBootstrapFirstSeen time.Time
 	headerSyncBootstrapTimer     *time.Timer
@@ -564,6 +574,7 @@ func (b *blockManager) Stop() error {
 	b.cancelHeaderCommitRetry()
 	b.disarmHeaderSyncTimeout()
 	b.clearHeaderSyncBootstrapDelay()
+	b.cancelHeaderCooldownWakeup()
 	b.stopHeaderSyncActors()
 
 	close(done)
@@ -783,6 +794,41 @@ func (b *blockManager) trackHeaderSyncPeerCooldown(peerID string,
 	b.headerSync.Session().TrackPeerCooldown(
 		peerID, state, time.Now(), defaultHeaderPeerCooldown,
 	)
+	b.scheduleHeaderCooldownWakeup()
+}
+
+// scheduleHeaderCooldownWakeup arms one wakeup for the earliest peer cooldown
+// expiry. Cooled-down peers are only recovered while dispatching. Without a
+// wakeup, a sync waiting on a blocked peer (for example the second anchor
+// observation under a two-peer policy) has no request or timer outstanding
+// and never dispatches again.
+func (b *blockManager) scheduleHeaderCooldownWakeup() {
+	if b.headerCooldownTimer != nil {
+		return
+	}
+	until, ok := b.headerSync.Session().NextCooldownExpiry()
+	if !ok {
+		return
+	}
+
+	b.headerCooldownID++
+	generation := b.headerCooldownID
+	b.headerCooldownTimer = time.AfterFunc(time.Until(until), func() {
+		message := &headerSyncCooldownMsg{generation: generation}
+		select {
+		case b.peerChan <- message:
+		case <-b.quit:
+		}
+	})
+}
+
+// cancelHeaderCooldownWakeup stops a pending cooldown wakeup.
+func (b *blockManager) cancelHeaderCooldownWakeup() {
+	if b.headerCooldownTimer != nil {
+		b.headerCooldownTimer.Stop()
+		b.headerCooldownTimer = nil
+		b.headerCooldownID++
+	}
 }
 
 func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
@@ -2591,6 +2637,16 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 	case *headerSyncBootstrapMsg:
 		b.headerSyncBootstrapTimer = nil
 		b.startSync(peers)
+	case *headerSyncCooldownMsg:
+		if msg.generation != b.headerCooldownID {
+			return
+		}
+		b.headerCooldownTimer = nil
+
+		// Dispatch recovers every peer whose cooldown expired; arm
+		// the next wakeup for any still cooling down.
+		b.continueHeaderSync(peers)
+		b.scheduleHeaderCooldownWakeup()
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
 			return

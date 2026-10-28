@@ -358,6 +358,22 @@ func (s *Session) TrackPeerCooldown(peerID string, state PeerState,
 	return time.Time{}, false
 }
 
+// NextCooldownExpiry returns the earliest cooldown expiry, if any peer is in
+// cooldown.
+func (s *Session) NextCooldownExpiry() (time.Time, bool) {
+	var (
+		next  time.Time
+		found bool
+	)
+	for _, until := range s.cooldowns {
+		if !found || until.Before(next) {
+			next, found = until, true
+		}
+	}
+
+	return next, found
+}
+
 // CooldownUntil returns a peer's cooldown expiry when it is still active.
 func (s *Session) CooldownUntil(peerID string,
 	now time.Time) (time.Time, bool) {
