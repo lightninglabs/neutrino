@@ -2698,8 +2698,14 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 		b.headerCooldownTimer = nil
 
 		// Dispatch recovers every peer whose cooldown expired; arm
-		// the next wakeup for any still cooling down.
-		b.continueHeaderSync(peers)
+		// the next wakeup for any still cooling down. While a serial
+		// request is in flight only dispatch: continuing sync could
+		// reselect the sync peer under that request.
+		if b.headerSyncTimer != nil {
+			b.dispatchHeaderSyncWork(peers)
+		} else {
+			b.continueHeaderSync(peers)
+		}
 		b.scheduleHeaderCooldownWakeup()
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
