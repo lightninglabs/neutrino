@@ -44,6 +44,10 @@ type dstInvariants struct {
 	// rollbacks counts serial-path rollbacks to a checkpoint.
 	rollbacks int
 
+	// reorg is set once the run switched to the reorg branch, which may
+	// replace durable headers above the fork point.
+	reorg bool
+
 	// skipLeases disables the lease check for fixed tests that tamper
 	// with session state directly.
 	skipLeases bool
@@ -97,7 +101,7 @@ func (v *dstInvariants) durableChain(event string) {
 	// serves a header that fails the next one. That discards honest
 	// headers, which is legacy policy, but the remaining store must still
 	// be honest and never drop below the last checkpoint it verified.
-	if height < v.lastTip {
+	if height < v.lastTip && !v.reorg {
 		v.rollbacks++
 		checkpoint := v.d.bm.findPreviousHeaderCheckpoint(
 			int32(v.lastTip),
@@ -109,12 +113,20 @@ func (v *dstInvariants) durableChain(event string) {
 		v.lastTip = height
 	}
 	// An overlong reply may carry real headers past the advertised
-	// target. Committing them is fine as long as they are honest.
-	honest := dstChains().honest
+	// target. Committing them is fine as long as they are honest. After a
+	// reorg every height is checked again against the new chain.
+	honest := d.transport.chain
 	if int(height) >= len(honest) {
 		v.fail(event, "durable tip %d past the honest chain", height)
 	}
-	for h := v.lastTip + 1; h <= height; h++ {
+	from := v.lastTip + 1
+	if v.reorg {
+		from = 1
+	}
+	if height < v.lastTip && v.reorg {
+		v.lastTip = height
+	}
+	for h := from; h <= height; h++ {
 		header, err := d.store.FetchHeaderByHeight(h)
 		require.NoError(d.t, err)
 		if header.BlockHash() != honest[h].BlockHash() {
@@ -131,7 +143,7 @@ func (v *dstInvariants) durableChain(event string) {
 			prev = d.store.writes[i-1]
 		}
 		if written != prev+1 &&
-			(v.rollbacks == 0 || written > prev) {
+			(v.rollbacks == 0 && !v.reorg || written > prev) {
 
 			v.fail(event, "duplicate or skipped durable header "+
 				"writes=%v", d.store.writes)
@@ -152,7 +164,7 @@ func (v *dstInvariants) memoryMatchesDisk(event string) {
 		v.fail(event, "validation cache %v disagrees with tip %d",
 			back, bm.headerTip)
 	}
-	honest := dstChains().honest
+	honest := d.transport.chain
 	if bm.headerTip > v.lastTip {
 		v.fail(event, "visible tip %d ahead of durable tip %d",
 			bm.headerTip, v.lastTip)

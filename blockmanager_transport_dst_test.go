@@ -153,6 +153,9 @@ type dstHeaderRequest struct {
 // synthesizes timeout events. Production request timers and
 // message handlers decide when a stalled request loses its lease.
 type dstHeaderTransport struct {
+	// chain is the chain simulated peers serve; index i is height i.
+	chain []*wire.BlockHeader
+
 	queued  []dstHeaderRequest
 	blocked map[string]bool
 	cap     uint32
@@ -178,7 +181,7 @@ func (d *dstHeaderTransport) SendGetHeaders(peer *ServerPeer,
 	for _, hash := range locator {
 		height, known := fixture.heights[*hash]
 		if known && height <= d.best &&
-			fixture.honest[height].BlockHash() == *hash {
+			d.chain[height].BlockHash() == *hash {
 
 			start, ok = height, true
 			break
@@ -193,7 +196,7 @@ func (d *dstHeaderTransport) SendGetHeaders(peer *ServerPeer,
 		// Like btcd, a stop hash at or behind the locator is never
 		// reached, so the reply runs to the cap.
 		if known && height <= d.best && height > start &&
-			fixture.honest[height].BlockHash() == *stop {
+			d.chain[height].BlockHash() == *stop {
 
 			end, stopKnown = min(height, start+d.cap), true
 		}
@@ -299,6 +302,7 @@ type dstSnapshot struct {
 	Timeouts int
 	Sent     int
 	Restarts int
+	Ntfns    []string
 
 	ConflictPunishments int
 	Poisoned            bool
@@ -483,6 +487,7 @@ func (d *dstRun) build() {
 
 	if d.transport == nil {
 		d.transport = &dstHeaderTransport{
+			chain:   dstChains().honest,
 			blocked: make(map[string]bool),
 			cap:     dstWireCap,
 			best:    dstChainHeight,
@@ -763,7 +768,8 @@ func (d *dstRun) answer(request dstHeaderRequest,
 	kind dstReplyKind) *wire.MsgHeaders {
 
 	fixture := dstChains()
-	headers := fixture.honest[request.start+1 : request.stop+1]
+	chain := d.transport.chain
+	headers := chain[request.start+1 : request.stop+1]
 	if request.start < dstChainHeight {
 		count := int(request.stop - request.start)
 		switch kind {
@@ -794,9 +800,8 @@ func (d *dstRun) answer(request dstHeaderRequest,
 	case dstReplyEmpty:
 		msg.Headers = nil
 	case dstReplyOverlong:
-		honest := fixture.honest
-		if int(request.stop)+1 < len(honest) {
-			extra := *honest[request.stop+1]
+		if int(request.stop)+1 < len(chain) {
+			extra := *chain[request.stop+1]
 			msg.Headers = append(msg.Headers, &extra)
 		}
 	case dstReplyReorder:
@@ -1032,6 +1037,54 @@ func (d *dstRun) heal() {
 	d.check("healed")
 }
 
+// tipPhase follows the chain past the sync target, then announces a heavier
+// branch from below the old tip. It drives the serial path's extension and
+// reorg handling, rollBackToHeight, and the reorg's block notifications.
+func (d *dstRun) tipPhase() {
+	d.t.Helper()
+	fixture := dstChains()
+	announce := func(chain []*wire.BlockHeader, from int) {
+		best := uint32(len(chain) - 1)
+		d.transport.chain = chain
+		d.transport.best = best
+		d.target = best
+		for _, peer := range d.current {
+			if peer != nil {
+				peer.UpdateLastBlockHeight(int32(best))
+			}
+		}
+		msg := wire.NewMsgHeaders()
+		for _, header := range chain[from:] {
+			copyHeader := *header
+			require.NoError(d.t, msg.AddBlockHeader(&copyHeader))
+		}
+		// Announce from the sync peer, or any connected peer.
+		peer := d.bm.SyncPeer()
+		if peer == nil || d.slotOf(peer) < 0 {
+			for slot := range d.current {
+				if d.current[slot] == nil {
+					d.connect(slot)
+				}
+			}
+			peer = d.current[0]
+		}
+		d.deliver(&headersMsg{peer: peer, headers: msg})
+		d.heal()
+	}
+
+	// Extend the honest chain by announcing the new blocks.
+	announce(fixture.honest, dstChainHeight+1)
+	d.check("tip_extended")
+
+	// A branch forking below the last checkpoint must be refused; above
+	// it, the heavier branch must win.
+	if d.cfg.mode.discovery() && d.cfg.mode != dstModeAnchor {
+		d.inv.reorg = true
+		announce(fixture.reorg, dstReorgFork+1)
+		d.check("reorged")
+	}
+}
+
 // check runs every per-event invariant.
 func (d *dstRun) check(event string) {
 	d.t.Helper()
@@ -1049,6 +1102,7 @@ func (d *dstRun) snapshot() dstSnapshot {
 		Writes: d.store.writes, Bans: d.bans,
 		Timeouts: d.timeouts, Sent: d.transport.sent,
 		Restarts: d.restarts,
+		Ntfns:    d.ntfns,
 
 		ConflictPunishments: d.conflictPunishments,
 		Poisoned:            d.poisoned,
@@ -1111,6 +1165,9 @@ func runHeaderTransportDST(t *testing.T, script []byte) dstSnapshot {
 		}
 		if !d.stopped {
 			d.heal()
+			if d.enabled(dstFaultReorg) {
+				d.tipPhase()
+			}
 			err := d.quiescent()
 			if err != nil && d.poisonedAnchor() {
 				// Known gap F13: a liar's confirmed but
