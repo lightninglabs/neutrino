@@ -1,6 +1,7 @@
 package sqldb_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -468,4 +469,136 @@ func TestAutoImportMultiChunk(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, h, gotHeight)
 	}
+}
+
+// TestAutoImportFollowsLegacyIndexTip verifies the walletdb header index is
+// authoritative for the chain tips: records past it are ignored, while an
+// index that is ahead of its flat file is rejected.
+func TestAutoImportFollowsLegacyIndexTip(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 10
+	params := &chaincfg.SimNetParams
+
+	t.Run("records past the index tip", func(t *testing.T) {
+		t.Parallel()
+
+		dataDir, db, _ := seedLegacy(t, numBlocks)
+		require.NoError(t, db.Close())
+
+		// Append junk records to both files, as an interrupted write
+		// would leave behind.
+		for name, size := range map[string]int{
+			sqldb.DefaultBlockHeadersFilename:     2 * 80,
+			sqldb.DefaultRegFilterHeadersFilename: 3 * 32,
+		} {
+			f, err := os.OpenFile(
+				filepath.Join(dataDir, name),
+				os.O_APPEND|os.O_WRONLY, 0o600,
+			)
+			require.NoError(t, err)
+			_, err = f.Write(make([]byte, size))
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+		}
+
+		backend, err := openAuto(t, dataDir, params, false, nil)
+		require.NoError(t, err)
+		requireTips(t, backend, params, numBlocks, numBlocks)
+	})
+
+	t.Run("index ahead of the file", func(t *testing.T) {
+		t.Parallel()
+
+		dataDir, db, _ := seedLegacy(t, numBlocks)
+		require.NoError(t, db.Close())
+		path := filepath.Join(
+			dataDir, sqldb.DefaultBlockHeadersFilename,
+		)
+		require.NoError(t, os.Truncate(path, numBlocks*80))
+
+		// The valid prefix is imported; filter headers are cut to the
+		// block headers that survived.
+		fPath := filepath.Join(
+			dataDir, sqldb.DefaultRegFilterHeadersFilename,
+		)
+		require.NoError(t, os.Truncate(fPath, numBlocks*32))
+
+		backend, err := openAuto(t, dataDir, params, false, nil)
+		require.NoError(t, err)
+		requireTips(t, backend, params, numBlocks-1, numBlocks-1)
+	})
+}
+
+// TestSqliteFileGuard verifies neutrino refuses to run its migrations in a
+// SQLite file that belongs to something else, such as lnd's key-value
+// neutrino database.
+func TestSqliteFileGuard(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	cfg := configFor(t, dataDir)
+	if cfg.Backend != sqldb.BackendSqlite {
+		t.Skip("sqlite only")
+	}
+
+	path := filepath.Join(dataDir, sqldb.DefaultSqliteFilename)
+	other, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = other.Exec("CREATE TABLE kv (key BLOB, value BLOB)")
+	require.NoError(t, err)
+	require.NoError(t, other.Close())
+
+	_, err = openAuto(
+		t, dataDir, &chaincfg.SimNetParams, false, nil,
+	)
+	require.ErrorContains(t, err, "does not belong to neutrino")
+}
+
+// TestDirtyLegacyImportIsRetried verifies that a process killed in the middle
+// of the import, which leaves migration version 2 marked dirty, can start
+// again.
+func TestDirtyLegacyImportIsRetried(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 6
+	params := &chaincfg.SimNetParams
+
+	dataDir, db, _ := seedLegacy(t, numBlocks)
+	require.NoError(t, db.Close())
+
+	cfg := configFor(t, dataDir)
+	if cfg.Backend != sqldb.BackendSqlite {
+		t.Skip("sqlite only")
+	}
+
+	// Run a full import, then put the tracker where a kill during the
+	// import would have left it.
+	backend, err := openAuto(t, dataDir, params, false, nil)
+	require.NoError(t, err)
+	require.NoError(t, backend.Close())
+
+	raw, err := sql.Open(
+		"sqlite", filepath.Join(dataDir, sqldb.DefaultSqliteFilename),
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec("UPDATE neutrino_migrations SET version = 2, " +
+		"dirty = 1")
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	// A killed import never got to retire the flat files.
+	for _, name := range []string{
+		sqldb.DefaultBlockHeadersFilename,
+		sqldb.DefaultRegFilterHeadersFilename,
+	} {
+		p := filepath.Join(dataDir, name)
+		require.NoError(t, os.Rename(p+".bak", p))
+	}
+
+	// The restart must come up instead of refusing the dirty state, and
+	// import everything again.
+	backend, err = openAuto(t, dataDir, params, false, nil)
+	require.NoError(t, err)
+	requireTips(t, backend, params, numBlocks, numBlocks)
 }

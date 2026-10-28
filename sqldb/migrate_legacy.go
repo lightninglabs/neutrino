@@ -43,6 +43,10 @@ const (
 	// the record size of reg_filter_headers.bin.
 	filterHeaderSize = chainhash.HashSize
 
+	// legacyIndexPrefixBytes is the number of leading hash bytes naming the
+	// header index sub-bucket an entry lives in.
+	legacyIndexPrefixBytes = 2
+
 	// prevBlockOffset is the offset of the previous block hash inside a
 	// serialized block header (after the 4 byte version).
 	prevBlockOffset = 4
@@ -67,6 +71,12 @@ const (
 var (
 	legacyFilterStoreBucket = []byte("filter-store")
 	legacyRegFilterBucket   = []byte("regular")
+
+	// The header index root bucket and the keys under which it tracks the
+	// tips of the two header chains, see headerfs/index.go.
+	legacyIndexBucket  = []byte("header-index")
+	legacyBitcoinTip   = []byte("bitcoin")
+	legacyRegFilterTip = []byte("regular")
 
 	legacyBanStoreBucket    = []byte("ban-store")
 	legacyBanIndexBucket    = []byte("ban-index")
@@ -286,22 +296,114 @@ func planFlatFiles(blockBin, filterBin string) (legacyPlan, error) {
 		return plan, err
 	}
 
+	return plan, nil
+}
+
+// validate rejects combinations of flat file contents that cannot be
+// imported.
+func (p legacyPlan) validate(blockBin, filterBin string) error {
 	switch {
 	// Filter headers are keyed by block hash, which is only recoverable
 	// from the block headers.
-	case plan.filterCount > 0 && plan.blockCount == 0:
-		return plan, fmt.Errorf("%s has %d filter headers but %s is "+
-			"missing or empty", filterBin, plan.filterCount,
-			blockBin)
+	case p.filterCount > 0 && p.blockCount == 0:
+		return fmt.Errorf("%s has %d filter headers but %s is "+
+			"missing or empty", filterBin, p.filterCount, blockBin)
 
 	// The filter header chain trails the block header chain, never leads.
-	case plan.filterCount > plan.blockCount:
-		return plan, fmt.Errorf("%s has %d filter headers, more than "+
-			"the %d block headers in %s", filterBin,
-			plan.filterCount, plan.blockCount, blockBin)
+	case p.filterCount > p.blockCount:
+		return fmt.Errorf("%s has %d filter headers, more than the %d "+
+			"block headers in %s", filterBin, p.filterCount,
+			p.blockCount, blockBin)
 	}
 
-	return plan, nil
+	return nil
+}
+
+// legacyIndexTipHeight returns the height of the chain tip recorded under
+// tipKey in the legacy header index of db, and false if the index records no
+// such tip.
+func legacyIndexTipHeight(db walletdb.DB, tipKey []byte) (uint32, bool,
+	error) {
+
+	var (
+		height uint32
+		found  bool
+	)
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		root := tx.ReadBucket(legacyIndexBucket)
+		if root == nil {
+			return nil
+		}
+
+		hash := root.Get(tipKey)
+		if len(hash) != chainhash.HashSize {
+			return nil
+		}
+
+		// Entries live in a sub-bucket keyed by the leading hash
+		// bytes, or directly in the root bucket for older databases.
+		val := root.Get(hash)
+		sub := root.NestedReadBucket(hash[:legacyIndexPrefixBytes])
+		if sub != nil && sub.Get(hash) != nil {
+			val = sub.Get(hash)
+		}
+		if len(val) != 4 {
+			return fmt.Errorf("legacy header index entry for tip "+
+				"%x is malformed", hash)
+		}
+
+		height = binary.BigEndian.Uint32(val)
+		found = true
+
+		return nil
+	})
+
+	return height, found, err
+}
+
+// reconcileWithIndex trims the flat file record counts to the chain tips
+// recorded in the legacy walletdb header index, which is authoritative: the
+// legacy stores truncate the files to it on startup, so records past the
+// index tip are leftovers of an interrupted write. A file that is shorter than
+// its index is imported as is.
+func (p *legacyPlan) reconcileWithIndex(db walletdb.DB, blockBin,
+	filterBin string) error {
+
+	for _, c := range []struct {
+		name  string
+		path  string
+		tip   []byte
+		count *uint32
+	}{
+		{"block", blockBin, legacyBitcoinTip, &p.blockCount},
+		{"filter", filterBin, legacyRegFilterTip, &p.filterCount},
+	} {
+		height, ok, err := legacyIndexTipHeight(db, c.tip)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+
+		switch {
+		// The file lost records the index knows about. What is
+		// there is a valid prefix, so import it and let the node
+		// sync the rest again.
+		case height+1 > *c.count:
+			log.Warnf("Legacy %s header index tip is at height "+
+				"%d but %s only has %d records", c.name,
+				height, c.path, *c.count)
+
+		case height+1 < *c.count:
+			log.Warnf("Ignoring %d %s header records in %s past "+
+				"the legacy index tip at height %d",
+				*c.count-(height+1), c.name, c.path, height)
+			*c.count = height + 1
+		}
+	}
+
+	return nil
 }
 
 // run executes the full legacy import. The function is idempotent: every
@@ -314,8 +416,6 @@ func (i *legacyImporter) run(ctx context.Context,
 	blockBin := src.blockHeadersPath()
 	filterBin := src.filterHeadersPath()
 
-	// Validate the flat files first so that a bad file fails the import
-	// before any table is touched.
 	plan, err := planFlatFiles(blockBin, filterBin)
 	if err != nil {
 		return err
@@ -333,6 +433,18 @@ func (i *legacyImporter) run(ctx context.Context,
 				src.boltPath(), err)
 		}
 		defer legacyDB.Close()
+	}
+
+	// Settle on what to import and validate it before any table is
+	// touched, so that a bad file fails the import cleanly.
+	if legacyDB != nil {
+		err = plan.reconcileWithIndex(legacyDB, blockBin, filterBin)
+		if err != nil {
+			return err
+		}
+	}
+	if err := plan.validate(blockBin, filterBin); err != nil {
+		return err
 	}
 
 	log.Infof("Starting neutrino SQL legacy import from %s "+

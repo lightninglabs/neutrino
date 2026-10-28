@@ -22,7 +22,11 @@ const (
 
 // DefaultSqliteFilename is the default file name used when the caller does
 // not override Config.SqliteFilename. It lives under the neutrino DataDir.
-const DefaultSqliteFilename = "neutrino.sqlite"
+//
+// It deliberately differs from "neutrino.sqlite", the file lnd uses for its
+// own key-value neutrino database when running with its sqlite backend, so
+// the two can live in the same directory.
+const DefaultSqliteFilename = "neutrino_chain.sqlite"
 
 // Config selects and configures the SQL backend to use for neutrino's
 // persistent state. It is intended to be embedded inside neutrino.Config as
