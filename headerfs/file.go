@@ -3,7 +3,6 @@ package headerfs
 import (
 	"bytes"
 	"fmt"
-	"io"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -17,12 +16,15 @@ type ErrHeaderNotFound struct {
 
 // appendRaw appends a new raw header to the end of the flat file.
 func (h *headerStore) appendRaw(header []byte) error {
-	// Get current file position before writing. We'll use this position to
-	// revert to if the write fails partially.
-	currentPos, err := h.file.Seek(0, io.SeekCurrent)
+	// Get the current file size before writing. We'll use this size to
+	// revert to if the write fails partially. We can't use the file offset
+	// for this, as the file is opened with O_APPEND, so the offset is zero
+	// right after open and only advances on a successful write.
+	fileInfo, err := h.file.Stat()
 	if err != nil {
 		return err
 	}
+	currentPos := fileInfo.Size()
 
 	n, err := h.file.Write(header)
 	if err != nil {
