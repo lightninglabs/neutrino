@@ -4399,6 +4399,21 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 
+	// The lease may have ended while the reply was in flight, for example
+	// when a serial batch committed the span. Judging the reply against a
+	// range it no longer serves would punish an honest peer, so treat it
+	// as stale.
+	if rng.State != headersync.RangeActive ||
+		rng.OwnerPeer != peerID ||
+		rng.LeaseEpoch != assignment.LeaseEpoch {
+
+		log.Infof("headersync stale_completion peer=%s range_id=%d "+
+			"epoch=%d state=%s", peerID, assignment.RangeID,
+			assignment.LeaseEpoch, rng.State)
+		b.continueHeaderSync(peers)
+		return true
+	}
+
 	// Replies are matched by their first parent hash, so a late answer to
 	// an earlier, longer request from the same locator (say an anchor
 	// discovery request the session already dropped) lands here. If it
