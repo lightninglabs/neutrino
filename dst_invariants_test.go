@@ -481,7 +481,6 @@ func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, start,
 	require.NoError(d.t, err)
 	for _, anchor := range anchors {
 		if liar(anchor.Height, anchor.Hash) {
-
 			return true
 		}
 	}
