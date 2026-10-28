@@ -2,6 +2,7 @@ package banman_test
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -213,4 +214,102 @@ func TestSQLBanPurgeExpired(t *testing.T) {
 	purged, err := store.PurgeExpired()
 	require.NoError(t, err)
 	require.Equal(t, int64(1), purged)
+}
+
+// testTorV3BanHost is the Tor v3 host used by the backend parity tests. It is
+// repeated here rather than exported from banman so the internal constant stays
+// unexported; the address is the same one the internal tests use.
+const testTorV3BanHost = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5" +
+	"dyp3kead.onion"
+
+// TestSQLBanTorV3 verifies that a Tor v3 ban round-trips through the SQL
+// backend, which shares the banned_peers table with the IP records. The two
+// shapes must not collide: the Tor v3 record starts with a family byte no IP
+// record uses.
+func TestSQLBanTorV3(t *testing.T) {
+	t.Parallel()
+
+	store := newSQLBanStore(t)
+
+	key, err := banman.ParseAddr(testTorV3BanHost)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		store.BanKey(key, banman.NoCompactFilters, time.Minute),
+	)
+
+	status, err := store.StatusKey(key)
+	require.NoError(t, err)
+	require.True(t, status.Banned)
+	require.Equal(t, banman.NoCompactFilters, status.Reason)
+
+	// An IP ban in the same table must be unaffected.
+	ipKey, err := banman.ParseAddr("10.0.0.1:8333")
+	require.NoError(t, err)
+	require.NoError(
+		t, store.BanKey(ipKey, banman.InvalidBlock, time.Minute),
+	)
+
+	ipStatus, err := store.StatusKey(ipKey)
+	require.NoError(t, err)
+	require.Equal(t, banman.InvalidBlock, ipStatus.Reason)
+
+	// Unbanning the Tor v3 key leaves the IP ban in place.
+	require.NoError(t, store.UnbanKey(key))
+
+	status, err = store.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+
+	ipStatus, err = store.StatusKey(ipKey)
+	require.NoError(t, err)
+	require.True(t, ipStatus.Banned)
+}
+
+// TestBanStoreBackendsTorV3 runs the Tor v3 lifecycle against every backend,
+// so the kvdb and SQL encodings are held to the same behaviour.
+func TestBanStoreBackendsTorV3(t *testing.T) {
+	t.Parallel()
+
+	for name, makeStore := range banStoreFactories() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := makeStore(t)
+
+			key, err := banman.ParseAddr(testTorV3BanHost)
+			require.NoError(t, err)
+
+			require.NoError(t, store.BanKey(
+				key, banman.ExceededBanThreshold, time.Hour,
+			))
+
+			status, err := store.StatusKey(key)
+			require.NoError(t, err)
+			require.True(t, status.Banned)
+			require.Equal(
+				t, banman.ExceededBanThreshold,
+				status.Reason,
+			)
+
+			// The same host in a different case and on a
+			// different port is the same peer, so it must hit the
+			// same record.
+			other, err := banman.ParseAddr(
+				strings.ToUpper(testTorV3BanHost) + ":18333",
+			)
+			require.NoError(t, err)
+
+			status, err = store.StatusKey(other)
+			require.NoError(t, err)
+			require.True(t, status.Banned)
+
+			require.NoError(t, store.UnbanKey(key))
+
+			status, err = store.StatusKey(key)
+			require.NoError(t, err)
+			require.False(t, status.Banned)
+		})
+	}
 }

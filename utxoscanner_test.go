@@ -391,19 +391,25 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 	mockChainClient.SetBlockHash(100000, &block100000Hash)
 	mockChainClient.SetBlock(&block100000Hash, btcutil.NewBlock(&Block100000))
 
-	var snapshotLock sync.Mutex
-	waitForSnapshot := make(chan struct{})
-
 	scanner := NewUtxoScanner(&UtxoScannerConfig{
-		GetBlock:     mockChainClient.GetBlockFromNetwork,
-		GetBlockHash: mockChainClient.GetBlockHash,
-		BestSnapshot: func() (*headerfs.BlockStamp, error) {
-			<-waitForSnapshot
-			snapshotLock.Lock()
-			defer snapshotLock.Unlock()
+		GetBlock: func(hash chainhash.Hash,
+			options ...QueryOption) (*btcutil.Block, error) {
 
-			return mockChainClient.BestSnapshot()
+			// Advance the tip after the scanner has captured its
+			// original end height. The update and snapshot reads
+			// both run on the scan goroutine.
+			if hash == block99999Hash {
+				mockChainClient.SetBestSnapshot(
+					&block100000Hash, 100000,
+				)
+			}
+
+			return mockChainClient.GetBlockFromNetwork(
+				hash, options...,
+			)
 		},
+		GetBlockHash:       mockChainClient.GetBlockHash,
+		BestSnapshot:       mockChainClient.BestSnapshot,
 		BlockFilterMatches: mockChainClient.blockFilterMatches,
 	})
 	scanner.Start()
@@ -421,23 +427,6 @@ func TestUtxoScannerScanAddBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to enqueue scan request: %v", err)
 	}
-
-	// The utxoscanner should currently be waiting for the block stamp at
-	// height 99999. Signaling will cause the initial scan to finish and
-	// block while querying again for the updated chain tip.
-	waitForSnapshot <- struct{}{}
-
-	// Now, add the successor block at height 100000 and update the best
-	// snapshot..
-	snapshotLock.Lock()
-	mockChainClient.SetBestSnapshot(&block100000Hash, 100000)
-	snapshotLock.Unlock()
-
-	// The rescan should now be waiting for stamp 100000, signal to allow
-	// the rescan to detect the added block and perform another pass.
-	// Signal one more for the final query scan makes before exiting.
-	waitForSnapshot <- struct{}{}
-	waitForSnapshot <- struct{}{}
 
 	spendReport, scanErr = req.Result(nil)
 	if scanErr != nil {

@@ -37,9 +37,11 @@ CREATE TABLE IF NOT EXISTS regular_filters (
 );
 
 -- banned_peers stores active and historical peer bans. ip_net is the binary
--- wire-encoded IPNet form produced by neutrino/banman/codec.go::encodeIPNet,
--- preserved verbatim from the legacy bdb encoding so the migrator can copy
--- rows in without re-encoding.
+-- wire-encoded ban key produced by neutrino/banman/codec.go::encodeKey: a
+-- family byte, then the address, then the mask for an IP key and nothing for a
+-- Tor v3 key. The layout is byte-identical to the legacy bdb encoding so the
+-- migrator can copy rows in without re-encoding, and a Tor v3 record is
+-- distinguishable from an IP record by its family byte alone.
 CREATE TABLE IF NOT EXISTS banned_peers (
     id            INTEGER PRIMARY KEY,
     ip_net        BLOB    NOT NULL,

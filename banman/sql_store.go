@@ -1,11 +1,9 @@
 package banman
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -43,18 +41,36 @@ func NewSQLStore(db sqldb.BanTx) (*SQLBanStore, error) {
 	return &SQLBanStore{db: db}, nil
 }
 
-// BanIPNet creates or refreshes a ban record for the given IP network. The
-// duration is added to the current time to derive the absolute expiration
-// stored in the database.
+// BanIPNet creates or refreshes a ban record for the given IP network.
+//
+// Deprecated: use BanKey.
 //
 // NOTE: This method is part of the Store interface.
 func (s *SQLBanStore) BanIPNet(ipNet *net.IPNet, reason Reason,
 	duration time.Duration) error {
 
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return err
+	}
+
+	return s.BanKey(key, reason, duration)
+}
+
+// BanKey creates or refreshes a ban record for the given typed ban key. The
+// duration is added to the current time to derive the absolute expiration
+// stored in the database.
+//
+// NOTE: This method is part of the Store interface, and reuses the
+// banned_peers table: its ip_net column already holds the opaque encoded key,
+// so a Tor v3 record needs no schema change.
+func (s *SQLBanStore) BanKey(key *Key, reason Reason,
+	duration time.Duration) error {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	key, err := encodeIPNetKey(ipNet)
+	encoded, err := serializeKey(key)
 	if err != nil {
 		return err
 	}
@@ -66,7 +82,7 @@ func (s *SQLBanStore) BanIPNet(ipNet *net.IPNet, reason Reason,
 		ctx, sqldbv2.WriteTxOpt(),
 		func(q sqldb.BanQueries) error {
 			return q.UpsertBan(ctx, sqlc.UpsertBanParams{
-				IpNet:      key,
+				IpNet:      encoded,
 				Expiration: expiration,
 				Reason:     int32(reason),
 			})
@@ -74,16 +90,30 @@ func (s *SQLBanStore) BanIPNet(ipNet *net.IPNet, reason Reason,
 	)
 }
 
-// Status returns the current ban status for the given IP network. If a
-// previously-recorded ban has expired, Status sweeps the row from the table in
-// the same transaction and returns Banned: false.
+// Status returns the current ban status for the given IP network.
+//
+// Deprecated: use StatusKey.
 //
 // NOTE: This method is part of the Store interface.
 func (s *SQLBanStore) Status(ipNet *net.IPNet) (Status, error) {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return Status{}, err
+	}
+
+	return s.StatusKey(key)
+}
+
+// StatusKey returns the current ban status for the given typed ban key. If a
+// previously-recorded ban has expired, StatusKey sweeps the row from the table
+// in the same transaction and returns Banned: false.
+//
+// NOTE: This method is part of the Store interface.
+func (s *SQLBanStore) StatusKey(key *Key) (Status, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	key, err := encodeIPNetKey(ipNet)
+	encoded, err := serializeKey(key)
 	if err != nil {
 		return Status{}, err
 	}
@@ -94,7 +124,7 @@ func (s *SQLBanStore) Status(ipNet *net.IPNet) (Status, error) {
 	err = s.db.ExecTx(
 		ctx, sqldbv2.WriteTxOpt(),
 		func(q sqldb.BanQueries) error {
-			row, err := q.GetBan(ctx, key)
+			row, err := q.GetBan(ctx, encoded)
 			switch {
 			case errors.Is(err, sql.ErrNoRows):
 				status = Status{}
@@ -111,7 +141,7 @@ func (s *SQLBanStore) Status(ipNet *net.IPNet) (Status, error) {
 				// state.
 				if delErr := q.DeleteBan(
 					ctx,
-					key,
+					encoded,
 				); delErr != nil {
 					return delErr
 				}
@@ -138,12 +168,27 @@ func (s *SQLBanStore) Status(ipNet *net.IPNet) (Status, error) {
 // UnbanIPNet removes the ban record for the given IP network. It is a no-op
 // when no record exists for the network.
 //
+// Deprecated: use UnbanKey.
+//
 // NOTE: This method is part of the Store interface.
 func (s *SQLBanStore) UnbanIPNet(ipNet *net.IPNet) error {
+	key, err := keyFromIPNet(ipNet)
+	if err != nil {
+		return err
+	}
+
+	return s.UnbanKey(key)
+}
+
+// UnbanKey removes the ban record for the given typed ban key. It is a no-op
+// when no record exists for the key.
+//
+// NOTE: This method is part of the Store interface.
+func (s *SQLBanStore) UnbanKey(key *Key) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	key, err := encodeIPNetKey(ipNet)
+	encoded, err := serializeKey(key)
 	if err != nil {
 		return err
 	}
@@ -152,7 +197,7 @@ func (s *SQLBanStore) UnbanIPNet(ipNet *net.IPNet) error {
 	return s.db.ExecTx(
 		ctx, sqldbv2.WriteTxOpt(),
 		func(q sqldb.BanQueries) error {
-			return q.DeleteBan(ctx, key)
+			return q.DeleteBan(ctx, encoded)
 		}, sqldbv2.NoOpReset,
 	)
 }
@@ -178,20 +223,4 @@ func (s *SQLBanStore) PurgeExpired() (int64, error) {
 		}, sqldbv2.NoOpReset,
 	)
 	return n, err
-}
-
-// encodeIPNetKey returns the canonical binary key used by both the legacy
-// walletdb and SQL ban stores. The format is byte-identical to the legacy
-// encoding so that the auto-migration can copy rows across without
-// re-encoding.
-func encodeIPNetKey(ipNet *net.IPNet) ([]byte, error) {
-	if ipNet == nil {
-		return nil, fmt.Errorf("nil IPNet")
-	}
-
-	var buf bytes.Buffer
-	if err := encodeIPNet(&buf, ipNet); err != nil {
-		return nil, fmt.Errorf("unable to encode %v: %w", ipNet, err)
-	}
-	return buf.Bytes(), nil
 }

@@ -25,6 +25,11 @@ import (
 // numBlocks block + filter headers, a couple of GCS filters, and a few peer
 // bans. It returns the data directory path and the open walletdb handle so
 // the caller can pass them into a LegacyDataSource.
+// seedTorV3Host is a well-formed Tor v3 address used to seed a ban record of
+// the non-IP key shape.
+const seedTorV3Host = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5" +
+	"dyp3kead.onion"
+
 func seedLegacy(t *testing.T,
 	numBlocks uint32) (string, walletdb.DB, []*wire.BlockHeader) {
 
@@ -113,6 +118,15 @@ func seedLegacy(t *testing.T,
 	require.NoError(t, err)
 	require.NoError(t, bs.BanIPNet(
 		expired, banman.ExceededBanThreshold, -time.Hour,
+	))
+
+	// A Tor v3 ban, written through the typed-key path into the same
+	// buckets. Its record starts with a family byte no IP record uses, so
+	// the import has to carry it across without re-encoding.
+	torKey, err := banman.ParseAddr(seedTorV3Host)
+	require.NoError(t, err)
+	require.NoError(t, bs.BanKey(
+		torKey, banman.NonResponsivePeer, time.Hour,
 	))
 
 	return dataDir, db, rawHeaders
@@ -223,6 +237,16 @@ func TestLegacyImportRoundTrip(t *testing.T) {
 	status, err = bs.Status(expiredIP)
 	require.NoError(t, err)
 	require.False(t, status.Banned)
+
+	// The Tor v3 ban has to survive the copy: the importer moves the
+	// encoded key across verbatim, so the key the live store looks up must
+	// be the one that was written.
+	torKey, err := banman.ParseAddr(seedTorV3Host)
+	require.NoError(t, err)
+	status, err = bs.StatusKey(torKey)
+	require.NoError(t, err)
+	require.True(t, status.Banned)
+	require.Equal(t, banman.NonResponsivePeer, status.Reason)
 
 	// Legacy artifacts must have been renamed to .bak.
 	for _, name := range []string{

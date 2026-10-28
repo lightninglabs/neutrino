@@ -81,7 +81,7 @@ func testBanStore(t *testing.T) {
 			t.Fatalf("expected %v to not be banned", ipNet)
 		}
 
-		if banned {
+		if !banned {
 			return
 		}
 
@@ -91,7 +91,7 @@ func testBanStore(t *testing.T) {
 		}
 		banDuration := time.Until(banStatus.Expiration)
 		if banDuration > duration {
-			t.Fatalf("expected ban duration to be within %v, got %v",
+			t.Fatalf("expected ban duration within %v, got %v",
 				duration, banDuration)
 		}
 	}
@@ -112,7 +112,9 @@ func testBanStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to parse IP network from %v: %v", addr2, err)
 	}
-	err = banStore.BanIPNet(ipNet2, banman.ExceededBanThreshold, time.Second)
+	err = banStore.BanIPNet(
+		ipNet2, banman.ExceededBanThreshold, time.Second,
+	)
 	if err != nil {
 		t.Fatalf("unable to ban IP network: %v", err)
 	}
@@ -138,4 +140,110 @@ func testBanStore(t *testing.T) {
 
 	// We would now check that ipNet1 is indeed unbanned.
 	checkBanStore(ipNet1, false, 0, 0)
+}
+
+// TestBanStoreKey ensures that the BanStore's key-based APIs correctly
+// persist IP address bans.
+func TestBanStoreKey(t *testing.T) {
+	t.Parallel()
+
+	// Bans have whole-second expiration, so virtual time is what keeps the
+	// expiry boundary deterministic: a real one-second sleep can be
+	// starved past the deadline by the rest of the suite and then the ban
+	// is already gone when it is read back.
+	synctest.Test(t, testBanStoreKey)
+}
+
+// testBanStoreKey is the body of TestBanStoreKey.
+func testBanStoreKey(t *testing.T) {
+	t.Helper()
+
+	banStore, cleanUp := createTestBanStore(t)
+	defer cleanUp()
+
+	key := &banman.Key{
+		Net:  banman.NetworkIPv4,
+		Addr: []byte{0x7f, 0x00, 0x00, 0x01},
+		Mask: []byte{0xff, 0xff, 0xff, 0xff},
+	}
+
+	err := banStore.BanKey(
+		key, banman.InvalidFilterHeader, time.Second,
+	)
+	require.NoError(t, err)
+
+	status, err := banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.True(t, status.Banned)
+	require.Equal(t, banman.InvalidFilterHeader, status.Reason)
+	require.LessOrEqual(t, time.Until(status.Expiration), time.Second)
+
+	<-time.After(time.Second)
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+
+	err = banStore.BanKey(
+		key, banman.InvalidFilterHeaderCheckpoint, time.Hour,
+	)
+	require.NoError(t, err)
+	require.NoError(t, banStore.UnbanKey(key))
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+}
+
+// TestBanStoreTorV3Key ensures that the BanStore's key-based APIs correctly
+// persist overlay address bans.
+func TestBanStoreTorV3Key(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, testBanStoreTorV3Key)
+}
+
+// testBanStoreTorV3Key is the body of TestBanStoreTorV3Key.
+func testBanStoreTorV3Key(t *testing.T) {
+	t.Helper()
+
+	banStore, cleanUp := createTestBanStore(t)
+	defer cleanUp()
+
+	key := &banman.Key{
+		Net: banman.NetworkTorV3,
+		Addr: []byte{
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+			0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+			0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+			0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		},
+	}
+
+	err := banStore.BanKey(
+		key, banman.InvalidFilterHeader, time.Second,
+	)
+	require.NoError(t, err)
+
+	status, err := banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.True(t, status.Banned)
+	require.Equal(t, banman.InvalidFilterHeader, status.Reason)
+	require.LessOrEqual(t, time.Until(status.Expiration), time.Second)
+
+	<-time.After(time.Second)
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
+
+	err = banStore.BanKey(
+		key, banman.InvalidFilterHeaderCheckpoint, time.Hour,
+	)
+	require.NoError(t, err)
+	require.NoError(t, banStore.UnbanKey(key))
+
+	status, err = banStore.StatusKey(key)
+	require.NoError(t, err)
+	require.False(t, status.Banned)
 }

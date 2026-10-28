@@ -17,6 +17,7 @@ require (
 	github.com/lightninglabs/neutrino/cache v1.1.4
 	github.com/lightningnetwork/lnd/queue v1.0.1
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.41.0
 	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50
 	pgregory.net/rapid v1.2.0
 )
@@ -96,7 +97,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
