@@ -3424,6 +3424,11 @@ func (b *blockManager) resetHeaderListToTip() error {
 		Height: int32(height),
 	})
 
+	// The next checkpoint must follow the durable tip too. A stale one at
+	// or below the tip is never matched again, which silently turns off
+	// checkpoint verification for every later serial batch.
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+
 	// The visible tip must describe the same header as the validation
 	// cache, or a later write can start from one and report the other.
 	b.newHeadersMtx.Lock()
