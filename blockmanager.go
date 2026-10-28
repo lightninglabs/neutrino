@@ -5327,6 +5327,11 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				log.Errorf("Unable to restore header tip: %v",
 					resetErr)
 			}
+
+			// The reply disarmed the request deadline, so
+			// nothing else would ask for this batch again. The
+			// commit retry continues sync once storage is back.
+			b.scheduleHeaderCommitRetry()
 			return
 		}
 
