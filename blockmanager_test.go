@@ -146,6 +146,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 		return nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
 	}
+	t.Cleanup(func() { _ = bm.Stop() })
 
 	return bm, hdrStore, cfStore, nil
 }
@@ -251,6 +252,7 @@ func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = bm.Stop() })
 	ntfnDone := make(chan struct{})
 	defer close(ntfnDone)
 	go func() {
@@ -939,6 +941,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 			)
 			require.NoError(t, err)
 		}
+		require.NoError(t, bm.ResetHeaderState())
 
 		// We set up a custom query batch method for this test, as we
 		// will use this to feed the blockmanager with our crafted
@@ -1032,6 +1035,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 		// Call the get checkpointed cf headers method with the
 		// checkpoints we created to start the test.
+		bm.wg.Add(1)
+		go bm.blockHandler()
+		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		bm.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
@@ -1171,6 +1177,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			)
 			require.NoError(t, err)
 		}
+		require.NoError(t, bm.ResetHeaderState())
 
 		bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
 			requests []*querysyncwm.Request,
@@ -1259,6 +1266,9 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// Start the test by calling the get checkpointed cf headers
 		// method with the checkpoints we created.
+		bm.wg.Add(1)
+		go bm.blockHandler()
+		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		bm.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
@@ -1343,7 +1353,6 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		fType           = wire.GCSFilterRegular
 		filterBytes, _  = correctFilter.NBytes()
 		filterHash, _   = builder.GetFilterHash(correctFilter)
-		blockHeader     = wire.BlockHeader{}
 		targetBlockHash = block.BlockHash()
 
 		peers = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
@@ -1420,9 +1429,9 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		// serve a header for the target index.
 		mBlockHeaderStore := &headerfs.MockBlockHeaderStore{}
 
-		mBlockHeaderStore.On("FetchHeaderByHeight", targetIndex).Return(
-			&blockHeader, nil,
-		)
+		mBlockHeaderStore.On(
+			"FetchHeaderAncestors", badIndex-1, &stopHash,
+		).Return(make([]wire.BlockHeader, badIndex), targetIndex, nil)
 
 		// We set up the scripted broadcaster to only respond according
 		// to the active testcase.
@@ -1552,6 +1561,7 @@ func TestHandleHeaders(t *testing.T) {
 	// Let's feed in the correct headers. This should work fine and the peer
 	// should not be disconnected.
 	bm.handleHeadersMsg(hmsg)
+	settleHeaderCommit(t, bm, list.New())
 	assertPeerDisconnected(false)
 
 	// Now scramble the headers and feed them in again. This should cause
@@ -1621,17 +1631,29 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 	require.NoError(t, err)
 	wrongHash, err := builder.GetFilterHash(fakeFilter1)
 	require.NoError(t, err)
+	stopHash := block.BlockHash()
 	headers := map[string]*wire.MsgCFHeaders{
-		"good:1":   {FilterHashes: []*chainhash.Hash{&correctHash}},
-		"wrong:1":  {FilterHashes: []*chainhash.Hash{&wrongHash}},
-		"silent:1": {FilterHashes: []*chainhash.Hash{&correctHash}},
+		"good:1": {
+			StopHash:     stopHash,
+			FilterHashes: []*chainhash.Hash{&correctHash},
+		},
+		"wrong:1": {
+			StopHash:     stopHash,
+			FilterHashes: []*chainhash.Hash{&wrongHash},
+		},
+		"silent:1": {
+			StopHash:     stopHash,
+			FilterHashes: []*chainhash.Hash{&correctHash},
+		},
 	}
 	checkpoints := make(map[string][]*chainhash.Hash)
 	for peer := range headers {
 		checkpoints[peer] = nil
 	}
 	store := &headerfs.MockBlockHeaderStore{}
-	store.On("FetchHeaderByHeight", uint32(100)).Return(&block.Header, nil)
+	store.On("FetchHeaderAncestors", uint32(0), &stopHash).Return(
+		[]wire.BlockHeader{block.Header}, uint32(100), nil,
+	)
 	var banned, disconnected []string
 	bm := &blockManager{cfg: &blockManagerCfg{
 		BlockHeaders: store,
