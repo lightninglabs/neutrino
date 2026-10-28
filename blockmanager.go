@@ -829,14 +829,11 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
-		header, height, err := b.cfg.BlockHeaders.ChainTip()
-		if err != nil {
+		// Reset the cache and the visible tip together, so they keep
+		// describing the same header.
+		if err := b.resetHeaderListToTip(); err != nil {
 			return
 		}
-		b.headerList.ResetHeaderState(headerlist.Node{
-			Header: *header,
-			Height: int32(height),
-		})
 		b.startSync(peers)
 		return
 	}
