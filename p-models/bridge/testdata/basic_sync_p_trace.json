@@ -1,0 +1,355 @@
+[
+  [
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFSMStateChange with payload <0,0,>.",
+        "id": "RescanFSM(3)",
+        "event": "eFSMStateChange",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 3
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFSMStateChange with payload <0,1,>.",
+        "id": "RescanFSM(3)",
+        "event": "eFSMStateChange",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 5,
+          "TestBasicSyncToCurrent(1)": 3
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eSelfTellOutbox.",
+        "id": "RescanFSM(3)",
+        "event": "eSelfTellOutbox",
+        "clock": {
+          "RescanFSM(3)": 6,
+          "TestBasicSyncToCurrent(1)": 3
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eGroundTruthBlockProcessed with payload <1,(),(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eGroundTruthBlockProcessed",
+        "payload": {
+          "0": {},
+          "1": [],
+          "2": []
+        },
+        "clock": {
+          "RescanFSM(3)": 21,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 8
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFilteredBlockOutbox with payload <1,(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eFilteredBlockOutbox",
+        "payload": {
+          "0": {},
+          "1": []
+        },
+        "clock": {
+          "RescanFSM(3)": 22,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 8
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eBlockConnectedOutbox with payload <1,2,>.",
+        "id": "RescanFSM(3)",
+        "event": "eBlockConnectedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 23,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 8
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eGroundTruthBlockProcessed with payload <2,(),(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eGroundTruthBlockProcessed",
+        "payload": {
+          "0": {},
+          "1": [],
+          "2": []
+        },
+        "clock": {
+          "RescanFSM(3)": 32,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 12
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFilteredBlockOutbox with payload <2,(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eFilteredBlockOutbox",
+        "payload": {
+          "0": {},
+          "1": []
+        },
+        "clock": {
+          "RescanFSM(3)": 33,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 12
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eBlockConnectedOutbox with payload <2,3,>.",
+        "id": "RescanFSM(3)",
+        "event": "eBlockConnectedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 34,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 12
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eGroundTruthBlockProcessed with payload <3,(),(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eGroundTruthBlockProcessed",
+        "payload": {
+          "0": {},
+          "1": [],
+          "2": []
+        },
+        "clock": {
+          "RescanFSM(3)": 43,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 16
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFilteredBlockOutbox with payload <3,(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eFilteredBlockOutbox",
+        "payload": {
+          "0": {},
+          "1": []
+        },
+        "clock": {
+          "RescanFSM(3)": 44,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 16
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eBlockConnectedOutbox with payload <3,4,>.",
+        "id": "RescanFSM(3)",
+        "event": "eBlockConnectedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 45,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 16
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eGroundTruthBlockProcessed with payload <4,(),(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eGroundTruthBlockProcessed",
+        "payload": {
+          "0": {},
+          "1": [],
+          "2": []
+        },
+        "clock": {
+          "RescanFSM(3)": 54,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 20
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFilteredBlockOutbox with payload <4,(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eFilteredBlockOutbox",
+        "payload": {
+          "0": {},
+          "1": []
+        },
+        "clock": {
+          "RescanFSM(3)": 55,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 20
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eBlockConnectedOutbox with payload <4,5,>.",
+        "id": "RescanFSM(3)",
+        "event": "eBlockConnectedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 56,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 20
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eGroundTruthBlockProcessed with payload <5,(),(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eGroundTruthBlockProcessed",
+        "payload": {
+          "0": {},
+          "1": [],
+          "2": []
+        },
+        "clock": {
+          "RescanFSM(3)": 65,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFilteredBlockOutbox with payload <5,(),>.",
+        "id": "RescanFSM(3)",
+        "event": "eFilteredBlockOutbox",
+        "payload": {
+          "0": {},
+          "1": []
+        },
+        "clock": {
+          "RescanFSM(3)": 66,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eBlockConnectedOutbox with payload <5,6,>.",
+        "id": "RescanFSM(3)",
+        "event": "eBlockConnectedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 67,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eStartSubscriptionOutbox with payload 5.",
+        "id": "RescanFSM(3)",
+        "event": "eStartSubscriptionOutbox",
+        "payload": 5,
+        "clock": {
+          "RescanFSM(3)": 70,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eRescanFinishedOutbox with payload <5,6,>.",
+        "id": "RescanFSM(3)",
+        "event": "eRescanFinishedOutbox",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 71,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    },
+    {
+      "type": "Announce",
+      "details": {
+        "log": "RescanFSM(3) announced event eFSMStateChange with payload <1,2,>.",
+        "id": "RescanFSM(3)",
+        "event": "eFSMStateChange",
+        "payload": {
+          "0": {},
+          "1": {}
+        },
+        "clock": {
+          "RescanFSM(3)": 72,
+          "TestBasicSyncToCurrent(1)": 5,
+          "MockChain(2)": 24
+        }
+      }
+    }
+  ]
+]

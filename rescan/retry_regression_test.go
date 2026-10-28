@@ -247,3 +247,60 @@ func TestStopCancelsBeforeWaitingForMailbox(t *testing.T) {
 		)
 	}
 }
+
+// TestCurrentIgnoresOlderConnect checks a notification queued during catch-up
+// after the scanner has already processed a later tip.
+func TestCurrentIgnoresOlderConnect(t *testing.T) {
+	chain := newMockChain(4)
+	tip, err := chain.BestBlock()
+	require.NoError(t, err)
+	state := &StateCurrent{
+		CurStamp:  *tip,
+		CurHeader: *chain.blockHeaders[tip.Hash],
+	}
+	header := chain.blockHeaders[*chain.blockHashesByHeight[1]]
+	transition, err := state.ProcessEvent(
+		t.Context(),
+		BlockConnectedEvent{
+			Header: *header, Height: 1,
+		},
+		&Environment{Chain: chain},
+	)
+	require.NoError(t, err)
+	require.Equal(t, state, transition.NextState)
+	require.Nil(t, transition.Events)
+}
+
+// TestCurrentRetriesTransientHeaderRead ensures an active block is not
+// discarded when its canonical header lookup temporarily fails.
+func TestCurrentRetriesTransientHeaderRead(t *testing.T) {
+	base := newMockChain(2)
+	chain := &failingHeaderChain{
+		mockChainSource: base,
+		failHeight:      1,
+	}
+	genesis := base.ChainParams().GenesisBlock.Header
+	header := *base.blockHeaders[*base.blockHashesByHeight[1]]
+	state := &StateCurrent{
+		CurStamp: headerfs.BlockStamp{
+			Hash: genesis.BlockHash(),
+		},
+		CurHeader: genesis,
+	}
+	event := BlockConnectedEvent{Header: header, Height: 1}
+	_, err := state.ProcessEvent(
+		t.Context(),
+		event,
+		&Environment{Chain: chain},
+	)
+	require.Error(t, err)
+	chain.failHeight = 0
+	transition, err := state.ProcessEvent(t.Context(), event,
+		&Environment{Chain: chain})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		header.BlockHash(),
+		transition.NextState.(*StateCurrent).CurStamp.Hash,
+	)
+}

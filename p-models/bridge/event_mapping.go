@@ -70,7 +70,8 @@ type FilteredBlockPayload struct {
 // AbstractTxPayload is the Go representation of an AbstractTx from the P
 // model: (txid, pays_to: set[AddrID]).
 type AbstractTxPayload struct {
-	TxID   int   `json:"txid"`
+	TxID int `json:"txid"`
+	//nolint:tagliatelle // Matches P payloads.
 	PaysTo []int `json:"pays_to"`
 }
 

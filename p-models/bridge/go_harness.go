@@ -2,10 +2,11 @@ package bridge
 
 import (
 	"fmt"
-	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -19,11 +20,18 @@ import (
 type ObservedEventKind string
 
 const (
-	ObservedFilteredBlockConnected    ObservedEventKind = "filtered_block_connected"
-	ObservedBlockConnected            ObservedEventKind = "block_connected"
-	ObservedBlockDisconnected         ObservedEventKind = "block_disconnected"
-	ObservedFilteredBlockDisconnected ObservedEventKind = "filtered_block_disconnected"
-	ObservedRescanFinished            ObservedEventKind = "rescan_finished"
+	ObservedFilteredBlockConnected = ObservedEventKind(
+		"filtered_block_connected",
+	)
+
+	ObservedBlockConnected    ObservedEventKind = "block_connected"
+	ObservedBlockDisconnected ObservedEventKind = "block_disconnected"
+
+	ObservedFilteredBlockDisconnected = ObservedEventKind(
+		"filtered_block_disconnected",
+	)
+
+	ObservedRescanFinished ObservedEventKind = "rescan_finished"
 )
 
 // ObservedEvent is a normalized event emitted by the real Go actor.
@@ -51,10 +59,12 @@ func (r *EventRecorder) Callbacks() rescan.Callbacks {
 			header *wire.BlockHeader, relevantTxs []*btcutil.Tx) {
 
 			r.record(ObservedEvent{
-				Kind:            ObservedFilteredBlockConnected,
-				Height:          height,
-				Hash:            header.BlockHash(),
-				RelevantTxCount: len(relevantTxs),
+				Kind:   ObservedFilteredBlockConnected,
+				Height: height,
+				Hash:   header.BlockHash(),
+				RelevantTxCount: len(
+					relevantTxs,
+				),
 			})
 		},
 		OnBlockConnected: func(height int32,
@@ -75,7 +85,9 @@ func (r *EventRecorder) Callbacks() rescan.Callbacks {
 				Hash:   header.BlockHash(),
 			})
 		},
-		OnBlockDisconnected: func(height int32, header *wire.BlockHeader) {
+		OnBlockDisconnected: func(height int32,
+			header *wire.BlockHeader) {
+
 			r.record(ObservedEvent{
 				Kind:   ObservedBlockDisconnected,
 				Height: height,
@@ -130,7 +142,10 @@ func (r *EventRecorder) SetOnObserved(fn func(ObservedEvent)) {
 // CheckFilteredBlockForEveryBlock enforces the same invariant as the P monitor:
 // every block-connected callback must have a matching filtered-block-connected
 // callback at the same height.
-func CheckFilteredBlockForEveryBlock(events []ObservedEvent) []string {
+func CheckFilteredBlockForEveryBlock(
+	events []ObservedEvent,
+) []string {
+
 	filteredByHeight := make(map[int32]struct{})
 	var errs []string
 
@@ -142,7 +157,9 @@ func CheckFilteredBlockForEveryBlock(events []ObservedEvent) []string {
 		case ObservedBlockConnected:
 			if _, ok := filteredByHeight[event.Height]; !ok {
 				errs = append(errs, fmt.Sprintf(
-					"block connected at height %d without prior filtered block",
+					"block connected at "+
+						"height %d without prior "+
+						"filtered block",
 					event.Height,
 				))
 			}
@@ -154,7 +171,10 @@ func CheckFilteredBlockForEveryBlock(events []ObservedEvent) []string {
 
 // CheckBlockCallbackConsistency verifies that a filtered-block callback is
 // always paired with a block-connected callback for the same block.
-func CheckBlockCallbackConsistency(events []ObservedEvent) []string {
+func CheckBlockCallbackConsistency(
+	events []ObservedEvent,
+) []string {
+
 	var (
 		errs         []string
 		lastFiltered *ObservedEvent
@@ -170,7 +190,10 @@ func CheckBlockCallbackConsistency(events []ObservedEvent) []string {
 		case ObservedBlockConnected:
 			if lastFiltered == nil {
 				errs = append(errs, fmt.Sprintf(
-					"block connected at height %d without a preceding filtered-block callback",
+					"block connected at "+
+						"height %d without a "+
+						"preceding "+
+						"filtered-block callback",
 					event.Height,
 				))
 				continue
@@ -180,9 +203,14 @@ func CheckBlockCallbackConsistency(events []ObservedEvent) []string {
 				lastFiltered.Hash != event.Hash {
 
 				errs = append(errs, fmt.Sprintf(
-					"callback mismatch: filtered block (%d, %s) followed by block connected (%d, %s)",
-					lastFiltered.Height, lastFiltered.Hash,
-					event.Height, event.Hash,
+					"callback mismatch: "+
+						"filtered block (%d, %s) "+
+						"followed by block "+
+						"connected (%d, %s)",
+					lastFiltered.Height,
+					lastFiltered.Hash,
+					event.Height,
+					event.Hash,
 				))
 			}
 
@@ -196,7 +224,10 @@ func CheckBlockCallbackConsistency(events []ObservedEvent) []string {
 // CheckDisconnectCallbackConsistency verifies that a filtered-block-disconnect
 // callback is always paired with a block-disconnect callback for the same
 // block.
-func CheckDisconnectCallbackConsistency(events []ObservedEvent) []string {
+func CheckDisconnectCallbackConsistency(
+	events []ObservedEvent,
+) []string {
+
 	var (
 		errs             []string
 		lastFilteredDisc *ObservedEvent
@@ -212,7 +243,11 @@ func CheckDisconnectCallbackConsistency(events []ObservedEvent) []string {
 		case ObservedBlockDisconnected:
 			if lastFilteredDisc == nil {
 				errs = append(errs, fmt.Sprintf(
-					"block disconnected at height %d without a preceding filtered-block-disconnect callback",
+					"block disconnected at "+
+						"height %d without a "+
+						"preceding "+
+						"filtered-block-disconnec"+
+						"t callback",
 					event.Height,
 				))
 				continue
@@ -222,9 +257,15 @@ func CheckDisconnectCallbackConsistency(events []ObservedEvent) []string {
 				lastFilteredDisc.Hash != event.Hash {
 
 				errs = append(errs, fmt.Sprintf(
-					"disconnect callback mismatch: filtered block disconnected (%d, %s) followed by block disconnected (%d, %s)",
-					lastFilteredDisc.Height, lastFilteredDisc.Hash,
-					event.Height, event.Hash,
+					"disconnect callback "+
+						"mismatch: filtered "+
+						"block disconnected (%d, "+
+						"%s) followed by block "+
+						"disconnected (%d, %s)",
+					lastFilteredDisc.Height,
+					lastFilteredDisc.Hash,
+					event.Height,
+					event.Hash,
 				))
 			}
 
@@ -238,7 +279,10 @@ func CheckDisconnectCallbackConsistency(events []ObservedEvent) []string {
 // CheckMonotonicFilteredProgress mirrors the P MonotonicProgress monitor for
 // the Go bridge: forward filtered-block callbacks must increase strictly until
 // a disconnect resets the forward progress window.
-func CheckMonotonicFilteredProgress(events []ObservedEvent) []string {
+func CheckMonotonicFilteredProgress(
+	events []ObservedEvent,
+) []string {
+
 	var (
 		errs              []string
 		lastForwardHeight int32 = -1
@@ -246,14 +290,18 @@ func CheckMonotonicFilteredProgress(events []ObservedEvent) []string {
 
 	for _, event := range events {
 		switch event.Kind {
-		case ObservedFilteredBlockDisconnected, ObservedBlockDisconnected:
+		case ObservedFilteredBlockDisconnected,
+			ObservedBlockDisconnected:
 			lastForwardHeight = -1
 
 		case ObservedFilteredBlockConnected:
 			if event.Height <= lastForwardHeight {
 				errs = append(errs, fmt.Sprintf(
-					"non-monotonic filtered progress: height %d after %d",
-					event.Height, lastForwardHeight,
+					"non-monotonic filtered "+
+						"progress: height %d "+
+						"after %d",
+					event.Height,
+					lastForwardHeight,
 				))
 			}
 
@@ -266,7 +314,10 @@ func CheckMonotonicFilteredProgress(events []ObservedEvent) []string {
 
 // CheckSubscriptionAlternation mirrors the P SubscriptionLifecycle monitor for
 // the Go bridge: subscribes and cancels must strictly alternate.
-func CheckSubscriptionAlternation(events []SubscriptionEvent) []string {
+func CheckSubscriptionAlternation(
+	events []SubscriptionEvent,
+) []string {
+
 	var (
 		errs   []string
 		active bool
@@ -277,7 +328,9 @@ func CheckSubscriptionAlternation(events []SubscriptionEvent) []string {
 		case SubscriptionStarted:
 			if active {
 				errs = append(errs, fmt.Sprintf(
-					"double subscription start at height %d without cancel",
+					"double subscription "+
+						"start at height %d "+
+						"without cancel",
 					event.Height,
 				))
 			}
@@ -286,8 +339,12 @@ func CheckSubscriptionAlternation(events []SubscriptionEvent) []string {
 
 		case SubscriptionCanceled:
 			if !active {
-				errs = append(errs,
-					"subscription cancel without active subscription")
+				errs = append(
+					errs,
+					"subscription cancel "+
+						"without active "+
+						"subscription",
+				)
 			}
 
 			active = false
@@ -314,8 +371,15 @@ type ActorHarnessConfig struct {
 }
 
 // NewActorHarness creates a harness with a fresh chain of the requested size.
-func NewActorHarness(numBlocks int, cfg ActorHarnessConfig) (*ActorHarness, error) {
-	return NewActorHarnessWithChain(NewMockChain(numBlocks), cfg)
+func NewActorHarness(
+	numBlocks int,
+	cfg ActorHarnessConfig,
+) (*ActorHarness, error) {
+
+	return NewActorHarnessWithChain(
+		NewMockChain(numBlocks),
+		cfg,
+	)
 }
 
 // NewActorHarnessWithChain creates a harness using the provided chain.
@@ -369,7 +433,10 @@ func (h *ActorHarness) StopAndWait() {
 }
 
 // WaitForCurrent waits until the actor reports StateCurrent.
-func (h *ActorHarness) WaitForCurrent(timeout time.Duration) error {
+func (h *ActorHarness) WaitForCurrent(
+	timeout time.Duration,
+) error {
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		state, err := h.Actor.CurrentState()
@@ -382,5 +449,8 @@ func (h *ActorHarness) WaitForCurrent(timeout time.Duration) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	return fmt.Errorf("actor did not reach current state within %v", timeout)
+	return fmt.Errorf(
+		"actor did not reach current state within %v",
+		timeout,
+	)
 }

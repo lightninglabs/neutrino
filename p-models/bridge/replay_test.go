@@ -1,58 +1,66 @@
 package bridge
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// TestReplayTraceFromFile tests the bridge by replaying any P model checker
-// trace files found in the PCheckerOutput directory. This validates that the
-// trace parser, event mapping, and replay harness work together.
+// TestReplayTraceFromFile replays announcements captured from an actual P run.
 func TestReplayTraceFromFile(t *testing.T) {
-	// Look for trace files in the standard P checker output directory.
-	traceDir := filepath.Join("..", "PCheckerOutput", "BugFinding")
+	path := filepath.Join(
+		"testdata",
+		"basic_sync_p_trace.json",
+	)
+	trace, err := ParseTraceFile(path)
+	require.NoError(t, err)
+	require.NotEmpty(t, trace.Entries)
 
+	result, err := ReplayTrace(trace)
+	require.NoError(t, err)
+	require.Empty(t, result.Errors)
+	require.Equal(t, []StateTransition{
+		{From: StateInitializing, To: StateInitializing},
+		{From: StateInitializing, To: StateSyncing},
+		{From: StateSyncing, To: StateCurrent},
+	}, result.StateTransitions)
+	require.Len(t, result.FilteredBlocks, 5)
+	for i, block := range result.FilteredBlocks {
+		require.Equal(t, i+1, block.Height)
+	}
+
+	// Also replay any locally generated checker traces, as the original
+	// test did, while keeping the checked-in fixture mandatory.
+	traceDir := filepath.Join(
+		"..",
+		"PCheckerOutput",
+		"BugFinding",
+	)
 	entries, err := os.ReadDir(traceDir)
-	if err != nil {
-		t.Skipf("no PCheckerOutput directory found (run P checker "+
-			"first): %v", err)
+	if os.IsNotExist(err) {
 		return
 	}
-
-	var traceFiles []string
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".json" {
-			traceFiles = append(traceFiles,
-				filepath.Join(traceDir, e.Name()))
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
 		}
-	}
-
-	if len(traceFiles) == 0 {
-		t.Skip("no trace JSON files found in PCheckerOutput")
-		return
-	}
-
-	for _, tf := range traceFiles {
-		t.Run(filepath.Base(tf), func(t *testing.T) {
-			trace, err := ParseTraceFile(tf)
+		t.Run(entry.Name(), func(t *testing.T) {
+			trace, err := ParseTraceFile(
+				filepath.Join(
+					traceDir,
+					entry.Name(),
+				),
+			)
 			require.NoError(t, err)
 			require.NotEmpty(t, trace.Entries)
-
 			result, err := ReplayTrace(trace)
 			require.NoError(t, err)
-
-			t.Logf("Replayed %d events, %d state transitions, "+
-				"%d filtered blocks",
-				result.TotalEvents,
-				len(result.StateTransitions),
-				len(result.FilteredBlocks))
-
-			// No conformance errors should be found.
-			require.Empty(t, result.Errors,
-				"conformance errors: %v", result.Errors)
+			require.Empty(t, result.Errors)
 		})
 	}
 }
@@ -65,6 +73,9 @@ func TestValidTransitionTable(t *testing.T) {
 	))
 	require.True(t, IsValidTransition(
 		StateInitializing, StateSyncing,
+	))
+	require.True(t, IsValidTransition(
+		StateInitializing, StateRewinding,
 	))
 	require.True(t, IsValidTransition(
 		StateInitializing, StateTerminal,
@@ -96,9 +107,6 @@ func TestValidTransitionTable(t *testing.T) {
 		StateInitializing, StateCurrent,
 	))
 	require.False(t, IsValidTransition(
-		StateInitializing, StateRewinding,
-	))
-	require.False(t, IsValidTransition(
 		StateSyncing, StateInitializing,
 	))
 	require.False(t, IsValidTransition(
@@ -120,10 +128,52 @@ func TestValidTransitionTable(t *testing.T) {
 
 // TestFSMStateString verifies state name formatting.
 func TestFSMStateString(t *testing.T) {
-	require.Equal(t, "Initializing", StateInitializing.String())
+	require.Equal(
+		t,
+		"Initializing",
+		StateInitializing.String(),
+	)
 	require.Equal(t, "Syncing", StateSyncing.String())
 	require.Equal(t, "Current", StateCurrent.String())
 	require.Equal(t, "Rewinding", StateRewinding.String())
 	require.Equal(t, "Terminal", StateTerminal.String())
 	require.Equal(t, "Unknown", FSMState(99).String())
+}
+
+// TestPTraceInvalidPayload rejects numeric overflow and transaction payloads
+// the native trace decoder cannot yet interpret faithfully.
+func TestPTraceInvalidPayload(t *testing.T) {
+	for _, log := range []string{
+		"RescanFSM(3) announced " +
+			"event eFSMStateChange " +
+			"with payload " +
+			"<99999999999999999999999" +
+			"9,1,>.",
+		"RescanFSM(3) announced " +
+			"event " +
+			"eFilteredBlockOutbox " +
+			"with payload " +
+			"<1,(<txid:1,>),>.",
+	} {
+		event := "eFSMStateChange"
+		if strings.Contains(
+			log,
+			"eFilteredBlockOutbox",
+		) {
+
+			event = "eFilteredBlockOutbox"
+		}
+		data, err := json.Marshal(
+			[][]map[string]interface{}{{{
+				"type": "Announce",
+				"details": map[string]interface{}{
+					"event": event,
+					"log":   log,
+				},
+			}}},
+		)
+		require.NoError(t, err)
+		_, err = ParseTrace(data)
+		require.Error(t, err)
+	}
 }

@@ -291,6 +291,9 @@ spec FSMStateTransitionValidity observes eFSMStateChange {
         if (from_s == FSMInitializing && to_s == FSMSyncing) {
             return true;
         }
+        if (from_s == FSMInitializing && to_s == FSMRewinding) {
+            return true;
+        }
         if (from_s == FSMInitializing && to_s == FSMTerminal) {
             return true;
         }

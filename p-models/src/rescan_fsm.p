@@ -104,6 +104,7 @@ machine RescanFSM {
     var batch_size: int;
     var target_height: Height;
     var scanning: bool;
+    var initial_rewind: bool;
 
     // =========================================================================
     // Initializing State
@@ -118,11 +119,20 @@ machine RescanFSM {
             watch = init.initial_watch;
             batch_size = init.batch_size;
             scanning = false;
+            initial_rewind = false;
 
             announce eFSMStateChange, (FSMInitializing, FSMInitializing);
         }
 
         on eProcessNextBlockEvent do {
+            if (initial_rewind) {
+                announce eFSMStateChange, (FSMInitializing, FSMRewinding);
+                announce eSelfTellOutbox;
+                if (observer != default(machine)) {
+                    send observer, eObsFSMSelfTell;
+                }
+                goto Rewinding;
+            }
             announce eFSMStateChange, (FSMInitializing, FSMSyncing);
             announce eSelfTellOutbox;
 
@@ -137,6 +147,11 @@ machine RescanFSM {
             var addr: AddrID;
             foreach (addr in payload.0) {
                 watch += (addr);
+            }
+            if (payload.1 > 0 && payload.1 < cur_height &&
+                (!initial_rewind || payload.1 < target_height)) {
+                target_height = payload.1;
+                initial_rewind = true;
             }
         }
 

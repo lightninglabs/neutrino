@@ -48,11 +48,19 @@ func NewRescanFSMSimulator() *RescanFSMSimulator {
 
 // ValidTransitions defines the legal FSM state transition table.
 var ValidTransitions = map[FSMState][]FSMState{
-	StateInitializing: {StateSyncing, StateTerminal},
-	StateSyncing:      {StateCurrent, StateRewinding, StateTerminal},
-	StateCurrent:      {StateRewinding, StateTerminal},
-	StateRewinding:    {StateSyncing, StateTerminal},
-	StateTerminal:     {},
+	StateInitializing: {
+		StateSyncing,
+		StateRewinding,
+		StateTerminal,
+	},
+	StateSyncing: {
+		StateCurrent,
+		StateRewinding,
+		StateTerminal,
+	},
+	StateCurrent:   {StateRewinding, StateTerminal},
+	StateRewinding: {StateSyncing, StateTerminal},
+	StateTerminal:  {},
 }
 
 // IsValidTransition checks whether a transition from→to is valid per the
@@ -100,31 +108,37 @@ func ReplayTrace(trace *Trace) (*ReplayResult, error) {
 				continue
 			}
 
-			transition := StateTransition{
-				From: payload.From,
-				To:   payload.To,
-			}
+			transition := StateTransition(payload)
 			result.StateTransitions = append(
-				result.StateTransitions, transition,
+				result.StateTransitions,
+				transition,
 			)
 
 			// Validate the transition.
-			if !IsValidTransition(payload.From, payload.To) {
-				result.Errors = append(result.Errors,
+			if !IsValidTransition(
+				payload.From,
+				payload.To,
+			) {
+
+				result.Errors = append(
+					result.Errors,
 					fmt.Sprintf(
 						"invalid transition: %s -> %s",
-						payload.From, payload.To,
+						payload.From,
+						payload.To,
 					),
 				)
 			}
 
 			// Verify the simulator's current state matches.
 			if payload.From != sim.CurrentState {
-				result.Errors = append(result.Errors,
+				result.Errors = append(
+					result.Errors,
 					fmt.Sprintf(
 						"state mismatch: expected %s, "+
 							"trace says %s",
-						sim.CurrentState, payload.From,
+						sim.CurrentState,
+						payload.From,
 					),
 				)
 			}

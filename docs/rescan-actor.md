@@ -26,3 +26,9 @@ runtime ordering covered by the deterministic reorg tests.
 An `AddWatchAddrs` update with no rewind applies to future scanning only. To
 cover blocks already processed or concurrent with registration, callers must
 provide a prior active-chain rewind height. Scanning resumes after that anchor.
+
+`AddWatchAddrs` waits up to five seconds for an acknowledgement. A timeout does
+not remove an update already queued in the mailbox: it can still apply after
+the caller returns. Callers must treat a timeout as an unknown outcome and
+reconcile the current watch state before assuming registration failed. The
+actor does not roll back wallet state maintained by its caller.

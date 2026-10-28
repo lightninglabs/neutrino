@@ -105,6 +105,12 @@ func (s *StateCurrent) handleBlockConnected(
 
 	blockHash := event.Header.BlockHash()
 
+	// Notifications queued while catching up may arrive after this block
+	// has already been scanned. Keep the current tip unchanged.
+	if int32(event.Height) < s.CurStamp.Height {
+		return &StateTransition{NextState: s}, nil
+	}
+
 	// Duplicate delivery of the block at our current tip can happen when a
 	// previously failed block notification is retried after the block was
 	// already recovered through another path, such as rewind+sync. Treat it
@@ -112,6 +118,16 @@ func (s *StateCurrent) handleBlockConnected(
 	if event.Height == uint32(s.CurStamp.Height) &&
 		blockHash == s.CurStamp.Hash {
 
+		return &StateTransition{NextState: s}, nil
+	}
+
+	// A filter notification can be delayed past a reorg. Only process the
+	// block if its height still identifies the active chain header.
+	active, err := env.Chain.GetBlockHeaderByHeight(event.Height)
+	if err != nil {
+		return nil, err
+	}
+	if active.BlockHash() != blockHash {
 		return &StateTransition{NextState: s}, nil
 	}
 

@@ -2,10 +2,11 @@ package bridge
 
 import (
 	"errors"
-	"github.com/btcsuite/btcd/address/v2"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
@@ -48,7 +49,10 @@ type mockSubscription struct {
 
 func newMockSubscription() *mockSubscription {
 	return &mockSubscription{
-		notifications: make(chan blockntfns.BlockNtfn, 100),
+		notifications: make(
+			chan blockntfns.BlockNtfn,
+			100,
+		),
 	}
 }
 
@@ -78,13 +82,27 @@ var _ neutrino.ChainSource = (*MockChain)(nil)
 // NewMockChain creates a linear chain with the requested number of blocks.
 func NewMockChain(numBlocks int) *MockChain {
 	chain := &MockChain{
-		blockHeightIndex:      make(map[chainhash.Hash]uint32),
-		blockHashesByHeight:   make(map[uint32]*chainhash.Hash),
-		blockHeaders:          make(map[chainhash.Hash]*wire.BlockHeader),
-		blocks:                make(map[chainhash.Hash]*btcutil.Block),
-		filters:               make(map[chainhash.Hash]*gcs.Filter),
-		filterHeadersByHeight: make(map[uint32]*chainhash.Hash),
-		filterFailures:        make(map[chainhash.Hash]int),
+		blockHeightIndex: make(
+			map[chainhash.Hash]uint32,
+		),
+		blockHashesByHeight: make(
+			map[uint32]*chainhash.Hash,
+		),
+		blockHeaders: make(
+			map[chainhash.Hash]*wire.BlockHeader,
+		),
+		blocks: make(
+			map[chainhash.Hash]*btcutil.Block,
+		),
+		filters: make(
+			map[chainhash.Hash]*gcs.Filter,
+		),
+		filterHeadersByHeight: make(
+			map[uint32]*chainhash.Hash,
+		),
+		filterFailures: make(
+			map[chainhash.Hash]int,
+		),
 	}
 
 	genesisHash := chain.ChainParams().GenesisHash
@@ -93,7 +111,9 @@ func NewMockChain(numBlocks int) *MockChain {
 	chain.blockHeightIndex[*genesisHash] = 0
 	chain.blockHashesByHeight[0] = genesisHash
 	chain.blockHeaders[*genesisHash] = &genesisBlock.Header
-	chain.blocks[*genesisHash] = btcutil.NewBlock(genesisBlock)
+	chain.blocks[*genesisHash] = btcutil.NewBlock(
+		genesisBlock,
+	)
 
 	filter, _ := gcs.FromBytes(
 		0, builder.DefaultP, builder.DefaultM, nil,
@@ -128,7 +148,8 @@ func (c *MockChain) AddBlock() headerfs.BlockStamp {
 
 // AddBlockWithTx extends the chain with a block paying to the given address.
 func (c *MockChain) AddBlockWithTx(
-	addr address.Address) (headerfs.BlockStamp, *wire.MsgTx, error) {
+	addr address.Address,
+) (headerfs.BlockStamp, *wire.MsgTx, error) {
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	if err != nil {
@@ -138,7 +159,11 @@ func (c *MockChain) AddBlockWithTx(
 	tx := &wire.MsgTx{
 		Version: 1,
 		TxIn: []*wire.TxIn{
-			{PreviousOutPoint: wire.OutPoint{Index: 0}},
+			{
+				PreviousOutPoint: wire.OutPoint{
+					Index: 0,
+				},
+			},
 		},
 		TxOut: []*wire.TxOut{
 			{Value: 100000, PkScript: pkScript},
@@ -173,7 +198,9 @@ func (c *MockChain) NotifyBlockConnected(height uint32) error {
 	c.mu.Unlock()
 
 	if sub != nil {
-		sub.notifications <- blockntfns.NewBlockConnected(*header, height)
+		sub.notifications <- blockntfns.NewBlockConnected(
+			*header, height,
+		)
 	}
 
 	return nil
@@ -181,12 +208,17 @@ func (c *MockChain) NotifyBlockConnected(height uint32) error {
 
 // NotifyBlockDisconnected delivers a disconnected notification for the target
 // block using the previous block as the new chain tip.
-func (c *MockChain) NotifyBlockDisconnected(height uint32) error {
+func (c *MockChain) NotifyBlockDisconnected(
+	height uint32,
+) error {
+
 	c.mu.Lock()
 
 	if height == 0 {
 		c.mu.Unlock()
-		return errors.New("genesis block cannot be disconnected")
+		return errors.New(
+			"genesis block cannot be disconnected",
+		)
 	}
 
 	hash, ok := c.blockHashesByHeight[height]
@@ -271,7 +303,9 @@ func (c *MockChain) RewriteHeaderAtHeight(height uint32) error {
 	}
 
 	altHeader := *header
-	altHeader.Timestamp = altHeader.Timestamp.Add(time.Second)
+	altHeader.Timestamp = altHeader.Timestamp.Add(
+		time.Second,
+	)
 	altHash := altHeader.BlockHash()
 
 	c.blockHashesByHeight[height] = &altHash
@@ -283,7 +317,11 @@ func (c *MockChain) RewriteHeaderAtHeight(height uint32) error {
 
 // FailFilterFetches arranges for GetCFilter to fail the next count times for
 // the block at the given height.
-func (c *MockChain) FailFilterFetches(height uint32, count int) error {
+func (c *MockChain) FailFilterFetches(
+	height uint32,
+	count int,
+) error {
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -329,7 +367,9 @@ func (c *MockChain) addBlockLocked(
 	header := &wire.BlockHeader{
 		PrevBlock: prevHash,
 		Timestamp: genesisTimestamp.Add(
-			time.Duration(newHeight) * 10 * time.Minute,
+			time.Duration(
+				newHeight,
+			) * 10 * time.Minute,
 		),
 	}
 
@@ -349,7 +389,10 @@ func (c *MockChain) addBlockLocked(
 	var filter *gcs.Filter
 	if len(txs) == 0 {
 		filter, _ = gcs.FromBytes(
-			0, builder.DefaultP, builder.DefaultM, nil,
+			0,
+			builder.DefaultP,
+			builder.DefaultM,
+			nil,
 		)
 	} else {
 		filter, _ = builder.BuildBasicFilter(msgBlock, nil)
@@ -404,19 +447,24 @@ func (c *MockChain) GetBlockHeaderByHeight(
 }
 
 func (c *MockChain) GetBlockHeader(
-	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+	hash *chainhash.Hash,
+) (*wire.BlockHeader, uint32, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	header, ok := c.blockHeaders[*hash]
 	if !ok {
-		return nil, 0, errors.New("block header not found")
+		return nil, 0, errors.New(
+			"block header not found",
+		)
 	}
 
 	height, ok := c.blockHeightIndex[*hash]
 	if !ok {
-		return nil, 0, errors.New("block height not found")
+		return nil, 0, errors.New(
+			"block height not found",
+		)
 	}
 
 	return header, height, nil
@@ -459,7 +507,9 @@ func (c *MockChain) GetCFilter(hash chainhash.Hash,
 
 	if remaining := c.filterFailures[hash]; remaining > 0 {
 		c.filterFailures[hash] = remaining - 1
-		return nil, errors.New("injected filter fetch failure")
+		return nil, errors.New(
+			"injected filter fetch failure",
+		)
 	}
 
 	filter, ok := c.filters[hash]
@@ -486,7 +536,8 @@ func (c *MockChain) Subscribe(
 		Height: height,
 	})
 
-	for h := height + 1; h <= uint32(c.bestBlock.Height); h++ {
+	for h := height + 1; height != 0 &&
+		h <= uint32(c.bestBlock.Height); h++ {
 		hash, ok := c.blockHashesByHeight[h]
 		if !ok {
 			continue
@@ -498,7 +549,8 @@ func (c *MockChain) Subscribe(
 		}
 
 		backlog = append(
-			backlog, blockntfns.NewBlockConnected(*header, h),
+			backlog,
+			blockntfns.NewBlockConnected(*header, h),
 		)
 	}
 	c.mu.Unlock()
@@ -518,9 +570,12 @@ func (c *MockChain) Subscribe(
 				if c.activeSub == sub {
 					c.activeSub = nil
 				}
-				c.subEvents = append(c.subEvents, SubscriptionEvent{
-					Kind: SubscriptionCanceled,
-				})
+				c.subEvents = append(
+					c.subEvents,
+					SubscriptionEvent{
+						Kind: SubscriptionCanceled,
+					},
+				)
 				c.mu.Unlock()
 
 				c.cancelCount.Add(1)

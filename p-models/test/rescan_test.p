@@ -1974,6 +1974,59 @@ machine TestReplayCurrentTipAfterRecovery {
     }
 }
 
+// A rewind accepted before processing must run before historical catch-up.
+machine TestInitializingRewind {
+    var fsm_m: RescanFSM;
+    var disconnected: int;
+
+    start state Init {
+        entry {
+            var chain_m: MockChain;
+            var addrs: set[AddrID];
+            chain_m = new MockChain((
+                observer = this,
+                blocks = BuildLinearChain(5),
+                tip_height = 5
+            ));
+            fsm_m = new RescanFSM((
+                chain = chain_m,
+                observer = this,
+                start_height = 3,
+                start_hash = 4,
+                initial_watch = default(WatchState),
+                batch_size = 100
+            ));
+            addrs = default(set[AddrID]);
+            send fsm_m, eAddWatchAddrsEvent, (addrs, 1);
+            send fsm_m, eProcessNextBlockEvent;
+        }
+
+        on eObsFSMSelfTell do {
+            send fsm_m, eProcessNextBlockEvent;
+        }
+        on eObsFSMBlockDisconnected do (payload: (Height, BlockHash)) {
+            assert payload.0 == 3 - disconnected,
+                "initial rewind disconnected unexpected height";
+            disconnected = disconnected + 1;
+        }
+        on eObsFSMRescanFinished do (payload: (Height, BlockHash)) {
+            assert disconnected == 2,
+                "initial rewind was not applied before catch-up";
+            assert payload.0 == 5, "did not reach the active tip";
+            goto Done;
+        }
+        on eObsFSMFilteredBlock do { }
+        on eObsFSMBlockConnected do { }
+        on eObsFSMStartSubscription do { }
+    }
+
+    state Done {
+        ignore eObsFSMFilteredBlock, eObsFSMBlockConnected,
+               eObsFSMBlockDisconnected, eObsFSMStartSubscription,
+               eObsFSMSelfTell, eObsFSMRescanFinished;
+    }
+}
+
 // =============================================================================
 // Test Declarations
 // =============================================================================
@@ -2073,3 +2126,7 @@ test tcReplayCurrentTipAfterRecovery [main=TestReplayCurrentTipAfterRecovery]:
     assert MonotonicProgress, SubscriptionLifecycle,
            DisconnectCallbackPairing, FSMStateTransitionValidity
     in { MockChain, RescanFSM, RescanActor, TestReplayCurrentTipAfterRecovery };
+
+test tcInitializingRewind [main=TestInitializingRewind]:
+    assert FSMStateTransitionValidity
+    in { MockChain, RescanFSM, TestInitializingRewind };
