@@ -5,6 +5,7 @@ package neutrino
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"

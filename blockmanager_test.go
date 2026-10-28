@@ -1649,23 +1649,22 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 			return nil
 		},
 	}}
-	bm.cfg.queryAllPeers = func(_ wire.Message,
-		respond func(*ServerPeer, wire.Message,
-			chan<- struct{}, chan<- struct{}),
-		_ ...QueryOption) {
+	bm.cfg.Broadcaster = broadcastFunc(func(b *querysyncwm.Broadcast,
+		opts ...querysyncwm.QueryOption) error {
 
+		scripts := make(map[string][]wire.Message)
 		for addr, filter := range map[string]*gcs.Filter{
 			"good:1": correctFilter, "wrong:1": fakeFilter1,
 		} {
-			p := newTestServerPeer(t, addr, 100)
 			payload, err := filter.NBytes()
 			require.NoError(t, err)
 			hash := block.BlockHash()
-			respond(p, wire.NewMsgCFilter(
+			scripts[addr] = []wire.Message{wire.NewMsgCFilter(
 				wire.GCSFilterRegular, &hash, payload,
-			), make(chan struct{}), make(chan struct{}))
+			)}
 		}
-	}
+		return newScriptedBroadcaster(scripts).Broadcast(b, opts...)
+	})
 	err = bm.resolveCFHeaderMismatches(
 		headers, checkpoints, 100, 1, wire.GCSFilterRegular,
 	)
