@@ -4289,7 +4289,21 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		valid = false
 	}
 
-	if !valid {
+	// A peer asked for blocks past its advertised height answers with
+	// nothing, which is honest. Hold it back for a cooldown instead of
+	// quarantining and disconnecting it; the range is replanned either
+	// way.
+	lagging := len(hmsg.headers.Headers) == 0 &&
+		hmsg.peer.LastBlock() < int32(rng.StopHeight)
+	switch {
+	case !valid && lagging:
+		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
+			"peer_height=%d stop_height=%d", peerID,
+			assignment.RangeID, hmsg.peer.LastBlock(),
+			rng.StopHeight)
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+
+	case !valid:
 		b.rejectHeaderSyncRangePeer(
 			peers,
 			hmsg.peer,
