@@ -5563,7 +5563,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
 	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
-		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
 			nextHash = *b.nextCheckpoint.Hash
@@ -5576,6 +5575,22 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		target := b.SyncPeer()
 		if target == nil {
 			target = hmsg.peer
+		}
+
+		// The batch's last hash is a fine locator for its sender. The
+		// sync peer may not know that block, and peers answer an
+		// unknown locator from genesis: an all-known reply that
+		// leaves the deadline armed until the honest sync peer is
+		// quarantined. Give it our full locator instead.
+		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
+		if target != hmsg.peer {
+			var err error
+			locator, err = b.cfg.BlockHeaders.LatestBlockLocator()
+			if err != nil {
+				log.Errorf("Unable to build block locator: %v",
+					err)
+				return
+			}
 		}
 		err := b.requestHeaders(
 			target, locator, &nextHash, uint32(finalHeight),

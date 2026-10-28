@@ -1655,6 +1655,63 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 	})
 }
 
+// locatorRecorder records the locators of serial getheaders requests.
+type locatorRecorder struct {
+	requests []blockchain.BlockLocator
+	peers    []*ServerPeer
+}
+
+// SendGetHeaders records one request.
+func (r *locatorRecorder) SendGetHeaders(peer *ServerPeer,
+	locator blockchain.BlockLocator, _ *chainhash.Hash) error {
+
+	r.requests = append(r.requests, locator)
+	r.peers = append(r.peers, peer)
+	return nil
+}
+
+// TestSerialFollowUpUsesFullLocator checks that a serial follow-up sent to the
+// sync peer after another peer's batch carries our full locator. The batch's
+// last hash alone may be unknown to the sync peer, which then answers from
+// genesis with headers we have, and its deadline expires on an honest peer.
+func TestSerialFollowUpUsesFullLocator(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		bm, _ := setupDSTBlockManager(t)
+		genesis := chaincfg.SimNetParams.GenesisBlock.Header
+		bm.cfg.TimeSource = dstMedianTime{
+			MedianTimeSource: bm.cfg.TimeSource,
+			offset: time.Until(
+				genesis.Timestamp.Add(time.Hour),
+			),
+		}
+		recorder := &locatorRecorder{}
+		bm.cfg.HeaderTransport = recorder
+		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
+
+		syncPeer := newTestServerPeer(t, "127.0.0.1:8333", 12)
+		other := newTestServerPeer(t, "127.0.0.2:8333", 12)
+		peers := list.New()
+		peers.PushBack(syncPeer)
+		peers.PushBack(other)
+		bm.syncPeer = syncPeer
+
+		msg := wire.NewMsgHeaders()
+		for _, header := range dstChains().honest[1:3] {
+			require.NoError(t, msg.AddBlockHeader(header))
+		}
+		bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+			peer: other, headers: msg,
+		})
+
+		require.Len(t, recorder.requests, 1)
+		require.Same(t, syncPeer, recorder.peers[0])
+		locator := recorder.requests[0]
+		require.Greater(t, len(locator), 1,
+			"sync peer got only another peer's batch hash")
+		require.Equal(t, genesis.BlockHash(), *locator[len(locator)-1])
+	})
+}
+
 // TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
 // actor asks. The op context used to derive from context.Background, so Stop
 // could wait out the full deadline for every ask still pending.
