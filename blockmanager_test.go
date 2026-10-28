@@ -678,6 +678,16 @@ func TestHeaderSyncEmptyReplyFromSyncPeer(t *testing.T) {
 	require.NotNil(t, bm.headerSyncTimer,
 		"the new sync peer's request must carry a deadline")
 
+	// An empty message with no serial request in flight answers
+	// nothing and must not demote the sync peer.
+	bm.disarmHeaderSyncTimeout()
+	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+		peer: other, headers: wire.NewMsgHeaders(),
+	})
+	require.Equal(t, other, bm.SyncPeer(),
+		"unsolicited empty reply demoted the sync peer")
+	bm.armHeaderSyncTimeout(other, 0)
+
 	// A sync peer with nothing past our tip answering empty is done.
 	done := newTestServerPeer(t, "127.0.0.3:8333", 0)
 	peers.PushBack(done)

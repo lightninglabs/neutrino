@@ -2901,7 +2901,10 @@ func (b *blockManager) advanceHeaderSyncTip(height uint32,
 func (b *blockManager) handleNoProgressReply(peers *list.List,
 	peer *ServerPeer) {
 
-	if peer != b.SyncPeer() {
+	// With no serial request in flight the reply answers nothing, for
+	// example an unsolicited or late empty message, so it is no reason
+	// to demote the best peer.
+	if peer != b.SyncPeer() || b.headerSyncTimer == nil {
 		return
 	}
 	b.disarmHeaderSyncTimeout()
