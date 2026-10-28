@@ -1009,6 +1009,15 @@ func (d *dstRun) heal() {
 		if d.quiescent() == nil {
 			break
 		}
+
+		// Production may still drop peers that the scripted phase
+		// faulted. Keep every slot filled so liveness never depends on
+		// fewer honest peers than the confirmation policy needs.
+		for slot, peer := range d.current {
+			if peer == nil {
+				d.connect(slot)
+			}
+		}
 		progressed := false
 		for slot := range d.current {
 			if d.reply(slot, dstReplyHonest) {
@@ -1169,6 +1178,12 @@ var dstRegressionSeeds = []string{
 	"195120c67404a29dc585cb8637de9b98c333e983a88d92704c",
 	"ded4487caf9a7882f5425aeef6378aab1779baf98a6629f1bde352",
 	"6f53a47a3d22a22f18b5abbffa735e7e8c81bf47ada842d000dc95854477",
+	// A late discovery reply matched to a range from the same locator,
+	// and heal phases that lost peers mid-recovery.
+	"c549a8254d53ba71b6c1416f29523562a5",
+	"277d75d4a62964a270d68e72b3131be1f056dbf0",
+	"5efcd649b1dba97bb29b86658bf2a2bad9c4a9900330885243bf",
+	"2c32dc3e81d1e62029fc492b6b9029a02395adcd82d151cc",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.

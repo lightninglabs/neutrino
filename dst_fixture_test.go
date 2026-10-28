@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -154,13 +155,24 @@ func buildDSTFixture() *dstFixture {
 		))
 	}
 
+	// Every mined header must be distinct. A fork or replacement header
+	// that collides with another chain's would make a fault silently
+	// honest, or an honest reply look like a fault.
 	index := func(base uint32, headers []*wire.BlockHeader) {
 		for i, header := range headers {
-			fixture.heights[header.BlockHash()] = base + uint32(i)
+			hash := header.BlockHash()
+			if _, dup := fixture.heights[hash]; dup {
+				panic(fmt.Sprintf("dst fixture hash collision "+
+					"at height %d: %s", base+uint32(i),
+					hash))
+			}
+			fixture.heights[hash] = base + uint32(i)
 		}
 	}
 	index(0, fixture.honest)
-	index(0, fixture.reorg)
+
+	// The reorg branch shares the honest prefix by construction.
+	index(dstReorgFork+1, fixture.reorg[dstReorgFork+1:])
 	for start := 0; start < dstChainHeight; start++ {
 		index(uint32(start+1), fixture.fork[start])
 		index(uint32(start+1), fixture.badTime[start])
