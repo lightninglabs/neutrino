@@ -1,6 +1,7 @@
-package query
+package workmanager
 
 import (
+	"errors"
 	"time"
 
 	"github.com/btcsuite/btcd/wire/v2"
@@ -259,6 +260,7 @@ type Request struct {
 // peers that must be started and stopped in order to perform these queries.
 type WorkManager interface {
 	Dispatcher
+	Broadcaster
 
 	// Start sets up any resources that the WorkManager requires. It must
 	// be called before any of the Dispatcher calls can be made.
@@ -303,3 +305,27 @@ type Peer interface {
 	// disconnected.
 	OnDisconnect() <-chan struct{}
 }
+
+var (
+	// ErrQueryTimeout is an error returned if the worker doesn't respond
+	// with a valid response to the request within the timeout.
+	ErrQueryTimeout = errors.New("did not get response before timeout")
+
+	// ErrPeerDisconnected is returned if the worker's peer disconnect
+	// before the query has been answered.
+	ErrPeerDisconnected = errors.New("peer disconnected")
+
+	// ErrPeerNotFound is returned if the peer explicitly reports that it
+	// does not have the requested inventory. This is retryable, but unlike
+	// a timeout it should fail fast so forked or lagging peers do not
+	// consume a full query timeout.
+	ErrPeerNotFound = errors.New("peer did not have requested data")
+
+	// ErrJobCanceled is returned if the job is canceled before the query
+	// has been answered.
+	ErrJobCanceled = errors.New("job canceled")
+
+	// ErrWorkManagerShuttingDown will be returned in case the WorkManager
+	// is in the process of exiting.
+	ErrWorkManagerShuttingDown = errors.New("WorkManager shutting down")
+)

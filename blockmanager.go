@@ -28,7 +28,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/headersync/querydispatch"
-	"github.com/lightninglabs/neutrino/query"
+	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
 const (
@@ -183,7 +183,7 @@ type blockManagerCfg struct {
 	TimeSource blockchain.MedianTimeSource
 
 	// QueryDispatcher is used to make queries to connected Bitcoin peers.
-	QueryDispatcher query.Dispatcher
+	QueryDispatcher querysyncwm.Dispatcher
 
 	// BanPeer bans and disconnects the given peer.
 	BanPeer func(addr string, reason banman.Reason) error
@@ -208,11 +208,10 @@ type blockManagerCfg struct {
 	// use the existing Bitcoin peer transport.
 	HeaderTransport headerTransport
 
-	queryAllPeers func(
-		queryMsg wire.Message,
-		checkResponse func(sp *ServerPeer, resp wire.Message,
-			quit chan<- struct{}, peerQuit chan<- struct{}),
-		options ...QueryOption)
+	// Broadcaster sends a single message to all connected peers and
+	// collects their responses. It backs the all-peer checks used to
+	// sanity check compact filter headers and checkpoints.
+	Broadcaster querysyncwm.Broadcaster
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -1204,10 +1203,10 @@ type checkpointedCFHeadersQuery struct {
 }
 
 // requests creates the query.Requests for this CF headers query.
-func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
-	reqs := make([]*query.Request, len(c.msgs))
+func (c *checkpointedCFHeadersQuery) requests() []*querysyncwm.Request {
+	reqs := make([]*querysyncwm.Request, len(c.msgs))
 	for idx, m := range c.msgs {
-		reqs[idx] = &query.Request{
+		reqs[idx] = &querysyncwm.Request{
 			Req:        m,
 			HandleResp: c.handleResponse,
 		}
@@ -1218,12 +1217,12 @@ func (c *checkpointedCFHeadersQuery) requests() []*query.Request {
 // handleResponse is the internal response handler used for requests for this
 // CFHeaders query.
 func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
-	peerAddr string) query.Progress {
+	peerAddr string) querysyncwm.Progress {
 
 	r, ok := resp.(*wire.MsgCFHeaders)
 	if !ok {
 		// We are only looking for cfheaders messages.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1233,7 +1232,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	if !ok {
 		// We sent a getcfheaders message, so that's what we should be
 		// comparing against.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1241,7 +1240,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 	// The response doesn't match the query.
 	if q.FilterType != r.FilterType || q.StopHash != r.StopHash {
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1250,7 +1249,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	checkPointIndex, ok := c.stopHashes[r.StopHash]
 	if !ok {
 		// We never requested a matching stop hash.
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1287,7 +1286,7 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
 		}
 
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
@@ -1301,13 +1300,13 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 	select {
 	case c.headerChan <- r:
 	case <-c.blockMgr.quit:
-		return query.Progress{
+		return querysyncwm.Progress{
 			Finished:   false,
 			Progressed: false,
 		}
 	}
 
-	return query.Progress{
+	return querysyncwm.Progress{
 		Finished:   true,
 		Progressed: true,
 	}
@@ -1444,9 +1443,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// timer alive for hours and amplify a slow-peer attack.
 	//
 	errChan := b.cfg.QueryDispatcher.Query(
-		q.requests(), query.Cancel(b.quit), query.NoRetryMax(),
-		query.Timeout(checkpointedCFHeadersBatchTimeout(batchesCount)),
-		query.ProgressTimeout(30*time.Second),
+		q.requests(), querysyncwm.Cancel(b.quit),
+		querysyncwm.NoRetryMax(),
+		querysyncwm.Timeout(
+			checkpointedCFHeadersBatchTimeout(batchesCount),
+		),
+		querysyncwm.ProgressTimeout(30*time.Second),
 	)
 
 	// Keep waiting for more headers as long as we haven't received an
@@ -1457,7 +1459,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		case r = <-headerChan:
 		case err := <-errChan:
 			switch {
-			case err == query.ErrWorkManagerShuttingDown:
+			case err == querysyncwm.ErrWorkManagerShuttingDown:
 				return
 			case err != nil:
 				log.Errorf("Query finished with error before "+
@@ -2314,27 +2316,37 @@ func (b *blockManager) getCFHeadersForAllPeers(height uint32,
 	numHeaders := int(stopHeight - height + 1)
 
 	// Send the query to all peers and record their responses in the map.
-	b.cfg.queryAllPeers(
-		msg,
-		func(sp *ServerPeer, resp wire.Message, _ chan<- struct{},
-			peerQuit chan<- struct{}) {
+	err = b.cfg.Broadcaster.Broadcast(
+		&querysyncwm.Broadcast{
+			Msg: msg,
+			HandleResp: func(peer querysyncwm.Peer,
+				resp wire.Message,
+				ctl *querysyncwm.BroadcastControl) {
 
-			m, isHeaders := resp.(*wire.MsgCFHeaders)
-			if isHeaders {
-				if m.StopHash == stopHash &&
-					m.FilterType == fType &&
-					len(m.FilterHashes) == numHeaders {
-
-					headers[sp.Addr()] = m
-
-					// We got an answer from this peer so
-					// that peer's goroutine can stop.
-					close(peerQuit)
+				m, isHeaders := resp.(*wire.MsgCFHeaders)
+				if !isHeaders {
+					return
 				}
-			}
+
+				if m.StopHash != stopHash ||
+					m.FilterType != fType ||
+					len(m.FilterHashes) != numHeaders {
+
+					return
+				}
+
+				headers[peer.Addr()] = m
+
+				// We got an answer from this peer so that
+				// peer's goroutine can stop.
+				ctl.PeerDone()
+			},
 		},
-		Timeout(cfHeaderCollectTimeout),
+		querysyncwm.Timeout(cfHeaderCollectTimeout),
 	)
+	if err != nil {
+		log.Debugf("CF header broadcast ended early: %v", err)
+	}
 
 	return headers, numHeaders
 }
@@ -2354,10 +2366,10 @@ func (b *blockManager) fetchFilterFromAllPeers(
 	// We'll now request the target filter from each peer, using a stop
 	// hash at the target block hash to ensure we only get a single filter.
 	fitlerReqMsg := wire.NewMsgGetCFilters(filterType, height, &blockHash)
-	b.cfg.queryAllPeers(
-		fitlerReqMsg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+	err := b.cfg.Broadcaster.Broadcast(&querysyncwm.Broadcast{
+		Msg: fitlerReqMsg,
+		HandleResp: func(peer querysyncwm.Peer, resp wire.Message,
+			ctl *querysyncwm.BroadcastControl) {
 
 			switch response := resp.(type) {
 			// We're only interested in "cfilter" messages.
@@ -2385,13 +2397,17 @@ func (b *blockManager) fetchFilterFromAllPeers(
 
 				// Now that we're able to properly parse this
 				// filter, we'll assign it to its source peer,
-				// and wait for the next response.
-				filterResponses[sp.Addr()] = gcsFilter
+				// and stop listening to it as it has answered.
+				filterResponses[peer.Addr()] = gcsFilter
+				ctl.PeerDone()
 
 			default:
 			}
 		},
-	)
+	}, querysyncwm.Timeout(QueryTimeout))
+	if err != nil {
+		log.Debugf("Filter broadcast ended early: %v", err)
+	}
 
 	return filterResponses
 }
@@ -2403,22 +2419,26 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 
 	checkpoints := make(map[string][]*chainhash.Hash)
 	getCheckptMsg := wire.NewMsgGetCFCheckpt(fType, lastHash)
-	b.cfg.queryAllPeers(
-		getCheckptMsg,
-		func(sp *ServerPeer, resp wire.Message, quit chan<- struct{},
-			peerQuit chan<- struct{}) {
+	err := b.cfg.Broadcaster.Broadcast(&querysyncwm.Broadcast{
+		Msg: getCheckptMsg,
+		HandleResp: func(peer querysyncwm.Peer, resp wire.Message,
+			ctl *querysyncwm.BroadcastControl) {
 
 			m, isCheckpoint := resp.(*wire.MsgCFCheckpt)
-			if isCheckpoint {
-				if m.FilterType == fType &&
-					m.StopHash == *lastHash {
+			if !isCheckpoint {
+				return
+			}
 
-					checkpoints[sp.Addr()] = m.FilterHeaders
-					close(peerQuit)
-				}
+			if m.FilterType == fType && m.StopHash == *lastHash {
+				checkpoints[peer.Addr()] = m.FilterHeaders
+				ctl.PeerDone()
 			}
 		},
-	)
+	}, querysyncwm.Timeout(QueryTimeout))
+	if err != nil {
+		log.Debugf("Checkpoint broadcast ended early: %v", err)
+	}
+
 	return checkpoints
 }
 
