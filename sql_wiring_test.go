@@ -86,16 +86,8 @@ func TestNewChainServiceSQLPath(t *testing.T) {
 func TestChainServiceOnionBan(t *testing.T) {
 	t.Parallel()
 
-	tempDir := t.TempDir()
-	db, err := walletdb.Create(
-		"bdb", filepath.Join(tempDir, "neutrino.db"),
-		true, 10*time.Second, false,
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-
 	cs, err := neutrino.NewChainService(neutrino.Config{
-		DataDir:     tempDir,
+		DataDir:     t.TempDir(),
 		ChainParams: chaincfg.SimNetParams,
 		SQLConfig: &sqldb.Config{
 			Backend: sqldb.BackendSqlite,
