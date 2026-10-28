@@ -2780,6 +2780,43 @@ func (b *blockManager) advanceHeaderSyncTip(height uint32,
 	}
 }
 
+// handleNoProgressReply settles a serial reply that added no headers: empty,
+// or only headers already in the store. From a peer that is not the sync peer
+// it means nothing. From the sync peer it answers the request: if the peer
+// advertises nothing past our tip, sync is done and the deadline is disarmed.
+// If it advertises more but sent none, it cannot serve us from our locator.
+// It is not punished, since it did answer, but it stops being the sync peer
+// and a candidate, so startSync moves on rather than asking it again forever.
+// Keeping it while disarming the deadline would leave sync with no request
+// and no timer until the peer disconnected.
+func (b *blockManager) handleNoProgressReply(peers *list.List,
+	peer *ServerPeer) {
+
+	if peer != b.SyncPeer() {
+		return
+	}
+	b.disarmHeaderSyncTimeout()
+
+	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		log.Errorf("Unable to read header tip: %v", err)
+		return
+	}
+	if peer.LastBlock() <= int32(height) {
+		return
+	}
+
+	log.Infof("Sync peer %s advertises height %d but sent no headers "+
+		"past %d; selecting a new sync peer", peer.Addr(),
+		peer.LastBlock(), height)
+
+	removeSyncCandidate(peers, peer)
+	b.syncPeerMutex.Lock()
+	b.syncPeer = nil
+	b.syncPeerMutex.Unlock()
+	b.startSync(peers)
+}
+
 // disarmHeaderSyncTimeout cancels the serial getheaders deadline. Bumping the
 // request ID also voids a timeout callback that already fired but has not been
 // handled yet.
@@ -5014,15 +5051,10 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		return
 	}
 
-	// Any reply from the sync peer answers the outstanding serial
-	// request. An empty reply means the peer has nothing past our
-	// locator, which is not a stall.
-	if hmsg.peer == b.SyncPeer() {
-		b.disarmHeaderSyncTimeout()
-	}
-
-	// Nothing to do for an empty headers message.
+	// Nothing to do for an empty headers message, beyond settling the
+	// sync peer's outstanding request.
 	if numHeaders == 0 {
+		b.handleNoProgressReply(peers, hmsg.peer)
 		return
 	}
 
@@ -5365,6 +5397,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// must not publish a new tip or start a legacy request from an old
 	// hash.
 	if finalHash == nil {
+		b.handleNoProgressReply(peers, hmsg.peer)
 		return
 	}
 
@@ -5414,6 +5447,12 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// When this header is a checkpoint, find the next checkpoint.
 	if receivedCheckpoint {
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
+	}
+
+	// The batch made progress, so it answered the sync peer's request.
+	// A follow-up request below re-arms the deadline.
+	if hmsg.peer == b.SyncPeer() {
+		b.disarmHeaderSyncTimeout()
 	}
 
 	// If not current, request the next batch of headers starting from the

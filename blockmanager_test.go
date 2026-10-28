@@ -639,41 +639,55 @@ func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
 	require.Equal(t, fastPeer, bm.SyncPeer())
 }
 
-// TestHeaderSyncEmptyReplyDisarmsTimeout checks that an empty headers reply
-// from the sync peer answers the serial request. The peer simply has nothing
-// past our locator, so its deadline must not later quarantine it.
-func TestHeaderSyncEmptyReplyDisarmsTimeout(t *testing.T) {
+// TestHeaderSyncEmptyReplyFromSyncPeer checks how a serial reply that adds no
+// headers settles the sync peer's request. A sync peer advertising more than
+// our tip that answers with nothing used to keep the sync peer role with its
+// deadline disarmed: no request, no timer, and sync stalled until the peer
+// disconnected. It must instead hand sync to another peer, without
+// punishment. A peer at our tip that answers empty is simply done.
+func TestHeaderSyncEmptyReplyFromSyncPeer(t *testing.T) {
 	t.Parallel()
 
 	bm, _, _, err := setupBlockManager(t)
 	require.NoError(t, err)
 	bm.headerSyncTimeout = time.Hour
 
-	var quarantined []string
+	var punished []string
 	bm.cfg.QuarantinePeer = func(addr string, _ time.Duration) {
-		quarantined = append(quarantined, addr)
+		punished = append(punished, addr)
+	}
+	bm.cfg.BanPeer = func(addr string, _ banman.Reason) error {
+		punished = append(punished, addr)
+		return nil
 	}
 
-	peer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	ahead := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	other := newTestServerPeer(t, "127.0.0.2:8333", 50)
 	peers := list.New()
-	peers.PushBack(peer)
+	peers.PushBack(ahead)
+	peers.PushBack(other)
 	bm.startSync(peers)
-	require.Equal(t, peer, bm.SyncPeer())
-	requestID := bm.headerRequestID
+	require.Equal(t, ahead, bm.SyncPeer())
 
 	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
-		peer: peer, headers: wire.NewMsgHeaders(),
+		peer: ahead, headers: wire.NewMsgHeaders(),
+	})
+	require.Empty(t, punished)
+	require.Equal(t, other, bm.SyncPeer(),
+		"sync stayed with a peer that cannot serve it")
+	require.NotNil(t, bm.headerSyncTimer,
+		"the new sync peer's request must carry a deadline")
+
+	// A sync peer with nothing past our tip answering empty is done.
+	done := newTestServerPeer(t, "127.0.0.3:8333", 0)
+	peers.PushBack(done)
+	bm.syncPeer = done
+	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
+		peer: done, headers: wire.NewMsgHeaders(),
 	})
 	require.Nil(t, bm.headerSyncTimer)
-
-	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
-		peer:        peer,
-		requestID:   requestID,
-		startHeight: 0,
-		timeout:     bm.headerSyncTimeout,
-	})
-	require.Empty(t, quarantined)
-	require.Equal(t, peer, bm.SyncPeer())
+	require.Equal(t, done, bm.SyncPeer())
+	require.Empty(t, punished)
 }
 
 // headers wraps the different headers and filters used throughout the tests.
