@@ -266,6 +266,11 @@ func (m *fsmModel) Check(t *rapid.T) {
 	}
 
 	require.True(t, commitLogStrictlyIncreasing(m.fsm.CommitLog()))
+
+	// The counters agree with the tables they summarize.
+	metrics := m.fsm.Metrics()
+	require.EqualValues(t, len(m.fsm.CommitLog()), metrics.RangesCommitted)
+	require.EqualValues(t, len(m.fsm.Ranges()), metrics.RangesPlanned)
 }
 
 // TestHeaderSyncFSMProperties runs random op sequences against the FSM. Its
