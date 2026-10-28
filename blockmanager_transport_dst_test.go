@@ -79,21 +79,28 @@ const (
 	// observations per anchor.
 	dstModeFrontier2
 
-	// dstModeCount is the number of modes.
+	// dstModeCount is the number of modes chosen by the mode byte's
+	// remainder.
 	dstModeCount
+
+	// dstModeSerial runs on the SimNet network ID, where production keeps
+	// the serial header path, with a checkpoint every two heights. It is
+	// chosen by a mode byte ending in 0xf, so adding it did not remap the
+	// modes of existing seeds.
+	dstModeSerial = dstModeCount
 )
 
 // String returns a short mode name.
 func (m dstMode) String() string {
 	return [...]string{
 		"checkpoint_all", "checkpoint", "anchor", "frontier1",
-		"frontier2",
+		"frontier2", "serial",
 	}[m]
 }
 
 // discovery reports whether the mode reaches anchor discovery.
 func (m dstMode) discovery() bool {
-	return m >= dstModeAnchor
+	return m >= dstModeAnchor && m != dstModeSerial
 }
 
 // dstFault is one swarm fault class. A seed enables a subset of classes so
@@ -130,6 +137,9 @@ func decodeDSTScript(script []byte) (dstConfig, []byte) {
 	cfg := dstConfig{faults: ^dstFault(0)}
 	if len(script) >= 3 {
 		cfg.mode = dstMode(script[0] % byte(dstModeCount))
+		if script[0]%16 == 0xf {
+			cfg.mode = dstModeSerial
+		}
 		cfg.faults = dstFault(binary.LittleEndian.Uint16(script[1:3]))
 		script = script[3:]
 	}
@@ -411,6 +421,10 @@ func (d *dstRun) params() chaincfg.Params {
 	params.Checkpoints = nil
 	honest := dstChains().honest
 	switch d.cfg.mode {
+	case dstModeSerial:
+		params.Net = chaincfg.SimNetParams.Net
+		fallthrough
+
 	case dstModeCheckpointAll, dstModeCheckpoint:
 		for height := 2; height <= dstChainHeight; height += 2 {
 			hash := honest[height].BlockHash()
@@ -1218,6 +1232,20 @@ func (d *dstRun) describe() string {
 		}
 	}
 	fmt.Fprintf(&out, "faulted=%v punished=%v\n", d.faulted, d.punished)
+	if !d.stopped {
+		var queued []string
+		for _, request := range d.transport.queued {
+			queued = append(queued, fmt.Sprintf("%s:%d..%d",
+				request.peer.Addr(), request.start,
+				request.stop))
+		}
+		syncPeer := "none"
+		if peer := d.bm.SyncPeer(); peer != nil {
+			syncPeer = peer.Addr()
+		}
+		fmt.Fprintf(&out, "sync_peer=%s serial_timer=%v queued=%v\n",
+			syncPeer, d.bm.headerSyncTimer != nil, queued)
+	}
 	fmt.Fprintf(&out, "steps=%v\n", d.steps)
 	return out.String()
 }
@@ -1324,6 +1352,10 @@ var dstRegressionSeeds = []string{
 	"7f594edd1aa359a3df8e520794782a7397b87325138fd79aeef7cdc3f5384d",
 	// A reply judged against a range the serial writer already committed.
 	"1b66426e6b5a8ed82ea0095936fa89bca0430d",
+	// Serial mode: a follow-up request to a non-sync peer cancelling the
+	// sync peer's deadline, and a failed follow-up send to the sync peer.
+	"8fc173f7bba5c713c3f4ceaafb8a912e6a8fc5d48377eff027b7",
+	"cfc8b87fa5b27e053a45c56ba6de82f71fa3bbd6",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.
