@@ -257,8 +257,13 @@ type dstRun struct {
 	// bans records every BanPeer call as "addr:reason".
 	bans []string
 
-	// askFaults holds one-shot actor ask faults.
+	// askFaults holds one-shot actor ask faults at blockmanager call
+	// sites.
 	askFaults map[headerSyncAskOp]headerSyncAskFault
+
+	// controllerFaults holds one-shot faults for asks the headersync
+	// controller makes itself.
+	controllerFaults map[headersync.AskOp]headersync.AskFault
 
 	// anchorLiar is set once a peer served a PoW-valid but dishonest
 	// chain, which can win anchor discovery.
@@ -350,7 +355,10 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 		faulted:   make(map[string]string),
 		punished:  make(map[string]string),
 		askFaults: make(map[headerSyncAskOp]headerSyncAskFault),
-		target:    dstChainHeight,
+		controllerFaults: make(
+			map[headersync.AskOp]headersync.AskFault,
+		),
+		target: dstChainHeight,
 	}
 	filters, err := newMemFilterHeaderStore(&chaincfg.SimNetParams)
 	require.NoError(t, err)
@@ -479,6 +487,7 @@ func (d *dstRun) build() {
 			MailboxSize:   headerSyncActorMailboxSize,
 			Dispatch:      querydispatch.New(dispatchActor),
 			DispatchActor: dispatchActor,
+			AskFault:      d.controllerFault,
 		},
 	)
 	d.recorder = &headersync.EventRecorder{}
@@ -517,7 +526,19 @@ func (d *dstRun) build() {
 	}(bm)
 }
 
-// askFault consumes a one-shot ask fault armed by the script.
+// controllerFault consumes a one-shot controller ask fault.
+func (d *dstRun) controllerFault(
+	op headersync.AskOp) headersync.AskFault {
+
+	fault, ok := d.controllerFaults[op]
+	if !ok {
+		return headersync.AskOK
+	}
+	delete(d.controllerFaults, op)
+	return fault
+}
+
+// askFault consumes a one-shot blockmanager ask fault armed by the script.
 func (d *dstRun) askFault(op headerSyncAskOp) headerSyncAskFault {
 	fault, ok := d.askFaults[op]
 	if !ok {
@@ -912,11 +933,24 @@ func (d *dstRun) step(value byte) {
 		label += " store=" + mode.String()
 
 	case op == 9 && d.enabled(dstFaultAsk):
-		askOp := headerSyncAskOp(arg % int(headerSyncAskOps))
-		fault := headerSyncAskFailBefore + headerSyncAskFault(
-			(arg/int(headerSyncAskOps))%2,
-		)
-		d.askFaults[askOp] = fault
+		// Faults land at a blockmanager call site or at an ask the
+		// controller makes itself, before or after it applies.
+		ops := int(headerSyncAskOps) + int(headersync.AskOps)
+		target, after := arg%ops, (arg/ops)%2 == 1
+		if target < int(headerSyncAskOps) {
+			fault := headerSyncAskFailBefore
+			if after {
+				fault = headerSyncAskFailAfter
+			}
+			d.askFaults[headerSyncAskOp(target)] = fault
+			break
+		}
+		fault := headersync.AskFailBefore
+		if after {
+			fault = headersync.AskFailAfter
+		}
+		op := headersync.AskOp(target - int(headerSyncAskOps))
+		d.controllerFaults[op] = fault
 
 	case (op == 10 || op == 11) && d.enabled(dstFaultByzantine):
 		kind := 1 + dstReplyKind(
@@ -1009,6 +1043,7 @@ func (d *dstRun) heal() {
 	d.t.Helper()
 	d.store.mode = dstStoreOK
 	clear(d.askFaults)
+	clear(d.controllerFaults)
 	clear(d.transport.blocked)
 	// Only empty slots get a fresh peer. Replacing a faulted peer that is
 	// still connected would run the done-peer path, which resets the
