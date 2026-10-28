@@ -750,8 +750,12 @@ func (d *dstRun) reply(slot int, kind dstReplyKind) bool {
 	if kind != dstReplyHonest {
 		d.fault(peer, kind.String())
 	}
+	// Any reply whose last header is not honest can win discovery with a
+	// boundary of its own.
 	switch kind {
-	case dstReplyFork, dstReplyBadTime, dstReplyBadBits:
+	case dstReplyFork, dstReplyBadTime, dstReplyBadBits,
+		dstReplyCorrupt:
+
 		d.anchorLiar = true
 	}
 	log.Debugf("dst reply slot=%d %d..%d %s", slot, request.start,
