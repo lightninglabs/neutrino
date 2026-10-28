@@ -1251,7 +1251,10 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// do anything from there.
 	if blockHeight == filtHeight {
 		log.Tracef("cfheaders already caught up to blocks")
-		return nil
+
+		// Caught up on disk is not caught up for waiters: publish
+		// any durable headers a failed write left unpublished.
+		return b.reconcileFilterHeaderTip(store)
 	}
 
 	log.Infof("Attempting to fetch set of un-checkpointed filters "+
@@ -1549,9 +1552,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		currentInterval = nextInterval
 	}
 
+	// With nothing left to fetch, make sure everything durable is
+	// published; a failed write may have landed. A read error here is
+	// returned so the caller retries.
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
-		return nil
+		return b.reconcileFilterHeaderTip(store)
 	}
 
 	log.Infof("Attempting to query for %v cfheader batches", batchesCount)
@@ -1883,11 +1889,34 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
 		"new_tip=%v", lastHeight, lastHash, lastHeader)
 
-	// Write the header batch.
+	// Write the header batch. A failed write may still have landed (a
+	// lost SQL commit acknowledgement), so publish whatever is durable
+	// before reporting the error. Otherwise the retry finds nothing left
+	// to fetch and the published tip and notifications never catch up.
 	err = store.WriteHeaders(headerBatch...)
 	if err != nil {
+		if rErr := b.reconcileFilterHeaderTip(store); rErr != nil {
+			log.Errorf("Unable to reconcile filter header tip: %v",
+				rErr)
+		}
 		return nil, 0, err
 	}
+
+	b.publishFilterHeaders(matchingBlockHeaders, startHeight)
+
+	return &lastHeader, lastHeight, nil
+}
+
+// publishFilterHeaders makes the last of headers, which start at startHeight,
+// the published filter header tip, wakes waiters, and sends a connected
+// notification for each header in order.
+func (b *blockManager) publishFilterHeaders(headers []wire.BlockHeader,
+	startHeight uint32) {
+
+	if len(headers) == 0 {
+		return
+	}
+	lastHeight := startHeight + uint32(len(headers)) - 1
 
 	// We'll also set the new header tip and notify any peers that the tip
 	// has changed as well. Unlike the set of notifications below, this is
@@ -1895,13 +1924,13 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 	// than know each new header that's been added to the tip.
 	b.newFilterHeadersMtx.Lock()
 	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = lastHash
+	b.filterHeaderTipHash = headers[len(headers)-1].BlockHash()
 	b.newFilterHeadersMtx.Unlock()
 	b.newFilterHeadersSignal.Broadcast()
 
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
-	for i, header := range matchingBlockHeaders {
+	for i, header := range headers {
 		headerHeight := startHeight + uint32(i)
 		b.fltrHeaderProgessLogger.LogBlockHeight(
 			header.Timestamp, int32(headerHeight),
@@ -1909,8 +1938,45 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 
 		b.onBlockConnected(header, headerHeight)
 	}
+}
 
-	return &lastHeader, lastHeight, nil
+// reconcileFilterHeaderTip publishes filter headers that are durable in store
+// but not yet published: the store is the source of truth. A filter header
+// write can report an error after it landed, and every later fetch then
+// starts from the store's tip, so without this the published tip, its waiters
+// and the connected notifications for that prefix would never catch up. It
+// runs only on error and nothing-to-do paths, never on a successful write.
+func (b *blockManager) reconcileFilterHeaderTip(
+	store headerfs.FilterHeaderStore) error {
+
+	_, storeHeight, err := store.ChainTip()
+	if err != nil {
+		return err
+	}
+	b.newFilterHeadersMtx.RLock()
+	published := b.filterHeaderTip
+	b.newFilterHeadersMtx.RUnlock()
+	if storeHeight <= published {
+		return nil
+	}
+
+	stop, err := b.cfg.BlockHeaders.FetchHeaderByHeight(storeHeight)
+	if err != nil {
+		return err
+	}
+	stopHash := stop.BlockHash()
+	headers, startHeight, err := b.cfg.BlockHeaders.FetchHeaderAncestors(
+		storeHeight-published-1, &stopHash,
+	)
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Publishing durable filter headers from height=%d to "+
+		"height=%d", startHeight, storeHeight)
+	b.publishFilterHeaders(headers, startHeight)
+
+	return nil
 }
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.

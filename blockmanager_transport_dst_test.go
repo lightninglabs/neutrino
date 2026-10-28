@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/headersync/querydispatch"
 	"github.com/lightninglabs/neutrino/querysync"
@@ -1709,6 +1710,161 @@ func TestSerialFollowUpUsesFullLocator(t *testing.T) {
 		require.Greater(t, len(locator), 1,
 			"sync peer got only another peer's batch hash")
 		require.Equal(t, genesis.BlockHash(), *locator[len(locator)-1])
+	})
+}
+
+// dstFilterType is the filter type the cfheader regressions fetch. It is a
+// variable so the fetch functions keep a real filter type parameter.
+var dstFilterType = wire.GCSFilterRegular
+
+// ackLostFilterStore lands the first filter header write and then reports an
+// error, like a SQL commit whose acknowledgement was lost. With failTip set,
+// the first tip read after that fails too.
+type ackLostFilterStore struct {
+	headerfs.FilterHeaderStore
+	lost    bool
+	failTip bool
+}
+
+// ChainTip fails once after the lost write when failTip is set.
+func (s *ackLostFilterStore) ChainTip() (*chainhash.Hash, uint32, error) {
+	if s.lost && s.failTip {
+		s.failTip = false
+		return nil, 0, errDSTWrite
+	}
+	return s.FilterHeaderStore.ChainTip()
+}
+
+// WriteHeaders writes the batch and fails the first write after it lands.
+func (s *ackLostFilterStore) WriteHeaders(
+	headers ...headerfs.FilterHeader) error {
+
+	if err := s.FilterHeaderStore.WriteHeaders(headers...); err != nil {
+		return err
+	}
+	if !s.lost {
+		s.lost = true
+		return errDSTWrite
+	}
+	return nil
+}
+
+// TestCFHeaderLostWriteAckPublishesDurablePrefix is the regression for a
+// filter header write that lands but reports an error. writeCFHeadersMsgs
+// returned before publishing the tip and the connected notifications, and the
+// retry found the store already at the checkpoint, planned nothing and
+// returned: the published tip stayed behind disk for good and the
+// notifications for that prefix were never sent. Both nothing-to-do paths,
+// checkpointed and uncheckpointed, must publish the durable prefix, including
+// when the publish attempted right after the failed write could not read the
+// store either.
+func TestCFHeaderLostWriteAckPublishesDurablePrefix(t *testing.T) {
+	for _, checkpointed := range []bool{true, false} {
+		for _, failTip := range []bool{false, true} {
+			name := fmt.Sprintf("checkpointed=%v/tip_read_fails=%v",
+				checkpointed, failTip)
+			t.Run(name, func(t *testing.T) {
+				runCFHeaderLostWriteAck(
+					t, checkpointed, failTip,
+				)
+			})
+		}
+	}
+}
+
+// runCFHeaderLostWriteAck writes one checkpoint interval of filter headers
+// through a store that loses the write's acknowledgement, then retries
+// through one of the fetch paths.
+func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
+	synctest.Test(t, func(t *testing.T) {
+		params := &chaincfg.SimNetParams
+		bm, blocks := setupDSTBlockManager(t)
+		filters, err := newMemFilterHeaderStore(params)
+		require.NoError(t, err)
+		store := &ackLostFilterStore{
+			FilterHeaderStore: filters, failTip: failTip,
+		}
+		bm.cfg.RegFilterHeaders = store
+
+		// One checkpoint interval of block headers, and a cfheaders
+		// message covering it.
+		prev, _, err := filters.ChainTip()
+		require.NoError(t, err)
+		msg := &wire.MsgCFHeaders{PrevFilterHeader: *prev}
+		parent := params.GenesisBlock.Header
+		var headers []headerfs.BlockHeader
+		for height := uint32(1); height <= wire.CFCheckptInterval; {
+			header := wire.BlockHeader{
+				PrevBlock: parent.BlockHash(),
+				Timestamp: parent.Timestamp,
+				Nonce:     height,
+			}
+			headers = append(headers, headerfs.BlockHeader{
+				BlockHeader: &header, Height: height,
+			})
+			filterHash := chainhash.DoubleHashH(
+				[]byte{byte(height), byte(height >> 8)},
+			)
+			msg.FilterHashes = append(msg.FilterHashes, &filterHash)
+			parent = header
+			height++
+		}
+		require.NoError(t, blocks.WriteHeaders(headers...))
+		msg.StopHash = parent.BlockHash()
+
+		// Collect every connected notification in order.
+		var connected []uint32
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case ntfn := <-bm.blockNtfnChan:
+					connected = append(connected,
+						ntfn.Height())
+				case <-bm.quit:
+					return
+				}
+			}
+		}()
+		t.Cleanup(func() {
+			close(bm.quit)
+			<-done
+		})
+
+		_, _, err = bm.writeCFHeadersMsgs(
+			[]*wire.MsgCFHeaders{msg}, store,
+		)
+		require.ErrorIs(t, err, errDSTWrite)
+		checkpoint, durable, err := filters.ChainTip()
+		require.NoError(t, err)
+		require.EqualValues(t, wire.CFCheckptInterval, durable)
+
+		// Retry through the path under test: nothing is left to
+		// fetch, so it must still publish what is on disk.
+		if checkpointed {
+			require.NoError(t, bm.getCheckpointedCFHeaders(
+				[]*chainhash.Hash{checkpoint}, store,
+				dstFilterType,
+			))
+		} else {
+			require.NoError(t, bm.getUncheckpointedCFHeaders(
+				store, dstFilterType,
+			))
+		}
+		synctest.Wait()
+
+		bm.newFilterHeadersMtx.RLock()
+		published := bm.filterHeaderTip
+		publishedHash := bm.filterHeaderTipHash
+		bm.newFilterHeadersMtx.RUnlock()
+		require.EqualValues(t, durable, published,
+			"retry left the durable prefix unpublished")
+		require.Equal(t, parent.BlockHash(), publishedHash)
+		require.Len(t, connected, int(wire.CFCheckptInterval))
+		for i, height := range connected {
+			require.EqualValues(t, i+1, height)
+		}
 	})
 }
 
