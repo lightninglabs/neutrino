@@ -49,6 +49,10 @@ const (
 	// to another candidate.
 	defaultHeaderSyncTimeout = 30 * time.Second
 
+	// headerSyncOpTimeout bounds one headersync actor ask from the block
+	// handler. Shutdown cancels it early.
+	headerSyncOpTimeout = 5 * time.Second
+
 	// maxHeaderSyncTimeout caps RTT-derived header sync timeouts. This
 	// keeps a very slow ping sample from creating another long global
 	// stall.
@@ -305,6 +309,11 @@ type blockManager struct { // nolint:maligned
 	wg   sync.WaitGroup
 	quit chan struct{}
 
+	// quitCtx is cancelled on shutdown, so pending headersync actor asks
+	// return at once instead of waiting out their deadline.
+	quitCtx    context.Context
+	quitCancel context.CancelFunc
+
 	headerList     headerlist.Chain
 	reorgList      headerlist.Chain
 	startHeader    *headerlist.Node
@@ -363,6 +372,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	if bm.headerSyncTimeout == 0 {
 		bm.headerSyncTimeout = defaultHeaderSyncTimeout
 	}
+	bm.quitCtx, bm.quitCancel = context.WithCancel(context.Background())
 
 	// Next we'll create the two signals that goroutines will use to wait
 	// on a particular header chain height before starting their normal
@@ -545,6 +555,7 @@ func (b *blockManager) Stop() error {
 
 	log.Infof("Block manager shutting down")
 	close(b.quit)
+	b.quitCancel()
 	b.wg.Wait()
 
 	// Stop every block handler timer. A callback that fires after quit
@@ -661,7 +672,7 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 func (b *blockManager) headerSyncOpCtx() (context.Context,
 	context.CancelFunc) {
 
-	return context.WithTimeout(context.Background(), 5*time.Second)
+	return context.WithTimeout(b.quitCtx, headerSyncOpTimeout)
 }
 
 func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {

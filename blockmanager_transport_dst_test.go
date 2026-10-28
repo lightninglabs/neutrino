@@ -3,6 +3,7 @@ package neutrino
 import (
 	"bytes"
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -1318,6 +1319,22 @@ func TestHeaderCommitRetryGeneration(t *testing.T) {
 		})
 		require.Same(t, replacement, d.bm.headerCommitRetryTimer,
 			"obsolete wakeup consumed a replacement timer")
+	})
+}
+
+// TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
+// actor asks. The op context used to derive from context.Background, so Stop
+// could wait out the full deadline for every ask still pending.
+func TestHeaderSyncOpCtxCancelledOnStop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
+		ctx, cancel := d.bm.headerSyncOpCtx()
+		defer cancel()
+		require.NoError(t, ctx.Err())
+
+		d.stopped = true
+		require.NoError(t, d.bm.Stop())
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
 	})
 }
 
