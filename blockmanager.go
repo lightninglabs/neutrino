@@ -883,9 +883,19 @@ func (b *blockManager) releaseOrphanedHeaderSyncRange(sp *ServerPeer) {
 	}
 
 	// Fail the lease under its current epoch, then plan the span again.
-	result, err := manager.CompleteRange(
-		ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
-	)
+	// Go through the peer actor when there is one: it still holds the
+	// range as active, and failing it only in the manager would leave the
+	// actor busy forever, answering every later request with nothing.
+	var result headersync.CompleteResult
+	if peerActor, ok := b.headerSync.Peer(peerID); ok {
+		result, err = peerActor.CompleteRange(
+			ctx, rng.ID, rng.LeaseEpoch, false, time.Now(),
+		)
+	} else {
+		result, err = manager.CompleteRange(
+			ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
+		)
+	}
 	if err != nil || !result.Accepted {
 		return
 	}

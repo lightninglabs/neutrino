@@ -1568,6 +1568,14 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 		peer, ok, err := manager.SnapshotPeer(t.Context(), peerID)
 		require.NoError(t, err)
 		require.True(t, ok)
+
+		// The released span must be startable again by the same
+		// peer: a peer actor left busy would never take new work.
+		d.bm.dispatchHeaderSyncWork(d.peers)
+		synctest.Wait()
+		require.True(t, session.RangeActive(peerID),
+			"recovered peer never started new work")
+
 		nextID := session.NextRangeID()
 		for id := headersync.RangeID(1); id < nextID; id++ {
 			rng, ok, err := manager.SnapshotRange(t.Context(), id)
