@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -1138,8 +1139,50 @@ var dstCorpus = [][]byte{
 	{1, 255, 255, 0, 13}, {3, 255, 255, 14, 14 + 16, 15},
 }
 
+// dstRegressionSeeds are swarm seeds that found bugs, in hex. Each one is
+// replayed by TestHeaderTransportDST so the fix stays fixed.
+var dstRegressionSeeds = []string{
+	// Ambiguous commit stall, B2 ban, torn write in frontier discovery.
+	"01ffff180f0f", "00ffff280f0f", "03ffff000c0f",
+	// F12 sticky rejection and F11 discovery livelock.
+	"3141300b3030", "f477f208201c96081121373b6cafd5cc2f",
+	"5479161c102b44973f909820a050fd3e8a5e6804bcf7de019326",
+	// Staged leaks after serial writes and below-tip staging.
+	"40732f9e5a32e68ede3bca6f1c12489bf5098721c492ae923a196503",
+	"ef395d762a43ac360572c13572e5441c614e0973842cdf34b27ccb7ac94e08",
+	// Overlap abort in anchor discovery.
+	"2f65cc0de558c6aa",
+	// Serial path cache and tip consistency.
+	"4a1de7e96a0717c39ab32fbf0d1277596fb8b7a39d", "c4eb4a04faf7f3c5",
+	"0e1b043680dbd3cd07e0df85e4b36d6ac7f867a544f1d718fd25941b",
+	// F1 asks that apply then fail, and the new-peer dispatch stall.
+	"7a6fa024c529a8e9abc0eb2e03b0b23f8c233fae580d45",
+	"ffbaceae8c60fb040cf599bcb6a96b9296187a1b84081bf190f7120a25c4d67ab2ca",
+	"4b68e926ec48d9f1cfc8d123e73b08af8001434a9e289865",
+	"66fa4297a69e52879dae65edd0af69832a418111e2d2e4a19d547675c48ccf4dbf",
+	"3c7b937a39a6f46f3021287c317877d3",
+	// Reorg notification deadlock, FSM left behind after a failed serial
+	// write, retry after a failed serial write, and the stale next
+	// checkpoint that let a fork past three checkpoints.
+	"d77bb606ee817e1a5b31f65e4e6905ccf1855ce8db5a79de89bd96fa12e126530d45",
+	"195120c67404a29dc585cb8637de9b98c333e983a88d92704c",
+	"ded4487caf9a7882f5425aeef6378aab1779baf98a6629f1bde352",
+	"6f53a47a3d22a22f18b5abbffa735e7e8c81bf47ada842d000dc95854477",
+}
+
+// dstSeeds returns the fixed corpus plus every regression seed.
+func dstSeeds(t testing.TB) [][]byte {
+	seeds := append([][]byte(nil), dstCorpus...)
+	for _, encoded := range dstRegressionSeeds {
+		seed, err := hex.DecodeString(encoded)
+		require.NoError(t, err)
+		seeds = append(seeds, seed)
+	}
+	return seeds
+}
+
 func TestHeaderTransportDST(t *testing.T) {
-	for _, seed := range dstCorpus {
+	for _, seed := range dstSeeds(t) {
 		t.Run(fmt.Sprintf("%x", seed), func(t *testing.T) {
 			first := runHeaderTransportDST(t, seed)
 			require.Equal(t, first, runHeaderTransportDST(t, seed),
@@ -1149,7 +1192,7 @@ func TestHeaderTransportDST(t *testing.T) {
 }
 
 func FuzzHeaderTransportDST(f *testing.F) {
-	for _, seed := range dstCorpus {
+	for _, seed := range dstSeeds(f) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, seed []byte) {
