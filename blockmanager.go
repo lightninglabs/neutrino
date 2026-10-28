@@ -5558,12 +5558,33 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		if b.nextCheckpoint != nil {
 			nextHash = *b.nextCheckpoint.Hash
 		}
+
+		// Ask the sync peer, not whoever sent this batch. There is a
+		// single serial deadline and it only acts for the sync peer,
+		// so arming it for another peer cancelled the sync peer's
+		// deadline and left that one with nothing in flight.
+		target := b.SyncPeer()
+		if target == nil {
+			target = hmsg.peer
+		}
 		err := b.requestHeaders(
-			hmsg.peer, locator, &nextHash, uint32(finalHeight),
+			target, locator, &nextHash, uint32(finalHeight),
 		)
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
-				"peer %s: %s", hmsg.peer.Addr(), err)
+				"peer %s: %s", target.Addr(), err)
+
+			// Nothing is in flight now, so move on to another
+			// sync peer as startSync does when its send fails,
+			// rather than wait for a deadline that was never
+			// armed.
+			removeSyncCandidate(peers, target)
+			b.syncPeerMutex.Lock()
+			if b.syncPeer == target {
+				b.syncPeer = nil
+			}
+			b.syncPeerMutex.Unlock()
+			b.startSync(peers)
 		}
 	}
 }
