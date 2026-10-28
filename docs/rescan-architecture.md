@@ -257,6 +257,11 @@ header data and the block cache before dispatch. Network results are validated
 before use. Filter persistence is controlled by the chain service's own
 configuration, independent of the actor's callback delivery.
 
+`CancelQuery` is honored by `GetBlock` and `GetCFilter`; other consumers of
+`QueryOption` ignore it. If cancellation races a completed network request,
+the caller can receive `context.Canceled` even when a valid response is
+available. The caller receives no result in that case.
+
 For the rest of the chain service and its stores, see
 [`sync-architecture.md`](sync-architecture.md).
 
