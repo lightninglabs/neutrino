@@ -172,6 +172,14 @@ func (v *dstInvariants) memoryMatchesDisk(event string) {
 	if bm.headerTipHash != honest[bm.headerTip].BlockHash() {
 		v.fail(event, "visible tip hash off the honest chain")
 	}
+	// The next checkpoint is always above the visible tip, or a serial
+	// batch past it would never be checked against it.
+	if next := bm.nextCheckpoint; next != nil &&
+		uint32(next.Height) <= bm.headerTip {
+
+		v.fail(event, "next checkpoint %d at or below visible tip %d",
+			next.Height, bm.headerTip)
+	}
 	if bm.headerTip < v.lastTip && bm.headerCommitRetryTimer == nil {
 		v.fail(event, "visible tip %d trails durable tip %d with no "+
 			"commit retry armed", bm.headerTip, v.lastTip)

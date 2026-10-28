@@ -3602,18 +3602,9 @@ func (b *blockManager) resetHeaderListToTip() error {
 		Height: int32(height),
 	})
 
-	// The next checkpoint must follow the durable tip too. A stale one at
-	// or below the tip is never matched again, which silently turns off
-	// checkpoint verification for every later serial batch.
-	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
-
 	// The visible tip must describe the same header as the validation
 	// cache, or a later write can start from one and report the other.
-	b.newHeadersMtx.Lock()
-	b.headerTip = height
-	b.headerTipHash = header.BlockHash()
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
+	b.publishHeaderTip(height, header.BlockHash())
 
 	// A failed serial write may still have landed. Planning stops
 	// advancing the FSM once the tip reaches the best height, so move it
@@ -4788,14 +4779,24 @@ func (b *blockManager) reconcileHeaderTipWithStore() error {
 	log.Infof("headersync reconciled visible tip height=%d -> %d with "+
 		"durable store", back.Height, height)
 
-	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
-	b.newHeadersMtx.Lock()
-	b.headerTip = height
-	b.headerTipHash = prev.Header.BlockHash()
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
+	b.publishHeaderTip(height, prev.Header.BlockHash())
 
 	return nil
+}
+
+// publishHeaderTip makes height and hash the visible header tip, recomputes
+// the next checkpoint from it, and wakes everything waiting on new headers.
+// Every writer of the visible tip goes through here, so the next checkpoint
+// can never be left at or below the tip: a stale one is never matched again,
+// which silently turns off checkpoint verification for later serial batches.
+func (b *blockManager) publishHeaderTip(height uint32, hash chainhash.Hash) {
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+
+	b.newHeadersMtx.Lock()
+	b.headerTip = height
+	b.headerTipHash = hash
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
 }
 
 // trimDurableHeaderSyncRange drops the prefix of a ready range that is already
@@ -5145,13 +5146,7 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(
 		}
 	}
 
-	b.nextCheckpoint = prepared.NextCheckpoint
-
-	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(prepared.FinalHeight)
-	b.headerTipHash = prepared.FinalHash
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
+	b.publishHeaderTip(uint32(prepared.FinalHeight), prepared.FinalHash)
 
 	log.Debugf("headersync range_commit_batch ranges=%d headers=%d "+
 		"tip_height=%d tip_hash=%s write_elapsed=%v", len(ranges),
@@ -5202,7 +5197,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
-	receivedCheckpoint := false
 	var (
 		finalHash   *chainhash.Hash
 		finalHeight int32
@@ -5475,7 +5469,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 			nodeHash := node.Header.BlockHash()
 			if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
-				receivedCheckpoint = true
 				log.Infof("Verified downloaded block "+
 					"header against checkpoint at height "+
 					"%d/hash %s", node.Height, nodeHash)
@@ -5567,16 +5560,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// more. A failed follow-up request used to return first, leaving the
 	// visible tip behind disk and filter header sync waiting on a signal
 	// that never came.
-	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(finalHeight)
-	b.headerTipHash = *finalHash
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
-
-	// When this header is a checkpoint, find the next checkpoint.
-	if receivedCheckpoint {
-		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
-	}
+	b.publishHeaderTip(uint32(finalHeight), *finalHash)
 
 	// The batch made progress, so it answered the sync peer's request.
 	// A follow-up request below re-arms the deadline.
