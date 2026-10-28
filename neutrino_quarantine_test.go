@@ -29,9 +29,10 @@ func TestQuarantinePeerDoesNotBlock(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, "127.0.0.1:8333", quarantine.addr)
 
-		// A pending handoff exits on shutdown.
+		// A pending handoff exits on shutdown, and Stop's wait group
+		// accounts for it.
 		s.QuarantinePeer("127.0.0.2:8333", time.Minute)
 		close(s.quit)
-		synctest.Wait()
+		s.wg.Wait()
 	})
 }

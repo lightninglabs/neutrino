@@ -1203,8 +1203,14 @@ func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
 	// handing a new peer to the block handler's full peerChan: a
 	// synchronous send deadlocks both until shutdown. Quarantines keep the
 	// latest expiry, so their arrival order does not matter.
+	//
+	// Callers (the block and work managers) stop before Stop waits on
+	// s.wg, so the Add below is ordered before that Wait.
 	msg := quarantinePeerMsg{addr: addr, until: until}
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
+
 		select {
 		case s.query <- msg:
 		case <-s.quit:
