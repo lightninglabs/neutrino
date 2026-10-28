@@ -172,8 +172,9 @@ tracking table, so it happens at most once:
 
 * A fresh install has no legacy state; version 2 is recorded as a no-op.
 * If the import fails or the process dies part way (even a hard kill, which
-  leaves version 2 marked dirty), version 2 is not recorded. The next start
-  wipes the partial SQL rows and imports again from the untouched legacy state.
+  leaves version 2 marked dirty), version 2 is not recorded and the next start
+  imports again from the untouched legacy state. Partial SQL rows are removed
+  as soon as the import fails, or on the next start after a kill.
 * Only after the import was recorded are `block_headers.bin` and
   `reg_filter_headers.bin` renamed to `*.bak`. The `walletdb` is left in
   place; delete it, and the `*.bak` files, once you are happy with the SQL

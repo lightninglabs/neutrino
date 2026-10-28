@@ -408,6 +408,23 @@ func (p *legacyPlan) reconcileWithIndex(db walletdb.DB, blockBin,
 func (i *legacyImporter) run(ctx context.Context,
 	baseDB *sqldbv2.BaseDB) error {
 
+	err := i.doRun(ctx, baseDB)
+	if err != nil {
+		// Batches commit as they go, so a failed import leaves partial
+		// rows behind. Wipe them again, so that a failure and a kill
+		// (which the next start cleans up in resetDirtyLegacyImport)
+		// end in the same state, and a later start that skips the
+		// import finds no debris.
+		_ = truncateTables(ctx, baseDB)
+	}
+
+	return err
+}
+
+// doRun is run without the cleanup after a failure.
+func (i *legacyImporter) doRun(ctx context.Context,
+	baseDB *sqldbv2.BaseDB) error {
+
 	src := i.src
 	blockBin := src.blockHeadersPath()
 	filterBin := src.filterHeadersPath()
@@ -862,7 +879,9 @@ func NewBackendWithLegacy(dataDir string, cfg *Config,
 	imp.finalize()
 
 	// Files that are still around now were not imported by this start.
-	if LegacyArtifactsExist(&resolved) && explicit == nil {
+	if explicit == nil && (fileExists(resolved.blockHeadersPath()) ||
+		fileExists(resolved.filterHeadersPath())) {
+
 		log.Warnf("Legacy neutrino files in %s were not imported "+
 			"because the SQL backend had already completed its "+
 			"legacy import", dataDir)

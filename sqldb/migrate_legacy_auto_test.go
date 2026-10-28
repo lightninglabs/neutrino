@@ -568,9 +568,6 @@ func TestDirtyLegacyImportIsRetried(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	cfg := configFor(t, dataDir)
-	if cfg.Backend != sqldb.BackendSqlite {
-		t.Skip("sqlite only")
-	}
 
 	// Run a full import, then put the tracker where a kill during the
 	// import would have left it.
@@ -578,12 +575,16 @@ func TestDirtyLegacyImportIsRetried(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend.Close())
 
-	raw, err := sql.Open(
-		"sqlite", filepath.Join(dataDir, sqldb.DefaultSqliteFilename),
-	)
+	driver, dsn, dirty := "sqlite", filepath.Join(
+		dataDir, sqldb.DefaultSqliteFilename,
+	), "1"
+	if cfg.Backend == sqldb.BackendPostgres {
+		driver, dsn, dirty = "pgx", cfg.Postgres.Dsn, "true"
+	}
+	raw, err := sql.Open(driver, dsn)
 	require.NoError(t, err)
 	_, err = raw.Exec("UPDATE neutrino_migrations SET version = 2, " +
-		"dirty = 1")
+		"dirty = " + dirty)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 
@@ -601,4 +602,34 @@ func TestDirtyLegacyImportIsRetried(t *testing.T) {
 	backend, err = openAuto(t, dataDir, params, false, nil)
 	require.NoError(t, err)
 	requireTips(t, backend, params, numBlocks, numBlocks)
+}
+
+// TestFailedImportLeavesNoDebris verifies that an import that fails after some
+// batches were committed leaves empty tables behind, so that a later start
+// that skips the import comes up with a clean genesis-only store.
+func TestFailedImportLeavesNoDebris(t *testing.T) {
+	t.Parallel()
+
+	const (
+		numHeaders = 70_000
+		badHeight  = 50_000
+	)
+	params := &chaincfg.MainNetParams
+
+	dataDir := t.TempDir()
+	writeSyntheticLegacy(t, dataDir, params, numHeaders, 10)
+
+	path := filepath.Join(dataDir, sqldb.DefaultBlockHeadersFilename)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	raw[badHeight*80+10] ^= 1
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+
+	explicit := &sqldb.LegacyDataSource{BatchSize: 20_000}
+	_, err = openAuto(t, dataDir, params, false, explicit)
+	require.ErrorContains(t, err, "does not connect")
+
+	backend, err := openAuto(t, dataDir, params, true, nil)
+	require.NoError(t, err)
+	requireTips(t, backend, params, 0, 0)
 }

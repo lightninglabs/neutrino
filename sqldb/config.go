@@ -109,12 +109,10 @@ func (c *Config) sqliteConfig() *sqldbv2.SqliteConfig {
 	}
 
 	cfg := *c.Sqlite
-	if cfg.MaxConnections == 0 {
-		cfg.MaxConnections = 1
-	}
-	if cfg.MaxIdleConnections == 0 {
-		cfg.MaxIdleConnections = 1
-	}
+	// The chain pragmas, fullfsync=false in particular, are applied to a
+	// single pooled connection, so the pool must not grow.
+	cfg.MaxConnections = 1
+	cfg.MaxIdleConnections = 1
 	cfg.PragmaOptions = append(
 		append([]string(nil), c.Sqlite.PragmaOptions...),
 		defaultSqliteChainPragmas()...,
