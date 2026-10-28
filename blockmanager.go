@@ -806,7 +806,7 @@ func (b *blockManager) scheduleHeaderCooldownWakeup() {
 	if b.headerCooldownTimer != nil {
 		return
 	}
-	until, ok := b.headerSync.Session().NextCooldownExpiry()
+	until, ok := b.headerSync.Session().NextCooldownExpiry(time.Now())
 	if !ok {
 		return
 	}
