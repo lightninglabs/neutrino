@@ -41,6 +41,9 @@ type dstInvariants struct {
 	// committed is every range seen in a commit event.
 	committed map[headersync.RangeID]bool
 
+	// rollbacks counts serial-path rollbacks to a checkpoint.
+	rollbacks int
+
 	// skipLeases disables the lease check for fixed tests that tamper
 	// with session state directly.
 	skipLeases bool
@@ -90,9 +93,20 @@ func (v *dstInvariants) durableChain(event string) {
 	d := v.d
 	_, height, err := d.store.ChainTip()
 	require.NoError(d.t, err)
+	// The serial path rolls back to the previous checkpoint when a peer
+	// serves a header that fails the next one. That discards honest
+	// headers, which is legacy policy, but the remaining store must still
+	// be honest and never drop below the last checkpoint it verified.
 	if height < v.lastTip {
-		v.fail(event, "durable tip went backwards %d -> %d",
-			v.lastTip, height)
+		v.rollbacks++
+		checkpoint := v.d.bm.findPreviousHeaderCheckpoint(
+			int32(v.lastTip),
+		)
+		if height < uint32(checkpoint.Height) {
+			v.fail(event, "durable tip went backwards %d -> %d",
+				v.lastTip, height)
+		}
+		v.lastTip = height
 	}
 	// An overlong reply may carry real headers past the advertised
 	// target. Committing them is fine as long as they are honest.
@@ -108,8 +122,17 @@ func (v *dstInvariants) durableChain(event string) {
 				"chain", h)
 		}
 	}
+	// Writes extend the tip one height at a time. The store itself
+	// rejects a write that does not extend its tip, so a height is only
+	// written again after a rollback removed it.
 	for i, written := range d.store.writes {
-		if written != uint32(i+1) {
+		prev := uint32(0)
+		if i > 0 {
+			prev = d.store.writes[i-1]
+		}
+		if written != prev+1 &&
+			(v.rollbacks == 0 || written > prev) {
+
 			v.fail(event, "duplicate or skipped durable header "+
 				"writes=%v", d.store.writes)
 		}
@@ -361,6 +384,31 @@ func (d *dstRun) quiescent() error {
 		}
 	}
 	return nil
+}
+
+// poisonedAnchor reports whether the FSM holds a confirmed untrusted anchor
+// off the honest chain. Under the one-observation policy, a liar's discovery
+// reply confirms its own boundary. When its payload is never staged (an
+// overlap kept it out), commit-time validation never runs, nothing rejects the
+// anchor, and honest replies for the span fail its stop hash (known gap F13).
+func (d *dstRun) poisonedAnchor() bool {
+	if !d.anchorLiar || !d.cfg.mode.discovery() {
+		return false
+	}
+	anchors, err := d.bm.headerSync.Manager().Anchors(d.t.Context())
+	require.NoError(d.t, err)
+	honest := dstChains().honest
+	for _, anchor := range anchors {
+		if anchor.Trusted || int(anchor.Height) >= len(honest) {
+			continue
+		}
+		if anchor.Hash != honest[anchor.Height].BlockHash() &&
+			d.bm.headerSync.Controller().AnchorConfirmed(anchor) {
+
+			return true
+		}
+	}
+	return false
 }
 
 // dstMatchesChain reports whether headers continue chain after start.

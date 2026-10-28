@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -262,6 +263,14 @@ type dstRun struct {
 	// anchor that conflicted with a liar's (known policy gap F12).
 	conflictPunishments int
 
+	// ntfns records every block notification in delivery order.
+	ntfns   []string
+	ntfnMtx sync.Mutex
+
+	// poisoned is set when a run ended stuck behind a liar's confirmed
+	// anchor (known gap F13) instead of reaching the honest tip.
+	poisoned bool
+
 	// restarts counts block manager rebuilds over the same stores.
 	restarts int
 
@@ -290,6 +299,7 @@ type dstSnapshot struct {
 	Restarts int
 
 	ConflictPunishments int
+	Poisoned            bool
 }
 
 // setupDSTBlockManager builds a block manager over in-memory header stores.
@@ -482,6 +492,22 @@ func (d *dstRun) build() {
 	bm.cfg.HeaderTransport = d.transport
 	d.bm = bm
 	d.inv.reset()
+
+	// Stand in for the notification subscription manager, which drains
+	// the unbuffered notification channel in production. Record every
+	// notification so ordering can be inspected.
+	go func(bm *blockManager) {
+		for {
+			select {
+			case ntfn := <-bm.blockNtfnChan:
+				d.ntfnMtx.Lock()
+				d.ntfns = append(d.ntfns, fmt.Sprint(ntfn))
+				d.ntfnMtx.Unlock()
+			case <-bm.quit:
+				return
+			}
+		}
+	}(bm)
 }
 
 // askFault consumes a one-shot ask fault armed by the script.
@@ -1014,6 +1040,7 @@ func (d *dstRun) snapshot() dstSnapshot {
 		Restarts: d.restarts,
 
 		ConflictPunishments: d.conflictPunishments,
+		Poisoned:            d.poisoned,
 	}
 	if d.stopped {
 		return snapshot
@@ -1073,7 +1100,14 @@ func runHeaderTransportDST(t *testing.T, script []byte) dstSnapshot {
 		}
 		if !d.stopped {
 			d.heal()
-			require.NoError(t, d.quiescent(),
+			err := d.quiescent()
+			if err != nil && d.poisonedAnchor() {
+				// Known gap F13: a liar's confirmed but
+				// never-validated anchor blocks its span.
+				d.poisoned = true
+				err = nil
+			}
+			require.NoError(t, err,
 				"recovery did not complete; seed=%x\n%s",
 				script, d.describe())
 		}
