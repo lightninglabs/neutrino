@@ -563,7 +563,8 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 			var err error
 			rng, staged, err = c.manager.StageDiscoveredRange(
 				ctx, c.session.NextRangeID(), peerID,
-				request.StartHeight, response.Height, time.Now(),
+				request.StartHeight, response.Height,
+				time.Now(),
 			)
 			return err
 		})
