@@ -631,6 +631,15 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 		}
 	}
 
+	// While parallel header sync is running, startSync returns at once,
+	// so hand the new peer work directly. Otherwise a sync whose other
+	// peers are all blocked, with no request or timer outstanding, never
+	// schedules anything again: a new peer is the event that unsticks it.
+	if b.SyncPeer() != nil && !b.allowSerialHeaderFallback() {
+		b.continueHeaderSync(peers)
+		return
+	}
+
 	// Start syncing by choosing the best candidate if needed.
 	b.startSync(peers)
 }
