@@ -38,7 +38,7 @@ const (
 	dstMaxSteps = 32
 
 	// dstHealRounds bounds the recovery phase of one run.
-	dstHealRounds = 48
+	dstHealRounds = 64
 
 	// dstRangeCap is the scaled-down getheaders cap used by discovery
 	// modes, so a 12-header chain needs several spans. Simulated peers
@@ -644,6 +644,8 @@ func messageKey(message any) string {
 		return fmt.Sprintf("timeout:%020d", msg.requestID)
 	case *headerSyncCommitRetryMsg:
 		return fmt.Sprintf("retry:%020d", msg.generation)
+	case *headerSyncCooldownMsg:
+		return fmt.Sprintf("cooldown:%020d", msg.generation)
 	case *headerSyncBootstrapMsg:
 		return "bootstrap"
 	case *headersMsg:
@@ -1008,12 +1010,17 @@ func (d *dstRun) heal() {
 	d.store.mode = dstStoreOK
 	clear(d.askFaults)
 	clear(d.transport.blocked)
+	// Only empty slots get a fresh peer. Replacing a faulted peer that is
+	// still connected would run the done-peer path, which resets the
+	// header state and restarts sync, and would hide a stall the faulted
+	// peer left behind.
 	for slot, peer := range d.current {
-		if peer == nil || d.faulted[peer.Addr()] != "" {
+		if peer == nil {
 			d.connect(slot)
 		}
 	}
 	d.pump()
+	idle := 0
 	for rounds := 0; rounds < dstHealRounds; rounds++ {
 		if d.quiescent() == nil {
 			break
@@ -1033,8 +1040,22 @@ func (d *dstRun) heal() {
 				progressed = true
 			}
 		}
-		if !progressed {
+		// Let virtual time move every round, so production timers
+		// such as the commit retry still fire while replies keep
+		// arriving. Half a request timeout lets peers answer a request
+		// sent this round before its deadline.
+		// When nothing moves for a few rounds, wait out a peer
+		// cooldown, which production recovers with its own wakeup.
+		switch {
+		case progressed:
+			idle = 0
+			time.Sleep(dstRequestTimeout / 2)
+		case idle < 3:
+			idle++
 			time.Sleep(dstStall)
+		default:
+			idle = 0
+			time.Sleep(defaultHeaderPeerCooldown)
 		}
 		d.pump()
 	}
@@ -1250,6 +1271,9 @@ var dstRegressionSeeds = []string{
 	"81cbc61289d3bc6f773c1341504a585a1a1d6e1055bcad",
 	"3ff9cd239f8f0c0caa711003bea0fe34e8ce7bd3aa3919ced732cf38cef0",
 	"17d1c2321aed3719ba5dda26f1eb1020cf00ffa933c8e3f193c7ba",
+	// A blocked peer whose cooldown expired with nothing to wake it.
+	"594a287c17b7ef352630f8133cea52e3f222a8451e7a1c1575c1b2",
+	"7f594edd1aa359a3df8e520794782a7397b87325138fd79aeef7cdc3f5384d",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.
@@ -1400,6 +1424,33 @@ func TestHeaderCommitRetryGeneration(t *testing.T) {
 		})
 		require.Same(t, replacement, d.bm.headerCommitRetryTimer,
 			"obsolete wakeup consumed a replacement timer")
+	})
+}
+
+// TestHeaderCooldownWakeup checks that a blocked header peer is recovered when
+// its cooldown expires, with no other event. Recovery used to happen only
+// while dispatching, so a sync waiting on that peer, such as for a second
+// anchor observation, never dispatched again.
+func TestHeaderCooldownWakeup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Finish sync first, so no request can time out meanwhile.
+		d := newDSTRun(t, dstConfig{mode: dstModeFrontier2})
+		d.heal()
+		require.NoError(t, d.quiescent())
+		peer := d.current[1]
+		d.fault(peer, "blocked")
+		d.bm.updateHeaderSyncPeerState(peer, headersync.PeerBlocked)
+		require.NotNil(t, d.bm.headerCooldownTimer)
+
+		time.Sleep(defaultHeaderPeerCooldown)
+		d.pump()
+		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
+			t.Context(), peer.Addr(),
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NotEqual(t, headersync.PeerBlocked, snapshot.State,
+			"cooldown expired without recovering the peer")
 	})
 }
 
