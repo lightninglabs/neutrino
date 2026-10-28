@@ -457,16 +457,7 @@ func (m *ManagerActor) Receive(ctx context.Context,
 		}
 	}
 
-	if event, ok := traceEventForManagerMessage(m.fsm, msg, resp); ok {
-		m.trace.Record(event)
-	}
-	if m.events != nil {
-		if event, ok := schedulerEventForManagerMessage(
-			m.fsm, msg, resp,
-		); ok {
-			m.events.RecordSchedulerEvent(event)
-		}
-	}
+	recordManagerMessage(m.fsm, m.trace, m.events, msg, resp)
 
 	return fn.Ok(resp)
 }
