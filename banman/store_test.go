@@ -247,3 +247,64 @@ func testBanStoreTorV3Key(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, status.Banned)
 }
+
+// TestIPv4OneBanCoversEverySpelling is the regression test for the reason the
+// record width had to change, and it goes through the store rather than the
+// codec so it asserts what a caller actually observes.
+//
+// Before ban keys, a ban recorded through the 16-byte-mask spelling of a
+// v4 address was invisible to Status through the plain spelling of the same
+// peer: the two spellings were two separate records. Each record round-tripped
+// on its own, which is why this went unnoticed, but a peer could step out of a
+// ban by reconnecting under the other spelling. One peer must have one record.
+func TestIPv4OneBanCoversEverySpelling(t *testing.T) {
+	t.Parallel()
+
+	for name, makeStore := range banStoreFactories() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store := makeStore(t)
+
+			// Ban through the wide-mask spelling, which is what
+			// net.ParseCIDR hands out for a v4-mapped address.
+			_, mapped, err := net.ParseCIDR("::ffff:1.2.3.4/128")
+			require.NoError(t, err)
+
+			wide, err := banman.ParseIPNet(
+				mapped.IP.String(), mapped.Mask,
+			)
+			require.NoError(t, err)
+			require.NoError(t, store.BanIPNet(
+				wide, banman.NoCompactFilters, time.Hour,
+			))
+
+			// Every other spelling of the same peer must observe
+			// that ban.
+			for _, addr := range []string{
+				"1.2.3.4:8333",
+				"1.2.3.4",
+				"[::ffff:1.2.3.4]:8333",
+				"::ffff:1.2.3.4",
+			} {
+				plain, err := banman.ParseIPNet(addr, nil)
+				require.NoError(t, err)
+
+				status, err := store.Status(plain)
+				require.NoError(t, err)
+				require.True(t, status.Banned,
+					"ban must cover %v", addr)
+			}
+
+			// And clearing it must clear it for all of them.
+			require.NoError(t, store.UnbanIPNet(wide))
+
+			plain, err := banman.ParseIPNet("1.2.3.4:8333", nil)
+			require.NoError(t, err)
+
+			status, err := store.Status(plain)
+			require.NoError(t, err)
+			require.False(t, status.Banned)
+		})
+	}
+}
