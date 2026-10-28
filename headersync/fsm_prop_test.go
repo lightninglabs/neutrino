@@ -54,8 +54,9 @@ func newFSMModel(t *rapid.T) *fsmModel {
 		"outstanding")
 	fsm := NewHeaderSyncFSM(0, propHash(0), cfg)
 	fsm.SeedCommittedAnchor()
-	for height := uint32(propSpan); height <= propHeight; height += propSpan {
+	for height := uint32(propSpan); height <= propHeight; {
 		fsm.AddOrConfirmAnchor(height, propHash(height), true)
+		height += propSpan
 	}
 
 	return &fsmModel{

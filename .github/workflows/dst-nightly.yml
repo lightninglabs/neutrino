@@ -99,3 +99,27 @@ jobs:
           echo "generator seed: $seed"
           go test . -run '^TestHeaderTransportDSTSwarm$' -timeout 40m \
             -dst.swarm="$SWARM" -dst.seed="$seed"
+
+  ########################
+  # P model checking
+  ########################
+  p-models:
+    name: P model checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+
+      - name: setup dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: install P
+        run: |
+          dotnet tool install --global P --version 3.0.4
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: check
+        run: SCHEDULES=3000 MAX_STEPS=1000 TIMEOUT=900 ./p-models/scripts/check.sh

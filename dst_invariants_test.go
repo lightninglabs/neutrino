@@ -453,14 +453,6 @@ func (d *dstRun) slotOfAddr(addr string) int {
 	return -1
 }
 
-// peerByAddr returns the connected peer with addr, or nil.
-func (d *dstRun) peerByAddr(addr string) *ServerPeer {
-	if slot := d.slotOfAddr(addr); slot >= 0 {
-		return d.current[slot]
-	}
-	return nil
-}
-
 // dstReplay is a hex seed for TestHeaderTransportDSTReplay.
 var dstReplay = flag.String("dst.replay", "",
 	"hex seed replayed by TestHeaderTransportDSTReplay")

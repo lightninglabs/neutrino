@@ -241,8 +241,7 @@ func TestHeaderSyncDSTExhaustive(t *testing.T) {
 	)
 	for flags := byte(0); flags < flagCases; flags++ {
 		for latency := byte(0); latency < latencyCases; latency++ {
-			for deadline := byte(0); deadline < deadlineCases; deadline++ {
-
+			for deadline := range byte(deadlineCases) {
 				script := []byte{flags, latency, deadline}
 				first := runHeaderDST(t, script)
 				if latency == deadline {

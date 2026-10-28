@@ -100,7 +100,8 @@ func dstExtend(parent *wire.BlockHeader, count int,
 
 	headers := make([]*wire.BlockHeader, 0, count)
 	for i := 0; i < count; i++ {
-		parent = dstMine(parent, parent.Timestamp.Add(step), parent.Bits)
+		timestamp := parent.Timestamp.Add(step)
+		parent = dstMine(parent, timestamp, parent.Bits)
 		headers = append(headers, parent)
 	}
 	return headers
