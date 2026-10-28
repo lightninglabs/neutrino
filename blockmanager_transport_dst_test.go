@@ -1550,6 +1550,65 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 	})
 }
 
+// flakyTipStore fails one ChainTip call and counts calls.
+type flakyTipStore struct {
+	*memBlockHeaderStore
+	failAt int
+	calls  int
+}
+
+// ChainTip fails the failAt-th call.
+func (s *flakyTipStore) ChainTip() (*wire.BlockHeader, uint32, error) {
+	s.calls++
+	if s.calls == s.failAt {
+		return nil, 0, errDSTWrite
+	}
+	return s.memBlockHeaderStore.ChainTip()
+}
+
+// TestCFHandlerRetriesTipError checks that a failed block header tip read
+// does not end filter header sync. cfHandler used to log it as critical and
+// return, which stopped filter sync until restart; with the SQL backends that
+// read can fail transiently.
+func TestCFHandlerRetriesTipError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		bm, store := setupDSTBlockManager(t)
+		genesis := chaincfg.SimNetParams.GenesisBlock.Header
+		bm.cfg.TimeSource = dstMedianTime{
+			MedianTimeSource: bm.cfg.TimeSource,
+			offset:           time.Until(genesis.Timestamp),
+		}
+		// The first read is the synced check in the wait loop; fail
+		// the second, cfHandler's own tip read.
+		flaky := &flakyTipStore{memBlockHeaderStore: store, failAt: 2}
+		bm.cfg.BlockHeaders = flaky
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			bm.cfHandler()
+		}()
+		synctest.Wait()
+		require.GreaterOrEqual(t, flaky.calls, 2, "tip was never read")
+		calls := flaky.calls
+
+		select {
+		case <-done:
+			t.Fatal("cfHandler exited after a tip read error")
+		default:
+		}
+		time.Sleep(retryTimeout)
+		synctest.Wait()
+		require.Greater(t, flaky.calls, calls,
+			"cfHandler never read the tip again")
+
+		close(bm.quit)
+		bm.newHeadersSignal.Broadcast()
+		bm.newFilterHeadersSignal.Broadcast()
+		<-done
+	})
+}
+
 // TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
 // actor asks. The op context used to derive from context.Background, so Stop
 // could wait out the full deadline for every ask still pending.

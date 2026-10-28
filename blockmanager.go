@@ -1010,10 +1010,19 @@ waitForHeaders:
 	// Now that the block headers are finished or ahead of the filter
 	// headers, we'll grab the current chain tip so we can base our filter
 	// header sync off of that.
+	// A store read can fail transiently with the SQL backends. Retry
+	// rather than end filter header sync until restart.
 	lastHeader, lastHeight, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		log.Critical(err)
-		return
+		log.Errorf("Unable to read block header tip for cfheaders "+
+			"sync, retrying: %v", err)
+
+		select {
+		case <-time.After(retryTimeout):
+		case <-b.quit:
+			return
+		}
+		goto waitForHeaders
 	}
 	lastHash := lastHeader.BlockHash()
 
