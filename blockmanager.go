@@ -2880,15 +2880,14 @@ func (b *blockManager) advanceHeaderSyncTip(height uint32,
 	}
 }
 
-// handleNoProgressReply settles a serial reply that added no headers: empty,
-// or only headers already in the store. From a peer that is not the sync peer
-// it means nothing. From the sync peer it answers the request: if the peer
-// advertises nothing past our tip, sync is done and the deadline is disarmed.
-// If it advertises more but sent none, it cannot serve us from our locator.
-// It is not punished, since it did answer, but it stops being the sync peer
-// and a candidate, so startSync moves on rather than asking it again forever.
-// Keeping it while disarming the deadline would leave sync with no request
-// and no timer until the peer disconnected.
+// handleNoProgressReply settles an empty serial reply. From a peer that is
+// not the sync peer it means nothing. From the sync peer it answers the
+// request: if the peer advertises nothing past our tip, sync is done and the
+// deadline is disarmed. If it advertises more but sent none, it cannot serve
+// us from our locator. It is not punished, since it did answer, but it stops
+// being the sync peer and a candidate, so startSync moves on rather than asking
+// it again forever. Keeping it while disarming the deadline would leave sync
+// with no request and no timer until the peer disconnected.
 func (b *blockManager) handleNoProgressReply(peers *list.List,
 	peer *ServerPeer) {
 
@@ -5500,9 +5499,9 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 	// Late responses may contain only headers already in the store. They
 	// must not publish a new tip or start a legacy request from an old
-	// hash.
+	// hash. Such a reply usually answers an older request, so it says
+	// nothing about the outstanding one: leave its deadline armed.
 	if finalHash == nil {
-		b.handleNoProgressReply(peers, hmsg.peer)
 		return
 	}
 
