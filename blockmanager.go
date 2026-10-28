@@ -1027,10 +1027,22 @@ waitForHeaders:
 		}
 	}
 
-	// Get all the headers up to the last known good checkpoint.
-	b.getCheckpointedCFHeaders(
+	// Get all the headers up to the last known good checkpoint. A store
+	// failure is retried from the top rather than crashing the process.
+	err = b.getCheckpointedCFHeaders(
 		goodCheckpoints, store, fType,
 	)
+	if err != nil {
+		log.Errorf("Unable to fetch checkpointed cfheaders, "+
+			"retrying: %v", err)
+
+		select {
+		case <-time.After(retryTimeout):
+		case <-b.quit:
+			return
+		}
+		goto waitForHeaders
+	}
 
 	// Now we check the headers again. If the block headers are not yet
 	// current, then we go back to the loop waiting for them to finish.
@@ -1342,16 +1354,18 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
-// matches the checkpoints up to the tip of the store.
+// matches the checkpoints up to the tip of the store. A store or response
+// error is returned rather than panicking, since a transient SQL failure must
+// not crash the host process; the caller retries.
 func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store headerfs.FilterHeaderStore, fType wire.FilterType) {
+	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic(fmt.Sprintf("failed getting chaintip from filter "+
-			"store: %v", err))
+		return fmt.Errorf("failed getting chaintip from filter "+
+			"store: %w", err)
 	}
 
 	initialFilterHeader := curHeader
@@ -1413,8 +1427,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			panic(fmt.Sprintf("failed getting block header at "+
-				"height %v: %v", endHeightRange, err))
+			return fmt.Errorf("failed getting block header at "+
+				"height %v: %w", endHeightRange, err)
 		}
 		stopHash := stopHeader.BlockHash()
 
@@ -1437,7 +1451,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
-		return
+		return nil
 	}
 
 	log.Infof("Attempting to query for %v cfheader batches", batchesCount)
@@ -1488,11 +1502,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		case err := <-errChan:
 			switch {
 			case err == querysyncwm.ErrWorkManagerShuttingDown:
-				return
+				return nil
 			case err != nil:
 				log.Errorf("Query finished with error before "+
 					"all responses received: %v", err)
-				return
+				return nil
 			}
 
 			// The query did finish successfully, but continue to
@@ -1501,7 +1515,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			continue
 
 		case <-b.quit:
-			return
+			return nil
 		}
 
 		checkPointIndex := stopHashes[r.StopHash]
@@ -1583,7 +1597,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 						len(r.FilterHashes),
 					) {
 
-						panic(fmt.Sprintf(
+						return fmt.Errorf(
 							"initial "+
 								"cfheaders "+
 								"offset %d "+
@@ -1592,7 +1606,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 								"size %d",
 							offset,
 							len(r.FilterHashes),
-						))
+						)
 					}
 					r.FilterHashes = r.FilterHashes[offset:]
 					startHeight += offset
@@ -1637,8 +1651,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				writeBatch, store,
 			)
 			if err != nil {
-				panic(fmt.Sprintf("couldn't write "+
-					"cfheaders messages: %v", err))
+				return fmt.Errorf("couldn't write "+
+					"cfheaders messages: %w", err)
 			}
 
 			// Update the next interval to write to reflect our
@@ -1654,6 +1668,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			break
 		}
 	}
+
+	return nil
 }
 
 func checkpointedCFHeadersBatchTimeout(batches int) time.Duration {
