@@ -1,6 +1,6 @@
 # Rescan actor architecture
 
-This document describes the rescan actor at commit `4870f0e`. It is a guide to
+This document describes the rescan actor at commit `358fa3b`. It is a guide to
 the in-memory actor in `rescan/`, its chain-source boundary, and the effects
 that reach a caller. The repository also has the existing `NewRescan` API in
 `rescan.go`; it runs its own rescan loop and does not instantiate this actor.
