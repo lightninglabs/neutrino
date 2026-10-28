@@ -75,3 +75,83 @@ func TestSkipLegacyMigration(t *testing.T) {
 		legacyDir, sqldb.DefaultRegFilterHeadersFilename,
 	))
 }
+
+// TestAutoLegacyImport verifies that NewChainService with SQLConfig set
+// imports the legacy flat files found in DataDir and the walletdb, without any
+// LegacyImport being declared. The walletdb is either found as
+// DataDir/neutrino.db or handed in as Config.Database.
+func TestAutoLegacyImport(t *testing.T) {
+	t.Parallel()
+
+	for _, passDatabase := range []bool{false, true} {
+		name := "detect walletdb"
+		if passDatabase {
+			name = "walletdb as Config.Database"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			testAutoLegacyImport(t, passDatabase)
+		})
+	}
+}
+
+func testAutoLegacyImport(t *testing.T, passDatabase bool) {
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
+		true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	params := chaincfg.SimNetParams
+	blocks, err := headerfs.NewBlockHeaderStore(dataDir, db, &params)
+	require.NoError(t, err)
+	header := params.GenesisBlock.Header
+	header.PrevBlock = header.BlockHash()
+	header.Nonce++
+	require.NoError(t, blocks.WriteHeaders(headerfs.BlockHeader{
+		BlockHeader: &header, Height: 1,
+	}))
+	filters, err := headerfs.NewFilterHeaderStore(
+		dataDir, db, headerfs.RegularFilter, &params, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, filters.WriteHeaders(headerfs.FilterHeader{
+		HeaderHash: header.BlockHash(),
+		FilterHash: chainhash.Hash{1},
+		Height:     1,
+	}))
+	_, err = filterdb.New(db, params)
+	require.NoError(t, err)
+
+	// Without Config.Database, the legacy owner must release the walletdb
+	// before the upgrade so it can be opened by neutrino.
+	cfgDB := db
+	if !passDatabase {
+		require.NoError(t, db.Close())
+		cfgDB = nil
+	} else {
+		t.Cleanup(func() { _ = db.Close() })
+	}
+
+	service, err := NewChainService(Config{
+		DataDir: dataDir, ChainParams: params, Database: cfgDB,
+		SQLConfig: &sqldb.Config{
+			Backend: sqldb.BackendSqlite,
+			Sqlite:  &sqldbv2.SqliteConfig{},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.sqlBackend.Close()) })
+
+	tip, blockHeight, err := service.BlockHeaders.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), blockHeight)
+	require.Equal(t, header.BlockHash(), tip.BlockHash())
+	_, filterHeight, err := service.RegFilterHeaders.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), filterHeight)
+	require.FileExists(t, filepath.Join(
+		dataDir, sqldb.DefaultBlockHeadersFilename+".bak",
+	))
+}

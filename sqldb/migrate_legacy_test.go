@@ -144,8 +144,8 @@ func openSQLBackend(t *testing.T, dataDir string,
 		Sqlite:         &sqldbv2.SqliteConfig{},
 		SqliteFilename: "neutrino.sqlite",
 	}
-	backend, err := sqldb.NewBackend(
-		dataDir, cfg, sqldb.MakeLegacyImportMigration(src),
+	backend, err := sqldb.NewBackendWithLegacy(
+		dataDir, cfg, &chaincfg.SimNetParams, src,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Close() })
