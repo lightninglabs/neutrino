@@ -56,6 +56,26 @@ func TestPlanConfirmedAnchorRangesSkipsExistingSpan(t *testing.T) {
 	require.EqualValues(t, 2, result.NextID)
 }
 
+// TestPlanConfirmedAnchorRangesSkipsOverlap checks that one overlapping anchor
+// pair is skipped rather than aborting the batch. A short discovery reply can
+// confirm an anchor inside a span that is already staged; the pairs after it
+// must still be planned.
+func TestPlanConfirmedAnchorRangesSkipsOverlap(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 10, 110)
+	mustPlanRange(t, fsm, 1, 0, 10)
+	addTrustedAnchor(t, fsm, 9, 109)
+	addTrustedAnchor(t, fsm, 20, 120)
+
+	result, err := fsm.PlanConfirmedAnchorRanges(2, 0, 20)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.SkippedOverlap)
+	require.Len(t, result.Ranges, 1)
+	require.EqualValues(t, 10, result.Ranges[0].StartHeight)
+	require.EqualValues(t, 20, result.Ranges[0].StopHeight)
+}
+
 func TestPlanConfirmedAnchorRangesSkipsOversizedSpan(t *testing.T) {
 	fsm := newTestFSM()
 	fsm.SeedCommittedAnchor()

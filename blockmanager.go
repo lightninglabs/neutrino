@@ -49,6 +49,10 @@ const (
 	// to another candidate.
 	defaultHeaderSyncTimeout = 30 * time.Second
 
+	// headerSyncOpTimeout bounds one headersync actor ask from the block
+	// handler. Shutdown cancels it early.
+	headerSyncOpTimeout = 5 * time.Second
+
 	// maxHeaderSyncTimeout caps RTT-derived header sync timeouts. This
 	// keeps a very slow ping sample from creating another long global
 	// stall.
@@ -159,6 +163,13 @@ type headerSyncTimeoutMsg struct {
 // after the cold-start peer admission window expires.
 type headerSyncBootstrapMsg struct{}
 
+// headerSyncCooldownMsg wakes the block handler when a header peer's cooldown
+// expires, so the peer can be scheduled again without waiting for an
+// unrelated event.
+type headerSyncCooldownMsg struct {
+	generation uint64
+}
+
 // headerSyncCommitRetryMsg retries retained staging after a storage failure.
 type headerSyncCommitRetryMsg struct {
 	generation uint64
@@ -212,6 +223,11 @@ type blockManagerCfg struct {
 	// collects their responses. It backs the all-peer checks used to
 	// sanity check compact filter headers and checkpoints.
 	Broadcaster querysyncwm.Broadcaster
+
+	// headerSyncAskFault lets deterministic tests report a caller-side
+	// deadline before or after selected headersync actor asks apply.
+	// Production leaves it nil.
+	headerSyncAskFault func(headerSyncAskOp) headerSyncAskFault
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -300,6 +316,11 @@ type blockManager struct { // nolint:maligned
 	wg   sync.WaitGroup
 	quit chan struct{}
 
+	// quitCtx is cancelled on shutdown, so pending headersync actor asks
+	// return at once instead of waiting out their deadline.
+	quitCtx    context.Context
+	quitCancel context.CancelFunc
+
 	headerList     headerlist.Chain
 	reorgList      headerlist.Chain
 	startHeader    *headerlist.Node
@@ -311,6 +332,9 @@ type blockManager struct { // nolint:maligned
 	headerSyncTimer        *time.Timer
 	headerCommitRetryTimer *time.Timer
 	headerCommitRetryID    uint64
+
+	headerCooldownTimer *time.Timer
+	headerCooldownID    uint64
 
 	headerSyncBootstrapFirstSeen time.Time
 	headerSyncBootstrapTimer     *time.Timer
@@ -358,6 +382,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	if bm.headerSyncTimeout == 0 {
 		bm.headerSyncTimeout = defaultHeaderSyncTimeout
 	}
+	bm.quitCtx, bm.quitCancel = context.WithCancel(context.Background())
 
 	// Next we'll create the two signals that goroutines will use to wait
 	// on a particular header chain height before starting their normal
@@ -540,8 +565,16 @@ func (b *blockManager) Stop() error {
 
 	log.Infof("Block manager shutting down")
 	close(b.quit)
+	b.quitCancel()
 	b.wg.Wait()
+
+	// Stop every block handler timer. A callback that fires after quit
+	// closed sees both quit and a buffered peerChan ready, and select may
+	// still enqueue a message nobody will read.
 	b.cancelHeaderCommitRetry()
+	b.disarmHeaderSyncTimeout()
+	b.clearHeaderSyncBootstrapDelay()
+	b.cancelHeaderCooldownWakeup()
 	b.stopHeaderSyncActors()
 
 	close(done)
@@ -620,6 +653,15 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 		}
 	}
 
+	// While parallel header sync is running, startSync returns at once,
+	// so hand the new peer work directly. Otherwise a sync whose other
+	// peers are all blocked, with no request or timer outstanding, never
+	// schedules anything again: a new peer is the event that unsticks it.
+	if b.SyncPeer() != nil && !b.allowSerialHeaderFallback() {
+		b.continueHeaderSync(peers)
+		return
+	}
+
 	// Start syncing by choosing the best candidate if needed.
 	b.startSync(peers)
 }
@@ -641,7 +683,7 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 func (b *blockManager) headerSyncOpCtx() (context.Context,
 	context.CancelFunc) {
 
-	return context.WithTimeout(context.Background(), 5*time.Second)
+	return context.WithTimeout(b.quitCtx, headerSyncOpTimeout)
 }
 
 func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
@@ -752,6 +794,41 @@ func (b *blockManager) trackHeaderSyncPeerCooldown(peerID string,
 	b.headerSync.Session().TrackPeerCooldown(
 		peerID, state, time.Now(), defaultHeaderPeerCooldown,
 	)
+	b.scheduleHeaderCooldownWakeup()
+}
+
+// scheduleHeaderCooldownWakeup arms one wakeup for the earliest peer cooldown
+// expiry. Cooled-down peers are only recovered while dispatching. Without a
+// wakeup, a sync waiting on a blocked peer (for example the second anchor
+// observation under a two-peer policy) has no request or timer outstanding
+// and never dispatches again.
+func (b *blockManager) scheduleHeaderCooldownWakeup() {
+	if b.headerCooldownTimer != nil {
+		return
+	}
+	until, ok := b.headerSync.Session().NextCooldownExpiry(time.Now())
+	if !ok {
+		return
+	}
+
+	b.headerCooldownID++
+	generation := b.headerCooldownID
+	b.headerCooldownTimer = time.AfterFunc(time.Until(until), func() {
+		message := &headerSyncCooldownMsg{generation: generation}
+		select {
+		case b.peerChan <- message:
+		case <-b.quit:
+		}
+	})
+}
+
+// cancelHeaderCooldownWakeup stops a pending cooldown wakeup.
+func (b *blockManager) cancelHeaderCooldownWakeup() {
+	if b.headerCooldownTimer != nil {
+		b.headerCooldownTimer.Stop()
+		b.headerCooldownTimer = nil
+		b.headerCooldownID++
+	}
 }
 
 func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
@@ -778,8 +855,53 @@ func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
 		log.Infof("headersync peer_recovered peer=%s "+
 			"cooldown_until=%s",
 			peerID, until.Format(time.RFC3339))
+		b.releaseOrphanedHeaderSyncRange(sp)
 		b.updateHeaderSyncPeerState(sp, headersync.PeerReady)
 	}
+}
+
+// releaseOrphanedHeaderSyncRange returns the active range of a peer that has
+// no request outstanding to the queue. An ask that applied but reported an
+// error can leave such a lease behind. While the peer was blocked, another
+// peer could steal it; with no other peer, recovering the peer to ready
+// would otherwise leave the range active forever with nothing running it.
+func (b *blockManager) releaseOrphanedHeaderSyncRange(sp *ServerPeer) {
+	ctx, cancel := b.headerSyncOpCtx()
+	defer cancel()
+
+	peerID := sp.Addr()
+	manager := b.headerSync.Manager()
+	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
+	if err != nil || !ok || peer.ActiveRange == headersync.NoRange {
+		return
+	}
+	rng, ok, err := manager.SnapshotRange(ctx, peer.ActiveRange)
+	if err != nil || !ok || rng.State != headersync.RangeActive ||
+		rng.OwnerPeer != peerID {
+
+		return
+	}
+
+	// Fail the lease under its current epoch, then plan the span again.
+	// Go through the peer actor when there is one: it still holds the
+	// range as active, and failing it only in the manager would leave the
+	// actor busy forever, answering every later request with nothing.
+	var result headersync.CompleteResult
+	if peerActor, ok := b.headerSync.Peer(peerID); ok {
+		result, err = peerActor.CompleteRange(
+			ctx, rng.ID, rng.LeaseEpoch, false, time.Now(),
+		)
+	} else {
+		result, err = manager.CompleteRange(
+			ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
+		)
+	}
+	if err != nil || !result.Accepted {
+		return
+	}
+	log.Infof("headersync orphaned_range_released peer=%s range_id=%d",
+		peerID, rng.ID)
+	b.replanHeaderSyncRange(ctx, rng)
 }
 
 func headerSyncPeerRank(sp *ServerPeer) int {
@@ -818,14 +940,11 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
-		header, height, err := b.cfg.BlockHeaders.ChainTip()
-		if err != nil {
+		// Reset the cache and the visible tip together, so they keep
+		// describing the same header.
+		if err := b.resetHeaderListToTip(); err != nil {
 			return
 		}
-		b.headerList.ResetHeaderState(headerlist.Node{
-			Header: *header,
-			Height: int32(height),
-		})
 		b.startSync(peers)
 		return
 	}
@@ -901,10 +1020,19 @@ waitForHeaders:
 	// Now that the block headers are finished or ahead of the filter
 	// headers, we'll grab the current chain tip so we can base our filter
 	// header sync off of that.
+	// A store read can fail transiently with the SQL backends. Retry
+	// rather than end filter header sync until restart.
 	lastHeader, lastHeight, err := b.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		log.Critical(err)
-		return
+		log.Errorf("Unable to read block header tip for cfheaders "+
+			"sync, retrying: %v", err)
+
+		select {
+		case <-time.After(retryTimeout):
+		case <-b.quit:
+			return
+		}
+		goto waitForHeaders
 	}
 	lastHash := lastHeader.BlockHash()
 
@@ -999,10 +1127,22 @@ waitForHeaders:
 		}
 	}
 
-	// Get all the headers up to the last known good checkpoint.
-	b.getCheckpointedCFHeaders(
+	// Get all the headers up to the last known good checkpoint. A store
+	// failure is retried from the top rather than crashing the process.
+	err = b.getCheckpointedCFHeaders(
 		goodCheckpoints, store, fType,
 	)
+	if err != nil {
+		log.Errorf("Unable to fetch checkpointed cfheaders, "+
+			"retrying: %v", err)
+
+		select {
+		case <-time.After(retryTimeout):
+		case <-b.quit:
+			return
+		}
+		goto waitForHeaders
+	}
 
 	// Now we check the headers again. If the block headers are not yet
 	// current, then we go back to the loop waiting for them to finish.
@@ -1111,7 +1251,10 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	// do anything from there.
 	if blockHeight == filtHeight {
 		log.Tracef("cfheaders already caught up to blocks")
-		return nil
+
+		// Caught up on disk is not caught up for waiters: publish
+		// any durable headers a failed write left unpublished.
+		return b.reconcileFilterHeaderTip(store)
 	}
 
 	log.Infof("Attempting to fetch set of un-checkpointed filters "+
@@ -1314,16 +1457,18 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 
 // getCheckpointedCFHeaders catches a filter header store up with the
 // checkpoints we got from the network. It assumes that the filter header store
-// matches the checkpoints up to the tip of the store.
+// matches the checkpoints up to the tip of the store. A store or response
+// error is returned rather than panicking, since a transient SQL failure must
+// not crash the host process; the caller retries.
 func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store headerfs.FilterHeaderStore, fType wire.FilterType) {
+	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
 	curHeader, curHeight, err := store.ChainTip()
 	if err != nil {
-		panic(fmt.Sprintf("failed getting chaintip from filter "+
-			"store: %v", err))
+		return fmt.Errorf("failed getting chaintip from filter "+
+			"store: %w", err)
 	}
 
 	initialFilterHeader := curHeader
@@ -1385,8 +1530,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			endHeightRange,
 		)
 		if err != nil {
-			panic(fmt.Sprintf("failed getting block header at "+
-				"height %v: %v", endHeightRange, err))
+			return fmt.Errorf("failed getting block header at "+
+				"height %v: %w", endHeightRange, err)
 		}
 		stopHash := stopHeader.BlockHash()
 
@@ -1407,9 +1552,12 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		currentInterval = nextInterval
 	}
 
+	// With nothing left to fetch, make sure everything durable is
+	// published; a failed write may have landed. A read error here is
+	// returned so the caller retries.
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
-		return
+		return b.reconcileFilterHeaderTip(store)
 	}
 
 	log.Infof("Attempting to query for %v cfheader batches", batchesCount)
@@ -1460,11 +1608,11 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 		case err := <-errChan:
 			switch {
 			case err == querysyncwm.ErrWorkManagerShuttingDown:
-				return
+				return nil
 			case err != nil:
 				log.Errorf("Query finished with error before "+
 					"all responses received: %v", err)
-				return
+				return nil
 			}
 
 			// The query did finish successfully, but continue to
@@ -1473,7 +1621,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			continue
 
 		case <-b.quit:
-			return
+			return nil
 		}
 
 		checkPointIndex := stopHashes[r.StopHash]
@@ -1555,7 +1703,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 						len(r.FilterHashes),
 					) {
 
-						panic(fmt.Sprintf(
+						return fmt.Errorf(
 							"initial "+
 								"cfheaders "+
 								"offset %d "+
@@ -1564,7 +1712,7 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 								"size %d",
 							offset,
 							len(r.FilterHashes),
-						))
+						)
 					}
 					r.FilterHashes = r.FilterHashes[offset:]
 					startHeight += offset
@@ -1609,8 +1757,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				writeBatch, store,
 			)
 			if err != nil {
-				panic(fmt.Sprintf("couldn't write "+
-					"cfheaders messages: %v", err))
+				return fmt.Errorf("couldn't write "+
+					"cfheaders messages: %w", err)
 			}
 
 			// Update the next interval to write to reflect our
@@ -1626,6 +1774,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			break
 		}
 	}
+
+	return nil
 }
 
 func checkpointedCFHeadersBatchTimeout(batches int) time.Duration {
@@ -1739,11 +1889,34 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
 		"new_tip=%v", lastHeight, lastHash, lastHeader)
 
-	// Write the header batch.
+	// Write the header batch. A failed write may still have landed (a
+	// lost SQL commit acknowledgement), so publish whatever is durable
+	// before reporting the error. Otherwise the retry finds nothing left
+	// to fetch and the published tip and notifications never catch up.
 	err = store.WriteHeaders(headerBatch...)
 	if err != nil {
+		if rErr := b.reconcileFilterHeaderTip(store); rErr != nil {
+			log.Errorf("Unable to reconcile filter header tip: %v",
+				rErr)
+		}
 		return nil, 0, err
 	}
+
+	b.publishFilterHeaders(matchingBlockHeaders, startHeight)
+
+	return &lastHeader, lastHeight, nil
+}
+
+// publishFilterHeaders makes the last of headers, which start at startHeight,
+// the published filter header tip, wakes waiters, and sends a connected
+// notification for each header in order.
+func (b *blockManager) publishFilterHeaders(headers []wire.BlockHeader,
+	startHeight uint32) {
+
+	if len(headers) == 0 {
+		return
+	}
+	lastHeight := startHeight + uint32(len(headers)) - 1
 
 	// We'll also set the new header tip and notify any peers that the tip
 	// has changed as well. Unlike the set of notifications below, this is
@@ -1751,13 +1924,13 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 	// than know each new header that's been added to the tip.
 	b.newFilterHeadersMtx.Lock()
 	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = lastHash
+	b.filterHeaderTipHash = headers[len(headers)-1].BlockHash()
 	b.newFilterHeadersMtx.Unlock()
 	b.newFilterHeadersSignal.Broadcast()
 
 	// Notify subscribers, and also update the filter header progress
 	// logger at the same time.
-	for i, header := range matchingBlockHeaders {
+	for i, header := range headers {
 		headerHeight := startHeight + uint32(i)
 		b.fltrHeaderProgessLogger.LogBlockHeight(
 			header.Timestamp, int32(headerHeight),
@@ -1765,8 +1938,45 @@ func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
 
 		b.onBlockConnected(header, headerHeight)
 	}
+}
 
-	return &lastHeader, lastHeight, nil
+// reconcileFilterHeaderTip publishes filter headers that are durable in store
+// but not yet published: the store is the source of truth. A filter header
+// write can report an error after it landed, and every later fetch then
+// starts from the store's tip, so without this the published tip, its waiters
+// and the connected notifications for that prefix would never catch up. It
+// runs only on error and nothing-to-do paths, never on a successful write.
+func (b *blockManager) reconcileFilterHeaderTip(
+	store headerfs.FilterHeaderStore) error {
+
+	_, storeHeight, err := store.ChainTip()
+	if err != nil {
+		return err
+	}
+	b.newFilterHeadersMtx.RLock()
+	published := b.filterHeaderTip
+	b.newFilterHeadersMtx.RUnlock()
+	if storeHeight <= published {
+		return nil
+	}
+
+	stop, err := b.cfg.BlockHeaders.FetchHeaderByHeight(storeHeight)
+	if err != nil {
+		return err
+	}
+	stopHash := stop.BlockHash()
+	headers, startHeight, err := b.cfg.BlockHeaders.FetchHeaderAncestors(
+		storeHeight-published-1, &stopHash,
+	)
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Publishing durable filter headers from height=%d to "+
+		"height=%d", startHeight, storeHeight)
+	b.publishFilterHeaders(headers, startHeight)
+
+	return nil
 }
 
 // rollBackToHeight rolls back all blocks until it hits the specified height.
@@ -2547,6 +2757,22 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 	case *headerSyncBootstrapMsg:
 		b.headerSyncBootstrapTimer = nil
 		b.startSync(peers)
+	case *headerSyncCooldownMsg:
+		if msg.generation != b.headerCooldownID {
+			return
+		}
+		b.headerCooldownTimer = nil
+
+		// Dispatch recovers every peer whose cooldown expired; arm
+		// the next wakeup for any still cooling down. While a serial
+		// request is in flight only dispatch: continuing sync could
+		// reselect the sync peer under that request.
+		if b.headerSyncTimer != nil {
+			b.dispatchHeaderSyncWork(peers)
+		} else {
+			b.continueHeaderSync(peers)
+		}
+		b.scheduleHeaderCooldownWakeup()
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
 			return
@@ -2719,6 +2945,73 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 	})
 }
 
+// advanceHeaderSyncTip reconciles the headersync FSM with a durable tip that
+// the serial writer persisted, and drops the staging of ranges it retired.
+func (b *blockManager) advanceHeaderSyncTip(height uint32,
+	hash chainhash.Hash) {
+
+	ctx, cancel := b.headerSyncOpCtx()
+	defer cancel()
+
+	err := b.headerSync.Controller().AdvanceCommittedTip(
+		ctx, headersync.ChainPoint{Height: height, Hash: hash},
+	)
+	if err != nil {
+		log.Warnf("headersync unable to advance to serial tip "+
+			"height=%d: %v", height, err)
+	}
+}
+
+// handleNoProgressReply settles an empty serial reply. From a peer that is
+// not the sync peer it means nothing. From the sync peer it answers the
+// request: if the peer advertises nothing past our tip, sync is done and the
+// deadline is disarmed. If it advertises more but sent none, it cannot serve
+// us from our locator. It is not punished, since it did answer, but it stops
+// being the sync peer and a candidate, so startSync moves on rather than asking
+// it again forever. Keeping it while disarming the deadline would leave sync
+// with no request and no timer until the peer disconnected.
+func (b *blockManager) handleNoProgressReply(peers *list.List,
+	peer *ServerPeer) {
+
+	// With no serial request in flight the reply answers nothing, for
+	// example an unsolicited or late empty message, so it is no reason
+	// to demote the best peer.
+	if peer != b.SyncPeer() || b.headerSyncTimer == nil {
+		return
+	}
+	b.disarmHeaderSyncTimeout()
+
+	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		log.Errorf("Unable to read header tip: %v", err)
+		return
+	}
+	if peer.LastBlock() <= int32(height) {
+		return
+	}
+
+	log.Infof("Sync peer %s advertises height %d but sent no headers "+
+		"past %d; selecting a new sync peer", peer.Addr(),
+		peer.LastBlock(), height)
+
+	removeSyncCandidate(peers, peer)
+	b.syncPeerMutex.Lock()
+	b.syncPeer = nil
+	b.syncPeerMutex.Unlock()
+	b.startSync(peers)
+}
+
+// disarmHeaderSyncTimeout cancels the serial getheaders deadline. Bumping the
+// request ID also voids a timeout callback that already fired but has not been
+// handled yet.
+func (b *blockManager) disarmHeaderSyncTimeout() {
+	if b.headerSyncTimer != nil {
+		b.headerSyncTimer.Stop()
+		b.headerSyncTimer = nil
+	}
+	b.headerRequestID++
+}
+
 func (b *blockManager) requestHeaders(peer *ServerPeer,
 	locator blockchain.BlockLocator, stopHash *chainhash.Hash,
 	startHeight uint32) error {
@@ -2832,6 +3125,13 @@ func (b *blockManager) armHeaderSyncAnchorTimeout(peer *ServerPeer,
 func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 	if b.headerSync.Controller() == nil {
 		return 0, nil
+	}
+
+	// Planning moves the FSM to the durable tip, so bring the cache and
+	// the next checkpoint along first. Otherwise a write that landed but
+	// reported an error leaves planning aimed at a stale checkpoint.
+	if err := b.reconcileHeaderTipWithStore(); err != nil {
+		return 0, err
 	}
 
 	header, height, err := b.cfg.BlockHeaders.ChainTip()
@@ -2957,7 +3257,7 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 			continue
 		}
 
-		assignment, ok, err := peerActor.RequestRange(ctx)
+		assignment, ok, err := b.requestPeerRange(ctx, sp, peerActor)
 		if err != nil {
 			log.Warnf(
 				"headersync peer %s failed to request range: "+
@@ -2986,8 +3286,8 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 					steal.LeaseEpoch, steal.Reason)
 				b.markHeaderSyncRangeStolen(ctx, steal)
 
-				assignment, ok, err = peerActor.RequestRange(
-					ctx,
+				assignment, ok, err = b.requestPeerRange(
+					ctx, sp, peerActor,
 				)
 				if err != nil {
 					log.Warnf("headersync peer %s failed "+
@@ -3012,6 +3312,31 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 	}
 
 	return started
+}
+
+// requestPeerRange asks a peer actor to start its next range. The ask may
+// have started a range in the actor even though it reported an error, which
+// leaves an active lease with no request behind it. On an error the peer is
+// blocked, so the steal of blocked owners or the release on cooldown recovery
+// takes the range back.
+func (b *blockManager) requestPeerRange(ctx context.Context, sp *ServerPeer,
+	peerActor *headersync.PeerActor) (headersync.RangeAssignment, bool,
+	error) {
+
+	var (
+		assignment headersync.RangeAssignment
+		ok         bool
+	)
+	err := b.headerSyncAsk(headerSyncAskRequestRange, func() error {
+		var err error
+		assignment, ok, err = peerActor.RequestRange(ctx)
+		return err
+	})
+	if err != nil {
+		b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
+	}
+
+	return assignment, ok, err
 }
 
 func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
@@ -3361,6 +3686,15 @@ func (b *blockManager) resetHeaderListToTip() error {
 		Height: int32(height),
 	})
 
+	// The visible tip must describe the same header as the validation
+	// cache, or a later write can start from one and report the other.
+	b.publishHeaderTip(height, header.BlockHash())
+
+	// A failed serial write may still have landed. Planning stops
+	// advancing the FSM once the tip reaches the best height, so move it
+	// here, or ranges the write covered stay staged forever.
+	b.advanceHeaderSyncTip(height, header.BlockHash())
+
 	return nil
 }
 
@@ -3400,22 +3734,14 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 	}
 
 	log.Warnf("Header sync from peer %s stalled for %v at height %d; "+
-		"marking peer non-responsive and selecting a new sync peer",
+		"quarantining peer and selecting a new sync peer",
 		msg.peer.Addr(), msg.timeout, height)
-	b.updateHeaderSyncPeerState(msg.peer, headersync.PeerQuarantined)
 
+	// A slow or stalled peer is quarantined, never IP-banned: on regtest
+	// and behind NAT or Tor one address can be the only usable peer.
+	b.quarantineHeaderSyncPeer(msg.peer)
 	removeSyncCandidate(peers, msg.peer)
-
-	if b.cfg.BanPeer != nil {
-		if err := b.cfg.BanPeer(
-			msg.peer.Addr(), banman.NonResponsivePeer,
-		); err != nil {
-			log.Warnf("Unable to ban non-responsive header sync "+
-				"peer %s: %v", msg.peer.Addr(), err)
-		}
-	} else {
-		msg.peer.Disconnect()
-	}
+	msg.peer.Disconnect()
 
 	b.syncPeerMutex.Lock()
 	if b.syncPeer == msg.peer {
@@ -3954,17 +4280,27 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		ctx, peerID, hmsg.headers.Headers,
 		headersync.DefaultMaxRangeHeaders,
 	)
-	if !ok {
-		// Keep unmatched replies out of the compatibility path while
-		// discovery waits for a different locator response.
-		return b.headerSync.Session().AnchorActive(peerID)
-	}
+
+	// Check the error before the match flag, so an actor failure is never
+	// mistaken for an unmatched reply. The request is already finished, so
+	// keep sync moving: otherwise nothing is in flight and nothing ever
+	// schedules the next request.
 	if err != nil {
 		log.Warnf("headersync unable to add discovered anchor "+
 			"peer=%s "+
 			"height=%d hash=%s: %v", peerID, result.Response.Height,
 			result.Response.Hash, err)
+
+		// The ask may have staged a discovered range without its
+		// headers. The commit retry requeues such a range.
+		b.scheduleHeaderCommitRetry()
+		b.continueHeaderSync(peers)
 		return true
+	}
+	if !ok {
+		// Keep unmatched replies out of the compatibility path while
+		// discovery waits for a different locator response.
+		return b.headerSync.Session().AnchorActive(peerID)
 	}
 
 	request := result.Request
@@ -4130,6 +4466,34 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 
+	// The lease may have ended while the reply was in flight, for example
+	// when a serial batch committed the span. Judging the reply against a
+	// range it no longer serves would punish an honest peer, so treat it
+	// as stale.
+	if rng.State != headersync.RangeActive ||
+		rng.OwnerPeer != peerID ||
+		rng.LeaseEpoch != assignment.LeaseEpoch {
+
+		log.Infof("headersync stale_completion peer=%s range_id=%d "+
+			"epoch=%d state=%s", peerID, assignment.RangeID,
+			assignment.LeaseEpoch, rng.State)
+		b.continueHeaderSync(peers)
+		return true
+	}
+
+	// Replies are matched by their first parent hash, so a late answer to
+	// an earlier, longer request from the same locator (say an anchor
+	// discovery request the session already dropped) lands here. If it
+	// reaches the range's stop hash at the right height, the range is in
+	// it: keep that prefix rather than punish an honest peer.
+	expected := int(rng.StopHeight - rng.StartHeight)
+	if headers := hmsg.headers.Headers; len(headers) > expected &&
+		expected > 0 &&
+		headers[expected-1].BlockHash() == rng.StopHash {
+
+		hmsg.headers.Headers = headers[:expected]
+	}
+
 	valid := true
 	if err := headersync.ValidateHeaderRange(
 		rng,
@@ -4149,7 +4513,21 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		valid = false
 	}
 
-	if !valid {
+	// A peer asked for blocks past its advertised height answers with
+	// nothing, which is honest. Hold it back for a cooldown instead of
+	// quarantining and disconnecting it; the range is replanned either
+	// way.
+	lagging := len(hmsg.headers.Headers) == 0 &&
+		hmsg.peer.LastBlock() < int32(rng.StopHeight)
+	switch {
+	case !valid && lagging:
+		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
+			"peer_height=%d stop_height=%d", peerID,
+			assignment.RangeID, hmsg.peer.LastBlock(),
+			rng.StopHeight)
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+
+	case !valid:
 		b.rejectHeaderSyncRangePeer(
 			peers,
 			hmsg.peer,
@@ -4158,17 +4536,21 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	}
 
 	var result headersync.CompleteResult
-	if peerActor, ok := b.headerSync.Peer(peerID); ok {
-		result, err = peerActor.CompleteRange(
-			ctx, assignment.RangeID, assignment.LeaseEpoch, valid,
-			time.Now(),
-		)
-	} else {
+	err = b.headerSyncAsk(headerSyncAskCompleteRange, func() error {
+		var err error
+		if peerActor, ok := b.headerSync.Peer(peerID); ok {
+			result, err = peerActor.CompleteRange(
+				ctx, assignment.RangeID, assignment.LeaseEpoch,
+				valid, time.Now(),
+			)
+			return err
+		}
 		result, err = b.headerSync.Manager().CompleteRange(
 			ctx, peerID, assignment.RangeID, assignment.LeaseEpoch,
 			valid, time.Now(),
 		)
-	}
+		return err
+	})
 	if err != nil {
 		log.Warnf(
 			"headersync failed to complete range_id=%d peer=%s: "+
@@ -4177,6 +4559,15 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 			peerID,
 			err,
 		)
+
+		// The ask may have staged the range without its headers;
+		// the commit retry requeues such a range. Or it may not have
+		// applied at all, leaving the range active with its request
+		// already consumed. Blocking the peer lets the existing steal
+		// of blocked owners recover that case.
+		b.scheduleHeaderCommitRetry()
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+		b.continueHeaderSync(peers)
 		return true
 	}
 
@@ -4282,24 +4673,42 @@ func (b *blockManager) replanHeaderSyncRange(ctx context.Context,
 }
 
 func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
+	// A write that reported an error may still have landed, so the store,
+	// not the validation cache, decides where the next write starts.
+	if err := b.reconcileHeaderTipWithStore(); err != nil {
+		b.scheduleHeaderCommitRetry()
+		return err
+	}
+
 	ready, err := b.headerSync.Manager().ReadyRanges(ctx)
 	if err != nil {
 		return err
 	}
 	if len(ready) == 0 {
+		// A commit ask that applied but reported an error leaves its
+		// payloads behind with nothing left to commit them.
+		err := b.headerSync.Controller().PruneRetiredStaging(ctx)
+		if err != nil {
+			b.scheduleHeaderCommitRetry()
+			return err
+		}
 		b.cancelHeaderCommitRetry()
 		return nil
 	}
 
 	commitRanges := make([]headerSyncRangeCommit, 0, len(ready))
 	for _, rangeID := range ready {
+		// The FSM staged the range but its headers never reached the
+		// session: the completion ask applied and then reported an
+		// error. Fetch the span again rather than stop here forever.
 		staged, ok := b.headerSync.Session().StagedRange(rangeID)
 		if !ok {
-			return fmt.Errorf(
-				"headersync range_id=%d ready without "+
-					"staged headers",
-				rangeID,
+			_, err := b.headerSync.Manager().RequeueStagedRange(
+				ctx, rangeID,
 			)
+			log.Warnf("headersync range_id=%d ready without "+
+				"staged headers, requeued: %v", rangeID, err)
+			break
 		}
 
 		rng, ok, err := b.headerSync.Manager().
@@ -4312,10 +4721,18 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 				rangeID)
 		}
 
-		commitRanges = append(commitRanges, headerSyncRangeCommit{
-			Range:  rng,
-			Staged: staged,
-		})
+		// Skip whatever part of the range is already durable. The
+		// FSM still commits the whole range below.
+		commitRange, pending, err := b.trimDurableHeaderSyncRange(
+			rng, staged,
+		)
+		if err != nil {
+			b.scheduleHeaderCommitRetry()
+			return err
+		}
+		if pending {
+			commitRanges = append(commitRanges, commitRange)
+		}
 	}
 
 	if _, err := b.commitHeaderSyncRangeHeaders(commitRanges); err != nil {
@@ -4351,8 +4768,13 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	commitCtx, commitCancel := b.headerSyncOpCtx()
 	defer commitCancel()
 
-	commitResult, err := b.headerSync.Controller().
-		CommitReadyRanges(commitCtx)
+	var commitResult headersync.CommitReadyResult
+	err = b.headerSyncAsk(headerSyncAskCommitReady, func() error {
+		var err error
+		commitResult, err = b.headerSync.Controller().
+			CommitReadyRanges(commitCtx)
+		return err
+	})
 	if err != nil {
 		b.scheduleHeaderCommitRetry()
 		return err
@@ -4377,6 +4799,108 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// reconcileHeaderTipWithStore fast-forwards the visible tip and validation
+// cache to the durable block header tip.
+//
+// A header write can report an error after it landed: a SQL commit whose
+// acknowledgement was lost, or a store that wrote part of a batch before
+// failing. Memory then trails disk. Retrying the same batch from memory would
+// either rewrite durable heights (a primary-key conflict on SQL, a duplicate
+// append that corrupts the legacy flat file) or, once planning has moved the
+// FSM to the durable tip, stage ranges that never connect to the stale cache.
+// Either way header sync stalls until restart. Every header on disk passed
+// contextual validation before it was written, so adopting it here is safe.
+func (b *blockManager) reconcileHeaderTipWithStore() error {
+	back := b.headerList.Back()
+	if back == nil {
+		return fmt.Errorf("header list missing previous element")
+	}
+	_, height, err := b.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return err
+	}
+	if height <= uint32(back.Height) {
+		return nil
+	}
+
+	prev := *back
+	for next := uint32(back.Height) + 1; next <= height; next++ {
+		header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(next)
+		if err != nil {
+			return err
+		}
+
+		// A durable chain that does not extend the cache is a reorg,
+		// which the serial path owns. Leave the cache alone.
+		if header.PrevBlock != prev.Header.BlockHash() {
+			return fmt.Errorf("durable header height=%d does not "+
+				"extend cached tip height=%d", next,
+				prev.Height)
+		}
+		prev = headerlist.Node{Header: *header, Height: int32(next)}
+		b.headerList.PushBack(prev)
+	}
+
+	log.Infof("headersync reconciled visible tip height=%d -> %d with "+
+		"durable store", back.Height, height)
+
+	b.publishHeaderTip(height, prev.Header.BlockHash())
+
+	return nil
+}
+
+// publishHeaderTip makes height and hash the visible header tip, recomputes
+// the next checkpoint from it, and wakes everything waiting on new headers.
+// Every writer of the visible tip goes through here, so the next checkpoint
+// can never be left at or below the tip: a stale one is never matched again,
+// which silently turns off checkpoint verification for later serial batches.
+func (b *blockManager) publishHeaderTip(height uint32, hash chainhash.Hash) {
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
+
+	b.newHeadersMtx.Lock()
+	b.headerTip = height
+	b.headerTipHash = hash
+	b.newHeadersMtx.Unlock()
+	b.newHeadersSignal.Broadcast()
+}
+
+// trimDurableHeaderSyncRange drops the prefix of a ready range that is already
+// durable, so a retry after an ambiguous write appends only the missing
+// suffix. It reports pending=false when the whole range is durable; the
+// caller then skips the write and only commits the range in the FSM. A range
+// whose durable prefix disagrees with its staged headers is returned
+// unchanged, so validation classifies it as before.
+func (b *blockManager) trimDurableHeaderSyncRange(rng headersync.HeaderRange,
+	staged headersync.StagedRange) (headerSyncRangeCommit, bool, error) {
+
+	commit := headerSyncRangeCommit{Range: rng, Staged: staged}
+	tip := b.headerTip
+	if tip <= rng.StartHeight || len(staged.Headers) == 0 {
+		return commit, true, nil
+	}
+
+	durable := min(tip-rng.StartHeight, uint32(len(staged.Headers)))
+	last := staged.Headers[durable-1]
+	stored, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
+		rng.StartHeight + durable,
+	)
+	if err != nil {
+		return commit, false, err
+	}
+	if stored.BlockHash() != last.BlockHash() {
+		return commit, true, nil
+	}
+	if int(durable) == len(staged.Headers) {
+		return commit, false, nil
+	}
+
+	commit.Range.StartHeight += durable
+	commit.Range.StartHash = last.BlockHash()
+	commit.Staged.Headers = staged.Headers[durable:]
+
+	return commit, true, nil
 }
 
 // scheduleHeaderCommitRetry keeps one wakeup while staging waits for storage.
@@ -4689,13 +5213,7 @@ func (b *blockManager) commitHeaderSyncRangeHeaders(
 		}
 	}
 
-	b.nextCheckpoint = prepared.NextCheckpoint
-
-	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(prepared.FinalHeight)
-	b.headerTipHash = prepared.FinalHash
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
+	b.publishHeaderTip(uint32(prepared.FinalHeight), prepared.FinalHash)
 
 	log.Debugf("headersync range_commit_batch ranges=%d headers=%d "+
 		"tip_height=%d tip_hash=%s write_elapsed=%v", len(ranges),
@@ -4724,8 +5242,10 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		return
 	}
 
-	// Nothing to do for an empty headers message.
+	// Nothing to do for an empty headers message, beyond settling the
+	// sync peer's outstanding request.
 	if numHeaders == 0 {
+		b.handleNoProgressReply(peers, hmsg.peer)
 		return
 	}
 
@@ -4744,7 +5264,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 	// Process all of the received headers ensuring each one connects to
 	// the previous and that checkpoints match.
-	receivedCheckpoint := false
 	var (
 		finalHash   *chainhash.Hash
 		finalHeight int32
@@ -5017,7 +5536,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 			nodeHash := node.Header.BlockHash()
 			if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
-				receivedCheckpoint = true
 				log.Infof("Verified downloaded block "+
 					"header against checkpoint at height "+
 					"%d/hash %s", node.Height, nodeHash)
@@ -5048,6 +5566,15 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 					// Should we panic here?
 				}
 
+				// The loop above already pushed this batch's
+				// rejected headers into the validation cache.
+				// Rebuild it from the durable tip, or the next
+				// batch validates against the rejected chain.
+				if err := b.resetHeaderListToTip(); err != nil {
+					log.Errorf("Unable to reset header "+
+						"list: %v", err)
+				}
+
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -5057,7 +5584,8 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 	// Late responses may contain only headers already in the store. They
 	// must not publish a new tip or start a legacy request from an old
-	// hash.
+	// hash. Such a reply usually answers an older request, so it says
+	// nothing about the outstanding one: leave its deadline armed.
 	if finalHash == nil {
 		return
 	}
@@ -5080,41 +5608,85 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				log.Errorf("Unable to restore header tip: %v",
 					resetErr)
 			}
+
+			// The reply disarmed the request deadline, so
+			// nothing else would ask for this batch again. The
+			// commit retry continues sync once storage is back.
+			b.scheduleHeaderCommitRetry()
 			return
 		}
+
+		// The serial writer moved the durable tip outside the
+		// headersync commit path. Retire the ranges it covered now,
+		// rather than at the next planning pass, which may never
+		// come once sync is done.
+		b.advanceHeaderSyncTip(uint32(finalHeight), *finalHash)
 	}
 
-	// When this header is a checkpoint, find the next checkpoint.
-	if receivedCheckpoint {
-		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
+	// The headers are durable, so publish the new tip before asking for
+	// more. A failed follow-up request used to return first, leaving the
+	// visible tip behind disk and filter header sync waiting on a signal
+	// that never came.
+	b.publishHeaderTip(uint32(finalHeight), *finalHash)
+
+	// The batch made progress, so it answered the sync peer's request.
+	// A follow-up request below re-arms the deadline.
+	if hmsg.peer == b.SyncPeer() {
+		b.disarmHeaderSyncTimeout()
 	}
 
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
 	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net || !b.BlockHeadersSynced() {
-		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
 			nextHash = *b.nextCheckpoint.Hash
 		}
+
+		// Ask the sync peer, not whoever sent this batch. There is a
+		// single serial deadline and it only acts for the sync peer,
+		// so arming it for another peer cancelled the sync peer's
+		// deadline and left that one with nothing in flight.
+		target := b.SyncPeer()
+		if target == nil {
+			target = hmsg.peer
+		}
+
+		// The batch's last hash is a fine locator for its sender. The
+		// sync peer may not know that block, and peers answer an
+		// unknown locator from genesis: an all-known reply that
+		// leaves the deadline armed until the honest sync peer is
+		// quarantined. Give it our full locator instead.
+		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
+		if target != hmsg.peer {
+			var err error
+			locator, err = b.cfg.BlockHeaders.LatestBlockLocator()
+			if err != nil {
+				log.Errorf("Unable to build block locator: %v",
+					err)
+				return
+			}
+		}
 		err := b.requestHeaders(
-			hmsg.peer, locator, &nextHash, uint32(finalHeight),
+			target, locator, &nextHash, uint32(finalHeight),
 		)
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
-				"peer %s: %s", hmsg.peer.Addr(), err)
-			return
+				"peer %s: %s", target.Addr(), err)
+
+			// Nothing is in flight now, so move on to another
+			// sync peer as startSync does when its send fails,
+			// rather than wait for a deadline that was never
+			// armed.
+			removeSyncCandidate(peers, target)
+			b.syncPeerMutex.Lock()
+			if b.syncPeer == target {
+				b.syncPeer = nil
+			}
+			b.syncPeerMutex.Unlock()
+			b.startSync(peers)
 		}
 	}
-
-	// Since we have a new set of headers written to disk, we'll send out a
-	// new signal to notify any waiting sub-systems that they can now maybe
-	// proceed do to us extending the header chain.
-	b.newHeadersMtx.Lock()
-	b.headerTip = uint32(finalHeight)
-	b.headerTipHash = *finalHash
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
 }
 
 // areHeadersConnected returns true if the passed block headers are connected

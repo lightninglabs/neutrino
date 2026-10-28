@@ -25,6 +25,11 @@ type RuntimeConfig struct {
 
 	Dispatch      DispatchController
 	DispatchActor ActorLifecycle
+
+	// AskFault is a test-only seam that makes selected controller asks
+	// report a caller deadline before or after they apply. Production
+	// leaves it nil.
+	AskFault func(AskOp) AskFault
 }
 
 // Runtime owns the headersync actor graph and production request bookkeeping.
@@ -83,6 +88,7 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 		peers: make(map[string]*PeerActor),
 	}
 	runtime.controller.peerLookup = runtime.Peer
+	runtime.controller.askFault = cfg.AskFault
 	return runtime, seeded
 }
 

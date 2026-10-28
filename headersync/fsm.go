@@ -15,8 +15,13 @@ type HeaderSyncFSM struct {
 	committedTip  uint32
 	committedHash Hash
 
-	anchors   map[uint32]Anchor
-	ranges    map[RangeID]HeaderRange
+	anchors map[uint32]Anchor
+	ranges  map[RangeID]HeaderRange
+
+	// checkpoints holds the heights of chain checkpoint anchors, which a
+	// tip rewind keeps.
+	checkpoints map[uint32]bool
+
 	rangeKeys []RangeID
 	peers     map[string]PeerSnapshot
 
@@ -34,6 +39,7 @@ func NewHeaderSyncFSM(committedTip uint32, committedHash Hash,
 		committedHash: committedHash,
 		anchors:       make(map[uint32]Anchor),
 		ranges:        make(map[RangeID]HeaderRange),
+		checkpoints:   make(map[uint32]bool),
 		peers:         make(map[string]PeerSnapshot),
 	}
 }
@@ -52,16 +58,20 @@ func (h *HeaderSyncFSM) CommittedHash() Hash {
 // persisted outside the staged headersync commit path. Production can still
 // fall back to the legacy serial writer in a few edge cases; when that writer
 // advances the database tip, the scheduler must treat the new tip as committed
-// before planning additional frontier work.
+// before planning additional frontier work. When that writer rolled the tip
+// back or replaced it at the same height, the FSM rewinds to it instead.
 func (h *HeaderSyncFSM) AdvanceCommittedTip(height uint32,
 	hash Hash) bool {
 
-	if height < h.committedTip {
-		return false
+	if height < h.committedTip ||
+		(height == h.committedTip && hash != h.committedHash) {
+
+		h.rewindCommittedTip(height, hash)
+
+		return true
 	}
 	if height == h.committedTip {
 		h.AddOrConfirmAnchor(height, hash, true)
-		h.committedHash = hash
 
 		return false
 	}
@@ -93,6 +103,43 @@ func (h *HeaderSyncFSM) AdvanceCommittedTip(height uint32,
 	return true
 }
 
+// rewindCommittedTip moves the committed tip down to, or sideways at, a
+// durable tip the serial writer produced by rolling back or reorganizing.
+// Work above the new tip was planned against headers that are no longer on
+// disk: every range ending above it becomes stale under a new epoch, and the
+// untrusted anchors above it are dropped so discovery relearns them. Without
+// this a ranged planned from the old tip could never connect, and ordered
+// commit stopped at it for good.
+func (h *HeaderSyncFSM) rewindCommittedTip(height uint32, hash Hash) {
+	// Anchors at or above the new tip came from the old chain: discovered
+	// ones, and durable tips trusted only because they were on disk. Only
+	// checkpoints survive.
+	for anchorHeight := range h.anchors {
+		if anchorHeight >= height && !h.checkpoints[anchorHeight] {
+			delete(h.anchors, anchorHeight)
+		}
+	}
+
+	for id, rng := range h.ranges {
+		if rng.StopHeight <= height || rng.State == RangeFailed ||
+			rng.State == RangeStale {
+
+			continue
+		}
+		h.detachRangeFromPeers(id)
+		rng.LeaseEpoch++
+		rng.OwnerPeer = NoPeer
+		rng.State = RangeStale
+		rng.Valid = false
+		rng.StagedAt = time.Time{}
+		h.ranges[id] = rng
+	}
+
+	h.committedTip = height
+	h.committedHash = hash
+	h.anchors[height] = h.newAnchor(height, hash, true)
+}
+
 // Metrics returns the current counters.
 func (h *HeaderSyncFSM) Metrics() Metrics {
 	return h.metrics
@@ -108,7 +155,24 @@ func (h *HeaderSyncFSM) CommitLog() []RangeID {
 func (h *HeaderSyncFSM) AddOrConfirmAnchor(height uint32, hash Hash,
 	trusted bool) (Anchor, bool) {
 
-	if existing, ok := h.anchors[height]; ok {
+	existing, ok := h.anchors[height]
+
+	// A rejected incumbent already lost its standing, whichever hash it
+	// carries. Comparing later observations against it would reject each
+	// honest reporter in turn, so a single liar that answered first could
+	// block the height forever. Start over from the new observation.
+	if ok && existing.Rejected && !existing.Trusted && !trusted {
+		anchor := h.newAnchor(height, hash, false)
+		h.anchors[height] = anchor
+		h.metrics.AnchorsAdded++
+		if h.anchorConfirmed(anchor) {
+			h.metrics.AnchorsConfirmed++
+		}
+
+		return anchor, true
+	}
+
+	if ok {
 		if existing.Hash != hash {
 			if trusted {
 				anchor := h.newAnchor(height, hash, true)
@@ -129,7 +193,12 @@ func (h *HeaderSyncFSM) AddOrConfirmAnchor(height uint32, hash Hash,
 
 		wasConfirmed := h.anchorConfirmed(existing)
 		if trusted {
+			// A trusted observation is authoritative, so it also
+			// clears an earlier rejection. Otherwise a committed
+			// tip whose anchor a conflicting reply had rejected
+			// stays unconfirmed, and nothing plans from it.
 			existing.Trusted = true
+			existing.Rejected = false
 			existing.Confirmations =
 				h.cfg.AnchorConfirmationsRequired
 		} else if existing.Confirmations <
@@ -212,6 +281,19 @@ func (h *HeaderSyncFSM) AddPeer(peer PeerSnapshot) error {
 
 	if existing, ok := h.peers[peer.ID]; ok && peer.LocalRanges == nil {
 		peer.LocalRanges = existing.LocalRanges
+	}
+
+	// The range table owns leases. A peer actor's snapshot can still name
+	// a range the FSM took away without telling it (discovery staging the
+	// span, or a tip advance); restoring it would give the range a second
+	// owner once it is reassigned.
+	if peer.ActiveRange != NoRange {
+		rng, ok := h.ranges[peer.ActiveRange]
+		if !ok || rng.State != RangeActive ||
+			rng.OwnerPeer != peer.ID {
+
+			peer.ActiveRange = NoRange
+		}
 	}
 
 	h.peers[peer.ID] = peer.clone()
@@ -340,11 +422,20 @@ func (h *HeaderSyncFSM) Ranges() []HeaderRange {
 	return ranges
 }
 
-// CanPlanRange returns true when both boundary anchors are confirmed.
+// CanPlanRange returns true when both boundary anchors are confirmed and the
+// span starts at or above the committed tip.
 func (h *HeaderSyncFSM) CanPlanRange(startHeight,
 	stopHeight uint32) bool {
 
 	if startHeight >= stopHeight {
+		return false
+	}
+
+	// Ordered commit only drains ranges from the committed tip upward, so
+	// a span starting below it could never commit. A late discovery reply
+	// for a span the serial writer already persisted would otherwise be
+	// staged and kept forever.
+	if startHeight < h.committedTip {
 		return false
 	}
 	if stopHeight-startHeight > h.cfg.MaxRangeHeaders {
@@ -426,12 +517,33 @@ func (h *HeaderSyncFSM) StageDiscoveredRange(
 		}
 	}
 
-	rng, ok, err := h.PlanRange(id, startHeight, stopHeight)
+	// A discovered span that overlaps other work (say a short reply's
+	// range inside it) is not staged. The anchor still counts, and
+	// planning fills the span once the overlap is gone.
+	if h.rangeOverlaps(startHeight, stopHeight) {
+		return HeaderRange{}, false, nil
+	}
+
+	rng, ok, err := h.PlanRange(
+		h.unusedRangeID(id), startHeight, stopHeight,
+	)
 	if err != nil || !ok {
 		return rng, ok, err
 	}
 
 	return h.stageRangeFromDiscovery(rng, peerID, now), true, nil
+}
+
+// unusedRangeID returns the first range ID at or after id that no range uses.
+// Range IDs are allocated by the caller's session, which falls behind the FSM
+// when an ask applies but reports an error to its caller.
+func (h *HeaderSyncFSM) unusedRangeID(id RangeID) RangeID {
+	for {
+		if _, used := h.ranges[id]; !used && id != NoRange {
+			return id
+		}
+		id++
+	}
 }
 
 func (h *HeaderSyncFSM) stageRangeFromDiscovery(rng HeaderRange,
@@ -1042,6 +1154,27 @@ func (h *HeaderSyncFSM) InvalidateRange(id RangeID) (
 		result.Ranges = append(result.Ranges, rng.ID)
 	}
 	return result, nil
+}
+
+// RequeueStagedRange returns a staged range to the queue under a new lease
+// epoch. The FSM stages a range before the caller stores its headers, so an ask
+// that applies but reports an error to the caller (an lnd actor runs a request
+// on its own context) can leave a staged range with no headers. Ordered commit
+// would then stop at it forever; requeueing fetches the span again.
+func (h *HeaderSyncFSM) RequeueStagedRange(id RangeID) bool {
+	rng, ok := h.ranges[id]
+	if !ok || rng.State != RangeStaged {
+		return false
+	}
+
+	rng.LeaseEpoch++
+	rng.OwnerPeer = NoPeer
+	rng.State = RangeQueued
+	rng.Valid = false
+	rng.StagedAt = time.Time{}
+	h.ranges[id] = rng
+
+	return true
 }
 
 // CommitReadyRanges drains all staged ranges that connect to the visible tip.

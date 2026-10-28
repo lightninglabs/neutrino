@@ -631,6 +631,133 @@ func permutedRangeOrder(numRanges int, raw []uint8) []RangeID {
 	return order
 }
 
+// TestTrustedObservationClearsRejection checks that a trusted observation of
+// an anchor's own hash clears an earlier rejection. A conflicting reply used to
+// leave a committed tip's anchor {Trusted, Rejected}, so it never counted as
+// confirmed and nothing could be planned from the tip.
+func TestTrustedObservationClearsRejection(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AnchorConfirmationsRequired = 1
+	fsm := NewHeaderSyncFSM(0, testHash(100), cfg)
+
+	_, ok := fsm.AddOrConfirmAnchor(10, testHash(110), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(10, testHash(111), false)
+	require.False(t, ok)
+
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(110)))
+	anchor, ok := fsm.AnchorByHeight(10)
+	require.True(t, ok)
+	require.True(t, anchor.Trusted)
+	require.False(t, anchor.Rejected)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
+// TestRejectedAnchorDoesNotBlockLaterObservations checks that once a conflict
+// rejects an unconfirmed anchor, a later observation starts over instead of
+// conflicting with the rejected hash. Otherwise one liar that answered first
+// gets every honest reporter rejected and the height is never confirmed.
+func TestRejectedAnchorDoesNotBlockLaterObservations(t *testing.T) {
+	fsm := newTestFSM()
+
+	_, ok := fsm.AddOrConfirmAnchor(10, testHash(66), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(10, testHash(110), false)
+	require.False(t, ok, "first conflict still rejects")
+
+	for i := 0; i < 2; i++ {
+		_, ok = fsm.AddOrConfirmAnchor(10, testHash(110), false)
+		require.True(t, ok)
+	}
+	anchor, ok := fsm.AnchorByHeight(10)
+	require.True(t, ok)
+	require.Equal(t, testHash(110), anchor.Hash)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+
+	// The same holds when the honest observation came first and a liar's
+	// conflict rejected it: later reports of the honest hash restart it.
+	fsm = newTestFSM()
+	_, ok = fsm.AddOrConfirmAnchor(20, testHash(120), false)
+	require.True(t, ok)
+	_, ok = fsm.AddOrConfirmAnchor(20, testHash(66), false)
+	require.False(t, ok)
+	for i := 0; i < 2; i++ {
+		_, ok = fsm.AddOrConfirmAnchor(20, testHash(120), false)
+		require.True(t, ok)
+	}
+	anchor, ok = fsm.AnchorByHeight(20)
+	require.True(t, ok)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
+// TestStageDiscoveredRangeBelowTipRefused checks that a discovery reply for a
+// span below the committed tip is not staged. Ordered commit could never drain
+// it, so its payload would stay in memory for the life of the session.
+func TestStageDiscoveredRangeBelowTipRefused(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 8, 108)
+	addTrustedAnchor(t, fsm, 12, 112)
+	require.True(t, fsm.AdvanceCommittedTip(12, testHash(112)))
+
+	_, ok, err := fsm.StageDiscoveredRange(
+		1, "peer", 8, 12, time.Unix(0, 0),
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.False(t, fsm.CanPlanRange(8, 12))
+}
+
+// TestStageDiscoveredRangeSkipsOverlap checks that a discovered span which
+// overlaps planned work is not staged and does not fail. An overlong reply can
+// confirm an anchor inside the next span; the error used to abort the reply
+// and leave nothing in flight.
+func TestStageDiscoveredRangeSkipsOverlap(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 1, 101)
+	addTrustedAnchor(t, fsm, 4, 104)
+	mustPlanRange(t, fsm, 1, 0, 1)
+
+	_, ok, err := fsm.StageDiscoveredRange(
+		2, "peer", 0, 4, time.Unix(0, 0),
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+// TestAdvanceCommittedTipRewinds is the regression for F3. The serial writer
+// can roll the durable tip back or replace it at the same height. The FSM tip
+// used to move forward only, so ranges planned from the old tip kept the old
+// start hash, could never connect, and were never replanned.
+func TestAdvanceCommittedTipRewinds(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 10, 110)
+	addTrustedAnchor(t, fsm, 20, 120)
+	fsm.AddCheckpointAnchors(nil)
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(110)))
+	mustPlanRange(t, fsm, 1, 10, 20)
+
+	// A same-height replacement retires work planned from the old hash
+	// and lets planning start again from the new one.
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(210)))
+	rng, ok := fsm.RangeByID(1)
+	require.True(t, ok)
+	require.Equal(t, RangeStale, rng.State)
+	require.EqualValues(t, 10, fsm.CommittedTip())
+	require.Equal(t, testHash(210), fsm.CommittedHash())
+	_, ok = fsm.AnchorByHeight(20)
+	require.False(t, ok, "old-chain anchor survived the rewind")
+
+	// A rollback below the tip rewinds too.
+	require.True(t, fsm.AdvanceCommittedTip(5, testHash(105)))
+	require.EqualValues(t, 5, fsm.CommittedTip())
+	anchor, ok := fsm.AnchorByHeight(5)
+	require.True(t, ok)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
 func commitLogStrictlyIncreasing(log []RangeID) bool {
 	for i := 1; i < len(log); i++ {
 		if log[i] <= log[i-1] {

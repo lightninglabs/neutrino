@@ -743,6 +743,7 @@ machine HeaderSyncTestDriver {
             new TestPostCheckpointFrontierDiscoveryStagesRange();
             new TestFrontierLookaheadStagesBeforeCommit();
             new TestOutOfOrderCompletionStagesUntilGapFilled();
+            new TestExternalTipAdvancePlansGapBeforeStagedFrontier();
             new TestReadyRangesDoesNotAdvanceCommittedTip();
             new TestCommitPrunesObsoleteAnchorRequests();
             new TestConflictingDiscoveredAnchorRejected();
@@ -775,6 +776,7 @@ test tcHeaderSync [main=HeaderSyncTestDriver]:
     TestPostCheckpointFrontierDiscoveryStagesRange,
     TestFrontierLookaheadStagesBeforeCommit,
     TestOutOfOrderCompletionStagesUntilGapFilled,
+    TestExternalTipAdvancePlansGapBeforeStagedFrontier,
     TestReadyRangesDoesNotAdvanceCommittedTip,
     TestCommitPrunesObsoleteAnchorRequests,
     TestConflictingDiscoveredAnchorRejected,

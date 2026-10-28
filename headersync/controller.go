@@ -88,6 +88,63 @@ type Controller struct {
 	cfg     Config
 
 	peerLookup func(string) (*PeerActor, bool)
+
+	// askFault is the test-only fault seam from RuntimeConfig.AskFault.
+	askFault func(AskOp) AskFault
+}
+
+// AskOp names a controller ask that deterministic tests can fault.
+type AskOp uint8
+
+const (
+	// AskPlanRanges is the ask that plans confirmed anchor ranges.
+	AskPlanRanges AskOp = iota
+
+	// AskStageDiscovered is the ask that stages a discovered range.
+	AskStageDiscovered
+
+	// AskAddAnchor is the ask that records a discovered anchor.
+	AskAddAnchor
+
+	// AskOps is the number of faultable controller asks.
+	AskOps
+)
+
+// AskFault selects how a faulted controller ask reports its outcome.
+type AskFault uint8
+
+const (
+	// AskOK runs the ask normally.
+	AskOK AskFault = iota
+
+	// AskFailBefore reports a caller deadline without sending the ask.
+	AskFailBefore
+
+	// AskFailAfter runs the ask, then reports a caller deadline. An lnd
+	// actor applies a request on its own context, so this happens in
+	// production when the caller's deadline fires after the send.
+	AskFailAfter
+)
+
+// ErrAskFault is the error a faulted controller ask reports.
+var ErrAskFault = errors.New("simulated headersync ask deadline")
+
+// ask runs one manager ask through the test fault seam.
+func (c *Controller) ask(op AskOp, fn func() error) error {
+	fault := AskOK
+	if c.askFault != nil {
+		fault = c.askFault(op)
+	}
+	if fault == AskFailBefore {
+		return ErrAskFault
+	}
+	if err := fn(); err != nil {
+		return err
+	}
+	if fault == AskFailAfter {
+		return ErrAskFault
+	}
+	return nil
 }
 
 // NewController creates a production controller around the manager actor and
@@ -125,9 +182,7 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	if _, err := c.manager.AdvanceCommittedTip(
-		ctx, tip.Height, tip.Hash,
-	); err != nil {
+	if err := c.AdvanceCommittedTip(ctx, tip); err != nil {
 		return CheckpointRangePlan{}, err
 	}
 
@@ -138,9 +193,14 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	result, err := c.manager.PlanConfirmedAnchorRanges(
-		ctx, c.session.NextRangeID(), tip.Height, stop.Height,
-	)
+	var result PlanRangesResult
+	err := c.ask(AskPlanRanges, func() error {
+		var err error
+		result, err = c.manager.PlanConfirmedAnchorRanges(
+			ctx, c.session.NextRangeID(), tip.Height, stop.Height,
+		)
+		return err
+	})
 	if err != nil {
 		return CheckpointRangePlan{}, err
 	}
@@ -154,6 +214,51 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		Span:            span,
 		MaxRangeHeaders: c.cfg.MaxRangeHeaders,
 	}, nil
+}
+
+// AdvanceCommittedTip moves the FSM to a durable tip that was persisted
+// outside the staged commit path, then drops the staged payloads of every range
+// that move retired. Without the sweep those payloads stay in memory for the
+// life of the session, and nothing else ever deletes them.
+func (c *Controller) AdvanceCommittedTip(ctx context.Context,
+	tip ChainPoint) error {
+
+	if c == nil || c.manager == nil {
+		return nil
+	}
+
+	advanced, err := c.manager.AdvanceCommittedTip(
+		ctx, tip.Height, tip.Hash,
+	)
+	if err != nil || !advanced {
+		return err
+	}
+
+	return c.PruneRetiredStaging(ctx)
+}
+
+// PruneRetiredStaging drops staged payloads whose range the FSM no longer
+// treats as staged. A range can leave the staged state without its payload
+// being deleted when the durable tip moves outside the staged commit path, or
+// when a commit ask applies in the actor but reports an error to its caller.
+// The sweep costs one snapshot per staged payload, which is bounded by the
+// outstanding range limit.
+func (c *Controller) PruneRetiredStaging(ctx context.Context) error {
+	if c == nil || c.manager == nil || c.session == nil {
+		return nil
+	}
+
+	for id := range c.session.stagedRanges {
+		rng, ok, err := c.manager.SnapshotRange(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok || rng.State != RangeStaged {
+			c.session.DeleteStagedRange(id)
+		}
+	}
+
+	return nil
 }
 
 // PlanFrontierRanges plans any already-known confirmed frontier spans after
@@ -170,15 +275,18 @@ func (c *Controller) PlanFrontierRanges(ctx context.Context,
 		return PlanRangesResult{}, nil
 	}
 
-	if _, err := c.manager.AdvanceCommittedTip(
-		ctx, tip.Height, tip.Hash,
-	); err != nil {
+	if err := c.AdvanceCommittedTip(ctx, tip); err != nil {
 		return PlanRangesResult{}, err
 	}
 
-	result, err := c.manager.PlanConfirmedAnchorRanges(
-		ctx, c.session.NextRangeID(), tip.Height, bestHeight,
-	)
+	var result PlanRangesResult
+	err := c.ask(AskPlanRanges, func() error {
+		var err error
+		result, err = c.manager.PlanConfirmedAnchorRanges(
+			ctx, c.session.NextRangeID(), tip.Height, bestHeight,
+		)
+		return err
+	})
 	if err != nil {
 		return result, err
 	}
@@ -255,7 +363,11 @@ func (c *Controller) FrontierDiscoverySpan(ctx context.Context,
 		return AnchorRequest{}, false, err
 	}
 	for _, anchor := range anchors {
-		if anchor.Height < tip.Height || anchor.Height >= bestHeight {
+		// An anchor at the best height counts: once it is confirmed
+		// there is nothing left to discover. Skipping it re-requested
+		// the final span forever, which kept every peer busy with
+		// discovery and starved queued gap ranges below it.
+		if anchor.Height < tip.Height || anchor.Height > bestHeight {
 			continue
 		}
 		if !c.AnchorConfirmed(anchor) {
@@ -418,9 +530,14 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	}
 	result.Response = response
 
-	anchor, ok, err := c.manager.AddAnchor(
-		ctx, response.Height, response.Hash, response.Trusted,
-	)
+	var anchor Anchor
+	err = c.ask(AskAddAnchor, func() error {
+		var err error
+		anchor, ok, err = c.manager.AddAnchor(
+			ctx, response.Height, response.Hash, response.Trusted,
+		)
+		return err
+	})
 	if err != nil {
 		return result, true, err
 	}
@@ -438,18 +555,28 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 
 	result.Confirmed = c.AnchorConfirmed(anchor)
 	if result.Confirmed {
-		rangeID := c.session.NextRangeID()
-		rng, staged, err := c.manager.StageDiscoveredRange(
-			ctx, rangeID, peerID, request.StartHeight,
-			response.Height, time.Now(),
+		var (
+			rng    HeaderRange
+			staged bool
 		)
+		err := c.ask(AskStageDiscovered, func() error {
+			var err error
+			rng, staged, err = c.manager.StageDiscoveredRange(
+				ctx, c.session.NextRangeID(), peerID,
+				request.StartHeight, response.Height,
+				time.Now(),
+			)
+			return err
+		})
 		if err != nil {
 			return result, true, err
 		}
 		if staged {
 			result.Range = rng
 			result.Staged = true
-			c.session.SetNextRangeID(rangeID + 1)
+			if rng.ID >= c.session.NextRangeID() {
+				c.session.SetNextRangeID(rng.ID + 1)
+			}
 		}
 	}
 
@@ -555,6 +682,9 @@ func (c *Controller) CommitReadyRanges(ctx context.Context) (
 	var pruned int
 	if c.session != nil && len(commit.Committed) > 0 {
 		pruned = c.session.PruneAnchorsAtOrBefore(commit.TipHeight)
+		if err := c.PruneRetiredStaging(ctx); err != nil {
+			return CommitReadyResult{}, err
+		}
 	}
 
 	return CommitReadyResult{
@@ -572,10 +702,23 @@ func (c *Controller) ReplanRange(ctx context.Context,
 			ErrInvalidRange)
 	}
 
-	retryID := c.session.AllocateRangeID()
-	retry, ok, err := c.manager.PlanRange(
-		ctx, retryID, rng.StartHeight, rng.StopHeight,
+	// Skip IDs the FSM already uses: the session falls behind it when an
+	// ask applies but reports an error.
+	var (
+		retryID RangeID
+		retry   HeaderRange
+		ok      bool
+		err     error
 	)
+	for {
+		retryID = c.session.AllocateRangeID()
+		retry, ok, err = c.manager.PlanRange(
+			ctx, retryID, rng.StartHeight, rng.StopHeight,
+		)
+		if !errors.Is(err, ErrDuplicateRange) {
+			break
+		}
+	}
 	if err != nil {
 		return ReplanResult{ID: retryID}, err
 	}

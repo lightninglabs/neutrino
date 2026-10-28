@@ -1,0 +1,125 @@
+name: DST nightly
+
+on:
+  schedule:
+    # Every night at 03:17 UTC, off the hour to avoid the scheduler rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Fuzz duration per target (go test -fuzztime)"
+        required: false
+        default: "20m"
+      swarm:
+        description: "Seeds per swarm campaign"
+        required: false
+        default: "200000"
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOCACHE: /home/runner/work/go/pkg/build
+  GOPATH: /home/runner/work/go
+  GO_VERSION: 1.26.2
+  FUZZTIME: ${{ github.event.inputs.fuzztime || '20m' }}
+  SWARM: ${{ github.event.inputs.swarm || '200000' }}
+
+jobs:
+  ########################
+  # coverage-guided fuzzing
+  ########################
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzHeaderTransportDST
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      # The generated corpus lives in the build cache's fuzz directory.
+      # Restore the newest one and save a new key each run, so the corpus
+      # keeps growing across nights.
+      - name: restore fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.GOCACHE }}/fuzz
+          key: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-${{ matrix.target }}-
+
+      - name: fuzz
+        run: |
+          go test . -run '^$' -fuzz "^${{ matrix.target }}\$" \
+            -fuzztime="$FUZZTIME"
+
+      - name: upload failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: testdata/fuzz/${{ matrix.target }}
+
+  ########################
+  # swarm campaigns
+  ########################
+  swarm:
+    name: swarm campaign seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # A new generator seed each night explores new swarms; the run
+        # number keeps every failure replayable from the log.
+        seed: [1, 2, 3, 4]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: swarm
+        run: |
+          seed=$(( ${{ github.run_number }} * 16 + ${{ matrix.seed }} ))
+          echo "generator seed: $seed"
+          go test . -run '^TestHeaderTransportDSTSwarm$' -timeout 40m \
+            -dst.swarm="$SWARM" -dst.seed="$seed"
+
+  ########################
+  # P model checking
+  ########################
+  p-models:
+    name: P model checking
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+
+      - name: setup dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: install P
+        run: |
+          dotnet tool install --global P --version 3.0.4
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: check
+        run: SCHEDULES=3000 MAX_STEPS=1000 TIMEOUT=900 ./p-models/scripts/check.sh
