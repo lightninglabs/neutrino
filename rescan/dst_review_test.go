@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -346,5 +347,122 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 		require.Empty(t, oracle.err)
 		require.Len(t, oracle.events, int(best.Height))
 		require.Zero(t, errorsReported)
+	})
+}
+
+// TestDSTDelayedOrphanConnectRejectsCachedFilter exercises a filter-header
+// notification captured before rollback and delivered after its disconnect.
+func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := &dstChain{mockChainWithTxs: newMockChainWithTxs(3)}
+		genesis := chain.ChainParams().GenesisBlock.Header
+		addr, err := address.NewAddressPubKeyHash(
+			make([]byte, 20), &chaincfg.MainNetParams,
+		)
+		require.NoError(t, err)
+		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
+		var payments []chainhash.Hash
+		actor := NewRescanActor(ActorConfig{
+			Chain: chain,
+			StartStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			StartHeader: genesis,
+			WatchAddrs:  []address.Address{addr},
+			Callbacks: Callbacks{
+				OnBlockConnected: func(h int32,
+					hdr *wire.BlockHeader, _ time.Time) {
+
+					oracle.connect(h, hdr)
+				},
+				OnBlockDisconnected: func(h int32,
+					hdr *wire.BlockHeader) {
+
+					oracle.disconnect(h, hdr)
+				},
+				OnFilteredBlockConnected: func(_ int32,
+					_ *wire.BlockHeader,
+					txs []*btcutil.Tx) {
+
+					for _, tx := range txs {
+						payments = append(
+							payments,
+							*tx.Hash(),
+						)
+					}
+				},
+			},
+		})
+		actor.Start()
+		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+		synctest.Wait()
+		state, err := actor.CurrentState()
+		require.NoError(t, err)
+		current, ok := state.(*StateCurrent)
+		require.True(t, ok, "state %T", state)
+		require.Equal(t, int32(2), current.CurStamp.Height)
+		chain.mu.Lock()
+		orphan := *chain.blockHeaders[chain.bestBlock.Hash]
+		orphanHash := orphan.BlockHash()
+		orphanFilter := chain.filters[orphanHash]
+		parent := *chain.blockHeaders[orphan.PrevBlock]
+		chain.bestBlock = headerfs.BlockStamp{
+			Hash:      parent.BlockHash(),
+			Height:    1,
+			Timestamp: parent.Timestamp,
+		}
+		chain.mu.Unlock()
+		stamp, payment := chain.addBlockWithTx(addr)
+		chain.mu.Lock()
+		block := chain.blocks[stamp.Hash].MsgBlock().Copy()
+		block.Header.Nonce = orphan.Nonce + 1
+		replacement := block.Header
+		replacementHash := replacement.BlockHash()
+		filter, err := builder.BuildBasicFilter(block, nil)
+		if err != nil {
+			chain.mu.Unlock()
+			t.Fatal(err)
+		}
+		chain.filters[orphanHash] = orphanFilter
+		chain.blockHeaders[replacementHash] = &replacement
+		chain.blockHeightIndex[replacementHash] = 2
+		chain.blockHashesByHeight[2] = &replacementHash
+		chain.blocks[replacementHash] = btcutil.NewBlock(block)
+		chain.filters[replacementHash] = filter
+		chain.bestBlock.Hash = replacementHash
+		delete(chain.blockHeaders, orphanHash)
+		chain.mu.Unlock()
+		require.NotEqual(t, orphanHash, replacementHash)
+		chain.ntfnChan <- blockntfns.NewBlockDisconnected(
+			orphan, 2, parent,
+		)
+		synctest.Wait()
+		chain.ntfnChan <- blockntfns.NewBlockConnected(orphan, 2)
+		synctest.Wait()
+		require.Empty(t, oracle.err)
+		require.Len(t, oracle.events, 3)
+		chain.ntfnChan <- blockntfns.NewBlockConnected(replacement, 2)
+		synctest.Wait()
+		for i := 0; i < 3; i++ {
+			time.Sleep(filterRetryInterval)
+			synctest.Wait()
+		}
+		state, err = actor.CurrentState()
+		require.NoError(t, err)
+		current, ok = state.(*StateCurrent)
+		require.True(t, ok, "state %T", state)
+		require.Equal(t, int32(2), current.CurStamp.Height)
+		require.Equal(t, replacementHash, current.CurStamp.Hash)
+		require.Empty(t, oracle.err)
+		require.Len(t, oracle.events, 4)
+		require.Equal(
+			t, dstEvent{"disconnect", 2, orphanHash},
+			oracle.events[2],
+		)
+		require.Equal(
+			t, dstEvent{"connect", 2, replacementHash},
+			oracle.events[3],
+		)
+		require.Equal(t, []chainhash.Hash{payment.TxHash()}, payments)
 	})
 }
