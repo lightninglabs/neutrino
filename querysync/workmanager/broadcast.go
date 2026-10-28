@@ -91,6 +91,7 @@ func (c *BroadcastControl) PeerDoneAfter(delay time.Duration) {
 		select {
 		case <-timer.C:
 		case <-c.run.done:
+		case <-c.run.finished:
 		case <-c.run.quit:
 		}
 	}()

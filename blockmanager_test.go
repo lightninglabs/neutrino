@@ -1464,3 +1464,29 @@ func TestHandleHeaders(t *testing.T) {
 	bm.handleHeadersMsg(hmsg)
 	assertPeerDisconnected(true)
 }
+
+// TestAllPeerBroadcastsUseQueryTimeout checks that the cfilter and
+// checkpoint all-peer queries bound each attempt by the QueryTimeout setting.
+func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
+	t.Parallel()
+
+	var timeouts []time.Duration
+	bm := &blockManager{cfg: &blockManagerCfg{
+		Broadcaster: broadcastFunc(func(_ *querysyncwm.Broadcast,
+			opts ...querysyncwm.QueryOption) error {
+
+			timeouts = append(
+				timeouts,
+				querysyncwm.ResolveOptions(opts...).Timeout,
+			)
+
+			return nil
+		}),
+	}}
+
+	hash := chainhash.Hash{1}
+	bm.fetchFilterFromAllPeers(1, hash, wire.GCSFilterRegular)
+	bm.getCheckpts(&hash, wire.GCSFilterRegular)
+
+	require.Equal(t, []time.Duration{QueryTimeout, QueryTimeout}, timeouts)
+}

@@ -2404,7 +2404,7 @@ func (b *blockManager) fetchFilterFromAllPeers(
 			default:
 			}
 		},
-	})
+	}, querysyncwm.Timeout(QueryTimeout))
 	if err != nil {
 		log.Debugf("Filter broadcast ended early: %v", err)
 	}
@@ -2434,7 +2434,7 @@ func (b *blockManager) getCheckpts(lastHash *chainhash.Hash,
 				ctl.PeerDone()
 			}
 		},
-	})
+	}, querysyncwm.Timeout(QueryTimeout))
 	if err != nil {
 		log.Debugf("Checkpoint broadcast ended early: %v", err)
 	}

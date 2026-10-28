@@ -1207,8 +1207,10 @@ Loop:
 
 			// Delete the job from the worker's active job, such
 			// that the slot gets opened for more work.
+			// A late result from a replaced worker must not touch
+			// the worker that took its place after a reconnect.
 			r := workers[result.peer.Addr()]
-			if r != nil {
+			if r != nil && r.peer == result.peer {
 				r.activeJob = nil
 				err := setWorkerPeerState(
 					schedulerCtx, scheduler, r,
