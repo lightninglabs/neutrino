@@ -1,6 +1,6 @@
 # Rescan actor architecture
 
-This document describes the rescan actor at commit `ea31eed`. It is a guide to
+This document describes the rescan actor at commit `4870f0e`. It is a guide to
 the in-memory actor in `rescan/`, its chain-source boundary, and the effects
 that reach a caller. The repository also has the existing `NewRescan` API in
 `rescan.go`; it runs its own rescan loop and does not instantiate this actor.
@@ -89,6 +89,14 @@ network dispatch; the cancellation option applies to the query path, rather
 than guaranteeing interruption of every possible local store read. See
 [`query.go`](../query.go) and
 [`querysync/workmanager/workmanager.go`](../querysync/workmanager/workmanager.go).
+
+The work manager's dispatcher owns accepted query batches. `handleNewBatch`
+starts each cancellation watcher, `cancelBatch` retires canceled work, and
+`stopBatchTimers` releases the watcher on completion, cancellation or shutdown.
+Late results for retired batches return before peer accounting. These
+transitions run in the dispatcher goroutine; see
+[`dispatcher.go`](../querysync/workmanager/dispatcher.go) and
+[`dispatcher_result.go`](../querysync/workmanager/dispatcher_result.go).
 
 ## Rescan states
 
