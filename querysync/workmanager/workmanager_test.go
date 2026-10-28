@@ -1,7 +1,6 @@
 package workmanager
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -47,6 +46,9 @@ type mockWorker struct {
 	peer    Peer
 	nextJob chan *queryJob
 	results chan *jobResult
+
+	// exit, if closed, makes Run return as if the peer had disconnected.
+	exit chan struct{}
 }
 
 var _ Worker = (*mockWorker)(nil)
@@ -63,6 +65,9 @@ func (m *mockWorker) Run(results chan<- *jobResult,
 		case r := <-m.results:
 			r.peer = m.peer
 			results <- r
+
+		case <-m.exit:
+			return
 
 		case <-quit:
 			return
@@ -136,6 +141,7 @@ func startWorkManager(
 				peer:    peer,
 				nextJob: make(chan *queryJob, 1),
 				results: make(chan *jobResult),
+				exit:    make(chan struct{}),
 			}
 			workerChan <- m
 			return m
@@ -349,15 +355,16 @@ func TestWorkManagerHardCoolsTimeoutPeerAndReassignsLocalWork(t *testing.T) {
 }
 
 func TestSchedulerDoesNotRelaxHardCooldown(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-
-	scheduler := newQuerySchedulerManager(minQueryTimeout)
-	scheduler.Start(ctx)
-	defer scheduler.Stop()
-
 	now := time.Now()
-	workers := map[string]*activeWorker{
+	ranking := &mockPeerRanking{}
+	ranking.setLess(func(i, j string) bool {
+		return i < j
+	})
+
+	d := newDispatcher(&peerWorkManager{
+		cfg: &Config{Ranking: ranking},
+	}, nil)
+	d.workers = map[string]*activeWorker{
 		"hard": {
 			peer: &mockPeer{
 				addr: "hard",
@@ -374,18 +381,14 @@ func TestSchedulerDoesNotRelaxHardCooldown(t *testing.T) {
 		},
 	}
 
-	ranking := &mockPeerRanking{}
-	ranking.setLess(func(i, j string) bool {
-		return i < j
-	})
+	avoid := d.syncPeers(syncOpts{ignoreCooldown: true})
+	require.Equal(t, []string{"hard"}, avoid)
 
-	assignment, ok := assignQueryJobToLocalWorkWithScheduler(
-		ctx, scheduler, workers, ranking, &queryJob{
-			index:   1,
-			timeout: minQueryTimeout,
-			Request: &Request{},
-		}, 0, nil, true,
-	)
+	assignment, ok := d.sched.AssignLocalTask(querysync.Task{
+		ID:         1,
+		Timeout:    minQueryTimeout,
+		AvoidPeers: avoid,
+	})
 	require.True(t, ok)
 	require.Equal(t, "soft", assignment.PeerID)
 }
@@ -470,6 +473,7 @@ func TestWorkManagerReplacesStaleWorkerOnReconnect(t *testing.T) {
 				peer:    peer,
 				nextJob: make(chan *queryJob, 1),
 				results: make(chan *jobResult),
+				exit:    make(chan struct{}),
 			}
 			workerChan <- m
 
@@ -532,4 +536,29 @@ func TestWorkManagerReplacesStaleWorkerOnReconnect(t *testing.T) {
 		t.Fatal("worker started for disconnected peer")
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestWorkManagerReapsExitedWorkerEagerly checks that the jobs queued on a
+// worker that exits are reassigned right away, without waiting for anything
+// to be sent to the dead worker.
+func TestWorkManagerReapsExitedWorkerEagerly(t *testing.T) {
+	wm, workers := startWorkManager(t, 2, nil, nil)
+	defer func() {
+		require.NoError(t, wm.Stop())
+	}()
+
+	errChan := wm.Query([]*Request{{}, {}, {}})
+
+	// Both workers get a job, and the last one waits in the local queue
+	// of the first, which has no way of starting it while busy.
+	_ = recvJob(t, workers[0], errChan)
+	job1 := recvJob(t, workers[1], errChan)
+
+	// The first peer disconnects. Its queued job must make its way to the
+	// remaining worker once that is free.
+	close(workers[0].exit)
+	sendResult(t, workers[1], job1, nil)
+
+	job2 := recvJob(t, workers[1], errChan)
+	require.EqualValues(t, 2, job2.index)
 }

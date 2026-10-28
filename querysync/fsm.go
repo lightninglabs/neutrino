@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+const (
+	// stealPriorityNone is the donor priority of a peer with nothing worth
+	// stealing.
+	stealPriorityNone = 0
+
+	// stealPriorityQueued is the donor priority of a ready or busy peer
+	// that holds more than one unstarted local task.
+	stealPriorityQueued = 2
+
+	// stealPriorityStranded is the donor priority of a blocked or
+	// quarantined peer, whose local work is otherwise stranded and is
+	// drained before any healthy peer's queue.
+	stealPriorityStranded = 3
+)
+
 // Metrics exposes counters that are useful both for production telemetry and
 // deterministic tests.
 type Metrics struct {
@@ -469,16 +484,16 @@ func betterStealDonor(peer, candidate PeerSnapshot) bool {
 func stealDonorPriority(peer PeerSnapshot) int {
 	switch {
 	case peer.State == PeerBlocked || peer.State == PeerQuarantined:
-		return 3
+		return stealPriorityStranded
 
 	case peer.State == PeerReady && len(peer.LocalWork) > 1:
-		return 2
+		return stealPriorityQueued
 
 	case peer.State == PeerBusy && len(peer.LocalWork) > 1:
-		return 2
+		return stealPriorityQueued
 
 	default:
-		return 0
+		return stealPriorityNone
 	}
 }
 

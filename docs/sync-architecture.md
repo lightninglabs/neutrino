@@ -4,7 +4,8 @@ Neutrino keeps three kinds of chain data in step with its peers: block
 headers, BIP 158 filter headers, and, on demand, filters and blocks. This
 document describes the components that do that work, who owns which state,
 and how a request moves from the network to durable storage. It reflects the
-code after the SQL and actor-based sync series (#397 through #403).
+code after the SQL and actor-based sync series (#397 through #403) and the
+work manager dispatcher restructuring (#412).
 
 For how the sync code is tested, see
 [deterministic-sync-testing.md](deterministic-sync-testing.md).
@@ -42,7 +43,7 @@ flowchart TB
     subgraph QS["querysync/workmanager"]
         direction TB
         disp["dispatcher goroutine<br/>job heap, workers"]
-        qmgr["querysync.ManagerActor<br/>owns SchedulerFSM"]
+        qsched["querysync.Scheduler<br/>wraps SchedulerFSM"]
         wk["worker goroutine per peer"]
     end
 
@@ -66,7 +67,7 @@ flowchart TB
     bh -- "ordered commit" --> bhs
     cfh -- "batch queries" --> disp
     cfh --> fhs
-    disp --> qmgr
+    disp --> qsched
     disp --> wk
     api --> fdb
     CS --> ban
@@ -91,8 +92,9 @@ interfaces is the same for both.
 | `headersync.Session` | In-flight range and anchor requests with their timers, stale requests, staged header payloads, peer cooldowns, range ID allocation | Range state, which lives in the FSM |
 | `headersync.Runtime` | Construction and shutdown of the actor graph | Message routing; `blockManager` calls each part directly |
 | `headersync/querydispatch` | Adapting a private querysync scheduler to choose range owners and steal unstarted ranges | Header validation, leases, commit order |
-| `querysync/workmanager` | The production `query.WorkManager`: the job heap, per-peer workers, retries, timeouts, cooldowns, quarantine | Message encoding and response matching, which each `query.Request` supplies |
+| `querysync/workmanager` | The production `query.WorkManager`: the job heap, per-peer workers, retries, timeouts, cooldowns, quarantine, and a `querysync.Scheduler` consulted only from its dispatcher goroutine | Message encoding and response matching, which each `query.Request` supplies |
 | `querysync.SchedulerFSM` | Pure peer scheduling state: per-peer snapshots, owner selection, steal selection | Concrete jobs, which the dispatcher keeps |
+| `querysync.Scheduler` | A synchronous wrapper of `SchedulerFSM` that records `SchedulerTrace` and `SchedulerEvents` for a single calling goroutine | Locking; the dispatcher goroutine is its only caller |
 | `protofsm` | A generic synchronous state machine that returns outbox messages instead of sending them | Actors or goroutines |
 
 ## Startup
@@ -319,13 +321,13 @@ sequenceDiagram
     autonumber
     participant C as Caller (GetCFilter)
     participant D as Dispatcher goroutine
-    participant M as querysync.ManagerActor
+    participant M as querysync.Scheduler
     participant W as Worker (one per peer)
     participant P as Peer
 
     C->>D: Query(requests, options)
     D->>D: push one job per request on the heap
-    D->>M: sync peer snapshots,<br/>AskAssignLocalTask
+    D->>M: syncPeers (AddPeer per worker),<br/>AssignLocalTask
     M-->>D: owner = peer with most spare capacity
     D->>D: append job to owner's local queue
     D->>W: NewJob() (non-blocking send)
@@ -340,10 +342,20 @@ sequenceDiagram
         D->>D: punish peer, cooldown, requeue job<br/>with doubled timeout
         D-->>C: error after NumRetries attempts
     end
+    opt Run returns (peer disconnected)
+        W-->>D: workerExits
+        D->>D: removeWorker, queued jobs back on the heap
+    end
 ```
 
-The dispatcher goroutine owns all concrete jobs and one `activeWorker` per
-peer. A worker runs one job at a time. Each peer can hold at most four jobs,
+The `dispatcher` struct (`dispatcher.go`) is owned by one goroutine and has
+a handler method per event: `handleNewPeer`, `handleWorkerExit`,
+`handleResult`, `handleNewBatch`, `handleProgressWake`, `handleBatchTimeout`,
+and `handleRetryTick`. It owns all concrete jobs and one `activeWorker` per
+peer, which is the only record of the peer's state. Before each decision,
+`syncPeers` rebuilds the `querysync.Scheduler` snapshots from the workers,
+and every batch is torn down through `completeBatch` or `cancelBatch`. A
+worker runs one job at a time. Each peer can hold at most four jobs,
 counting its active job and its local queue. The owner for a new job is the
 peer with the most spare capacity, with ties broken by lower load, then
 better rank, lower RTT, and peer ID. The per-attempt timeout is eight times
@@ -357,7 +369,12 @@ donor's queue.
 
 A failed attempt puts the peer in a 30-second cooldown and lowers its rank.
 On the third timeout or disconnect, the peer is quarantined for ten minutes
-and reported through `OnPeerUnresponsive`, which bans it.
+and reported through `OnPeerUnresponsive`, which bans it. A peer that
+becomes quarantined, or enters the hard cooldown that follows a timeout or
+`ErrPeerNotFound`, returns its unstarted local jobs to the heap immediately
+(`releaseLocalWork`). When a worker's `Run` method returns, the worker sends
+itself on `workerExits` and the dispatcher removes it at once, so a
+disconnected peer holds no jobs.
 
 Transaction broadcast and the all-peer filter-header checks still use
 `ChainService.queryAllPeers`, a broadcast loop that predates querysync.
@@ -530,8 +547,7 @@ Each piece of mutable sync state has one owner goroutine.
 | headersync peer actor, one per peer | That peer's scheduling state |
 | querysync actor inside headersync | The private dispatch `SchedulerFSM` |
 | `cfHandler` | Filter-header sync progress |
-| querysync dispatcher | The job heap, batches, `activeWorker` map |
-| querysync manager actor | The query `SchedulerFSM` |
+| querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |
 
 Timers created with `time.AfterFunc` for range timeouts, anchor timeouts,
