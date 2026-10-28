@@ -42,6 +42,7 @@ func (h *HeaderSyncFSM) AddCheckpointAnchors(
 		if _, ok := h.anchors[uint32(checkpoint.Height)]; !ok {
 			added++
 		}
+		h.checkpoints[uint32(checkpoint.Height)] = true
 		h.AddOrConfirmAnchor(
 			uint32(checkpoint.Height), *checkpoint.Hash, true,
 		)

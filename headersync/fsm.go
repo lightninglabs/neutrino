@@ -15,8 +15,13 @@ type HeaderSyncFSM struct {
 	committedTip  uint32
 	committedHash Hash
 
-	anchors   map[uint32]Anchor
-	ranges    map[RangeID]HeaderRange
+	anchors map[uint32]Anchor
+	ranges  map[RangeID]HeaderRange
+
+	// checkpoints holds the heights of chain checkpoint anchors, which a
+	// tip rewind keeps.
+	checkpoints map[uint32]bool
+
 	rangeKeys []RangeID
 	peers     map[string]PeerSnapshot
 
@@ -34,6 +39,7 @@ func NewHeaderSyncFSM(committedTip uint32, committedHash Hash,
 		committedHash: committedHash,
 		anchors:       make(map[uint32]Anchor),
 		ranges:        make(map[RangeID]HeaderRange),
+		checkpoints:   make(map[uint32]bool),
 		peers:         make(map[string]PeerSnapshot),
 	}
 }
@@ -52,16 +58,20 @@ func (h *HeaderSyncFSM) CommittedHash() Hash {
 // persisted outside the staged headersync commit path. Production can still
 // fall back to the legacy serial writer in a few edge cases; when that writer
 // advances the database tip, the scheduler must treat the new tip as committed
-// before planning additional frontier work.
+// before planning additional frontier work. When that writer rolled the tip
+// back or replaced it at the same height, the FSM rewinds to it instead.
 func (h *HeaderSyncFSM) AdvanceCommittedTip(height uint32,
 	hash Hash) bool {
 
-	if height < h.committedTip {
-		return false
+	if height < h.committedTip ||
+		(height == h.committedTip && hash != h.committedHash) {
+
+		h.rewindCommittedTip(height, hash)
+
+		return true
 	}
 	if height == h.committedTip {
 		h.AddOrConfirmAnchor(height, hash, true)
-		h.committedHash = hash
 
 		return false
 	}
@@ -91,6 +101,43 @@ func (h *HeaderSyncFSM) AdvanceCommittedTip(height uint32,
 	}
 
 	return true
+}
+
+// rewindCommittedTip moves the committed tip down to, or sideways at, a
+// durable tip the serial writer produced by rolling back or reorganizing.
+// Work above the new tip was planned against headers that are no longer on
+// disk: every range ending above it becomes stale under a new epoch, and the
+// untrusted anchors above it are dropped so discovery relearns them. Without
+// this a ranged planned from the old tip could never connect, and ordered
+// commit stopped at it for good.
+func (h *HeaderSyncFSM) rewindCommittedTip(height uint32, hash Hash) {
+	// Anchors at or above the new tip came from the old chain: discovered
+	// ones, and durable tips trusted only because they were on disk. Only
+	// checkpoints survive.
+	for anchorHeight := range h.anchors {
+		if anchorHeight >= height && !h.checkpoints[anchorHeight] {
+			delete(h.anchors, anchorHeight)
+		}
+	}
+
+	for id, rng := range h.ranges {
+		if rng.StopHeight <= height || rng.State == RangeFailed ||
+			rng.State == RangeStale {
+
+			continue
+		}
+		h.detachRangeFromPeers(id)
+		rng.LeaseEpoch++
+		rng.OwnerPeer = NoPeer
+		rng.State = RangeStale
+		rng.Valid = false
+		rng.StagedAt = time.Time{}
+		h.ranges[id] = rng
+	}
+
+	h.committedTip = height
+	h.committedHash = hash
+	h.anchors[height] = h.newAnchor(height, hash, true)
 }
 
 // Metrics returns the current counters.

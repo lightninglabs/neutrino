@@ -726,6 +726,38 @@ func TestStageDiscoveredRangeSkipsOverlap(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TestAdvanceCommittedTipRewinds is the regression for F3. The serial writer
+// can roll the durable tip back or replace it at the same height. The FSM tip
+// used to move forward only, so ranges planned from the old tip kept the old
+// start hash, could never connect, and were never replanned.
+func TestAdvanceCommittedTipRewinds(t *testing.T) {
+	fsm := newTestFSM()
+	fsm.SeedCommittedAnchor()
+	addTrustedAnchor(t, fsm, 10, 110)
+	addTrustedAnchor(t, fsm, 20, 120)
+	fsm.AddCheckpointAnchors(nil)
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(110)))
+	mustPlanRange(t, fsm, 1, 10, 20)
+
+	// A same-height replacement retires work planned from the old hash
+	// and lets planning start again from the new one.
+	require.True(t, fsm.AdvanceCommittedTip(10, testHash(210)))
+	rng, ok := fsm.RangeByID(1)
+	require.True(t, ok)
+	require.Equal(t, RangeStale, rng.State)
+	require.EqualValues(t, 10, fsm.CommittedTip())
+	require.Equal(t, testHash(210), fsm.CommittedHash())
+	_, ok = fsm.AnchorByHeight(20)
+	require.False(t, ok, "old-chain anchor survived the rewind")
+
+	// A rollback below the tip rewinds too.
+	require.True(t, fsm.AdvanceCommittedTip(5, testHash(105)))
+	require.EqualValues(t, 5, fsm.CommittedTip())
+	anchor, ok := fsm.AnchorByHeight(5)
+	require.True(t, ok)
+	require.True(t, fsm.AnchorConfirmed(anchor))
+}
+
 func commitLogStrictlyIncreasing(log []RangeID) bool {
 	for i := 1; i < len(log); i++ {
 		if log[i] <= log[i-1] {
