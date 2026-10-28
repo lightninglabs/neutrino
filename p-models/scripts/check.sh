@@ -66,3 +66,9 @@ run_model \
     "${PROJECT_DIR}/neutrinoheadersync/infra.pproj" \
     "NeutrinoHeaderSyncModels.dll" \
     "tcHeaderSync"
+
+run_model \
+    "header sync exploration" \
+    "${PROJECT_DIR}/neutrinoheadersync/infra.pproj" \
+    "NeutrinoHeaderSyncModels.dll" \
+    "tcHeaderSyncExplore"

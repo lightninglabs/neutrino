@@ -5,6 +5,7 @@
 <PFile>src/header_transport.p</PFile>
 <PFile>test/header_sync_test.p</PFile>
 <PFile>test/header_transport_test.p</PFile>
+<PFile>test/header_sync_explore.p</PFile>
 </InputFiles>
 <OutputDir>PGenerated</OutputDir>
 </Project>

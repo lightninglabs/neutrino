@@ -825,6 +825,8 @@ fun StealRange(model: HeaderSyncModel, thief_id: int,
     var thief: HeaderPeer;
     var donor: HeaderPeer;
     var range: HeaderRange;
+    var donor_state: HeaderPeerState;
+    var donor_active: int;
 
     thief = PeerByID(model.peers, thief_id);
     range = RangeByID(model.ranges, range_id);
@@ -836,14 +838,25 @@ fun StealRange(model: HeaderSyncModel, thief_id: int,
         return model;
     }
 
+    // Only the stolen lease leaves the donor. Stealing one of its queued
+    // ranges must not clear an unrelated active range, or that lease is
+    // left with no peer running it (the Go FSM's stealRange agrees).
     donor = PeerByID(model.peers, range.owner_peer);
+    donor_state = donor.peer_state;
+    donor_active = donor.active_range;
+    if (donor_active == range_id) {
+        donor_active = NoRange();
+        if (donor_state == HeaderPeerBusy) {
+            donor_state = HeaderPeerReady;
+        }
+    }
     donor = (
         id = donor.id,
         rank = donor.rank,
         rtt_ms = donor.rtt_ms,
-        peer_state = HeaderPeerReady,
+        peer_state = donor_state,
         local_ranges = RemoveID(donor.local_ranges, range_id),
-        active_range = NoRange()
+        active_range = donor_active
     );
     thief = (
         id = thief.id,
