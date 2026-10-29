@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,7 +93,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	pkScript, _ := txscript.PayToAddrScript(addr)
 	_ = pkScript
 
-	err := actor.AddWatchAddrs(WatchUpdate{
+	err := addWatch(actor, WatchUpdate{
 		Addrs:    []address.Address{addr},
 		RewindTo: &rewindTo,
 	})
@@ -112,7 +113,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	// Phase 4: Receive new blocks via subscription after re-sync.
 	// The actor should be back in Current state.
 	require.Eventually(t, func() bool {
-		state, _ := actor.CurrentState()
+		state, _ := actor.CurrentState(context.Background())
 		_, ok := state.(*StateCurrent)
 		return ok
 	}, 5*time.Second, 10*time.Millisecond,
@@ -130,7 +131,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	// Wait for the new blocks to be processed.
 	bestBlock, _ := chain.BestBlock()
 	require.Eventually(t, func() bool {
-		state, _ := actor.CurrentState()
+		state, _ := actor.CurrentState(context.Background())
 		if cur, ok := state.(*StateCurrent); ok {
 			return cur.CurStamp.Height == bestBlock.Height
 		}
@@ -212,7 +213,7 @@ func TestIntegrationRaceConditionPrevention(t *testing.T) {
 	}()
 
 	// Add the address with rewind right after (or simultaneously).
-	err := actor.AddWatchAddrs(WatchUpdate{
+	err := addWatch(actor, WatchUpdate{
 		Addrs:    []address.Address{addr},
 		RewindTo: &rewindTo,
 	})

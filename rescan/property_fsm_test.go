@@ -40,8 +40,7 @@ func newFSMModel(t *rapid.T) *fsmModel {
 	m := &fsmModel{
 		w: w,
 		env: &Environment{
-			Chain:     &dstSource{w: w},
-			BatchSize: rapid.IntRange(1, 4).Draw(t, "batch"),
+			Chain: &dstSource{w: w},
 		},
 		truth: newDSTTruth(
 			w, start, w.fx.genesis.header.Timestamp,

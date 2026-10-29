@@ -49,12 +49,8 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 			CurHeader: genesis,
 		},
 	}
-	env := &Environment{Chain: chain, BatchSize: 10}
-	transition, err := state.ProcessEvent(
-		t.Context(),
-		ProcessNextBlockEvent{},
-		env,
-	)
+	env := &Environment{Chain: chain}
+	transition, err := runSteps(t.Context(), state, env, 10)
 	require.NoError(t, err)
 	next := transition.NextState.(*StateSyncing)
 	require.Equal(t, int32(2), next.CurStamp.Height)
@@ -72,11 +68,7 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 	)
 	require.Error(t, err)
 	chain.failHeight = 0
-	transition, err = next.ProcessEvent(
-		t.Context(),
-		ProcessNextBlockEvent{},
-		env,
-	)
+	transition, err = runSteps(t.Context(), next, env, 10)
 	require.NoError(t, err)
 	require.IsType(t, &StateCurrent{}, transition.NextState)
 }
@@ -306,9 +298,7 @@ func TestCurrentFallsBackOnTransientHeaderRead(t *testing.T) {
 	require.Equal(t, []OutboxEvent{ContinueOutbox{}}, outboxOf(transition))
 
 	chain.failHeight = math.MaxUint32
-	transition, err = transition.NextState.ProcessEvent(
-		t.Context(), ProcessNextBlockEvent{}, env,
-	)
+	transition, err = runSteps(t.Context(), transition.NextState, env, 10)
 	require.NoError(t, err)
 	require.Equal(
 		t,

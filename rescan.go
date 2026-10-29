@@ -490,11 +490,6 @@ func newRescanConfig(chain ChainSource,
 		// 100ms.
 		RetryInterval: legacyRetryInterval,
 
-		// The legacy rescan notified each block before it scanned the
-		// next one, and read updates in between, so the actor runs one
-		// block per mailbox turn.
-		BatchSize: 1,
-
 		Callbacks: legacyCallbacks(ro.ntfn),
 	}, ro, nil
 }
@@ -719,14 +714,30 @@ func (r *Rescan) Update(options ...UpdateOption) error {
 		update.RewindTo = &uo.rewind
 	}
 
-	err := r.actor.AddWatchAddrs(update)
+	// Like the legacy Update, wait as long as the rescan takes to read
+	// the update, unless it ends first. The actor answers after at most
+	// the block it is scanning.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ro.quit:
+		case <-r.running:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+
+	err := r.actor.AddWatchAddrs(ctx, update)
 	if err == nil {
 		return nil
 	}
 
 	// An update that reaches a rescan that is shutting down fails like
 	// one sent after it ended.
-	if errors.Is(err, rescan.ErrStopped) {
+	if errors.Is(err, rescan.ErrStopped) ||
+		errors.Is(err, context.Canceled) {
+
 		select {
 		case <-ro.quit:
 			return ErrRescanExit

@@ -115,6 +115,13 @@ type EndReachedOutbox struct{}
 
 func (EndReachedOutbox) outboxEventSealed() {}
 
+// WaitOutbox asks the actor to send ProcessNextBlockEvent again after its
+// retry interval. Initializing emits it while it waits for the chain. Unlike
+// a failed step, a wait reports no error.
+type WaitOutbox struct{}
+
+func (WaitOutbox) outboxEventSealed() {}
+
 // ContinueOutbox instructs the actor wrapper to send a ProcessNextBlockEvent
 // back through its own mailbox. A state emits it instead of looping so the
 // mailbox can interleave AddWatchAddrs and notifications between batches.

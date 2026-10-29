@@ -7,7 +7,7 @@ import (
 )
 
 // StateRewinding walks backward through the chain from the cursor to the
-// target height, one batch per ProcessNextBlockEvent, and emits a
+// target height, one block per ProcessNextBlockEvent, and emits a
 // BlockDisconnectedOutbox for each block above the target. The target block
 // itself is kept.
 //
@@ -77,52 +77,48 @@ func (s *StateRewinding) ProcessEvent(
 	}
 }
 
-// processRewind walks back one batch of blocks toward the rewind target.
+// processRewind undoes the cursor block, or moves to Syncing once the cursor
+// has reached the target. A failed step leaves the state unchanged.
 func (s *StateRewinding) processRewind(
 	env *Environment) (*StateTransition, error) {
 
 	cur := s.Cursor
-	var outbox []OutboxEvent
 
-	for i := 0; i < env.batchSize(); i++ {
-		// Check if we've reached the target.
-		if cur.CurStamp.Height <= int32(s.TargetHeight) {
-			// Transition to syncing from this point.
-			return transition(
-				&StateSyncing{Cursor: cur},
-				append(outbox, ContinueOutbox{})...,
-			), nil
-		}
-
-		// Emit disconnection notification for the current block,
-		// unless the update that asked for this part of the rewind
-		// disabled it.
-		headerCopy := cur.CurHeader
-		if !s.plan.silentAt(cur.CurStamp.Height) {
-			outbox = append(outbox, BlockDisconnectedOutbox{
-				Hash:   cur.CurStamp.Hash,
-				Height: cur.CurStamp.Height,
-				Header: &headerCopy,
-				Rewind: true,
-			})
-		}
-
-		// Walk back to the previous block.
-		header, height, err := env.Chain.GetBlockHeader(
-			&cur.CurHeader.PrevBlock,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		cur.CurHeader = *header
-		cur.CurStamp = headerfs.BlockStamp{
-			Hash:   header.BlockHash(),
-			Height: int32(height),
-		}
+	// Check if we've reached the target.
+	if cur.CurStamp.Height <= int32(s.TargetHeight) {
+		// Transition to syncing from this point.
+		return transition(
+			&StateSyncing{Cursor: cur}, ContinueOutbox{},
+		), nil
 	}
 
-	// Batch complete but not yet at target. Continue through the mailbox.
+	// Emit disconnection notification for the current block, unless the
+	// update that asked for this part of the rewind disabled it.
+	var outbox []OutboxEvent
+	headerCopy := cur.CurHeader
+	if !s.plan.silentAt(cur.CurStamp.Height) {
+		outbox = append(outbox, BlockDisconnectedOutbox{
+			Hash:   cur.CurStamp.Hash,
+			Height: cur.CurStamp.Height,
+			Header: &headerCopy,
+			Rewind: true,
+		})
+	}
+
+	// Walk back to the previous block.
+	header, height, err := env.Chain.GetBlockHeader(
+		&cur.CurHeader.PrevBlock,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cur.CurHeader = *header
+	cur.CurStamp = headerfs.BlockStamp{
+		Hash:   header.BlockHash(),
+		Height: int32(height),
+	}
+
 	return transition(&StateRewinding{
 		Cursor:       cur,
 		TargetHeight: s.TargetHeight,

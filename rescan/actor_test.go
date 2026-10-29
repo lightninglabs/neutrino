@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -70,10 +71,11 @@ func TestRescanActorReceiveProcessNextBlock(t *testing.T) {
 	stateResult := actor.Receive(t.Context(), &currentStateReq{})
 	require.True(t, stateResult.IsOk())
 
+	// One continuation runs a batch, and the two blocks fit in it.
 	resp, ok := stateResult.UnwrapOr(nil).(*currentStateResp)
 	require.True(t, ok)
-	_, ok = resp.State.(*StateSyncing)
-	require.True(t, ok, "expected StateSyncing, got %T", resp.State)
+	_, ok = resp.State.(*StateCurrent)
+	require.True(t, ok, "expected StateCurrent, got %T", resp.State)
 }
 
 // TestRescanActorReceiveAddWatchAddrs exercises the actor behavior directly to
@@ -150,7 +152,7 @@ func TestRescanActorLifecycle(t *testing.T) {
 		"should have connected at least 1 block")
 
 	// Should be in Current state.
-	state, err := actor.CurrentState()
+	state, err := actor.CurrentState(context.Background())
 	require.NoError(t, err)
 	_, ok := state.(*StateCurrent)
 	require.True(t, ok, "expected StateCurrent, got %T", state)
@@ -195,12 +197,14 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 		chainhash.HashB([]byte("test-addr"))[:20],
 		&chaincfg.MainNetParams,
 	)
-	err := actor.AddWatchAddrs(WatchUpdate{Addrs: []address.Address{addr}})
+	err := addWatch(actor, WatchUpdate{
+		Addrs: []address.Address{addr},
+	})
 	require.NoError(t, err)
 
 	// Wait for the address to appear in state.
 	require.Eventually(t, func() bool {
-		state, err := actor.CurrentState()
+		state, err := actor.CurrentState(context.Background())
 		if err != nil {
 			return false
 		}
@@ -241,7 +245,7 @@ func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
 		actor.WaitForShutdown()
 	})
 
-	err := actor.AddWatchAddrs(WatchUpdate{
+	err := addWatch(actor, WatchUpdate{
 		Addrs: []address.Address{invalidTestAddress{}},
 	})
 	require.Error(t, err)
@@ -358,7 +362,7 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 
 	// Wait for the block to be processed.
 	require.Eventually(t, func() bool {
-		state, _ := actor.CurrentState()
+		state, _ := actor.CurrentState(context.Background())
 		if cur, ok := state.(*StateCurrent); ok {
 			return cur.CurStamp.Height == newBest.Height
 		}
@@ -493,7 +497,7 @@ func TestRescanActorStopBeforeStart(t *testing.T) {
 		actor.WaitForShutdown()
 
 		require.Zero(t, chain.subscribed.Load())
-		_, err := actor.CurrentState()
+		_, err := actor.CurrentState(context.Background())
 		require.Error(t, err)
 	})
 }
@@ -525,7 +529,7 @@ func TestRescanActorStopDuringStart(t *testing.T) {
 
 		require.Equal(t, int32(1), chain.subscribed.Load())
 		require.Zero(t, chain.live.Load(), "subscription leaked")
-		_, err := actor.CurrentState()
+		_, err := actor.CurrentState(context.Background())
 		require.Error(t, err)
 	})
 }
@@ -557,13 +561,13 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		synctest.Wait()
 
 		require.Equal(t, int32(1), errs.Load())
-		state, err := actor.CurrentState()
+		state, err := actor.CurrentState(context.Background())
 		require.NoError(t, err)
 		require.IsType(t, &StateTerminal{}, state)
 
 		// The mailbox still runs, but an update is never scanned, so
 		// it must fail rather than report success.
-		err = actor.AddWatchAddrs(WatchUpdate{})
+		err = addWatch(actor, WatchUpdate{})
 		require.ErrorIs(t, err, ErrStopped)
 	})
 }
@@ -615,12 +619,12 @@ func TestNewRescanActorRejectsInvalidAddress(t *testing.T) {
 		actor.WaitForShutdown()
 	})
 
-	state, err := actor.CurrentState()
+	state, err := actor.CurrentState(context.Background())
 	require.NoError(t, err)
 	watch := cursorOf(t, state).Watch
 	require.Len(t, watch.Addrs, 1)
 	require.Len(t, watch.List, 1)
-	require.NoError(t, actor.AddWatchAddrs(WatchUpdate{
+	require.NoError(t, addWatch(actor, WatchUpdate{
 		Addrs: []address.Address{valid},
 	}))
 }

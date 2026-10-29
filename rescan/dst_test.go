@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -293,7 +294,7 @@ func (d *dstRun) check(label string) {
 // current returns the actor's state, which must be StateCurrent.
 func (d *dstRun) current(label string) *StateCurrent {
 	d.t.Helper()
-	state, err := d.actor.CurrentState()
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err, "%s, seed %x", label, d.seed)
 	cur, ok := state.(*StateCurrent)
 	require.True(d.t, ok, "%s: state %v, %v, seed %x", label, state,
@@ -309,7 +310,7 @@ func (d *dstRun) requireAtTip(label string) {
 	d.t.Helper()
 	d.truth.checkFinished()
 	d.check(label)
-	state, err := d.actor.CurrentState()
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err, "%s, seed %x", label, d.seed)
 	tip := d.w.tip()
 	cur, ok := state.(*StateCurrent)
@@ -335,7 +336,7 @@ func (d *dstRun) requireAtTip(label string) {
 // connects already in flight that may still be delivered first.
 func (d *dstRun) rewind(target uint32, allowance int) error {
 	d.truth.beginRewind(target, allowance)
-	return d.actor.AddWatchAddrs(WatchUpdate{RewindTo: &target})
+	return addWatch(d.actor, WatchUpdate{RewindTo: &target})
 }
 
 // initialSync starts the actor and lets the historical scan reach the tip.
@@ -424,7 +425,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	gate := false
 	if faulty && d.enabled(dstFaultGate) && arg&16 != 0 {
 		// Only a current scan fetches the new block's filter at once.
-		state, err := d.actor.CurrentState()
+		state, err := d.actor.CurrentState(context.Background())
 		require.NoError(d.t, err)
 		cur, ok := state.(*StateCurrent)
 		gate = ok && cur.CurStamp.Hash == d.w.tip().hash
@@ -459,7 +460,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	done := make(chan error, 1)
 	d.truth.beginRewind(target, allowance)
 	go func() {
-		done <- d.actor.AddWatchAddrs(WatchUpdate{RewindTo: &target})
+		done <- addWatch(d.actor, WatchUpdate{RewindTo: &target})
 	}()
 	synctest.Wait()
 	close(release)
@@ -486,10 +487,10 @@ func (d *dstRun) step(i int, value byte) {
 		require.NoError(d.t, d.rewind(target, 0))
 
 	case 3:
-		require.NoError(d.t, d.actor.AddWatchAddrs(WatchUpdate{}))
+		require.NoError(d.t, addWatch(d.actor, WatchUpdate{}))
 
 	case 7:
-		_, err := d.actor.CurrentState()
+		_, err := d.actor.CurrentState(context.Background())
 		require.NoError(d.t, err)
 	}
 	d.settle()
@@ -552,7 +553,7 @@ func (d *dstRun) stopService() {
 	d.truth.mu.Unlock()
 	require.Equal(d.t, errors+1, d.truth.errorCount(),
 		"closed subscription errors, seed %x", d.seed)
-	state, err := d.actor.CurrentState()
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err)
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
 
@@ -580,7 +581,7 @@ func (d *dstRun) stopService() {
 	require.Equal(d.t, int32(1), lateErrors.Load(),
 		"failed subscribe errors, seed %x", d.seed)
 	require.Zero(d.t, lateCallbacks.Load(), "seed %x", d.seed)
-	state, err = late.CurrentState()
+	state, err = late.CurrentState(context.Background())
 	require.NoError(d.t, err)
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
 

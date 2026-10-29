@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -30,7 +31,6 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	env := &Environment{
 		Chain:     chain,
 		StartTime: time.Time{},
-		BatchSize: DefaultBatchSize,
 	}
 
 	transition, err := state.ProcessEvent(
@@ -114,12 +114,10 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	env := &Environment{
 		Chain:     chain,
 		StartTime: time.Time{},
-		BatchSize: 100, // Larger than chain so we finish in one batch.
 	}
 
-	transition, err := state.ProcessEvent(
-		t.Context(), ProcessNextBlockEvent{}, env,
-	)
+	// A batch larger than the chain finishes in one turn.
+	transition, err := runSteps(t.Context(), state, env, 100)
 	require.NoError(t, err)
 
 	// Should transition to StateCurrent since chain is only 5 blocks.
@@ -165,12 +163,10 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	env := &Environment{
 		Chain:     chain,
 		StartTime: time.Time{},
-		BatchSize: 5, // Only process 5 blocks per batch.
 	}
 
-	transition, err := state.ProcessEvent(
-		t.Context(), ProcessNextBlockEvent{}, env,
-	)
+	// Run a batch of only 5 steps.
+	transition, err := runSteps(t.Context(), state, env, 5)
 	require.NoError(t, err)
 
 	// Should stay in StateSyncing.
@@ -381,13 +377,12 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	}
 
 	env := &Environment{
-		Chain:     chain,
-		BatchSize: 100, // Large enough to finish in one batch.
+		Chain: chain,
 	}
 
-	transition, err := state.ProcessEvent(
-		t.Context(), ProcessNextBlockEvent{}, env,
-	)
+	// Three steps undo blocks 8 to 6, and the fourth hands the cursor
+	// to Syncing.
+	transition, err := runSteps(t.Context(), state, env, 4)
 	require.NoError(t, err)
 
 	// Should transition to StateSyncing at or below target height.
@@ -440,7 +435,6 @@ func TestStateMachineFullCycle(t *testing.T) {
 		&Environment{
 			Chain:     chain,
 			StartTime: time.Time{},
-			BatchSize: 100,
 		},
 	)
 
@@ -457,25 +451,22 @@ func TestStateMachineFullCycle(t *testing.T) {
 	// continuation. Process it manually.
 	require.NotEmpty(t, outbox)
 
-	// Find and process the continuation.
-	for _, out := range outbox {
-		if _, ok := out.(ContinueOutbox); ok {
-			outbox2, err := fsm.ProcessEvent(
-				t.Context(), ProcessNextBlockEvent{},
-			)
-			require.NoError(t, err)
+	// Process continuations, one block each, until the machine stops
+	// asking for one. This should process all blocks and reach Current.
+	var hasFinished bool
+	for continued(outbox) {
+		outbox, err = fsm.ProcessEvent(
+			t.Context(), ProcessNextBlockEvent{},
+		)
+		require.NoError(t, err)
 
-			// This should process all blocks and reach Current.
-			var hasFinished bool
-			for _, out2 := range outbox2 {
-				if _, ok := out2.(RescanFinishedOutbox); ok {
-					hasFinished = true
-				}
+		for _, out := range outbox {
+			if _, ok := out.(RescanFinishedOutbox); ok {
+				hasFinished = true
 			}
-			require.True(t, hasFinished,
-				"expected RescanFinishedOutbox")
 		}
 	}
+	require.True(t, hasFinished, "expected RescanFinishedOutbox")
 
 	// Verify we're in Current state.
 	state := fsm.CurrentState()
@@ -495,4 +486,59 @@ func TestStateTerminal(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, state, transition.NextState)
+}
+
+// continued reports whether outbox asks for a continuation.
+func continued(outbox []OutboxEvent) bool {
+	for _, out := range outbox {
+		if _, ok := out.(ContinueOutbox); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// runSteps applies ProcessNextBlockEvent to state up to n times, as one actor
+// turn does, and returns a transition to the last state with the outbox of
+// every step, the continuation requests merged into one at the end. It stops
+// after a step that asks for no continuation. A failed first step returns its
+// error. A later one ends the run with the steps before it, which the actor
+// has already committed.
+func runSteps(ctx context.Context, state RescanState, env *Environment,
+	n int) (*StateTransition, error) {
+
+	var (
+		outbox []OutboxEvent
+		more   bool
+	)
+	for i := 0; i < n; i++ {
+		step, err := state.ProcessEvent(
+			ctx, ProcessNextBlockEvent{}, env,
+		)
+		if err != nil {
+			if i == 0 {
+				return nil, err
+			}
+			break
+		}
+
+		state = step.NextState
+		more = false
+		for _, out := range outboxOf(step) {
+			if _, ok := out.(ContinueOutbox); ok {
+				more = true
+				continue
+			}
+			outbox = append(outbox, out)
+		}
+		if !more {
+			break
+		}
+	}
+	if more {
+		outbox = append(outbox, ContinueOutbox{})
+	}
+
+	return transition(state, outbox...), nil
 }

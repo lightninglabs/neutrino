@@ -229,3 +229,8 @@ func (c *mockChainSource) IsCurrent() bool {
 // MarkAsConfirmed is part of the ChainSource interface. The mock broadcasts
 // nothing.
 func (c *mockChainSource) MarkAsConfirmed(chainhash.Hash) {}
+
+// addWatch sends actor a watch-list update and waits for it to apply.
+func addWatch(actor *RescanActor, update WatchUpdate) error {
+	return actor.AddWatchAddrs(context.Background(), update)
+}

@@ -31,9 +31,23 @@ func (s *StateCurrent) ProcessEvent(
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		// A continuation or retry queued before Syncing reached the
-		// tip. The subscription reports every later reorg, so there
-		// is nothing to check.
-		return transition(s), nil
+		// tip, or the actor yielding a connect notification to a
+		// waiting request. If the header store holds blocks above the
+		// cursor, Syncing scans them, the notified block included.
+		// The subscription reports every later reorg, so there is
+		// nothing else to check.
+		best, err := env.Chain.BestBlock()
+		if err != nil {
+			return nil, err
+		}
+		if best.Height <= s.CurStamp.Height {
+			return transition(s), nil
+		}
+
+		return transition(&StateSyncing{
+			Cursor:   s.Cursor,
+			finished: true,
+		}, ContinueOutbox{}), nil
 
 	case BlockConnectedEvent:
 		next, err := s.handleBlockConnected(ctx, &e, env)

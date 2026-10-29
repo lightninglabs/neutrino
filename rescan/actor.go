@@ -18,16 +18,13 @@ import (
 	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
+	fn "github.com/lightningnetwork/lnd/fn/v2"
 )
 
 const (
 	// retryInterval is how long the actor waits before it retries a
 	// Syncing or Rewinding batch that failed.
 	retryInterval = 3 * time.Second
-
-	// requestTimeout bounds how long AddWatchAddrs and CurrentState wait
-	// for the mailbox to answer.
-	requestTimeout = 5 * time.Second
 
 	// stopTimeout bounds how long Stop waits for the turn in flight.
 	stopTimeout = time.Second
@@ -56,7 +53,9 @@ var errSubscriptionClosed = errors.New(
 // Every callback, and ActorConfig.OnError, runs on the actor goroutine inside
 // a mailbox turn. A callback must therefore not call back into the actor: a
 // call to AddWatchAddrs or CurrentState from a callback waits behind its own
-// turn until it times out, and a call to Stop stalls for its stop timeout.
+// turn until its context ends, which deadlocks for a context that never
+// does, as an Update from a handler deadlocked the legacy rescan, and a call
+// to Stop stalls for its stop timeout.
 type Callbacks struct {
 	// OnFilteredBlockConnected is called for every scanned block, matched
 	// or not. The relevantTxs slice holds the block's transactions that
@@ -127,8 +126,10 @@ type ActorConfig struct {
 	// Callbacks provides notification hooks back to the wallet layer.
 	Callbacks Callbacks
 
-	// BatchSize controls how many blocks are processed per batch during
-	// historical sync. Defaults to DefaultBatchSize if zero.
+	// BatchSize is how many blocks the actor scans or undoes per mailbox
+	// turn while syncing or rewinding. A turn ends early, after the block
+	// in progress, when an AddWatchAddrs or CurrentState request is
+	// waiting. Defaults to DefaultBatchSize if zero.
 	BatchSize int
 
 	// EndBlock is the block the rescan stops at, once it has scanned it.
@@ -190,6 +191,11 @@ type RescanActor struct {
 	// touches it.
 	continuationPending bool
 
+	// requests counts the AddWatchAddrs and CurrentState calls in flight.
+	// A syncing or rewinding turn ends its batch early while it is not
+	// zero, so a request waits for at most one block.
+	requests atomic.Int32
+
 	// turnMu is held for each mailbox turn, so WaitForShutdown can wait
 	// for the turn in flight, and with it the last callback.
 	turnMu sync.Mutex
@@ -236,13 +242,15 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 		&Environment{
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
-			BatchSize: cfg.BatchSize,
 			EndBlock:  cfg.EndBlock,
 		},
 	)
 
 	if cfg.RetryInterval <= 0 {
 		cfg.RetryInterval = retryInterval
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = DefaultBatchSize
 	}
 
 	a := &RescanActor{
@@ -383,45 +391,29 @@ type WatchUpdate struct {
 // are serialized with all other actor work and any FSM failure is surfaced to
 // the caller. Without a rewind the update applies to blocks scanned after it.
 // With one, the rescan disconnects every block above the rewind height and
-// scans them again, so the block at the rewind height itself is kept. A
-// timeout leaves the outcome unknown: the update may still apply after the
-// call returns.
-func (a *RescanActor) AddWatchAddrs(update WatchUpdate) error {
-	req := newAddWatchAddrsMsg(update)
+// scans them again, so the block at the rewind height itself is kept.
+//
+// It returns once the update has applied, after at most the block in
+// progress, and fails with ErrStopped once the rescan has stopped. It waits
+// as long as that takes. If ctx ends first, it returns ctx's error and the
+// outcome is unknown: the update may still apply after the call returns.
+func (a *RescanActor) AddWatchAddrs(ctx context.Context,
+	update WatchUpdate) error {
 
-	reqCtx, cancel := context.WithTimeout(
-		context.Background(), requestTimeout,
-	)
-	defer cancel()
-
-	result := a.ref.Ask(reqCtx, req).Await(reqCtx)
+	result := a.ask(ctx, newAddWatchAddrsMsg(update))
 	if result.IsErr() {
-		return stoppedErr(result.Err())
+		return result.Err()
 	}
 
 	return nil
 }
 
-// stoppedErr maps the mailbox's error for a request to a stopped actor to
-// ErrStopped, and returns any other error unchanged.
-func stoppedErr(err error) error {
-	if errors.Is(err, lndactor.ErrActorTerminated) {
-		return ErrStopped
-	}
-
-	return err
-}
-
 // CurrentState returns the current FSM state after all prior mailbox messages
-// have been processed.
-func (a *RescanActor) CurrentState() (RescanState, error) {
-	queryCtx, cancel := context.WithTimeout(
-		context.Background(), requestTimeout,
-	)
-	defer cancel()
-
-	result := a.ref.Ask(queryCtx, &currentStateReq{}).
-		Await(queryCtx)
+// have been processed. Like AddWatchAddrs, it waits for at most the block in
+// progress, until ctx ends, and fails with ErrStopped once the rescan has
+// stopped.
+func (a *RescanActor) CurrentState(ctx context.Context) (RescanState, error) {
+	result := a.ask(ctx, &currentStateReq{})
 	if result.IsErr() {
 		return nil, result.Err()
 	}
@@ -434,4 +426,30 @@ func (a *RescanActor) CurrentState() (RescanState, error) {
 	}
 
 	return resp.State, nil
+}
+
+// ask sends a request and waits for its answer, counting it in requests so a
+// batch in progress yields to it.
+func (a *RescanActor) ask(ctx context.Context,
+	msg RescanActorMsg) fn.Result[RescanActorResp] {
+
+	a.requests.Add(1)
+	defer a.requests.Add(-1)
+
+	result := a.ref.Ask(ctx, msg).Await(ctx)
+	if result.IsErr() {
+		return fn.Err[RescanActorResp](stoppedErr(result.Err()))
+	}
+
+	return result
+}
+
+// stoppedErr maps the mailbox's error for a request to a stopped actor to
+// ErrStopped, and returns any other error unchanged.
+func stoppedErr(err error) error {
+	if errors.Is(err, lndactor.ErrActorTerminated) {
+		return ErrStopped
+	}
+
+	return err
 }

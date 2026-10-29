@@ -118,8 +118,6 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		// Chain: [genesis] + N empty blocks + [block with tx].
 		numEmpty := rapid.IntRange(3, 15).
 			Draw(t, "numEmpty")
-		batchSize := rapid.IntRange(1, 5).
-			Draw(t, "batchSize")
 
 		chain := newMockChainWithTxs(numEmpty + 1)
 
@@ -150,7 +148,6 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		env := &Environment{
 			Chain:     chain.mockChainSource,
 			StartTime: time.Time{},
-			BatchSize: batchSize,
 		}
 
 		// Process some blocks to advance past the tx block.

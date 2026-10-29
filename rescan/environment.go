@@ -20,12 +20,6 @@ type Environment struct {
 	// checks).
 	StartTime time.Time
 
-	// BatchSize controls how many blocks are processed per
-	// ProcessNextBlockEvent while syncing or rewinding. This amortizes the
-	// continuation overhead while still allowing AddWatchAddrs to
-	// interleave between batches. Zero means DefaultBatchSize.
-	BatchSize int
-
 	// EndBlock is the block the scan stops at. The zero value never
 	// matches, so the scan follows the chain until it is stopped.
 	EndBlock headerfs.BlockStamp
@@ -39,20 +33,11 @@ func (e *Environment) reachedEnd(stamp headerfs.BlockStamp) bool {
 		(e.EndBlock.Height > 0 && stamp.Height == e.EndBlock.Height)
 }
 
-// DefaultBatchSize is the number of blocks processed per batch during
-// historical sync. Chosen to balance throughput (avoiding per-block mailbox
-// overhead) with responsiveness to filter updates.
+// DefaultBatchSize is the number of blocks the actor scans per mailbox turn
+// during historical sync, unless a request is waiting. It amortizes the
+// per-turn overhead.
 const DefaultBatchSize = 100
 
 // ProgressInterval controls how frequently RescanProgressOutbox events are
 // emitted during historical sync (every N blocks).
 const ProgressInterval = 10_000
-
-// batchSize returns BatchSize, or DefaultBatchSize when it is not set.
-func (e *Environment) batchSize() int {
-	if e.BatchSize <= 0 {
-		return DefaultBatchSize
-	}
-
-	return e.BatchSize
-}

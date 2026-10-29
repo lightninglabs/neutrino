@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -168,7 +169,7 @@ func waitCurrent(t *testing.T, actor *RescanActor, height int32) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
-		state, err := actor.CurrentState()
+		state, err := actor.CurrentState(context.Background())
 		if err != nil {
 			return false
 		}
@@ -240,7 +241,7 @@ func TestActorDisconnectOrder(t *testing.T) {
 	log.take()
 
 	rewind := uint32(2)
-	require.NoError(t, actor.AddWatchAddrs(WatchUpdate{
+	require.NoError(t, addWatch(actor, WatchUpdate{
 		RewindTo: &rewind,
 	}))
 	waitCurrent(t, actor, 4)
@@ -249,7 +250,7 @@ func TestActorDisconnectOrder(t *testing.T) {
 		"fc 3 0", "bc 3", "fc 4 0", "bc 4",
 	}, log.take())
 
-	require.NoError(t, actor.AddWatchAddrs(WatchUpdate{
+	require.NoError(t, addWatch(actor, WatchUpdate{
 		RewindTo:                 &rewind,
 		DisableDisconnectedNtfns: true,
 	}))
@@ -294,7 +295,7 @@ func TestActorEndBlock(t *testing.T) {
 		"fc 1 0", "bc 1", "fc 2 0", "bc 2", "fc 3 0", "bc 3",
 	}, log.take())
 
-	state, err := actor.CurrentState()
+	state, err := actor.CurrentState(context.Background())
 	require.NoError(t, err)
 	require.IsType(t, &StateTerminal{}, state)
 }

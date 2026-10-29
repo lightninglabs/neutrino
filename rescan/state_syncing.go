@@ -6,9 +6,10 @@ import (
 )
 
 // StateSyncing is the historical catch-up state. It scans the blocks above
-// its cursor from the header store, in batches of env.BatchSize per
-// ProcessNextBlockEvent, and asks for a continuation after each batch so the
-// mailbox can interleave AddWatchAddrs and notifications between batches.
+// its cursor from the header store, one block per ProcessNextBlockEvent, and
+// asks for a continuation after each. The actor runs a batch of such steps
+// per mailbox turn and ends the batch early when a request is waiting, so
+// AddWatchAddrs never waits for more than one block.
 //
 // It is entered from Initializing, from Rewinding once the rewind reaches
 // its target, and from Current when a live block cannot be scanned. It
@@ -28,8 +29,7 @@ type StateSyncing struct {
 }
 
 // ProcessEvent handles events in the Syncing state. On ProcessNextBlockEvent,
-// it processes up to env.BatchSize blocks, then emits a ContinueOutbox to
-// continue. This allows AddWatchAddrs to interleave between batches.
+// it scans the next block and emits a ContinueOutbox to continue.
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateSyncing) ProcessEvent(
@@ -40,7 +40,7 @@ func (s *StateSyncing) ProcessEvent(
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
-		return s.processNextBatch(ctx, env)
+		return s.processNextBlock(ctx, env)
 
 	case AddWatchAddrsEvent:
 		return s.updateWatch(&e, func(c Cursor) RescanState {
@@ -68,129 +68,82 @@ func (s *StateSyncing) ProcessEvent(
 	}
 }
 
-// processNextBatch processes up to env.BatchSize blocks during historical
-// catch-up.
-func (s *StateSyncing) processNextBatch(ctx context.Context,
+// processNextBlock scans the block after the cursor, or moves to Current if
+// the cursor is at the best block. A failed step leaves the state unchanged.
+func (s *StateSyncing) processNextBlock(ctx context.Context,
 	env *Environment) (*StateTransition, error) {
 
 	cur := s.Cursor
-	var outbox []OutboxEvent
 
-	// Commit a completed prefix before retrying a failed block. Otherwise a
-	// transient failure later in the batch discards already emitted work.
-	partial := func(err error) (*StateTransition, error) {
-		if len(outbox) == 0 {
-			return nil, err
-		}
-
-		return transition(
-			&StateSyncing{Cursor: cur, finished: s.finished},
-			append(outbox, ContinueOutbox{})...,
-		), nil
+	// Stop once the cursor reaches the end block, before anything above
+	// it is scanned.
+	if env.reachedEnd(cur.CurStamp) {
+		return transition(&StateTerminal{}, EndReachedOutbox{}), nil
 	}
 
-	for i := 0; i < env.batchSize(); i++ {
-		// Stop once the cursor reaches the end block, before anything
-		// above it is scanned.
-		if env.reachedEnd(cur.CurStamp) {
-			return transition(&StateTerminal{},
-				append(outbox, EndReachedOutbox{})...), nil
-		}
-
-		// Check if we've caught up to the chain tip.
-		bestBlock, err := env.Chain.BestBlock()
-		if err != nil {
-			return partial(err)
-		}
-
-		if cur.CurStamp.Height > bestBlock.Height {
-			return partial(
-				fmt.Errorf(
-					"scanned height %d exceeds tip %d",
-					cur.CurStamp.Height,
-					bestBlock.Height,
-				),
-			)
-		}
-
-		// A historical fetch can race a reorg. Never advance from an
-		// orphaned tip or publish a child from a different chain.
-		active, err := env.Chain.GetBlockHeaderByHeight(
-			uint32(cur.CurStamp.Height),
-		)
-		if err != nil {
-			return partial(err)
-		}
-		if active.BlockHash() != cur.CurStamp.Hash {
-			return partial(
-				fmt.Errorf(
-					"scanned %s at height %d is"+
-						" no longer active",
-					cur.CurStamp.Hash,
-					cur.CurStamp.Height,
-				),
-			)
-		}
-
-		if cur.CurStamp.Height == bestBlock.Height {
-			// We're current. Include all accumulated outbox
-			// events from blocks processed in this batch,
-			// followed by the finished event unless this scan
-			// already reported it.
-			if !s.finished {
-				outbox = append(outbox, RescanFinishedOutbox{
-					Hash:   cur.CurStamp.Hash,
-					Height: cur.CurStamp.Height,
-				})
-			}
-
-			return transition(
-				&StateCurrent{Cursor: cur}, outbox...,
-			), nil
-		}
-
-		// Advance to the next block.
-		nextHeight := uint32(cur.CurStamp.Height + 1)
-		header, err := env.Chain.GetBlockHeaderByHeight(nextHeight)
-		if err != nil {
-			return partial(err)
-		}
-
-		if header.PrevBlock != cur.CurStamp.Hash {
-			return partial(
-				fmt.Errorf(
-					"block at height %d does not "+
-						"extend scanned tip",
-					nextHeight,
-				),
-			)
-		}
-
-		next, blockOutbox, err := cur.scanBlock(ctx, env, header, true)
-		if err != nil {
-			return partial(err)
-		}
-		outbox = append(outbox, blockOutbox...)
-
-		// Emit progress periodically.
-		if nextHeight%ProgressInterval == 0 {
-			outbox = append(
-				outbox,
-				RescanProgressOutbox{
-					Height: int32(
-						nextHeight,
-					),
-				},
-			)
-		}
-
-		cur = next
+	// Check if we've caught up to the chain tip.
+	bestBlock, err := env.Chain.BestBlock()
+	if err != nil {
+		return nil, err
 	}
 
-	// Batch complete but not yet current. Continue through the mailbox so
-	// any pending AddWatchAddrs runs first.
+	if cur.CurStamp.Height > bestBlock.Height {
+		return nil, fmt.Errorf("scanned height %d exceeds tip %d",
+			cur.CurStamp.Height, bestBlock.Height)
+	}
+
+	// A historical fetch can race a reorg. Never advance from an orphaned
+	// tip or publish a child from a different chain.
+	active, err := env.Chain.GetBlockHeaderByHeight(
+		uint32(cur.CurStamp.Height),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if active.BlockHash() != cur.CurStamp.Hash {
+		return nil, fmt.Errorf("scanned %s at height %d is no longer "+
+			"active", cur.CurStamp.Hash, cur.CurStamp.Height)
+	}
+
+	if cur.CurStamp.Height == bestBlock.Height {
+		// We're current. Report it unless this scan already did.
+		var outbox []OutboxEvent
+		if !s.finished {
+			outbox = append(outbox, RescanFinishedOutbox{
+				Hash:   cur.CurStamp.Hash,
+				Height: cur.CurStamp.Height,
+			})
+		}
+
+		return transition(&StateCurrent{Cursor: cur}, outbox...), nil
+	}
+
+	// Advance to the next block.
+	nextHeight := uint32(cur.CurStamp.Height + 1)
+	header, err := env.Chain.GetBlockHeaderByHeight(nextHeight)
+	if err != nil {
+		return nil, err
+	}
+
+	if header.PrevBlock != cur.CurStamp.Hash {
+		return nil, fmt.Errorf("block at height %d does not extend "+
+			"scanned tip", nextHeight)
+	}
+
+	next, outbox, err := cur.scanBlock(ctx, env, header, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// Emit progress periodically.
+	if nextHeight%ProgressInterval == 0 {
+		outbox = append(outbox, RescanProgressOutbox{
+			Height: int32(nextHeight),
+		})
+	}
+
 	return transition(
-		&StateSyncing{Cursor: cur, finished: s.finished},
+		&StateSyncing{Cursor: next, finished: s.finished},
 		append(outbox, ContinueOutbox{})...,
 	), nil
 }
