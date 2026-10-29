@@ -190,7 +190,9 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 		mgr:   mgr,
 		src:   &dstSource{w: w, mgr: mgr},
 		start: start,
-		truth: newDSTTruth(w.fx, start),
+		truth: newDSTTruth(
+			w.fx, start, startTime, w.fx.scripts[dstAddrA],
+		),
 	}
 	d.armStartFaults()
 
@@ -326,8 +328,10 @@ func (d *dstRun) requireAtTip(label string) {
 	}
 }
 
-// rewind asks the actor to rewind to target.
-func (d *dstRun) rewind(target uint32) error {
+// rewind asks the actor to rewind to target. allowance is the number of
+// connects already in flight that may still be delivered first.
+func (d *dstRun) rewind(target uint32, allowance int) error {
+	d.truth.beginRewind(target, allowance)
 	return d.actor.AddWatchAddrs(nil, nil, &target)
 }
 
@@ -377,7 +381,7 @@ func (d *dstRun) rewindPhase() {
 		d.src.mu.Unlock()
 	}
 
-	require.NoError(d.t, d.rewind(d.start.height+2))
+	require.NoError(d.t, d.rewind(d.start.height+2, 0))
 	synctest.Wait()
 	d.sleepRetries(4)
 	require.True(d.t, fired, "missing rewind reorg")
@@ -443,6 +447,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	<-entered
 	target := d.start.height + 2
 	done := make(chan error, 1)
+	d.truth.beginRewind(target, 1)
 	go func() {
 		done <- d.actor.AddWatchAddrs(nil, nil, &target)
 	}()
@@ -469,7 +474,7 @@ func (d *dstRun) step(i int, value byte) {
 		// Rewind even when a retry is outstanding.
 		span := d.w.tip().height - d.start.height + 1
 		target := d.start.height + uint32(arg)%span
-		require.NoError(d.t, d.rewind(target))
+		require.NoError(d.t, d.rewind(target, 0))
 
 	case 3:
 		require.NoError(d.t, d.actor.AddWatchAddrs(nil, nil, nil))
