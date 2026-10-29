@@ -134,7 +134,9 @@ func (c Cursor) addWatch(event *AddWatchAddrsEvent) (Cursor, *uint32,
 	}
 	c.Watch = watch
 
-	if event.RewindTo == nil || int32(*event.RewindTo) >= c.CurStamp.Height {
+	if event.RewindTo == nil ||
+		int32(*event.RewindTo) >= c.CurStamp.Height {
+
 		return c, nil, nil
 	}
 
