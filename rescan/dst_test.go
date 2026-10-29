@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand/v2"
@@ -113,6 +114,16 @@ const (
 	// middle of a fetch. The update must wait for that block only, not
 	// for the rest of the batch.
 	dstFaultSlowBatch
+
+	// dstFaultShutdownFetch starts a second actor after the heal phase
+	// whose fetches fail with the shutdown error. The rescan must end
+	// with that error, reported once, and deliver nothing more.
+	dstFaultShutdownFetch
+
+	// dstFaultStoreFail starts a second actor after the heal phase whose
+	// header reads by height fail. The rescan must end with a
+	// HeaderStoreError, reported once, and deliver nothing more.
+	dstFaultStoreFail
 )
 
 // dstSlowFetch is how long a filter fetch takes under dstFaultSlowBatch.
@@ -227,6 +238,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 		StartTime:   startTime,
 		WatchAddrs:  []address.Address{w.fx.addrs[dstAddrA]},
 		BatchSize:   cfg.batchSize(),
+		ErrShutdown: errDSTShutdown,
 		OnError:     d.truth.onError,
 		Callbacks:   d.truth.callbacks(),
 	})
@@ -538,6 +550,101 @@ func (d *dstRun) stopDuringFetch() {
 	d.check("stop during fetch")
 }
 
+// endsWith starts a second actor scanning from the start with arm applied to
+// the fault layer, and requires it to end on its own with an error that
+// matches, reported exactly once, and with no callback after it ended. The
+// fault is cleared before it returns.
+func (d *dstRun) endsWith(label, inv string, arm func(on bool),
+	match func(error) bool) {
+
+	var (
+		ended               atomic.Bool
+		errs, lateCallbacks atomic.Int32
+	)
+	arm(true)
+	defer arm(false)
+
+	late := mustNewRescanActor(d.t, ActorConfig{
+		Chain:       d.src,
+		StartStamp:  d.start.stamp(),
+		StartHeader: d.start.header,
+		WatchAddrs:  []address.Address{d.w.fx.addrs[dstAddrA]},
+		BatchSize:   d.cfg.batchSize(),
+		ErrShutdown: errDSTShutdown,
+		OnError:     func(error) { errs.Add(1) },
+		Callbacks: Callbacks{
+			OnBlockConnected: func(*chainhash.Hash, int32,
+				time.Time) {
+
+				if ended.Load() {
+					lateCallbacks.Add(1)
+				}
+			},
+		},
+	})
+	late.Start()
+	defer func() { late.Stop(); late.WaitForShutdown() }()
+
+	select {
+	case <-late.Done():
+	case <-time.After(20 * retryInterval):
+	}
+	ended.Store(true)
+	d.sleepRetries(3)
+
+	d.truth.mu.Lock()
+	select {
+	case <-late.Done():
+		if err := late.Err(); !match(err) {
+			d.truth.fail(inv, "%s ended the rescan with %v", label,
+				err)
+		}
+		if n := errs.Load(); n != 1 {
+			d.truth.fail(inv, "%s reported %d errors", label, n)
+		}
+		if n := lateCallbacks.Load(); n != 0 {
+			d.truth.fail(inv, "%d callbacks after %s ended the "+
+				"rescan", n, label)
+		}
+
+	default:
+		d.truth.fail(inv, "%s did not end the rescan, %d errors",
+			label, errs.Load())
+	}
+	d.truth.mu.Unlock()
+	d.check(label)
+}
+
+// shutdownDuringFetch checks that a fetch failing with the shutdown error
+// ends the rescan with it.
+func (d *dstRun) shutdownDuringFetch() {
+	d.endsWith("shutdown during fetch", invShutdownEnds,
+		func(on bool) {
+			d.src.mu.Lock()
+			d.src.shutdown = on
+			d.src.mu.Unlock()
+		},
+		func(err error) bool { return errors.Is(err, errDSTShutdown) },
+	)
+}
+
+// storeFailure checks that a failed header store read ends the rescan with
+// a HeaderStoreError.
+func (d *dstRun) storeFailure() {
+	d.endsWith("header store failure", invStoreEnds,
+		func(on bool) {
+			d.src.mu.Lock()
+			d.src.storeFail = on
+			d.src.mu.Unlock()
+		},
+		func(err error) bool {
+			var storeErr *HeaderStoreError
+			return errors.As(err, &storeErr) &&
+				errors.Is(err, errDSTStore)
+		},
+	)
+}
+
 // newBlock extends the chain by one block and announces it. With the filter
 // class on, the next arg%3 filter fetches fail. With the gate class on and
 // bit 4 of arg set, the block's filter fetch is held while a rewind waits in
@@ -662,7 +769,7 @@ func (d *dstRun) stopService() {
 	d.truth.mu.Lock()
 	callbacks := len(d.truth.events)
 	d.truth.mu.Unlock()
-	errors := d.truth.errorCount()
+	errCount := d.truth.errorCount()
 
 	d.mgr.Stop()
 	d.settle()
@@ -672,8 +779,15 @@ func (d *dstRun) stopService() {
 	require.Len(d.t, d.truth.events, callbacks,
 		"callback after the service stopped, seed %x", d.seed)
 	d.truth.mu.Unlock()
-	require.Equal(d.t, errors+1, d.truth.errorCount(),
+	require.Equal(d.t, errCount+1, d.truth.errorCount(),
 		"closed subscription errors, seed %x", d.seed)
+	if err := d.actor.Err(); !errors.Is(err, errDSTShutdown) {
+		d.truth.mu.Lock()
+		d.truth.fail(invShutdownEnds, "closed subscription ended "+
+			"the rescan with %v", err)
+		d.truth.mu.Unlock()
+	}
+	d.check("service stop")
 	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err)
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
@@ -738,6 +852,12 @@ func runRescanDST(t *testing.T, seed []byte) dstSnapshot {
 		snap = d.snapshot()
 		if d.enabled(dstFaultStopFetch) {
 			d.stopDuringFetch()
+		}
+		if d.enabled(dstFaultShutdownFetch) {
+			d.shutdownDuringFetch()
+		}
+		if d.enabled(dstFaultStoreFail) {
+			d.storeFailure()
 		}
 		if d.enabled(dstFaultServiceStop) {
 			d.stopService()

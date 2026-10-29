@@ -45,7 +45,8 @@ flowchart LR
 | `Rescan.Start()` | Resolves the start and end blocks and checks the options exactly as the legacy `newRescanState` did, with the same errors, then builds and starts a `RescanActor`. |
 | The quit channel closes | The adapter stops the actor, waits for its last callback, and sends `ErrRescanExit`. |
 | The end block is scanned | The FSM stops in Terminal, and the adapter sends nil. |
-| The ChainService stops | The subscription closes, the FSM stops in Terminal, and the adapter sends the subscription error. |
+| The ChainService stops | A fetch fails with `ErrShuttingDown` or the subscription closes, whichever comes first. Either ends the FSM in Terminal, and the adapter sends `ErrShuttingDown`. |
+| A header store read fails | The FSM stops in Terminal, and the adapter sends the store's error. A read that finds no header, as after a reorg rolled the store back, is retried instead. |
 | `Rescan.Update(options...)` | `AddWatchAddrs` with the same addresses, inputs and `DisableDisconnectedNtfns`. A zero `Rewind` means no rewind, as before. |
 | `Rescan.WaitForShutdown()` | Waits for the adapter goroutine, which ends only after the actor's `WaitForShutdown`. No handler runs once it returns. |
 
@@ -197,10 +198,15 @@ or `CurrentState` from a callback waits behind its own turn until its context
 ends, as an `Update` from a handler deadlocked the legacy loop, and a call to
 `Stop` stalls for a second.
 
-`OnError` is for observation only. A Syncing or Rewinding step that fails is
-reported there and retried by the actor after the retry interval, so a caller
-must not build its own retry on it. The one error after which the rescan
-stops is a failed subscription, and the state is then `StateTerminal`. A
+`OnError` is for observation only. A Syncing or Rewinding step whose block
+or filter fetch fails, or whose filter fails verification, is reported there
+and retried by the actor after the retry interval, so a caller must not build
+its own retry on it. Three errors end the rescan instead, as they ended the
+legacy loop, and are reported once: a failed or closed subscription, the
+`ErrShutdown` error from a fetch, and a `HeaderStoreError`. A closed
+subscription means the chain shut down, so it ends the rescan with
+`ErrShutdown` when that is set. The state is then `StateTerminal`, and
+`Err` says which error ended it. A
 later `AddWatchAddrs` returns `ErrStopped`. The adapter sets no `OnError`:
 the actor logs each retried error itself, and the error channel reports only
 the error that ended the rescan.

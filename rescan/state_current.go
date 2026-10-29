@@ -36,7 +36,7 @@ func (s *StateCurrent) ProcessEvent(
 		// cursor, Syncing scans them, the notified block included.
 		// The subscription reports every later reorg, so there is
 		// nothing else to check.
-		best, err := env.Chain.BestBlock()
+		best, err := env.bestBlock()
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +120,7 @@ func (s *StateCurrent) handleBlockConnected(ctx context.Context,
 
 	// A filter notification can be delayed past a reorg. Only process the
 	// block if its height still identifies the active chain header.
-	active, err := env.Chain.GetBlockHeaderByHeight(event.Height)
+	active, err := env.headerByHeight(event.Height)
 	if err != nil {
 		return nil, err
 	}

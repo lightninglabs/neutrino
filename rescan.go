@@ -305,23 +305,39 @@ type rescanChain struct {
 // A compile-time check that rescanChain implements rescan.ChainSource.
 var _ rescan.ChainSource = (*rescanChain)(nil)
 
+// shutdownErr returns ErrShuttingDown in place of err once the chain is a
+// ChainService that has begun to stop, so a header read that fails because
+// the service closed its stores ends the rescan with ErrShuttingDown, as a
+// fetch does, rather than with the store's error.
+func (c *rescanChain) shutdownErr(err error) error {
+	chainSource, ok := c.src.(*RescanChainSource)
+	if err != nil && ok && atomic.LoadInt32(&chainSource.shutdown) != 0 {
+		return ErrShuttingDown
+	}
+
+	return err
+}
+
 // BestBlock is part of the rescan.ChainSource interface.
 func (c *rescanChain) BestBlock() (*headerfs.BlockStamp, error) {
-	return c.src.BestBlock()
+	best, err := c.src.BestBlock()
+	return best, c.shutdownErr(err)
 }
 
 // GetBlockHeaderByHeight is part of the rescan.ChainSource interface.
 func (c *rescanChain) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
 
-	return c.src.GetBlockHeaderByHeight(height)
+	header, err := c.src.GetBlockHeaderByHeight(height)
+	return header, c.shutdownErr(err)
 }
 
 // GetBlockHeader is part of the rescan.ChainSource interface.
 func (c *rescanChain) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
 
-	return c.src.GetBlockHeader(hash)
+	header, height, err := c.src.GetBlockHeader(hash)
+	return header, height, c.shutdownErr(err)
 }
 
 // GetBlock is part of the rescan.ChainSource interface.
@@ -489,8 +505,10 @@ func newRescanConfig(chain ChainSource,
 		EndBlock:    *ro.endBlock,
 
 		// The legacy rescan retried a block it could not fetch after
-		// 100ms.
+		// 100ms, and ended with ErrShuttingDown once the service
+		// stopped.
 		RetryInterval: legacyRetryInterval,
+		ErrShutdown:   ErrShuttingDown,
 
 		Callbacks: legacyCallbacks(ro.ntfn),
 	}, ro, nil
@@ -623,6 +641,12 @@ func (r *Rescan) run() error {
 
 	case <-actor.Done():
 		err = actor.Err()
+
+		// The legacy rescan ended with the header store's own error.
+		var storeErr *rescan.HeaderStoreError
+		if errors.As(err, &storeErr) {
+			err = storeErr.Err
+		}
 	}
 
 	actor.Stop()

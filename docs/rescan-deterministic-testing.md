@@ -91,7 +91,10 @@ Each fault class reproduces a fault the scripted harness injected before:
 | 10 | stop during fetch | After the heal phase, a second actor starts, its first filter fetch is held until its context ends, and the actor is stopped there. |
 | 11 | slow batch | After the live reorg, every filter fetch takes ten seconds while the scan rescans the blocks of a rewind, and an empty update is sent in the middle of the second fetch. |
 
-Bits 12 to 15 are free for the fault classes of later work.
+| 12 | shutdown during fetch | After the heal phase, a second actor starts whose fetches all fail with the shutdown error. |
+| 13 | header store failure | After the heal phase, a second actor starts whose header reads by height all fail with an error that is not a not-found result. |
+
+Bits 14 and 15 are free for the fault classes of later work.
 
 | Op | Action |
 | --- | --- |
@@ -124,9 +127,14 @@ making progress. Ops 4 to 7 are honest placeholders for later fault classes.
 8. **Stop during fetch.** With that class on, start a second actor, hold its
    first filter fetch and stop it. It must report no error and deliver no
    callback after the stop.
-9. **Service stop.** With the service-stop class on, stop the subscription
+9. **Shutdown and store failure.** With either class on, start a second
+   actor with the fault armed. It must end on its own with the shutdown
+   error or a `HeaderStoreError`, report it once and deliver no callback
+   after.
+10. **Service stop.** With the service-stop class on, stop the subscription
    manager and start a second actor. Both actors must report one error each,
-   end in `StateTerminal` and deliver no more callbacks.
+   end in `StateTerminal` and deliver no more callbacks, and the closed
+   subscription must end the first with the shutdown error.
 
 ## The oracle
 
@@ -151,6 +159,8 @@ after every callback and at every op boundary.
 | `waitsForCurrent` | No callback and no error fires before `IsCurrent` has reported true. |
 | `stopIsSilent` | A stop during a fetch reports no error, and no callback follows it. |
 | `updateWaitsOneBlock` | An update sent during a batch of slow fetches waits for the fetch in progress only. |
+| `shutdownEndsOnce` | A fetch failing with the shutdown error, or a closed subscription, ends the rescan with the shutdown error, reported once, with no callback after. |
+| `storeErrorEnds` | A failed header store read ends the rescan with a `HeaderStoreError`, reported once, with no callback after. |
 
 No invariant has an excuse. Every one fails on at least one hand-written
 mutant of production code. The mutants live in `rescan/testdata/mutants` as
@@ -214,7 +224,7 @@ recall.sh --repo . --cmd "go test ./rescan/ -run '^TestRescanDSTSwarm\$' \
 
 The `recall-` patches revert recorded fixes, the `inv-` patches each break
 the property one invariant names, the `fix-` patches each revert one of the
-three fixes the public rescan needed before it could run on the actor, and
+fixes the public rescan needed before it could run on the actor, and
 `probe-drop-relevant-txs.patch` empties `RelevantTxs` in the block scan that
 Syncing and Current share.
 

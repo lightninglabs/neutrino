@@ -82,7 +82,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
 	}
 
 	// Check if we've caught up to the chain tip.
-	bestBlock, err := env.Chain.BestBlock()
+	bestBlock, err := env.bestBlock()
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
 
 	// A historical fetch can race a reorg. Never advance from an orphaned
 	// tip or publish a child from a different chain.
-	active, err := env.Chain.GetBlockHeaderByHeight(
+	active, err := env.headerByHeight(
 		uint32(cur.CurStamp.Height),
 	)
 	if err != nil {
@@ -120,7 +120,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
 
 	// Advance to the next block.
 	nextHeight := uint32(cur.CurStamp.Height + 1)
-	header, err := env.Chain.GetBlockHeaderByHeight(nextHeight)
+	header, err := env.headerByHeight(nextHeight)
 	if err != nil {
 		return nil, err
 	}

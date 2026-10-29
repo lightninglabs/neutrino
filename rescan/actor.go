@@ -29,10 +29,10 @@ const (
 	stopTimeout = time.Second
 )
 
-// errSubscriptionClosed is reported when the block subscription closes
-// while the rescan is still running, which happens once the ChainService
-// stops.
-var errSubscriptionClosed = errors.New(
+// ErrSubscriptionClosed ends the rescan when the block subscription closes
+// while it runs, which happens once the ChainService stops, unless
+// ActorConfig.ErrShutdown names the shutdown error to report instead.
+var ErrSubscriptionClosed = errors.New(
 	"rescan block subscription was canceled",
 )
 
@@ -137,6 +137,14 @@ type ActorConfig struct {
 	// hash by hash.
 	EndBlock headerfs.BlockStamp
 
+	// ErrShutdown is the error the chain returns once it has shut down.
+	// A step that fails with it ends the rescan with it, as the legacy
+	// rescan loop did, instead of being retried, and a block subscription
+	// that closes, which happens only on shutdown, ends the rescan with it
+	// too. If nil, a closed subscription ends the rescan with
+	// ErrSubscriptionClosed.
+	ErrShutdown error
+
 	// RetryInterval is how long the actor waits before it retries a
 	// Syncing or Rewinding step that failed, and between two checks of a
 	// chain that is not ready for the first scan. Defaults to three
@@ -145,10 +153,11 @@ type ActorConfig struct {
 
 	// OnError reports errors for observation only. It is called when a
 	// Syncing or Rewinding step fails, which the actor retries on its own
-	// after RetryInterval, and once when the block subscription fails,
-	// after which the rescan has stopped in StateTerminal. A step that
-	// Stop cancelled is not reported. Like the callbacks, it runs on the
-	// actor goroutine.
+	// after RetryInterval, and once for the error that ends the rescan:
+	// a failed block subscription, the ErrShutdown error, or a
+	// HeaderStoreError. The rescan has then stopped in StateTerminal. A
+	// step that Stop cancelled is not reported. Like the callbacks, it
+	// runs on the actor goroutine.
 	OnError func(err error)
 }
 

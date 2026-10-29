@@ -75,7 +75,7 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 				)
 
 				a.ref.Tell(ctx, &subscriptionFailedMsg{
-					Err: errSubscriptionClosed,
+					Err: ErrSubscriptionClosed,
 				})
 
 				return

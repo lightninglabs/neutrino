@@ -518,6 +518,14 @@ var _ blockntfns.NotificationSource = (*dstWorld)(nil)
 // errDSTFault is the error every injected fetch fault returns.
 var errDSTFault = errors.New("dst injected fault")
 
+// errDSTShutdown is what every fetch returns once the simulated chain
+// service has shut down, and the actors' ErrShutdown.
+var errDSTShutdown = errors.New("dst chain service shut down")
+
+// errDSTStore is what a failing header store read returns. It is not a
+// not-found result, so it must end the rescan.
+var errDSTStore = errors.New("dst header store read failed")
+
 // dstSource is the ChainSource the actor sees. Subscribe goes to the real
 // SubscriptionManager over the world, and every other method goes to the
 // world through one fault layer. With no fault armed, every method behaves
@@ -562,6 +570,11 @@ type dstSource struct {
 	notCurrentArmed bool
 	becameCurrent   bool
 
+	// shutdown makes every fetch fail with errDSTShutdown, and storeFail
+	// every header read by height fail with errDSTStore.
+	shutdown  bool
+	storeFail bool
+
 	subscriptions int
 }
 
@@ -599,9 +612,17 @@ func (s *dstSource) BestBlock() (*headerfs.BlockStamp, error) {
 func (s *dstSource) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
 
+	s.mu.Lock()
+	storeFail := s.storeFail
+	s.mu.Unlock()
+	if storeFail {
+		return nil, errDSTStore
+	}
+
 	b, ok := s.w.at(height)
 	if !ok {
-		return nil, fmt.Errorf("height %d not found", height)
+		return nil, fmt.Errorf("height %d: %w", height,
+			headerfs.ErrHeightNotFound)
 	}
 	header := b.header
 	return &header, nil
@@ -635,6 +656,10 @@ func (s *dstSource) GetBlock(ctx context.Context,
 	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return nil, errDSTShutdown
+	}
 	if s.blockFail > 0 {
 		s.blockFail--
 		s.mu.Unlock()
@@ -675,7 +700,11 @@ func (s *dstSource) GetCFilter(ctx context.Context,
 	s.gateEntered, s.gateRelease = nil, nil
 	held, delay := s.holdEntered, s.filterDelay
 	s.holdEntered = nil
+	shutdown := s.shutdown
 	s.mu.Unlock()
+	if shutdown {
+		return nil, errDSTShutdown
+	}
 	if hook != nil {
 		if err := hook(b); err != nil {
 			return nil, err

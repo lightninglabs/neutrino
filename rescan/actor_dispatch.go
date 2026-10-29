@@ -2,6 +2,7 @@ package rescan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -124,6 +125,17 @@ func (a *RescanActor) stepFailed(err error) fn.Result[RescanActorResp] {
 		return fn.Err[RescanActorResp](ErrStopped)
 	}
 
+	// A shutdown and a failed header store read end the rescan, as they
+	// ended the legacy loop. Fetch and filter failures are retried.
+	var storeErr *HeaderStoreError
+	switch {
+	case a.cfg.ErrShutdown != nil && errors.Is(err, a.cfg.ErrShutdown):
+		return a.endWith(a.cfg.ErrShutdown)
+
+	case errors.As(err, &storeErr):
+		return a.endWith(err)
+	}
+
 	log.Warnf("RescanActor: error processing next block: %v, "+
 		"retrying in %v", err, a.cfg.RetryInterval)
 
@@ -199,13 +211,33 @@ func (a *RescanActor) handleSubscriptionFailed(
 
 	// Only one subscriptionFailedMsg is ever sent: Start sends it instead
 	// of starting the bridge, or the bridge sends it and exits. Receive
-	// drops it once Stop has run.
-	log.Errorf("RescanActor: %v, stopping", msg.Err)
+	// drops it once Stop has run. The subscription closes only once the
+	// chain has shut down, so a configured shutdown error names it.
+	err := msg.Err
+	if errors.Is(err, ErrSubscriptionClosed) && a.cfg.ErrShutdown != nil {
+		err = a.cfg.ErrShutdown
+	}
+
+	return a.endWith(err)
+}
+
+// endWith ends the rescan with err: it reports err once through OnError,
+// closes the subscription, records err as the reason the rescan ended, and
+// moves the FSM to Terminal. Once the rescan has ended, it does nothing, so
+// a shutdown seen both by a fetch and by the subscription is reported once.
+func (a *RescanActor) endWith(err error) fn.Result[RescanActorResp] {
+	select {
+	case <-a.done:
+		return fn.Ok[RescanActorResp](&rescanActorAck{})
+	default:
+	}
+
+	log.Errorf("RescanActor: %v, stopping", err)
 	if a.cfg.OnError != nil {
-		a.cfg.OnError(msg.Err)
+		a.cfg.OnError(err)
 	}
 	a.cancelBridge()
-	a.finish(msg.Err)
+	a.finish(err)
 
 	return a.handleFSMEvent(StopEvent{})
 }

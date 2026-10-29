@@ -92,7 +92,7 @@ func (s *StateInitializing) ProcessEvent(
 // block has reached the start block, and it is current or has reached the end
 // block.
 func (s *StateInitializing) chainReady(env *Environment) (bool, error) {
-	best, err := env.Chain.BestBlock()
+	best, err := env.bestBlock()
 	if err != nil {
 		return false, err
 	}

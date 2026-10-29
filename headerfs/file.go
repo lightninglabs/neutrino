@@ -14,6 +14,12 @@ type ErrHeaderNotFound struct {
 	error
 }
 
+// Unwrap returns the read error behind the missing header, such as io.EOF
+// for a height past the end of the flat file or sql.ErrNoRows.
+func (e *ErrHeaderNotFound) Unwrap() error {
+	return e.error
+}
+
 // appendRaw appends a new raw header to the end of the flat file.
 func (h *headerStore) appendRaw(header []byte) error {
 	// Get the current file size before writing. We'll use this size to

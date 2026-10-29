@@ -1,0 +1,17 @@
+Ends the rescan with the canceled subscription error, instead of the
+shutdown error, when the subscription closes.
+
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index 98be845..10cc116 100644
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -214,7 +214,8 @@ func (a *RescanActor) handleSubscriptionFailed(
+ 	// drops it once Stop has run. The subscription closes only once the
+ 	// chain has shut down, so a configured shutdown error names it.
+ 	err := msg.Err
+-	if errors.Is(err, ErrSubscriptionClosed) && a.cfg.ErrShutdown != nil {
++	if false && errors.Is(err, ErrSubscriptionClosed) &&
++		a.cfg.ErrShutdown != nil {
+ 		err = a.cfg.ErrShutdown
+ 	}
+ 

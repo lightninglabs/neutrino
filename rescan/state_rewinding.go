@@ -106,7 +106,7 @@ func (s *StateRewinding) processRewind(
 	}
 
 	// Walk back to the previous block.
-	header, height, err := env.Chain.GetBlockHeader(
+	header, height, err := env.header(
 		&cur.CurHeader.PrevBlock,
 	)
 	if err != nil {

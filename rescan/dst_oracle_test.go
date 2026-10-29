@@ -26,6 +26,8 @@ const (
 	invWaitCurrent    = "waitsForCurrent"
 	invStopSilent     = "stopIsSilent"
 	invUpdateLatency  = "updateWaitsOneBlock"
+	invShutdownEnds   = "shutdownEndsOnce"
+	invStoreEnds      = "storeErrorEnds"
 )
 
 // dstCallback is one recorded callback. The double run compares the whole

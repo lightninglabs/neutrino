@@ -143,11 +143,11 @@ func (c *mockChainSource) GetBlockHeaderByHeight(
 
 	blockHash, ok := c.blockHashesByHeight[height]
 	if !ok {
-		return nil, errors.New("block height not found")
+		return nil, headerfs.ErrHeightNotFound
 	}
 	blockHeader, ok := c.blockHeaders[*blockHash]
 	if !ok {
-		return nil, errors.New("block header not found")
+		return nil, headerfs.ErrHashNotFound
 	}
 
 	return blockHeader, nil
@@ -161,11 +161,11 @@ func (c *mockChainSource) GetBlockHeader(
 
 	blockHeader, ok := c.blockHeaders[*hash]
 	if !ok {
-		return nil, 0, errors.New("block header not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	blockHeight, ok := c.blockHeightIndex[*hash]
 	if !ok {
-		return nil, 0, errors.New("block height not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 
 	return blockHeader, blockHeight, nil

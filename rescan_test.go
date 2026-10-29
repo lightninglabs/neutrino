@@ -251,11 +251,11 @@ func (c *mockChainSource) GetBlockHeaderByHeight(
 
 	blockHash, ok := c.blockHashesByHeight[height]
 	if !ok {
-		return nil, errors.New("block height not found")
+		return nil, headerfs.ErrHeightNotFound
 	}
 	blockHeader, ok := c.blockHeaders[*blockHash]
 	if !ok {
-		return nil, errors.New("block header not found")
+		return nil, headerfs.ErrHashNotFound
 	}
 	return blockHeader, nil
 }
@@ -269,11 +269,11 @@ func (c *mockChainSource) GetBlockHeader(
 
 	blockHeader, ok := c.blockHeaders[*hash]
 	if !ok {
-		return nil, 0, errors.New("block header not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	blockHeight, ok := c.blockHeightIndex[*hash]
 	if !ok {
-		return nil, 0, errors.New("block height not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	return blockHeader, blockHeight, nil
 }
@@ -1023,4 +1023,73 @@ func TestRescanQuitWhileRetrying(t *testing.T) {
 		t.Fatal("rescan did not exit while retrying")
 	}
 	ctx.rescan.WaitForShutdown()
+}
+
+// shutdownChain is a mock chain whose filter fetches fail with
+// ErrShuttingDown, and whose header reads by height can fail with a store
+// error.
+type shutdownChain struct {
+	*mockChainSource
+	storeErr error
+}
+
+// GetCFilter fails as a stopped ChainService does.
+func (c *shutdownChain) GetCFilter(chainhash.Hash, wire.FilterType,
+	...QueryOption) (*gcs.Filter, error) {
+
+	return nil, ErrShuttingDown
+}
+
+// GetBlockHeaderByHeight fails with storeErr when it is set.
+func (c *shutdownChain) GetBlockHeaderByHeight(
+	height uint32) (*wire.BlockHeader, error) {
+
+	if c.storeErr != nil && height > 0 {
+		return nil, c.storeErr
+	}
+	return c.mockChainSource.GetBlockHeaderByHeight(height)
+}
+
+// TestRescanEndsOnShutdownAndStoreErrors checks that, as in the legacy
+// rescan, a fetch failing with ErrShuttingDown ends the rescan with exactly
+// ErrShuttingDown, and a failed header store read ends it with the store's
+// error, rather than being retried.
+func TestRescanEndsOnShutdownAndStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	storeErr := errors.New("header store read failed")
+	for _, test := range []struct {
+		name     string
+		storeErr error
+		want     error
+	}{
+		{name: "shutdown", want: ErrShuttingDown},
+		{name: "store", storeErr: storeErr, want: storeErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chain := &shutdownChain{
+				mockChainSource: newMockChainSource(5),
+				storeErr:        test.storeErr,
+			}
+			genesis := chain.ChainParams().GenesisHash
+			start := &headerfs.BlockStamp{Hash: *genesis}
+			input := InputWithScript{PkScript: []byte{1}}
+			rescan := NewRescan(
+				chain, QuitChan(make(chan struct{})),
+				StartBlock(start), WatchInputs(input),
+			)
+			errChan := rescan.Start()
+
+			select {
+			case err := <-errChan:
+				if err != test.want {
+					t.Fatalf("want %v, got %v", test.want,
+						err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("rescan did not end")
+			}
+			rescan.WaitForShutdown()
+		})
+	}
 }
