@@ -264,6 +264,10 @@ func (o *dstTruth) filteredConnected(height int32, header *wire.BlockHeader,
 	want := o.relevant(b)
 	got := make(map[chainhash.Hash]bool, len(txs))
 	for _, tx := range txs {
+		if got[*tx.Hash()] {
+			o.fail(invMissedTx, "block %d reported tx %v twice",
+				height, *tx.Hash())
+		}
 		got[*tx.Hash()] = true
 	}
 	for _, tx := range want {
@@ -448,8 +452,8 @@ func (o *dstTruth) beginRewind(target uint32, allowance int) {
 	})
 }
 
-// checkOp runs the state checks that hold between ops: the callback pair is
-// complete and the delivered chain is a chain of known blocks.
+// checkOp runs the state check that holds between ops: no callback pair is
+// left open.
 func (o *dstTruth) checkOp() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -458,28 +462,30 @@ func (o *dstTruth) checkOp() {
 		o.fail(invPairing, "%s %d unpaired at an op boundary",
 			o.pair.kind, o.pair.height)
 	}
-	for i := 1; i < len(o.stack); i++ {
-		if o.stack[i].parent != o.stack[i-1] {
-			o.fail(invContinuity, "delivered chain broken at %d",
-				o.stack[i].height)
-		}
+}
+
+// checkFinished fails finishedOnce if the scan has not reported finished
+// since it started or since its last rewind walked back. The caller checks
+// it only once the scan is current, which every walk back passes through
+// Syncing to reach.
+func (o *dstTruth) checkFinished() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.needFinish {
+		o.fail(invFinished, "current at %d with no finished "+
+			"callback since the last rewind", o.top().height)
 	}
 }
 
 // checkQuiescent runs the checks that hold once the run has healed: the
-// delivered chain is the active chain, every rewind walked back, and the
-// scan reported finished after the last one.
+// delivered tip is the active tip, so by continuity the delivered chain is
+// the active chain, every rewind walked back, and the scan reported
+// finished after the last one.
 func (o *dstTruth) checkQuiescent(w *dstWorld) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	for _, b := range o.stack {
-		if !w.onActive(b) {
-			o.fail(invQuiescentAtTip, "delivered block %d %v is "+
-				"not active", b.height, b.hash)
-			break
-		}
-	}
 	if tip := w.tip(); o.top() != tip {
 		o.fail(invQuiescentAtTip, "delivered tip %d, active tip %d",
 			o.top().height, tip.height)

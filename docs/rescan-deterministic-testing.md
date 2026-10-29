@@ -80,7 +80,7 @@ Each fault class reproduces a fault the scripted harness injected before:
 | 0 | filter | The first filter fetch fails. Each faulty new-block op fails the next `arg % 3` fetches. |
 | 1 | block | The first block fetch fails. |
 | 2 | subscribe | The first `Subscribe` fails. |
-| 3 | handoff | The first successful `Subscribe` replaces the tip before it registers, so the subscription never sees the reorg. |
+| 3 | handoff | The first successful `Subscribe` replaces the tip before it registers, so the subscription never sees the reorg. The actor subscribes before it scans, so today this only reorgs the chain ahead of the scan. |
 | 4 | historical reorg | While the historical scan fetches the filter four blocks above the start, the chain reorgs from three blocks above the start. |
 | 5 | deep reorg | The same reorg from one block above the start, below the scanned tip. |
 | 6 | rewind reorg | The chain reorgs from three blocks above the start while the scripted rewind walks back through it. |
@@ -132,7 +132,7 @@ after every callback and at every op boundary.
 | `filteredPairing` | Each filtered connect or disconnect is followed at once by its plain twin, and no other callback interleaves. |
 | `progressMonotone` | Progress reports the delivered tip, and rises unless the delivered chain dropped below the last report. |
 | `rewindRedelivers` | After a rewind below the delivered tip, no connect beyond those already in flight arrives before the delivered chain walks back to the target. Every rewind walks back by quiescence. |
-| `finishedOnce` | Finished reports the delivered tip, never repeats without a disconnect in between, and follows every rewind that walked back. |
+| `finishedOnce` | Finished reports the delivered tip, never repeats without a disconnect in between, and has fired since the start and since the last rewind that walked back whenever the scan is current at a phase boundary. |
 | `callbackContinuity` | Each connect extends the delivered tip, and each disconnect removes it. |
 | `quiescentAtTip` | At each phase boundary and after heal, the actor is current at the active tip and the delivered chain is the active chain. |
 
@@ -207,6 +207,12 @@ the syncing `RelevantTxs`.
   header-store read, or stops the actor mid-run. The reverted e05249c guards
   need a stale notification after a disconnect, so the swarm does not find
   them. Their scripted tests in `dst_review_test.go` do.
+- A reorg replaces the whole branch before its first disconnect is
+  announced. The block manager rolls the header store back one block per
+  disconnect, so the DST never shows a header store shorter than the
+  delivered tip mid-reorg.
+- A rapid-model retry re-applies the failed event without the actor's
+  retry admission checks, so mutants in `actor.go` are out of its reach.
 - The heal phase only sleeps. It does not check that no retry is armed, that
   `continuationPending` is clear, or that nothing fires after `Stop`.
 - The fixture's `IsCurrent` always reports true, so the "rescan started

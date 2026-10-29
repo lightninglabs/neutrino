@@ -70,7 +70,10 @@ const (
 
 	// dstFaultHandoff replaces the tip inside the first successful
 	// Subscribe, before it registers, so the subscription never sees
-	// the reorg's notifications.
+	// the reorg's notifications. The actor subscribes before it scans,
+	// so today this only reorgs the chain ahead of the scan. It reaches
+	// the handoff once a later fault class closes the subscription
+	// mid-run.
 	dstFaultHandoff
 
 	// dstFaultHistReorg reorgs the chain from three blocks above the
@@ -157,13 +160,12 @@ type dstRun struct {
 	cfg  dstConfig
 	ops  []byte
 
-	w       *dstWorld
-	mgr     *blockntfns.SubscriptionManager
-	src     *dstSource
-	truth   *dstTruth
-	actor   *RescanActor
-	start   *dstBlock
-	release chan struct{}
+	w     *dstWorld
+	mgr   *blockntfns.SubscriptionManager
+	src   *dstSource
+	truth *dstTruth
+	actor *RescanActor
+	start *dstBlock
 }
 
 // newDSTRun builds the world, the fault layer and the actor for one seed.
@@ -302,9 +304,12 @@ func (d *dstRun) current(label string) *StateCurrent {
 }
 
 // requireAtTip checks the quiescentAtTip invariant at a phase boundary: the
-// actor is current at the active tip and the callbacks delivered it.
+// actor is current at the active tip and the callbacks delivered it. It
+// also checks finishedOnce: a scan that got there has reported finished
+// since its last rewind.
 func (d *dstRun) requireAtTip(label string) {
 	d.t.Helper()
+	d.truth.checkFinished()
 	d.check(label)
 	state, err := d.actor.CurrentState()
 	require.NoError(d.t, err, "%s, seed %x", label, d.seed)
@@ -427,15 +432,22 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 		gate = ok && cur.CurStamp.Hash == d.w.tip().hash
 	}
 
-	var entered chan struct{}
+	var entered, release chan struct{}
 	d.src.mu.Lock()
 	if gate {
 		entered = make(chan struct{})
-		d.release = make(chan struct{})
-		d.src.gateEntered, d.src.gateRelease = entered, d.release
+		release = make(chan struct{})
+		d.src.gateEntered, d.src.gateRelease = entered, release
 	}
 	if faulty && d.enabled(dstFaultFilter) {
 		d.src.filterFail = int(arg % 3)
+	}
+
+	// A held fetch that is about to fail delivers no connect, so the
+	// rewind gets no allowance for it.
+	allowance := 1
+	if d.src.filterFail > 0 {
+		allowance = 0
 	}
 	d.src.mu.Unlock()
 
@@ -447,13 +459,12 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	<-entered
 	target := d.start.height + 2
 	done := make(chan error, 1)
-	d.truth.beginRewind(target, 1)
+	d.truth.beginRewind(target, allowance)
 	go func() {
 		done <- d.actor.AddWatchAddrs(nil, nil, &target)
 	}()
 	synctest.Wait()
-	close(d.release)
-	d.release = nil
+	close(release)
 	require.NoError(d.t, <-done)
 }
 
@@ -525,9 +536,6 @@ func (d *dstRun) snapshot() dstSnapshot {
 
 // shutdown stops the actor and the subscription manager.
 func (d *dstRun) shutdown() {
-	if d.release != nil {
-		close(d.release)
-	}
 	d.actor.Stop()
 	d.actor.WaitForShutdown()
 	d.mgr.Stop()

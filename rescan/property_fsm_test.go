@@ -11,8 +11,9 @@ import (
 // fsmModel drives the rescan states directly, without the actor, and feeds
 // every outbox event to the same ground-truth oracle as the DST. Rapid
 // chooses the order of chain events, notifications, continuations, rewinds
-// and watch updates, which is the order the actor's mailbox would see them
-// in.
+// and watch updates. A retry re-applies the failed event as is, without the
+// actor's retry admission checks, so the model reaches orders the actor
+// would filter out but cannot see bugs in the actor itself.
 type fsmModel struct {
 	w     *dstWorld
 	env   *Environment
