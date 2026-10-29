@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -135,6 +136,9 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 		QueryDispatcher:  &mockDispatcher{},
 		TimeSource:       blockchain.NewMedianTime(),
 		BanPeer: func(string, banman.Reason) error {
+			return nil
+		},
+		DisconnectPeer: func(string) error {
 			return nil
 		},
 	})
@@ -1342,23 +1346,35 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 		blockHeader     = wire.BlockHeader{}
 		targetBlockHash = block.BlockHash()
 
-		peers  = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
-		expBad = map[string]struct{}{
-			"bad:1": {},
-		}
+		peers = []string{"good1:1", "good2:1", "bad:1", "good3:1"}
 	)
 
 	testCases := []struct {
+		// name describes the scenario under test.
+		name string
+
 		// filterAnswers is used by each testcase to set the anwers we
 		// want each peer to respond with on filter queries.
 		filterAnswers func(string, map[string]wire.Message)
+
+		// expInvalid is the set of peers we expect to be classified as
+		// serving verified invalid data (and therefore banned).
+		expInvalid map[string]struct{}
+
+		// expUnresponsive is the set of peers we expect to be
+		// classified as not responding (and therefore disconnected
+		// without a ban).
+		expUnresponsive map[string]struct{}
 	}{
 		{
 			// We let the "bad" peers not respond to the filter
-			// query. They should be marked bad because they are
-			// unresponsive. We do this to ensure peers cannot
-			// only respond to us with headers, and stall our sync
-			// by not responding to filter requests.
+			// query. A missing response is not proof that they
+			// served invalid data, so they should be reported as
+			// unresponsive (disconnected without a ban) rather than
+			// banned. We still drop them from this round so they
+			// cannot stall our sync by only responding with
+			// headers.
+			name: "unresponsive peers are not banned",
 			filterAnswers: func(p string,
 				answers map[string]wire.Message) {
 
@@ -1370,10 +1386,16 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 					fType, &targetBlockHash, filterBytes,
 				)
 			},
+			expInvalid: map[string]struct{}{},
+			expUnresponsive: map[string]struct{}{
+				"bad:1": {},
+			},
 		},
 		{
 			// We let the "bad" peers serve filters that don't hash
-			// to the filter headers they have sent.
+			// to the filter headers they have sent. This is
+			// verified invalid data, so they should be banned.
+			name: "peers serving invalid filters are banned",
 			filterAnswers: func(p string,
 				answers map[string]wire.Message) {
 
@@ -1386,6 +1408,10 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 					fType, &targetBlockHash, filterData,
 				)
 			},
+			expInvalid: map[string]struct{}{
+				"bad:1": {},
+			},
+			expUnresponsive: map[string]struct{}{},
 		},
 	}
 
@@ -1442,15 +1468,23 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 			},
 		}
 
-		// Now trying to detect which peers are bad, we should detect the
-		// bad ones.
-		badPeers, err := bm.detectBadPeers(
+		// Now trying to detect which peers are bad, we should split
+		// them into the verified-invalid set and the unresponsive set.
+		invalidPeers, unresponsivePeers, err := bm.detectBadPeers(
 			headers, targetIndex, badIndex, fType,
 		)
-		require.NoError(t, err)
+		require.NoError(t, err, test.name)
 
-		err = assertBadPeers(expBad, badPeers)
-		require.NoError(t, err)
+		require.NoError(
+			t, assertBadPeers(test.expInvalid, invalidPeers),
+			test.name,
+		)
+		require.NoError(
+			t, assertBadPeers(
+				test.expUnresponsive, unresponsivePeers,
+			),
+			test.name,
+		)
 	}
 }
 
@@ -1554,4 +1588,91 @@ func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
 	bm.getCheckpts(&hash, wire.GCSFilterRegular)
 
 	require.Equal(t, []time.Duration{QueryTimeout, QueryTimeout}, timeouts)
+}
+
+// TestBanAndDisconnect distinguishes invalid data from missing responses.
+func TestBanAndDisconnect(t *testing.T) {
+	var banned, disconnected []string
+	bm := &blockManager{cfg: &blockManagerCfg{
+		BanPeer: func(peer string, reason banman.Reason) error {
+			require.Equal(t, banman.InvalidFilterHeader, reason)
+			banned = append(banned, peer)
+			return nil
+		},
+		DisconnectPeer: func(peer string) error {
+			disconnected = append(disconnected, peer)
+			return nil
+		},
+	}}
+
+	acted := bm.banAndDisconnect(
+		[]string{"invalid"}, []string{"unresponsive"},
+		banman.InvalidFilterHeader,
+	)
+	require.Equal(t, []string{"invalid"}, banned)
+	require.Equal(t, []string{"unresponsive"}, disconnected)
+	require.ElementsMatch(t, []string{"invalid", "unresponsive"}, acted)
+}
+
+// TestResolveCFHeaderMixedResponders checks that a silent peer does not hide
+// a conflict between responsive peers at the same height.
+func TestResolveCFHeaderMixedResponders(t *testing.T) {
+	correctHash, err := builder.GetFilterHash(correctFilter)
+	require.NoError(t, err)
+	wrongHash, err := builder.GetFilterHash(fakeFilter1)
+	require.NoError(t, err)
+	headers := map[string]*wire.MsgCFHeaders{
+		"good:1":   {FilterHashes: []*chainhash.Hash{&correctHash}},
+		"wrong:1":  {FilterHashes: []*chainhash.Hash{&wrongHash}},
+		"silent:1": {FilterHashes: []*chainhash.Hash{&correctHash}},
+	}
+	checkpoints := make(map[string][]*chainhash.Hash)
+	for peer := range headers {
+		checkpoints[peer] = nil
+	}
+	store := &headerfs.MockBlockHeaderStore{}
+	store.On("FetchHeaderByHeight", uint32(100)).Return(&block.Header, nil)
+	var banned, disconnected []string
+	bm := &blockManager{cfg: &blockManagerCfg{
+		BlockHeaders: store,
+		GetBlock: func(chainhash.Hash, ...QueryOption) (
+			*btcutil.Block, error) {
+
+			return btcutil.NewBlock(block), nil
+		},
+		BanPeer: func(addr string, _ banman.Reason) error {
+			banned = append(banned, addr)
+			return nil
+		},
+		DisconnectPeer: func(addr string) error {
+			disconnected = append(disconnected, addr)
+			return nil
+		},
+	}}
+	bm.cfg.Broadcaster = broadcastFunc(func(b *querysyncwm.Broadcast,
+		opts ...querysyncwm.QueryOption) error {
+
+		scripts := make(map[string][]wire.Message)
+		for addr, filter := range map[string]*gcs.Filter{
+			"good:1": correctFilter, "wrong:1": fakeFilter1,
+		} {
+			payload, err := filter.NBytes()
+			require.NoError(t, err)
+			hash := block.BlockHash()
+			scripts[addr] = []wire.Message{wire.NewMsgCFilter(
+				wire.GCSFilterRegular, &hash, payload,
+			)}
+		}
+		return newScriptedBroadcaster(scripts).Broadcast(b, opts...)
+	})
+	err = bm.resolveCFHeaderMismatches(
+		headers, checkpoints, 100, 1, wire.GCSFilterRegular,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"wrong:1"}, banned)
+	require.Equal(t, []string{"silent:1"}, disconnected)
+	require.Len(t, headers, 1)
+	require.Contains(t, headers, "good:1")
+	require.Len(t, checkpoints, 1)
+	require.Contains(t, checkpoints, "good:1")
 }

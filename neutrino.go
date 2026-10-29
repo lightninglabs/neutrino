@@ -27,6 +27,7 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/cache/lru"
 	"github.com/lightninglabs/neutrino/chainimport"
+	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -547,7 +548,9 @@ type Config struct {
 	// SQLConfig is nil.
 	LegacyImport *sqldb.LegacyDataSource
 
-	// ChainParams is the chain that we're running on.
+	// ChainParams is the chain that we're running on. Retarget parameters
+	// must be valid whole-second values, as checked by
+	// chainsync.NewRetarget.
 	ChainParams chaincfg.Params
 
 	// ConnectPeers is a slice of hosts that should be connected to on
@@ -714,7 +717,8 @@ type ChainService struct { // nolint:maligned
 	peerSubscribers []*peerSubscription
 
 	// TODO: Add a map for more granular exclusion?
-	mtxCFilter sync.Mutex
+	mtxCFilter     sync.Mutex
+	filterQuerySem chan struct{}
 
 	userAgentName    string
 	userAgentVersion string
@@ -729,6 +733,11 @@ type ChainService struct { // nolint:maligned
 // bitcoin network type specified by chainParams.  Use start to begin syncing
 // with peers.
 func NewChainService(cfg Config) (*ChainService, error) {
+	if _, err := chainsync.NewRetarget(cfg.ChainParams); err != nil {
+		return nil, fmt.Errorf("unable to create chain service: %w",
+			err)
+	}
+
 	// Validate that the caller provided at least one of the two supported
 	// persistent backends. This is checked before any other side effect
 	// so misconfigurations fail fast.
@@ -915,6 +924,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		TimeSource:       s.timeSource,
 		QueryDispatcher:  s.workManager,
 		BanPeer:          s.BanPeer,
+		DisconnectPeer:   s.DisconnectPeer,
 		QuarantinePeer:   s.QuarantinePeer,
 		GetBlock:         s.GetBlock,
 		firstPeerSignal:  s.firstPeerConnect,
@@ -1200,6 +1210,14 @@ func (s *ChainService) BanPeer(addr string, reason banman.Reason) error {
 // peers behind the same NAT or on localhost.
 func (s *ChainService) onPeerUnresponsive(peer querysyncwm.Peer) {
 	s.QuarantinePeer(peer.Addr(), unresponsivePeerQuarantine)
+}
+
+// DisconnectPeer disconnects a peer without recording a ban.
+func (s *ChainService) DisconnectPeer(addr string) error {
+	if sp := s.PeerByAddr(addr); sp != nil {
+		sp.Disconnect()
+	}
+	return nil
 }
 
 // QuarantinePeer temporarily excludes one exact peer address from peer
@@ -1673,6 +1691,12 @@ func disconnectPeer(peerList map[int32]*ServerPeer,
 func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
 	// TODO(roasbeef): pipe through querying interface
 	return s.broadcaster.Broadcast(tx)
+}
+
+// MarkAsConfirmed tells the broadcaster that a transaction has been confirmed
+// and no longer needs to be rebroadcast.
+func (s *ChainService) MarkAsConfirmed(txHash chainhash.Hash) {
+	s.broadcaster.MarkAsConfirmed(txHash)
 }
 
 // NewPeerConfig returns the configuration for the given ServerPeer.

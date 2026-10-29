@@ -562,3 +562,36 @@ func TestWorkManagerReapsExitedWorkerEagerly(t *testing.T) {
 	job2 := recvJob(t, workers[1], errChan)
 	require.EqualValues(t, 2, job2.index)
 }
+
+// TestCancelQueryWithoutPeers checks that an accepted batch is retired even
+// when no worker is available to observe cancellation.
+func TestCancelQueryWithoutPeers(t *testing.T) {
+	wm, _ := startWorkManager(t, 0, nil, nil)
+	cancel := make(chan struct{})
+	errChan := wm.Query([]*Request{{}}, Cancel(cancel))
+	close(cancel)
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, ErrJobCanceled)
+	case <-time.After(time.Second):
+		t.Fatal("canceled batch was not retired")
+	}
+}
+
+// TestCancelQueryBeforeDispatch checks cancellation while submitting a batch
+// to an unstarted dispatcher.
+func TestCancelQueryBeforeDispatch(t *testing.T) {
+	wm := NewWorkManager(&Config{})
+	cancel := make(chan struct{})
+	result := make(chan chan error, 1)
+	go func() {
+		result <- wm.Query([]*Request{{}}, Cancel(cancel))
+	}()
+	close(cancel)
+	select {
+	case errChan := <-result:
+		require.ErrorIs(t, <-errChan, ErrJobCanceled)
+	case <-time.After(time.Second):
+		t.Fatal("canceled batch submission did not return")
+	}
+}

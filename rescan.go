@@ -34,7 +34,9 @@ var (
 	ErrRescanExit = errors.New("rescan exited")
 
 	// errRetryBlock is an internal error used to signal to the rescan
-	// should it should attempt to retry processing a block.
+	// that it should attempt to retry processing a block. It is returned
+	// whenever the block's filter or the block itself could not be fetched
+	// from the network, which is considered a transient failure.
 	errRetryBlock = errors.New("block must be retried")
 )
 
@@ -97,10 +99,13 @@ type rescanOptions struct {
 
 	endBlock *headerfs.BlockStamp
 
-	watchAddrs  []address.Address
-	watchInputs []InputWithScript
-	watchList   [][]byte
-	txIdx       uint32
+	watchAddrs []address.Address
+
+	// watchScripts contains only scripts derived from watched addresses.
+	watchScripts map[string]struct{}
+	watchInputs  []InputWithScript
+	watchList    [][]byte
+	txIdx        uint32
 
 	update <-chan *updateOptions
 	quit   <-chan struct{}
@@ -112,7 +117,7 @@ type rescanOptions struct {
 type RescanOption func(ro *rescanOptions)
 
 func defaultRescanOptions() *rescanOptions {
-	return &rescanOptions{}
+	return &rescanOptions{watchScripts: make(map[string]struct{})}
 }
 
 // QueryOptions pass onto the underlying queries.
@@ -342,6 +347,7 @@ func newRescanState(chain ChainSource, options ...RescanOption) (*rescanState,
 		}
 
 		ro.watchList = append(ro.watchList, script)
+		ro.watchScripts[string(script)] = struct{}{}
 	}
 	for _, input := range ro.watchInputs {
 		ro.watchList = append(ro.watchList, input.PkScript)
@@ -589,12 +595,16 @@ rescanLoop:
 					}
 
 					err := rs.handleBlockConnected(ntfn)
-					switch err {
-					case nil:
+					switch {
+					case err == nil:
+
+					case errors.Is(err, ErrShuttingDown):
+						return err
 
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
 						log.Debugf("Retrying %v after %v",
 							ntfn, blockRetryInterval)
 						blockRetryQueue.push(ntfn)
@@ -648,17 +658,21 @@ rescanLoop:
 					err := rs.handleBlockConnected(
 						retryBlock,
 					)
-					switch err {
+					switch {
 					// We successfully notified the block
 					// this time, so we can remove it from
 					// our queue and move on to the next.
-					case nil:
+					case err == nil:
 						_ = blockRetryQueue.pop()
 						continue retryLoop
 
+					case errors.Is(err, ErrShuttingDown):
+						return err
+
 					// We'll need to retry the block again
-					// as we couldn't fetch its filter.
-					case errRetryBlock:
+					// as we couldn't fetch its filter or
+					// the block itself.
+					case errors.Is(err, errRetryBlock):
 						log.Debugf("Retrying %v after "+
 							"%v", retryBlock,
 							blockRetryInterval)
@@ -755,6 +769,9 @@ rescanLoop:
 				return err
 			}
 
+			// Advance our state to the next block, but remember
+			// where we were in case we need to retry it.
+			prevHeader, prevStamp := rs.curHeader, rs.curStamp
 			rs.curHeader = *header
 			rs.curStamp.Height++
 			rs.curStamp.Hash = header.BlockHash()
@@ -766,10 +783,55 @@ rescanLoop:
 			}
 
 			err = rs.notifyBlock()
-			if err != nil {
+			switch {
+			case err == nil:
+
+			// We couldn't fetch the block's filter or the block
+			// itself from the network. This is usually transient,
+			// e.g. we have no peers or they didn't respond, so
+			// rather than terminating the rescan for good we'll
+			// rewind our state and retry the block after a short
+			// delay.
+			case errors.Is(err, errRetryBlock):
+				log.Errorf("Unable to process block %d (%s), "+
+					"retrying after %v: %v",
+					rs.curStamp.Height, rs.curStamp.Hash,
+					blockRetryInterval, err)
+
+				rs.curHeader = prevHeader
+				rs.curStamp = prevStamp
+
+				err := rs.waitForRetry(blockRetryInterval)
+				if err != nil {
+					return err
+				}
+
+			default:
 				return err
 			}
 		}
+	}
+}
+
+// waitForRetry waits for the given interval before a block is retried while
+// catching up with the chain. Filter updates received in the meantime are
+// applied immediately so that callers of Update are never blocked by a block
+// we're unable to fetch, in which case the wait is cut short.
+func (rs *rescanState) waitForRetry(interval time.Duration) error {
+	ro := rs.opts
+
+	select {
+	case <-ro.quit:
+		return ErrRescanExit
+
+	case update := <-ro.update:
+		_, err := ro.updateFilter(
+			rs.chain, update, &rs.curStamp, &rs.curHeader,
+		)
+		return err
+
+	case <-time.After(interval):
+		return nil
 	}
 }
 
@@ -865,8 +927,18 @@ func (rs *rescanState) notifyBlock() error {
 		matched, filter, err := blockFilterMatches(
 			chain, ro, &rs.curStamp.Hash,
 		)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrShuttingDown):
 			return err
+
+		// If the query failed, then this either means that we don't
+		// have any peers to fetch this filter from, or the peer(s) we
+		// asked didn't respond, so we'll signal the block should be
+		// retried.
+		case err != nil:
+			return fmt.Errorf("%w: unable to get filter for "+
+				"block %d (%s): %w", errRetryBlock,
+				rs.curStamp.Height, rs.curStamp.Hash, err)
 		}
 
 		if matched {
@@ -961,14 +1033,12 @@ func (rs *rescanState) handleBlockConnected(ntfn *blockntfns.Connected) error {
 	blockFilter, err := chain.GetCFilter(
 		newStamp.Hash, wire.GCSFilterRegular, queryOptions,
 	)
+	if errors.Is(err, ErrShuttingDown) {
+		return err
+	}
 	if err != nil {
-		// If the query failed, then this either means that we don't
-		// have any peers to fetch this filter from, or the peer(s) that
-		// we're trying to fetch from are in the progress of a re-org.
-		log.Errorf("unable to get filter for hash=%v, retrying: %v",
-			rs.curStamp.Hash, err)
-
-		return errRetryBlock
+		return fmt.Errorf("%w: unable to get filter for hash=%v: %w",
+			errRetryBlock, newStamp.Hash, err)
 	}
 
 	err = rs.notifyBlockWithFilter(&header, &newStamp, blockFilter)
@@ -992,12 +1062,23 @@ func extractBlockMatches(chain ChainSource, ro *rescanOptions,
 	// We've matched. Now we actually get the block and cycle through the
 	// transactions to see which ones are relevant.
 	block, err := chain.GetBlock(curStamp.Hash, ro.queryOptions...)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrShuttingDown):
 		return nil, err
-	}
-	if block == nil {
-		return nil, fmt.Errorf("couldn't get block %d (%s) from "+
-			"network", curStamp.Height, curStamp.Hash)
+
+	// If we couldn't fetch the block, then this either means that we don't
+	// have any peers to fetch it from, or the peer(s) we asked didn't
+	// respond. This is transient, so we'll signal the block should be
+	// retried rather than terminating the rescan.
+	case err != nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s) from "+
+			"network: %w", errRetryBlock, curStamp.Height,
+			curStamp.Hash, err)
+
+	case block == nil:
+		return nil, fmt.Errorf("%w: couldn't get block %d (%s) from "+
+			"network", errRetryBlock, curStamp.Height,
+			curStamp.Hash)
 	}
 
 	// Before we go through the transactions, let's make sure the filter we
@@ -1211,6 +1292,7 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 		}
 
 		ro.watchList = append(ro.watchList, script)
+		ro.watchScripts[string(script)] = struct{}{}
 	}
 	for _, input := range update.inputs {
 		ro.watchList = append(ro.watchList, input.PkScript)
@@ -1303,45 +1385,22 @@ func (ro *rescanOptions) spendsWatchedInput(tx *btcutil.Tx) bool {
 // updates the filter to watch the newly created output going forward.
 func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) (bool, error) {
 	anyMatchingOutputs := false
-
-txOutLoop:
 	for outIdx, out := range tx.MsgTx().TxOut {
 		pkScript := out.PkScript
-
-		for _, addr := range ro.watchAddrs {
-			// We'll convert the address into its matching pkScript
-			// to in order to check for a match.
-			addrScript, err := txscript.PayToAddrScript(addr)
-			if err != nil {
-				return false, err
-			}
-
-			// If the script doesn't match, we'll move onto the
-			// next one.
-			if !bytes.Equal(pkScript, addrScript) {
-				continue
-			}
-
-			// At this state, we have a matching output so we'll
-			// mark this transaction as matching.
-			anyMatchingOutputs = true
-
-			// Update the filter by also watching this created
-			// outpoint for the event in the future that it's
-			// spent.
-			hash := tx.Hash()
-			outPoint := wire.OutPoint{
-				Hash:  *hash,
-				Index: uint32(outIdx),
-			}
-			ro.watchInputs = append(ro.watchInputs, InputWithScript{
-				PkScript: pkScript,
-				OutPoint: outPoint,
-			})
-			ro.watchList = append(ro.watchList, pkScript)
-
-			continue txOutLoop
+		if _, ok := ro.watchScripts[string(pkScript)]; !ok {
+			continue
 		}
+
+		anyMatchingOutputs = true
+		outPoint := wire.OutPoint{
+			Hash:  *tx.Hash(),
+			Index: uint32(outIdx),
+		}
+		ro.watchInputs = append(ro.watchInputs, InputWithScript{
+			PkScript: pkScript,
+			OutPoint: outPoint,
+		})
+		ro.watchList = append(ro.watchList, pkScript)
 	}
 
 	return anyMatchingOutputs, nil

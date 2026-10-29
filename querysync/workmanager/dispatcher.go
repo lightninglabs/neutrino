@@ -44,6 +44,9 @@ type batchProgress struct {
 	// disables idle detection.
 	progressTimeout time.Duration
 
+	// cancelWatchDone stops the per-batch cancellation watcher.
+	cancelWatchDone chan struct{}
+
 	// progressGen is the generation of progressTimer. It lets the
 	// dispatcher reject wakes that raced a successful completion.
 	progressGen uint64
@@ -143,6 +146,9 @@ type dispatcher struct {
 	// when no retry is pending.
 	scheduleRetry <-chan time.Time
 
+	// batchCancels delivers canceled caller batches.
+	batchCancels chan uint64
+
 	// batchTimeouts delivers batches whose deadline passed.
 	batchTimeouts chan uint64
 
@@ -177,6 +183,7 @@ func newDispatcher(w *peerWorkManager,
 		nonResponseFailures: make(map[string]uint8),
 		quarantinedPeers:    make(map[string]time.Time),
 		sendBlocked:         make(map[string]struct{}),
+		batchCancels:        make(chan uint64),
 		batchTimeouts:       make(chan uint64),
 		progressWakes:       make(chan progressWake),
 		workerExits: make(
@@ -217,6 +224,9 @@ func (d *dispatcher) run() {
 
 		case wake := <-d.progressWakes:
 			d.handleProgressWake(wake)
+
+		case batchNum := <-d.batchCancels:
+			d.cancelBatch(batchNum, ErrJobCanceled)
 
 		case batchNum := <-d.batchTimeouts:
 			d.handleBatchTimeout(batchNum)
@@ -360,6 +370,24 @@ func (d *dispatcher) handleNewBatch(b *batch) {
 		progressTimeout: b.options.ProgressTimeout,
 	}
 	d.batches[batchNum] = progress
+	if b.options.CancelChan != nil {
+		done := make(chan struct{})
+		progress.cancelWatchDone = done
+		d.w.wg.Add(1)
+		go func() {
+			defer d.w.wg.Done()
+			select {
+			case <-b.options.CancelChan:
+				select {
+				case d.batchCancels <- batchNum:
+				case <-done:
+				case <-d.w.quit:
+				}
+			case <-done:
+			case <-d.w.quit:
+			}
+		}()
+	}
 	d.armProgressTimer(progress, batchNum)
 }
 
@@ -425,6 +453,10 @@ func (d *dispatcher) armProgressTimer(b *batchProgress, batchNum uint64) {
 
 // stopBatchTimers stops both timers of a batch.
 func stopBatchTimers(b *batchProgress) {
+	if b.cancelWatchDone != nil {
+		close(b.cancelWatchDone)
+		b.cancelWatchDone = nil
+	}
 	if b.timer != nil {
 		b.timer.Stop()
 	}

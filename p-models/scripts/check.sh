@@ -72,3 +72,12 @@ run_model \
     "${PROJECT_DIR}/neutrinoheadersync/infra.pproj" \
     "NeutrinoHeaderSyncModels.dll" \
     "tcHeaderSyncExplore"
+for testcase in tcBasicSync tcAddWatchRewind tcRewindComplete tcSubLifecycle \
+    tcBatchBoundary tcStopInit tcChainExtension tcRewindWithinRewind \
+    tcRapidRewindCycles tcSelfTellInterleaving tcSubscriptionNewBlocks \
+    tcConcurrentAddWatch tcRewindToGenesis tcSubscriptionClosureRecovery \
+    tcSubscriptionDisconnectReattach tcStopCurrent tcNoOpRewindCurrent \
+    tcReplayCurrentTipAfterRecovery tcInitializingRewind; do
+    run_model "rescan ${testcase}" "${PROJECT_DIR}/rescan.pproj" \
+        "RescanFSMModels.dll" "$testcase"
+done

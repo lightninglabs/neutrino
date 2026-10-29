@@ -91,7 +91,7 @@ require (
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/lightningnetwork/lnd/actor v0.0.5
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
-	github.com/lightningnetwork/lnd/fn/v2 v2.0.8
+	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/lightningnetwork/lnd/sqldb/v2 v2.0.0-20260504151100-6fd5b7bb27d7
 	github.com/lightningnetwork/lnd/ticker v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
