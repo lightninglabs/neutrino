@@ -2,9 +2,6 @@ package rescan
 
 import (
 	"context"
-
-	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // StateInitializing is the initial state of the rescan FSM. It waits for a
@@ -12,14 +9,8 @@ import (
 // in this state are buffered into the watch state that will be carried
 // forward when transitioning to StateSyncing.
 type StateInitializing struct {
-	// StartStamp is the block stamp to begin scanning from.
-	StartStamp headerfs.BlockStamp
-
-	// StartHeader is the header at StartStamp.
-	StartHeader wire.BlockHeader
-
-	// Watch holds the current watch list state.
-	Watch WatchState
+	// Cursor is the start block, which counts as already scanned.
+	Cursor
 
 	// rewindTo records the earliest rewind before scanning.
 	rewindTo *uint32
@@ -37,41 +28,30 @@ func (s *StateInitializing) ProcessEvent(
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		// Apply a rewind accepted during subscription setup.
-		var next RescanState = &StateSyncing{
-			CurStamp:  s.StartStamp,
-			CurHeader: s.StartHeader,
-			Watch:     s.Watch,
-		}
+		var next RescanState = &StateSyncing{Cursor: s.Cursor}
 		if s.rewindTo != nil {
 			next = &StateRewinding{
-				CurStamp:  s.StartStamp,
-				CurHeader: s.StartHeader,
-				Watch:     s.Watch, TargetHeight: *s.rewindTo,
+				Cursor:       s.Cursor,
+				TargetHeight: *s.rewindTo,
 			}
 		}
 		return transition(next, ContinueOutbox{}), nil
 
 	case AddWatchAddrsEvent:
 		// Buffer addresses into the watch state.
-		newWatch, err := s.Watch.ApplyUpdate(&e)
+		cursor, rewind, err := s.addWatch(&e)
 		if err != nil {
 			return nil, err
 		}
 
 		rewindTo := s.rewindTo
-		if e.RewindTo != nil &&
-			int32(*e.RewindTo) < s.StartStamp.Height &&
-			(rewindTo == nil || *e.RewindTo < *rewindTo) {
-
-			height := *e.RewindTo
-			rewindTo = &height
+		if rewind != nil && (rewindTo == nil || *rewind < *rewindTo) {
+			rewindTo = rewind
 		}
 
 		return transition(&StateInitializing{
-			StartStamp:  s.StartStamp,
-			StartHeader: s.StartHeader,
-			Watch:       newWatch,
-			rewindTo:    rewindTo,
+			Cursor:   cursor,
+			rewindTo: rewindTo,
 		}), nil
 
 	case StopEvent:

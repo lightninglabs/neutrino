@@ -57,9 +57,11 @@ func newFSMModel(t *rapid.T) *fsmModel {
 		t.Fatalf("initial watch: %v", err)
 	}
 	m.state = &StateInitializing{
-		StartStamp:  start.stamp(),
-		StartHeader: start.header,
-		Watch:       watch,
+		Cursor: Cursor{
+			CurStamp:  start.stamp(),
+			CurHeader: start.header,
+			Watch:     watch,
+		},
 	}
 	return m
 }

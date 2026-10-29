@@ -1,12 +1,12 @@
 diff --git a/rescan/state_rewinding.go b/rescan/state_rewinding.go
 --- a/rescan/state_rewinding.go
 +++ b/rescan/state_rewinding.go
-@@ -70,7 +70,7 @@ func (s *StateRewinding) processRewind(
+@@ -65,7 +65,7 @@ func (s *StateRewinding) processRewind(
  
- 	for i := 0; i < batchSize; i++ {
+ 	for i := 0; i < env.batchSize(); i++ {
  		// Check if we've reached the target.
--		if curStamp.Height <= int32(s.TargetHeight) {
-+		if curStamp.Height <= int32(s.TargetHeight)+1 {
+-		if cur.CurStamp.Height <= int32(s.TargetHeight) {
++		if cur.CurStamp.Height <= int32(s.TargetHeight)+1 {
  			// Transition to syncing from this point.
- 			continuation := ContinueOutbox{}
- 			return transition(&StateSyncing{
+ 			cur.Scanning = true
+ 			return transition(

@@ -132,8 +132,7 @@ func MatchBlockFilter(
 
 // FetchAndMatchFilter fetches the compact filter for the given block hash
 // and checks it against the watch list. Returns the match result and the
-// filter (for potential later use in block extraction). Uses optimistic
-// batch queries for performance during historical catch-up.
+// filter (for potential later use in block extraction).
 func FetchAndMatchFilter(
 	chain neutrino.ChainSource,
 	blockHash *chainhash.Hash,
@@ -141,21 +140,15 @@ func FetchAndMatchFilter(
 	queryOpts ...neutrino.QueryOption,
 ) (bool, *gcs.Filter, error) {
 
-	opts := append(
-		[]neutrino.QueryOption{
-			neutrino.OptimisticBatch(),
-		},
-		queryOpts...)
-
 	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, opts...,
+		*blockHash, wire.GCSFilterRegular, queryOpts...,
 	)
 	if err != nil {
 		return false, nil, err
 	}
 
 	// If the filter is empty, no match is possible.
-	if filter.N() == 0 {
+	if filter == nil || filter.N() == 0 {
 		return false, nil, nil
 	}
 

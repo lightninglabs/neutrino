@@ -39,3 +39,12 @@ const DefaultBatchSize = 100
 // ProgressInterval controls how frequently RescanProgressOutbox events are
 // emitted during historical sync (every N blocks).
 const ProgressInterval = 10_000
+
+// batchSize returns BatchSize, or DefaultBatchSize when it is not set.
+func (e *Environment) batchSize() int {
+	if e.BatchSize <= 0 {
+		return DefaultBatchSize
+	}
+
+	return e.BatchSize
+}

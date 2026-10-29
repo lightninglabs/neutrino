@@ -3,10 +3,6 @@ package rescan
 import (
 	"context"
 	"fmt"
-
-	"github.com/btcsuite/btcd/btcutil/v2"
-	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // StateCurrent is the steady-state when the rescan is caught up to the chain
@@ -14,17 +10,8 @@ import (
 // and checks them against the watch list. AddWatchAddrs with a rewind target
 // will cause a transition to StateRewinding.
 type StateCurrent struct {
-	// CurStamp tracks the current position of the rescan in the chain.
-	CurStamp headerfs.BlockStamp
-
-	// CurHeader is the full header at the current position.
-	CurHeader wire.BlockHeader
-
-	// Watch holds the current watch list state.
-	Watch WatchState
-
-	// Scanning records whether the birthday threshold has been reached.
-	Scanning bool
+	// Cursor is the last scanned block, the chain tip when last checked.
+	Cursor
 }
 
 // ProcessEvent handles events in the Current state.
@@ -44,10 +31,21 @@ func (s *StateCurrent) ProcessEvent(
 		return s.handleBlockConnected(&e, env)
 
 	case BlockDisconnectedEvent:
-		return s.handleBlockDisconnected(&e)
+		cursor, undone, ok := s.disconnect(&e)
+		if !ok {
+			log.Debugf("StateCurrent: ignoring disconnect for "+
+				"block %v (current tip: %v)",
+				e.Header.BlockHash(), s.CurStamp.Hash)
+
+			return transition(s), nil
+		}
+
+		return transition(&StateCurrent{Cursor: cursor}, undone), nil
 
 	case AddWatchAddrsEvent:
-		return s.handleAddWatch(&e)
+		return s.updateWatch(&e, func(c Cursor) RescanState {
+			return &StateCurrent{Cursor: c}
+		})
 
 	case StopEvent:
 		return transition(&StateTerminal{}), nil
@@ -76,9 +74,9 @@ func (s *StateCurrent) reconcileTip(
 	if s.CurStamp.Height <= 0 {
 		return nil, fmt.Errorf("genesis block changed")
 	}
+
 	return transition(&StateRewinding{
-		CurStamp: s.CurStamp, CurHeader: s.CurHeader,
-		Watch:        s.Watch,
+		Cursor:       s.Cursor,
 		TargetHeight: uint32(s.CurStamp.Height - 1),
 	}, ContinueOutbox{}), nil
 }
@@ -128,142 +126,12 @@ func (s *StateCurrent) handleBlockConnected(
 		)
 	}
 
-	newStamp := headerfs.BlockStamp{
-		Hash:   blockHash,
-		Height: int32(event.Height),
-	}
-
-	watch := s.Watch
-	var (
-		outbox      []OutboxEvent
-		relevantTxs []*btcutil.Tx
-	)
-
-	scanning := s.Scanning ||
-		event.Header.Timestamp.After(env.StartTime)
-	if scanning && len(watch.List) > 0 {
-		// Fetch the filter for this block.
-		filter, err := env.Chain.GetCFilter(
-			blockHash, wire.GCSFilterRegular, env.QueryOpts...,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		if filter != nil && filter.N() != 0 {
-			matched, err := MatchBlockFilter(
-				filter, &blockHash, watch.List,
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			if matched {
-				relevantTxs, watch, err = ExtractBlockMatches(
-					env.Chain,
-					&newStamp,
-					filter,
-					watch,
-					env.QueryOpts...,
-				)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	// Always emit filtered block connected — the wallet relies on
-	// this for every block to advance its sync state. This matches
-	// the old notifyBlockWithFilter which calls
-	// OnFilteredBlockConnected for every block.
-	headerCopy := event.Header
-	outbox = append(outbox, FilteredBlockOutbox{
-		Height:      int32(event.Height),
-		Header:      &headerCopy,
-		RelevantTxs: relevantTxs,
-	})
-
-	// Also emit the simpler block connected notification.
-	outbox = append(outbox, BlockConnectedOutbox{
-		Header:    &headerCopy,
-		Hash:      blockHash,
-		Height:    int32(event.Height),
-		Timestamp: event.Header.Timestamp.Unix(),
-	})
-
-	return transition(&StateCurrent{
-		CurStamp:  newStamp,
-		CurHeader: event.Header,
-		Watch:     watch,
-		Scanning:  scanning,
-	}, outbox...), nil
-}
-
-// handleBlockDisconnected processes a block disconnection (reorg) from the
-// subscription.
-func (s *StateCurrent) handleBlockDisconnected(
-	event *BlockDisconnectedEvent,
-) (*StateTransition, error) {
-
-	// Only handle if this is the block at our current tip.
-	if event.Header.BlockHash() != s.CurStamp.Hash {
-		log.Debugf(
-			"StateCurrent: ignoring disconnect for block %v "+
-				"(current tip: %v)",
-			event.Header.BlockHash(),
-			s.CurStamp.Hash,
-		)
-
-		return transition(s), nil
-	}
-
-	headerCopy := s.CurHeader
-	return transition(&StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   event.ChainTip.BlockHash(),
-			Height: s.CurStamp.Height - 1,
-		},
-		CurHeader: event.ChainTip,
-		Watch:     s.Watch,
-		Scanning:  s.Scanning,
-	}, BlockDisconnectedOutbox{
-		Hash:   s.CurStamp.Hash,
-		Height: s.CurStamp.Height,
-		Header: &headerCopy,
-	}), nil
-}
-
-// handleAddWatch handles an AddWatchAddrsEvent while current.
-func (s *StateCurrent) handleAddWatch(
-	event *AddWatchAddrsEvent) (*StateTransition, error) {
-
-	newWatch, err := s.Watch.ApplyUpdate(event)
+	next, outbox, err := s.scanBlock(env, &event.Header, false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Only rewind if the requested target is actually below our current
-	// height. A no-op or future rewind target should behave like a plain
-	// watch-list update and keep the current subscription intact.
-	if event.RewindTo != nil &&
-		int32(*event.RewindTo) < s.CurStamp.Height {
-
-		return transition(&StateRewinding{
-			CurStamp:     s.CurStamp,
-			CurHeader:    s.CurHeader,
-			Watch:        newWatch,
-			TargetHeight: *event.RewindTo,
-		}, ContinueOutbox{}), nil
-	}
-
-	// No rewind — stay current with updated watch list.
-	return transition(&StateCurrent{
-		CurStamp:  s.CurStamp,
-		CurHeader: s.CurHeader,
-		Watch:     newWatch,
-		Scanning:  s.Scanning,
-	}), nil
+	return transition(&StateCurrent{Cursor: next}, outbox...), nil
 }
 
 // IsTerminal returns false since Current is not terminal.

@@ -3,7 +3,6 @@ package rescan
 import (
 	"context"
 
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -12,14 +11,8 @@ import (
 // BlockDisconnectedOutbox notification. Once the target is reached, it
 // transitions to StateSyncing to re-scan forward with the updated watch list.
 type StateRewinding struct {
-	// CurStamp tracks the current position (walking backwards).
-	CurStamp headerfs.BlockStamp
-
-	// CurHeader is the full header at the current position.
-	CurHeader wire.BlockHeader
-
-	// Watch holds the current watch list state.
-	Watch WatchState
+	// Cursor is the position, walking backwards.
+	Cursor
 
 	// TargetHeight is the height to rewind to.
 	TargetHeight uint32
@@ -42,7 +35,15 @@ func (s *StateRewinding) ProcessEvent(
 		return s.handleAddWatch(&e)
 
 	case BlockDisconnectedEvent:
-		return s.handleDisconnect(&e)
+		cursor, undone, ok := s.disconnect(&e)
+		if !ok {
+			return transition(s), nil
+		}
+
+		return transition(&StateRewinding{
+			Cursor:       cursor,
+			TargetHeight: s.TargetHeight,
+		}, undone, ContinueOutbox{}), nil
 
 	case StopEvent:
 		return transition(&StateTerminal{}), nil
@@ -59,84 +60,48 @@ func (s *StateRewinding) ProcessEvent(
 func (s *StateRewinding) processRewind(
 	env *Environment) (*StateTransition, error) {
 
-	curStamp := s.CurStamp
-	curHeader := s.CurHeader
+	cur := s.Cursor
 	var outbox []OutboxEvent
 
-	batchSize := env.BatchSize
-	if batchSize <= 0 {
-		batchSize = DefaultBatchSize
-	}
-
-	for i := 0; i < batchSize; i++ {
+	for i := 0; i < env.batchSize(); i++ {
 		// Check if we've reached the target.
-		if curStamp.Height <= int32(s.TargetHeight) {
+		if cur.CurStamp.Height <= int32(s.TargetHeight) {
 			// Transition to syncing from this point.
-			continuation := ContinueOutbox{}
-			return transition(&StateSyncing{
-				CurStamp:  curStamp,
-				CurHeader: curHeader,
-				Watch:     s.Watch,
-				Scanning:  true,
-			}, append(outbox, continuation)...), nil
+			cur.Scanning = true
+			return transition(
+				&StateSyncing{Cursor: cur},
+				append(outbox, ContinueOutbox{})...,
+			), nil
 		}
 
 		// Emit disconnection notification for the current block.
-		headerCopy := curHeader
+		headerCopy := cur.CurHeader
 		outbox = append(outbox, BlockDisconnectedOutbox{
-			Hash:   curStamp.Hash,
-			Height: curStamp.Height,
+			Hash:   cur.CurStamp.Hash,
+			Height: cur.CurStamp.Height,
 			Header: &headerCopy,
 		})
 
 		// Walk back to the previous block.
 		header, height, err := env.Chain.GetBlockHeader(
-			&curHeader.PrevBlock,
+			&cur.CurHeader.PrevBlock,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		curHeader = *header
-		curStamp = headerfs.BlockStamp{
-			Hash:   curHeader.BlockHash(),
+		cur.CurHeader = *header
+		cur.CurStamp = headerfs.BlockStamp{
+			Hash:   header.BlockHash(),
 			Height: int32(height),
 		}
 	}
 
-	// Batch complete but not yet at target. Self-Tell to continue.
+	// Batch complete but not yet at target. Continue through the mailbox.
 	return transition(&StateRewinding{
-		CurStamp:     curStamp,
-		CurHeader:    curHeader,
-		Watch:        s.Watch,
+		Cursor:       cur,
 		TargetHeight: s.TargetHeight,
 	}, append(outbox, ContinueOutbox{})...), nil
-}
-
-// handleDisconnect applies a reorg notification while rewinding.
-func (s *StateRewinding) handleDisconnect(
-	event *BlockDisconnectedEvent,
-) (*StateTransition, error) {
-
-	if event.Header.BlockHash() != s.CurStamp.Hash ||
-		int32(event.Height) != s.CurStamp.Height {
-
-		return transition(s), nil
-	}
-	header := event.Header
-	return transition(&StateRewinding{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   event.ChainTip.BlockHash(),
-			Height: s.CurStamp.Height - 1,
-		},
-		CurHeader:    event.ChainTip,
-		Watch:        s.Watch,
-		TargetHeight: s.TargetHeight,
-	}, BlockDisconnectedOutbox{
-		Hash:   s.CurStamp.Hash,
-		Height: s.CurStamp.Height,
-		Header: &header,
-	}, ContinueOutbox{}), nil
 }
 
 // handleAddWatch handles an AddWatchAddrsEvent during rewinding. If the
@@ -144,22 +109,18 @@ func (s *StateRewinding) handleDisconnect(
 func (s *StateRewinding) handleAddWatch(
 	event *AddWatchAddrsEvent) (*StateTransition, error) {
 
-	newWatch, err := s.Watch.ApplyUpdate(event)
+	cursor, rewind, err := s.addWatch(event)
 	if err != nil {
 		return nil, err
 	}
 
 	targetHeight := s.TargetHeight
-	if event.RewindTo != nil &&
-		*event.RewindTo < targetHeight {
-
-		targetHeight = *event.RewindTo
+	if rewind != nil && *rewind < targetHeight {
+		targetHeight = *rewind
 	}
 
 	return transition(&StateRewinding{
-		CurStamp:     s.CurStamp,
-		CurHeader:    s.CurHeader,
-		Watch:        newWatch,
+		Cursor:       cursor,
 		TargetHeight: targetHeight,
 	}), nil
 }

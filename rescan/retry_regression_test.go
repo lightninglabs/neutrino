@@ -41,10 +41,12 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 	}
 	genesis := base.ChainParams().GenesisBlock.Header
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
 		},
-		CurHeader: genesis,
 	}
 	env := &Environment{Chain: chain, BatchSize: 10}
 	transition, err := state.ProcessEvent(
@@ -79,12 +81,16 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 }
 
 func TestStateSnapshotOwnsWatchScripts(t *testing.T) {
-	original := &StateCurrent{Watch: WatchState{
-		Inputs: []neutrino.InputWithScript{
-			{PkScript: []byte{1, 2}},
+	original := &StateCurrent{
+		Cursor: Cursor{
+			Watch: WatchState{
+				Inputs: []neutrino.InputWithScript{
+					{PkScript: []byte{1, 2}},
+				},
+				List: [][]byte{{3, 4}},
+			},
 		},
-		List: [][]byte{{3, 4}},
-	}}
+	}
 	snapshot := snapshotState(original).(*StateCurrent)
 	snapshot.Watch.Inputs[0].PkScript[0] = 9
 	snapshot.Watch.List[0][0] = 9
@@ -118,11 +124,13 @@ func TestCurrentRetainsBirthdayGate(t *testing.T) {
 	second := base.blockHeaders[*base.blockHashesByHeight[2]]
 	genesis := base.ChainParams().GenesisBlock.Header
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
+			Watch:     WatchState{List: [][]byte{{1}}},
 		},
-		CurHeader: genesis,
-		Watch:     WatchState{List: [][]byte{{1}}},
 	}
 	env := &Environment{
 		Chain:     chain,
@@ -255,8 +263,10 @@ func TestCurrentIgnoresOlderConnect(t *testing.T) {
 	tip, err := chain.BestBlock()
 	require.NoError(t, err)
 	state := &StateCurrent{
-		CurStamp:  *tip,
-		CurHeader: *chain.blockHeaders[tip.Hash],
+		Cursor: Cursor{
+			CurStamp:  *tip,
+			CurHeader: *chain.blockHeaders[tip.Hash],
+		},
 	}
 	header := chain.blockHeaders[*chain.blockHashesByHeight[1]]
 	transition, err := state.ProcessEvent(
@@ -282,10 +292,12 @@ func TestCurrentRetriesTransientHeaderRead(t *testing.T) {
 	genesis := base.ChainParams().GenesisBlock.Header
 	header := *base.blockHeaders[*base.blockHashesByHeight[1]]
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
 		},
-		CurHeader: genesis,
 	}
 	event := BlockConnectedEvent{Header: header, Height: 1}
 	_, err := state.ProcessEvent(

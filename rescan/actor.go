@@ -174,26 +174,21 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		watch.List = append(watch.List, input.PkScript)
 	}
 
-	batchSize := cfg.BatchSize
-	if batchSize <= 0 {
-		batchSize = DefaultBatchSize
-	}
-
 	queryOpts := append([]neutrino.QueryOption(nil), cfg.QueryOpts...)
 	queryOpts = append(queryOpts, neutrino.CancelQuery(ctx.Done()))
 
 	// Create the FSM with initial state and immutable environment.
 	machine := newStateMachine(
-		&StateInitializing{
-			StartStamp:  cfg.StartStamp,
-			StartHeader: cfg.StartHeader,
-			Watch:       watch,
-		},
+		&StateInitializing{Cursor: Cursor{
+			CurStamp:  cfg.StartStamp,
+			CurHeader: cfg.StartHeader,
+			Watch:     watch,
+		}},
 		&Environment{
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
 			QueryOpts: queryOpts,
-			BatchSize: batchSize,
+			BatchSize: cfg.BatchSize,
 		},
 	)
 

@@ -17,12 +17,14 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateInitializing{
-		StartStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
 		},
-		StartHeader: *genesisHeader,
-		Watch:       WatchState{},
 	}
 
 	env := &Environment{
@@ -53,7 +55,9 @@ func TestStateInitializingToSyncing(t *testing.T) {
 // buffers addresses and stays in Initializing.
 func TestStateInitializingAddWatch(t *testing.T) {
 	state := &StateInitializing{
-		Watch: WatchState{},
+		Cursor: Cursor{
+			Watch: WatchState{},
+		},
 	}
 
 	env := &Environment{}
@@ -96,13 +100,15 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
+			Scanning:  false,
 		},
-		CurHeader: *genesisHeader,
-		Watch:     WatchState{},
-		Scanning:  false,
 	}
 
 	env := &Environment{
@@ -145,13 +151,15 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
+			Scanning:  false,
 		},
-		CurHeader: *genesisHeader,
-		Watch:     WatchState{},
-		Scanning:  false,
 	}
 
 	env := &Environment{
@@ -186,11 +194,13 @@ func TestStateSyncingAddWatchRewind(t *testing.T) {
 	chain := newMockChain(10)
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Height: 5,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 5,
+			},
+			Watch:    WatchState{},
+			Scanning: true,
 		},
-		Watch:    WatchState{},
-		Scanning: true,
 	}
 
 	env := &Environment{
@@ -223,12 +233,14 @@ func TestStateCurrentBlockConnected(t *testing.T) {
 	header := chain.blockHeaders[bestBlock.Hash]
 
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   bestBlock.Hash,
-			Height: bestBlock.Height,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   bestBlock.Hash,
+				Height: bestBlock.Height,
+			},
+			CurHeader: *header,
+			Watch:     WatchState{},
 		},
-		CurHeader: *header,
-		Watch:     WatchState{},
 	}
 
 	env := &Environment{
@@ -277,12 +289,14 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 	prevHeader := chain.blockHeaders[curHeader.PrevBlock]
 
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   bestBlock.Hash,
-			Height: bestBlock.Height,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   bestBlock.Hash,
+				Height: bestBlock.Height,
+			},
+			CurHeader: *curHeader,
+			Watch:     WatchState{},
 		},
-		CurHeader: *curHeader,
-		Watch:     WatchState{},
 	}
 
 	env := &Environment{Chain: chain}
@@ -317,10 +331,12 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 // Current transitions to Rewinding and keeps the subscription.
 func TestStateCurrentAddWatchRewind(t *testing.T) {
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Height: 10,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 10,
+			},
+			Watch: WatchState{},
 		},
-		Watch: WatchState{},
 	}
 
 	env := &Environment{}
@@ -353,12 +369,14 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	header := chain.blockHeaders[*hash]
 
 	state := &StateRewinding{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *hash,
-			Height: 8,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *hash,
+				Height: 8,
+			},
+			CurHeader: *header,
+			Watch:     WatchState{},
 		},
-		CurHeader:    *header,
-		Watch:        WatchState{},
 		TargetHeight: 5,
 	}
 
@@ -410,12 +428,14 @@ func TestStateMachineFullCycle(t *testing.T) {
 
 	fsm := newStateMachine(
 		&StateInitializing{
-			StartStamp: headerfs.BlockStamp{
-				Hash:   *genesisHash,
-				Height: 0,
+			Cursor: Cursor{
+				CurStamp: headerfs.BlockStamp{
+					Hash:   *genesisHash,
+					Height: 0,
+				},
+				CurHeader: *genesisHeader,
+				Watch:     WatchState{},
 			},
-			StartHeader: *genesisHeader,
-			Watch:       WatchState{},
 		},
 		&Environment{
 			Chain:     chain,

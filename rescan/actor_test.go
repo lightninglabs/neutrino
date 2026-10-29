@@ -391,10 +391,12 @@ func TestStateIsTerminal(t *testing.T) {
 // state can lower the rewind target.
 func TestRewindingAddWatchLowerTarget(t *testing.T) {
 	state := &StateRewinding{
-		CurStamp: headerfs.BlockStamp{
-			Height: 10,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 10,
+			},
+			Watch: WatchState{},
 		},
-		Watch:        WatchState{},
 		TargetHeight: 5,
 	}
 
