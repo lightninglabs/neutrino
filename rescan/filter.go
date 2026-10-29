@@ -38,15 +38,11 @@ type WatchState struct {
 // don't share underlying slice memory.
 func (ws *WatchState) Clone() WatchState {
 	clone := WatchState{
-		Addrs: make([]address.Address, len(ws.Addrs)),
-		Inputs: make(
-			[]neutrino.InputWithScript,
-			len(ws.Inputs),
-		),
-		List: make([][]byte, len(ws.List)),
+		Addrs:  make([]address.Address, len(ws.Addrs)),
+		Inputs: copyInputsWithScripts(ws.Inputs),
+		List:   make([][]byte, len(ws.List)),
 	}
 	copy(clone.Addrs, ws.Addrs)
-	clone.Inputs = copyInputsWithScripts(ws.Inputs)
 	for i, script := range ws.List {
 		clone.List[i] = append([]byte(nil), script...)
 	}
@@ -65,8 +61,9 @@ func (ws *WatchState) Clone() WatchState {
 
 // ApplyUpdate adds the addresses and inputs from an AddWatchAddrsEvent
 // to the watch state. It converts addresses to pkScripts and appends
-// everything to the appropriate slices. Returns a new WatchState — the
-// original is not modified.
+// everything to the appropriate slices. It returns a new WatchState and leaves
+// the original unchanged, or returns the original and an error if an address
+// has no payment script.
 func (ws *WatchState) ApplyUpdate(
 	event *AddWatchAddrsEvent) (WatchState, error) {
 

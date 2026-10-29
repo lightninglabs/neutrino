@@ -1,7 +1,7 @@
 diff --git a/rescan/state_rewinding.go b/rescan/state_rewinding.go
 --- a/rescan/state_rewinding.go
 +++ b/rescan/state_rewinding.go
-@@ -65,7 +65,7 @@ func (s *StateRewinding) processRewind(
+@@ -71,7 +71,7 @@ func (s *StateRewinding) processRewind(
  
  	for i := 0; i < env.batchSize(); i++ {
  		// Check if we've reached the target.

@@ -7,14 +7,15 @@ import (
 )
 
 // OutboxEvent is a sealed interface representing side effects produced by
-// FSM state transitions. These are dispatched by the actor wrapper after
-// all internal events have been processed.
+// FSM state transitions. The actor dispatches them, in order, once the
+// transition that produced them has committed.
 type OutboxEvent interface {
 	outboxEventSealed()
 }
 
-// FilteredBlockOutbox signals that a block was connected and contained
-// transactions relevant to the current watch list.
+// FilteredBlockOutbox signals that a block was scanned. It is emitted for
+// every scanned block, matched or not, immediately before the block's
+// BlockConnectedOutbox.
 type FilteredBlockOutbox struct {
 	// Height is the block height.
 	Height int32
@@ -23,13 +24,15 @@ type FilteredBlockOutbox struct {
 	Header *wire.BlockHeader
 
 	// RelevantTxs contains the transactions that matched the watch list.
+	// It is empty for a block with no match.
 	RelevantTxs []*btcutil.Tx
 }
 
 func (FilteredBlockOutbox) outboxEventSealed() {}
 
-// BlockConnectedOutbox signals that a block was connected but contained no
-// relevant transactions. The wallet uses this to advance its sync state.
+// BlockConnectedOutbox signals that a block was scanned. It is emitted for
+// every scanned block, right after its FilteredBlockOutbox. The wallet uses
+// it to advance its sync state.
 type BlockConnectedOutbox struct {
 	// Header is the exact block header processed by the FSM.
 	Header *wire.BlockHeader

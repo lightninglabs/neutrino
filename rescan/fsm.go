@@ -66,3 +66,10 @@ func outboxOf(t *StateTransition) []OutboxEvent {
 
 	return outbox
 }
+
+// Ensure all states implement the RescanState interface at compile time.
+var _ RescanState = (*StateInitializing)(nil)
+var _ RescanState = (*StateSyncing)(nil)
+var _ RescanState = (*StateCurrent)(nil)
+var _ RescanState = (*StateRewinding)(nil)
+var _ RescanState = (*StateTerminal)(nil)

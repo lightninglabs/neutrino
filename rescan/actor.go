@@ -17,13 +17,19 @@ import (
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
-	fn "github.com/lightningnetwork/lnd/fn/v2"
 )
 
 const (
-	// filterRetryInterval is how long to wait before retrying a failed
-	// filter fetch.
-	filterRetryInterval = 3 * time.Second
+	// retryInterval is how long the actor waits before it retries a
+	// Syncing or Rewinding batch that failed.
+	retryInterval = 3 * time.Second
+
+	// requestTimeout bounds how long AddWatchAddrs and CurrentState wait
+	// for the mailbox to answer.
+	requestTimeout = 5 * time.Second
+
+	// stopTimeout bounds how long Stop waits for the turn in flight.
+	stopTimeout = time.Second
 )
 
 // errSubscriptionClosed is reported when the block subscription closes
@@ -36,10 +42,16 @@ var errSubscriptionClosed = errors.New(
 // Callbacks defines the notification callbacks from the rescan actor to the
 // wallet layer. These correspond to the existing rpcclient.NotificationHandlers
 // but are simplified for the actor model.
+//
+// Every callback, and ActorConfig.OnError, runs on the actor goroutine inside
+// a mailbox turn. A callback must therefore not call back into the actor: a
+// call to AddWatchAddrs or CurrentState from a callback waits behind its own
+// turn until it times out, and a call to Stop stalls for its stop timeout.
 type Callbacks struct {
-	// OnFilteredBlockConnected is called when a block matching the watch
-	// list is connected. The relevantTxs slice contains the matching
-	// transactions.
+	// OnFilteredBlockConnected is called for every scanned block, matched
+	// or not, before OnBlockConnected. The relevantTxs slice holds the
+	// block's transactions that pay a watched script or spend a watched
+	// outpoint, and is empty for a block with none.
 	OnFilteredBlockConnected func(height int32, header *wire.BlockHeader,
 		relevantTxs []*btcutil.Tx)
 
@@ -54,7 +66,7 @@ type Callbacks struct {
 	OnBlockDisconnected func(height int32, header *wire.BlockHeader)
 
 	// OnFilteredBlockDisconnected is called when a block is disconnected,
-	// providing the height and header. Matches the old rescan's behavior
+	// just before OnBlockDisconnected. Matches the old rescan's behavior
 	// of calling both OnFilteredBlockDisconnected and OnBlockDisconnected.
 	OnFilteredBlockDisconnected func(height int32, header *wire.BlockHeader)
 
@@ -63,7 +75,7 @@ type Callbacks struct {
 	OnRescanProgress func(height int32)
 
 	// OnRescanFinished is called when the rescan catches up to the chain
-	// tip.
+	// tip. It is called again only after a rewind.
 	OnRescanFinished func(height int32)
 
 	// OnTxConfirmed is called for each relevant transaction found in a
@@ -78,7 +90,9 @@ type ActorConfig struct {
 	// subscriptions.
 	Chain neutrino.ChainSource
 
-	// StartStamp is the block stamp to begin scanning from.
+	// StartStamp is the block stamp to begin scanning from. It counts as
+	// already scanned, so the first block scanned is StartStamp.Height+1.
+	// It must be on the active chain.
 	StartStamp headerfs.BlockStamp
 
 	// StartHeader is the header at StartStamp.
@@ -104,20 +118,25 @@ type ActorConfig struct {
 	// historical sync. Defaults to DefaultBatchSize if zero.
 	BatchSize int
 
-	// OnError is called when the FSM encounters an error processing an
-	// event. The caller (e.g., NeutrinoClient) can use this to
-	// implement retry logic for transient failures like filter fetch
-	// errors.
+	// OnError reports errors for observation only. It is called when a
+	// Syncing or Rewinding batch fails, which the actor retries on its
+	// own after retryInterval, and once when the block subscription
+	// fails, after which the rescan has stopped in StateTerminal. Like the
+	// callbacks, it runs on the actor goroutine.
 	OnError func(err error)
 }
 
 // RescanActor wraps the rescan FSM in the lnd actor runtime. All external API
-// calls, self-tells, retries, and subscription bridge notifications are routed
-// through one mailbox and handled by Receive.
+// calls, continuations, retries, and subscription bridge notifications are
+// routed through one mailbox and handled by Receive, one at a time on the
+// actor goroutine.
 type RescanActor struct {
+	// machine holds the FSM state. Only the actor goroutine drives it.
 	machine *stateMachine
 	cfg     ActorConfig
 
+	// ctx is cancelled by Stop. It cancels in-flight chain queries, the
+	// bridge, and the retry and continuation goroutines.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -129,18 +148,25 @@ type RescanActor struct {
 	actor *lndactor.Actor[RescanActorMsg, RescanActorResp]
 	ref   lndactor.ActorRef[RescanActorMsg, RescanActorResp]
 
+	// bridgeMu guards the subscription and its bridge, which Start
+	// creates and both the actor goroutine and Stop cancel.
 	bridgeMu     sync.Mutex
 	bridgeCancel context.CancelFunc
 	sub          *blockntfns.Subscription
 
+	// asyncWG tracks the bridge, retry and continuation goroutines. It
+	// does not cover the actor goroutine itself.
 	asyncWG sync.WaitGroup
 
-	// continuationPending is owned by the actor mailbox.
+	// continuationPending is set while a continuation is on its way to
+	// the mailbox, so at most one is in flight. Only the actor goroutine
+	// touches it.
 	continuationPending bool
 }
 
 // NewRescanActor creates a new rescan actor with the given configuration.
-// Call Start() to begin processing.
+// Call Start to begin processing. A request sent before Start waits in the
+// mailbox until Start runs.
 func NewRescanActor(cfg ActorConfig) *RescanActor {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -248,7 +274,7 @@ func (a *RescanActor) Stop() {
 		a.cancel()
 
 		stopCtx, cancel := context.WithTimeout(
-			context.Background(), time.Second,
+			context.Background(), stopTimeout,
 		)
 		result := a.ref.Ask(stopCtx, &stopRescanMsg{}).Await(stopCtx)
 		cancel()
@@ -263,14 +289,18 @@ func (a *RescanActor) Stop() {
 	})
 }
 
-// WaitForShutdown blocks until the bridge and retry goroutines have stopped.
+// WaitForShutdown blocks until the bridge, retry and continuation goroutines
+// have stopped. It does not wait for the actor goroutine.
 func (a *RescanActor) WaitForShutdown() {
 	a.asyncWG.Wait()
 }
 
 // AddWatchAddrs sends an AddWatchAddrs mailbox request so watch-list changes
 // are serialized with all other actor work and any FSM failure is surfaced to
-// the caller.
+// the caller. Without rewindTo the update applies to blocks scanned after it.
+// With rewindTo, the rescan disconnects every block above that height and
+// scans them again, so the block at rewindTo itself is kept. A timeout leaves
+// the outcome unknown: the update may still apply after the call returns.
 func (a *RescanActor) AddWatchAddrs(
 	addrs []address.Address,
 	inputs []neutrino.InputWithScript,
@@ -280,7 +310,7 @@ func (a *RescanActor) AddWatchAddrs(
 	req := newAddWatchAddrsMsg(addrs, inputs, rewindTo)
 
 	reqCtx, cancel := context.WithTimeout(
-		context.Background(), 5*time.Second,
+		context.Background(), requestTimeout,
 	)
 	defer cancel()
 
@@ -296,7 +326,7 @@ func (a *RescanActor) AddWatchAddrs(
 // have been processed.
 func (a *RescanActor) CurrentState() (RescanState, error) {
 	queryCtx, cancel := context.WithTimeout(
-		context.Background(), 5*time.Second,
+		context.Background(), requestTimeout,
 	)
 	defer cancel()
 
@@ -315,361 +345,3 @@ func (a *RescanActor) CurrentState() (RescanState, error) {
 
 	return resp.State, nil
 }
-
-// Receive processes mailbox messages one at a time in the lnd actor runtime.
-func (a *RescanActor) Receive(actorCtx context.Context,
-	msg RescanActorMsg) fn.Result[RescanActorResp] {
-
-	switch m := msg.(type) {
-	case *processNextBlockMsg:
-		a.continuationPending = false
-		return a.handleContinuation(actorCtx)
-
-	case *blockConnectedMsg:
-		return a.handleFSMEvent(actorCtx, BlockConnectedEvent{
-			Header: m.Header,
-			Height: m.Height,
-		})
-
-	case *blockDisconnectedMsg:
-		return a.handleFSMEvent(actorCtx, BlockDisconnectedEvent{
-			Header:   m.Header,
-			Height:   m.Height,
-			ChainTip: m.ChainTip,
-		})
-
-	case *addWatchAddrsMsg:
-		return a.handleFSMEvent(
-			actorCtx,
-			AddWatchAddrsEvent{
-				Addrs:    m.Addrs,
-				Inputs:   m.Inputs,
-				RewindTo: m.RewindTo,
-			},
-		)
-
-	case *currentStateReq:
-		return fn.Ok[RescanActorResp](&currentStateResp{
-			State: snapshotState(a.machine.CurrentState()),
-		})
-
-	case *subscriptionFailedMsg:
-		return a.handleSubscriptionFailed(actorCtx, m)
-
-	case *stopRescanMsg:
-		return a.handleStop(actorCtx)
-
-	default:
-		return fn.Err[RescanActorResp](fmt.Errorf(
-			"unknown message type: %T", msg,
-		))
-	}
-}
-
-// handleContinuation runs the next batch. A failed batch leaves the state
-// unchanged. It is reported through OnError and retried after
-// filterRetryInterval.
-func (a *RescanActor) handleContinuation(
-	actorCtx context.Context) fn.Result[RescanActorResp] {
-
-	result := a.handleFSMEvent(actorCtx, ProcessNextBlockEvent{})
-	if result.IsErr() {
-		err := result.Err()
-		log.Warnf("RescanActor: error processing next block: %v, "+
-			"retrying in %v", err, filterRetryInterval)
-
-		if a.cfg.OnError != nil {
-			a.cfg.OnError(err)
-		}
-
-		a.scheduleRetry()
-	}
-
-	return result
-}
-
-func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
-	event RescanEvent) fn.Result[RescanActorResp] {
-
-	outbox, err := a.machine.ProcessEvent(actorCtx, event)
-	if err != nil {
-		return fn.Err[RescanActorResp](err)
-	}
-
-	a.dispatchOutbox(outbox)
-
-	return fn.Ok[RescanActorResp](&rescanActorAck{})
-}
-
-// scheduleRetry sends a continuation after filterRetryInterval, unless the
-// actor stops first.
-func (a *RescanActor) scheduleRetry() {
-	a.asyncWG.Add(1)
-	go func() {
-		defer a.asyncWG.Done()
-
-		timer := time.NewTimer(filterRetryInterval)
-		defer timer.Stop()
-
-		select {
-		case <-a.ctx.Done():
-			return
-
-		case <-timer.C:
-		}
-
-		a.ref.Tell(a.ctx, &processNextBlockMsg{})
-	}()
-}
-
-func (a *RescanActor) handleStop(
-	actorCtx context.Context) fn.Result[RescanActorResp] {
-
-	return a.handleFSMEvent(actorCtx, StopEvent{})
-}
-
-// handleSubscriptionFailed ends the rescan when its block subscription could
-// not be created or closed underneath it. Both happen only once the
-// ChainService has stopped, so the rescan reports the error once and moves
-// to Terminal, as the legacy rescan loop does, rather than retrying.
-func (a *RescanActor) handleSubscriptionFailed(actorCtx context.Context,
-	msg *subscriptionFailedMsg) fn.Result[RescanActorResp] {
-
-	if a.ctx.Err() != nil || a.machine.CurrentState().IsTerminal() {
-		return fn.Ok[RescanActorResp](&rescanActorAck{})
-	}
-
-	log.Errorf("RescanActor: %v, stopping", msg.Err)
-	if a.cfg.OnError != nil {
-		a.cfg.OnError(msg.Err)
-	}
-	a.cancelBridge()
-
-	return a.handleFSMEvent(actorCtx, StopEvent{})
-}
-
-// dispatchOutbox processes outbox events emitted by FSM state transitions.
-func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
-	for _, event := range outbox {
-		select {
-		case <-a.ctx.Done():
-			return
-		default:
-		}
-
-		switch e := event.(type) {
-		case FilteredBlockOutbox:
-			if a.cfg.Callbacks.OnFilteredBlockConnected != nil {
-				a.cfg.Callbacks.OnFilteredBlockConnected(
-					e.Height, e.Header, e.RelevantTxs,
-				)
-			}
-
-			if a.cfg.Callbacks.OnTxConfirmed != nil {
-				for _, tx := range e.RelevantTxs {
-					confirm := a.cfg.Callbacks.OnTxConfirmed
-					confirm(*tx.Hash())
-				}
-			}
-
-		case BlockConnectedOutbox:
-			if a.cfg.Callbacks.OnBlockConnected != nil {
-				a.cfg.Callbacks.OnBlockConnected(
-					e.Height, e.Header,
-					time.Unix(e.Timestamp, 0),
-				)
-			}
-
-		case BlockDisconnectedOutbox:
-			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {
-				a.cfg.Callbacks.OnFilteredBlockDisconnected(
-					e.Height, e.Header,
-				)
-			}
-			if a.cfg.Callbacks.OnBlockDisconnected != nil {
-				a.cfg.Callbacks.OnBlockDisconnected(
-					e.Height, e.Header,
-				)
-			}
-
-		case RescanProgressOutbox:
-			if a.cfg.Callbacks.OnRescanProgress != nil {
-				a.cfg.Callbacks.OnRescanProgress(e.Height)
-			}
-
-		case RescanFinishedOutbox:
-			if a.cfg.Callbacks.OnRescanFinished != nil {
-				a.cfg.Callbacks.OnRescanFinished(e.Height)
-			}
-
-		case ContinueOutbox:
-			a.enqueueContinuation()
-		}
-	}
-}
-
-// enqueueContinuation avoids blocking the mailbox on its own bounded queue.
-func (a *RescanActor) enqueueContinuation() {
-	if a.continuationPending {
-		return
-	}
-	a.continuationPending = true
-	a.asyncWG.Add(1)
-	go func() {
-		defer a.asyncWG.Done()
-		a.ref.Tell(a.ctx, &processNextBlockMsg{})
-	}()
-}
-
-// startBridge subscribes to block notifications with no backlog and starts
-// the bridge goroutine that turns them into mailbox messages.
-func (a *RescanActor) startBridge() error {
-	a.bridgeMu.Lock()
-	defer a.bridgeMu.Unlock()
-
-	// Stop cancels the context before it cancels the bridge under this
-	// lock, so checking it here means a Start racing Stop either leaves
-	// the subscription for Stop to cancel or never creates it.
-	if err := a.ctx.Err(); err != nil {
-		return err
-	}
-
-	sub, err := a.cfg.Chain.Subscribe(0)
-	if err != nil {
-		return fmt.Errorf("unable to register block subscription: %w",
-			err)
-	}
-
-	bridgeCtx, bridgeCancel := context.WithCancel(a.ctx)
-	a.bridgeCancel = bridgeCancel
-	a.sub = sub
-
-	a.asyncWG.Add(1)
-	go func() {
-		defer a.asyncWG.Done()
-		a.bridgeSubscription(bridgeCtx, sub)
-	}()
-
-	return nil
-}
-
-// cancelBridge cancels the current subscription bridge goroutine.
-func (a *RescanActor) cancelBridge() {
-	a.bridgeMu.Lock()
-	defer a.bridgeMu.Unlock()
-
-	if a.bridgeCancel != nil {
-		a.bridgeCancel()
-		a.bridgeCancel = nil
-	}
-	if a.sub != nil {
-		a.sub.Cancel()
-		a.sub = nil
-	}
-}
-
-// bridgeSubscription reads from a block subscription and converts
-// notifications into actor mailbox messages.
-func (a *RescanActor) bridgeSubscription(ctx context.Context,
-	sub *blockntfns.Subscription) {
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case ntfn, ok := <-sub.Notifications:
-			if !ok {
-				if ctx.Err() != nil {
-					return
-				}
-
-				log.Info(
-					"RescanActor: subscription closed",
-				)
-
-				a.ref.Tell(ctx, &subscriptionFailedMsg{
-					Err: errSubscriptionClosed,
-				})
-
-				return
-			}
-
-			var msg RescanActorMsg
-
-			switch n := ntfn.(type) {
-			case *blockntfns.Connected:
-				msg = &blockConnectedMsg{
-					Header: n.Header(),
-					Height: n.Height(),
-				}
-
-			case *blockntfns.Disconnected:
-				msg = &blockDisconnectedMsg{
-					Header:   n.Header(),
-					Height:   n.Height(),
-					ChainTip: n.ChainTip(),
-				}
-
-			default:
-				log.Warnf("RescanActor: unknown notification "+
-					"type %T", ntfn)
-				continue
-			}
-
-			a.ref.Tell(ctx, msg)
-		}
-	}
-}
-
-// snapshotState returns a copy of state whose watch list the caller may
-// mutate without touching the state the machine holds.
-func snapshotState(state RescanState) RescanState {
-	switch s := state.(type) {
-	case *StateInitializing:
-		snapshot := *s
-		snapshot.Watch = s.Watch.Clone()
-		return &snapshot
-	case *StateSyncing:
-		snapshot := *s
-		snapshot.Watch = s.Watch.Clone()
-		return &snapshot
-	case *StateCurrent:
-		snapshot := *s
-		snapshot.Watch = s.Watch.Clone()
-		return &snapshot
-	case *StateRewinding:
-		snapshot := *s
-		snapshot.Watch = s.Watch.Clone()
-		return &snapshot
-	default:
-		return state
-	}
-}
-
-// Ensure the mailbox behavior implements the lnd actor behavior interface.
-var _ lndactor.ActorBehavior[RescanActorMsg, RescanActorResp] = (*RescanActor)(
-	nil,
-)
-
-// Ensure all states implement the RescanState interface at compile time.
-var _ RescanState = (*StateInitializing)(nil)
-var _ RescanState = (*StateSyncing)(nil)
-var _ RescanState = (*StateCurrent)(nil)
-var _ RescanState = (*StateRewinding)(nil)
-var _ RescanState = (*StateTerminal)(nil)
-
-// Ensure all outbox events implement the OutboxEvent interface at compile time.
-var _ OutboxEvent = (*FilteredBlockOutbox)(nil)
-var _ OutboxEvent = (*BlockConnectedOutbox)(nil)
-var _ OutboxEvent = (*BlockDisconnectedOutbox)(nil)
-var _ OutboxEvent = (*RescanProgressOutbox)(nil)
-var _ OutboxEvent = (*RescanFinishedOutbox)(nil)
-var _ OutboxEvent = (*ContinueOutbox)(nil)
-
-// Ensure all events implement the RescanEvent interface at compile time.
-var _ RescanEvent = (*BlockConnectedEvent)(nil)
-var _ RescanEvent = (*BlockDisconnectedEvent)(nil)
-var _ RescanEvent = (*AddWatchAddrsEvent)(nil)
-var _ RescanEvent = (*ProcessNextBlockEvent)(nil)
-var _ RescanEvent = (*StopEvent)(nil)

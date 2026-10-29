@@ -551,7 +551,7 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 
 		close(chain.ntfnChan)
 		synctest.Wait()
-		time.Sleep(10 * filterRetryInterval)
+		time.Sleep(10 * retryInterval)
 		synctest.Wait()
 
 		require.Equal(t, int32(1), errs.Load())

@@ -277,7 +277,7 @@ func (d *dstRun) settle() {
 // sleepRetries advances virtual time by n retry intervals.
 func (d *dstRun) sleepRetries(n int) {
 	for i := 0; i < n; i++ {
-		time.Sleep(filterRetryInterval)
+		time.Sleep(retryInterval)
 		synctest.Wait()
 	}
 }
@@ -478,7 +478,7 @@ func (d *dstRun) step(i int, value byte) {
 		d.newBlock(arg, op == 0)
 
 	case 1, 5:
-		time.Sleep(filterRetryInterval)
+		time.Sleep(retryInterval)
 
 	case 2:
 		// Rewind even when a retry is outstanding.

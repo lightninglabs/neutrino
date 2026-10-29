@@ -184,7 +184,7 @@ with or without a rewind. The order rapid picks is the mailbox order the
 actor would see. A run ends by draining everything and requiring the scan to
 be current at the tip. The test reaches watch updates and reorgs at any
 point, which the DST ops do not yet generate, but it cannot see the actor's
-retry admission or its callback dispatch.
+retries or its callback dispatch.
 
 ## Judging the harness
 
@@ -201,7 +201,7 @@ recall.sh --repo . --cmd "go test ./rescan/ -run '^TestRescanDSTSwarm\$' \
 
 The `recall-` patches revert recorded fixes, the `inv-` patches each break
 the property one invariant names, and `probe-drop-relevant-txs.patch` empties
-the syncing `RelevantTxs`.
+`RelevantTxs` in the block scan that Syncing and Current share.
 
 ## Known gaps
 
@@ -214,8 +214,8 @@ the syncing `RelevantTxs`.
   announced. The block manager rolls the header store back one block per
   disconnect, so the DST never shows a header store shorter than the
   delivered tip mid-reorg.
-- A rapid-model retry re-applies the failed event without the actor's
-  retry admission checks, so mutants in `actor.go` are out of its reach.
+- The rapid model drives the states without the actor, so mutants in the
+  `actor*.go` files are out of its reach.
 - The heal phase only sleeps. It does not check that no retry is armed, that
   `continuationPending` is clear, or that nothing fires after `Stop`.
 - The fixture's `IsCurrent` always reports true, so the "rescan started

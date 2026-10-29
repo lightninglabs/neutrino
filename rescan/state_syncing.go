@@ -5,10 +5,18 @@ import (
 	"fmt"
 )
 
-// StateSyncing is the historical catch-up state. It processes blocks in
-// batches (env.BatchSize per ProcessNextBlockEvent), fetching cfilters and
-// checking them against the watch list. Between batches, the actor mailbox
-// can interleave AddWatchAddrs events via the self-Tell pattern.
+// StateSyncing is the historical catch-up state. It scans the blocks above
+// its cursor from the header store, in batches of env.BatchSize per
+// ProcessNextBlockEvent, and asks for a continuation after each batch so the
+// mailbox can interleave AddWatchAddrs and notifications between batches.
+//
+// It is entered from Initializing, from Rewinding once the rewind reaches
+// its target, and from Current when a live block cannot be scanned. It
+// leaves to Current once the cursor reaches the best block, to Rewinding on
+// an update that rewinds below the cursor, and to Terminal on StopEvent. A
+// disconnect of the cursor block moves the cursor back and stays. Connect
+// notifications are ignored: the header store already holds a block when its
+// notification arrives, so the next batch scans it.
 type StateSyncing struct {
 	// Cursor is the last scanned block.
 	Cursor

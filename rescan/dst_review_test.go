@@ -61,7 +61,7 @@ func TestDSTCanonicalRetrySuccessor(t *testing.T) {
 		)
 		synctest.Wait()
 		for i := 0; i < 3; i++ {
-			time.Sleep(filterRetryInterval)
+			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
 		state, err := actor.CurrentState()
@@ -143,7 +143,7 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 		close(release)
 		synctest.Wait()
 		for i := 0; i < 3; i++ {
-			time.Sleep(filterRetryInterval)
+			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
 		state, err := actor.CurrentState()
@@ -214,7 +214,7 @@ func TestDSTInitializingRewind(t *testing.T) {
 		actor.Start()
 		require.NoError(t, <-done)
 		for i := 0; i < 4; i++ {
-			time.Sleep(filterRetryInterval)
+			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
 		state, err := actor.CurrentState()
@@ -333,7 +333,7 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 		chain.ntfnChan <- blockntfns.NewBlockConnected(*second, 2)
 		synctest.Wait()
 		for i := 0; i < 3; i++ {
-			time.Sleep(filterRetryInterval)
+			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
 		state, err = actor.CurrentState()
@@ -444,7 +444,7 @@ func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
 		chain.ntfnChan <- blockntfns.NewBlockConnected(replacement, 2)
 		synctest.Wait()
 		for i := 0; i < 3; i++ {
-			time.Sleep(filterRetryInterval)
+			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
 		state, err = actor.CurrentState()

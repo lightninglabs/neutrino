@@ -1,7 +1,7 @@
 diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
 --- a/rescan/state_syncing.go
 +++ b/rescan/state_syncing.go
-@@ -122,12 +122,6 @@ func (s *StateSyncing) processNextBatch(
+@@ -130,12 +130,6 @@ func (s *StateSyncing) processNextBatch(
  			// events from blocks processed in this batch,
  			// followed by the finished event unless this scan
  			// already reported it.

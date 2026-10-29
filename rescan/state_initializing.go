@@ -4,15 +4,21 @@ import (
 	"context"
 )
 
-// StateInitializing is the initial state of the rescan FSM. It waits for a
-// ProcessNextBlockEvent to begin syncing. Any AddWatchAddrsEvents received
-// in this state are buffered into the watch state that will be carried
-// forward when transitioning to StateSyncing.
+// StateInitializing is the initial state of the rescan FSM, before the first
+// batch. The actor subscribes to block notifications before it sends the
+// first ProcessNextBlockEvent, and this state exists to hold AddWatchAddrs
+// updates until then: scanning without a subscription could miss a
+// disconnect. It buffers each update into the watch list, and remembers the
+// lowest rewind target below the start.
+//
+// It leaves on ProcessNextBlockEvent, to Syncing, or to Rewinding when a
+// buffered update asked to rewind, and on StopEvent to Terminal.
 type StateInitializing struct {
 	// Cursor is the start block, which counts as already scanned.
 	Cursor
 
-	// rewindTo records the earliest rewind before scanning.
+	// rewindTo records the lowest rewind target below the start that an
+	// update asked for before scanning began.
 	rewindTo *uint32
 }
 

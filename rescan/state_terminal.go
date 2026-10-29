@@ -2,12 +2,15 @@ package rescan
 
 import "context"
 
-// StateTerminal is the terminal state of the rescan FSM. Once entered, no
-// further transitions are possible.
+// StateTerminal is the terminal state of the rescan FSM. Every other state
+// moves here on StopEvent, which the actor sends when Stop runs and when the
+// block subscription fails. Once entered, no further transitions are
+// possible.
 type StateTerminal struct{}
 
-// ProcessEvent is a no-op for terminal state. It should never be called
-// since the state machine stops processing when IsTerminal() returns true.
+// ProcessEvent leaves the state unchanged. It is still called for messages
+// that were already in the mailbox, such as a retry or a notification that
+// arrived just before the stop.
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateTerminal) ProcessEvent(_ context.Context, _ RescanEvent,
@@ -16,7 +19,7 @@ func (s *StateTerminal) ProcessEvent(_ context.Context, _ RescanEvent,
 	return transition(s), nil
 }
 
-// IsTerminal returns true — this is the terminal state.
+// IsTerminal returns true, since this is the terminal state.
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateTerminal) IsTerminal() bool { return true }

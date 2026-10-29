@@ -7,9 +7,9 @@ import (
 )
 
 // Environment holds the immutable dependencies available to all FSM states
-// during event processing. The environment is NEVER mutated — all mutable
-// state (CurStamp, WatchAddrs, WatchList, etc.) lives in the state structs
-// themselves and is carried forward via state transitions.
+// during event processing. The environment is never mutated. All mutable
+// state, the Cursor and its watch list, lives in the state structs and is
+// carried forward through state transitions.
 type Environment struct {
 	// Chain provides access to block headers, filters, blocks, and
 	// subscriptions.
@@ -25,9 +25,9 @@ type Environment struct {
 	QueryOpts []neutrino.QueryOption
 
 	// BatchSize controls how many blocks are processed per
-	// ProcessNextBlockEvent during syncing. This amortizes the self-Tell
-	// overhead while still allowing AddWatchAddrs to interleave between
-	// batches.
+	// ProcessNextBlockEvent while syncing or rewinding. This amortizes the
+	// continuation overhead while still allowing AddWatchAddrs to
+	// interleave between batches. Zero means DefaultBatchSize.
 	BatchSize int
 }
 

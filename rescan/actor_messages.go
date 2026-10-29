@@ -29,6 +29,9 @@ type RescanActorResp interface {
 	rescanActorRespSealed()
 }
 
+// processNextBlockMsg is a continuation: it runs the next Syncing or Rewinding
+// batch. The actor sends it to itself, and a retry sends it after a failed
+// batch.
 type processNextBlockMsg struct {
 	lndactor.BaseMessage
 }
@@ -38,6 +41,7 @@ func (*processNextBlockMsg) MessageType() string {
 }
 func (*processNextBlockMsg) rescanActorMsgSealed() {}
 
+// stopRescanMsg is the barrier Stop asks for. It moves the FSM to Terminal.
 type stopRescanMsg struct {
 	lndactor.BaseMessage
 }
@@ -45,6 +49,8 @@ type stopRescanMsg struct {
 func (*stopRescanMsg) MessageType() string   { return "stop_rescan" }
 func (*stopRescanMsg) rescanActorMsgSealed() {}
 
+// addWatchAddrsMsg carries an AddWatchAddrs request. Its slices are copies
+// that the caller no longer shares.
 type addWatchAddrsMsg struct {
 	lndactor.BaseMessage
 
@@ -56,6 +62,7 @@ type addWatchAddrsMsg struct {
 func (*addWatchAddrsMsg) MessageType() string   { return "add_watch_addrs" }
 func (*addWatchAddrsMsg) rescanActorMsgSealed() {}
 
+// blockConnectedMsg carries a connected-block notification from the bridge.
 type blockConnectedMsg struct {
 	lndactor.BaseMessage
 
@@ -66,6 +73,8 @@ type blockConnectedMsg struct {
 func (*blockConnectedMsg) MessageType() string   { return "block_connected" }
 func (*blockConnectedMsg) rescanActorMsgSealed() {}
 
+// blockDisconnectedMsg carries a disconnected-block notification from the
+// bridge. ChainTip is the header of the block's parent, the new tip.
 type blockDisconnectedMsg struct {
 	lndactor.BaseMessage
 
@@ -80,6 +89,7 @@ func (*blockDisconnectedMsg) MessageType() string {
 
 func (*blockDisconnectedMsg) rescanActorMsgSealed() {}
 
+// currentStateReq asks for a copy of the current FSM state.
 type currentStateReq struct {
 	lndactor.BaseMessage
 }
@@ -87,6 +97,8 @@ type currentStateReq struct {
 func (*currentStateReq) MessageType() string   { return "current_state" }
 func (*currentStateReq) rescanActorMsgSealed() {}
 
+// subscriptionFailedMsg reports that the block subscription could not be
+// created, or closed while the rescan ran. Either ends the rescan.
 type subscriptionFailedMsg struct {
 	lndactor.BaseMessage
 
@@ -99,16 +111,20 @@ func (*subscriptionFailedMsg) MessageType() string {
 
 func (*subscriptionFailedMsg) rescanActorMsgSealed() {}
 
+// rescanActorAck is the answer to every request except currentStateReq.
 type rescanActorAck struct{}
 
 func (*rescanActorAck) rescanActorRespSealed() {}
 
+// currentStateResp answers currentStateReq.
 type currentStateResp struct {
 	State RescanState
 }
 
 func (*currentStateResp) rescanActorRespSealed() {}
 
+// newAddWatchAddrsMsg builds an addWatchAddrsMsg from copies of its
+// arguments, so the caller may reuse them once the call returns.
 func newAddWatchAddrsMsg(
 	addrs []address.Address,
 	inputs []neutrino.InputWithScript,
@@ -128,6 +144,8 @@ func newAddWatchAddrsMsg(
 	return msg
 }
 
+// copyInputsWithScripts returns a deep copy of inputs, including each
+// PkScript.
 func copyInputsWithScripts(
 	inputs []neutrino.InputWithScript,
 ) []neutrino.InputWithScript {

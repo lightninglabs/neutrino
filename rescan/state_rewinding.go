@@ -6,10 +6,16 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// StateRewinding walks backward through the chain from the current position
-// to the target rewind height. For each disconnected block, it emits a
-// BlockDisconnectedOutbox notification. Once the target is reached, it
-// transitions to StateSyncing to re-scan forward with the updated watch list.
+// StateRewinding walks backward through the chain from the cursor to the
+// target height, one batch per ProcessNextBlockEvent, and emits a
+// BlockDisconnectedOutbox for each block above the target. The target block
+// itself is kept.
+//
+// It is entered from Initializing, Syncing or Current on an update that
+// rewinds below the cursor. A later update can lower the target. Once the
+// cursor reaches the target, it leaves to Syncing with Scanning set, so the
+// rescanned blocks are checked even if they predate the wallet birthday. It
+// leaves to Terminal on StopEvent.
 type StateRewinding struct {
 	// Cursor is the position, walking backwards.
 	Cursor

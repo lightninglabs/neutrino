@@ -5,10 +5,15 @@ import (
 	"fmt"
 )
 
-// StateCurrent is the steady-state when the rescan is caught up to the chain
-// tip. It receives block notifications from the subscription bridge goroutine
-// and checks them against the watch list. AddWatchAddrs with a rewind target
-// will cause a transition to StateRewinding.
+// StateCurrent is the steady state when the rescan is caught up to the chain
+// tip. It scans each block that a connect notification delivers, and undoes
+// its tip on a disconnect notification.
+//
+// It is entered from Syncing at the tip. It leaves to Syncing when a
+// connected block cannot be scanned, because a fetch failed or the block does
+// not extend the cursor, so Syncing catches up from the header store instead
+// of retrying the block. It leaves to Rewinding on an update that rewinds
+// below the cursor, and to Terminal on StopEvent.
 type StateCurrent struct {
 	// Cursor is the last scanned block, the chain tip when last checked.
 	Cursor
