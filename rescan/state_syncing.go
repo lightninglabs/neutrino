@@ -29,7 +29,7 @@ type StateSyncing struct {
 }
 
 // ProcessEvent handles events in the Syncing state. On ProcessNextBlockEvent,
-// it processes up to env.BatchSize blocks, then emits a SelfTellOutbox to
+// it processes up to env.BatchSize blocks, then emits a ContinueOutbox to
 // continue. This allows AddWatchAddrs to interleave between batches.
 //
 // NOTE: This is part of the RescanState interface.
@@ -87,9 +87,7 @@ func (s *StateSyncing) processNextBatch(
 			Events: &EmittedEvent{
 				Outbox: append(
 					outbox,
-					SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					},
+					ContinueOutbox{},
 				),
 			},
 		}, nil
@@ -101,25 +99,6 @@ func (s *StateSyncing) processNextBatch(
 	}
 
 	for i := 0; i < batchSize; i++ {
-		// Check if we've hit the end block (bounded rescan).
-		if env.EndBlock != nil {
-			if curStamp.Hash == env.EndBlock.Hash ||
-				curStamp.Height >= env.EndBlock.Height {
-
-				finished := RescanFinishedOutbox{
-					Hash:   curStamp.Hash,
-					Height: curStamp.Height,
-				}
-				events := &EmittedEvent{
-					Outbox: append(outbox, finished),
-				}
-				return &StateTransition{
-					NextState: &StateTerminal{},
-					Events:    events,
-				}, nil
-			}
-		}
-
 		// Check if we've caught up to the chain tip.
 		bestBlock, err := env.Chain.BestBlock()
 		if err != nil {
@@ -160,18 +139,11 @@ func (s *StateSyncing) processNextBatch(
 		if curStamp.Height >= bestBlock.Height {
 			// We're current. Include all accumulated outbox
 			// events from blocks processed in this batch,
-			// followed by the subscription and finished events.
-			outbox = append(outbox,
-				StartSubscriptionOutbox{
-					BestHeight: uint32(
-						curStamp.Height,
-					),
-				},
-				RescanFinishedOutbox{
-					Hash:   curStamp.Hash,
-					Height: curStamp.Height,
-				},
-			)
+			// followed by the finished event.
+			outbox = append(outbox, RescanFinishedOutbox{
+				Hash:   curStamp.Hash,
+				Height: curStamp.Height,
+			})
 
 			return &StateTransition{
 				NextState: &StateCurrent{
@@ -292,9 +264,7 @@ func (s *StateSyncing) processNextBatch(
 			Scanning:  scanning,
 		},
 		Events: &EmittedEvent{
-			Outbox: append(outbox, SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			}),
+			Outbox: append(outbox, ContinueOutbox{}),
 		},
 	}, nil
 }
@@ -326,9 +296,7 @@ func (s *StateSyncing) handleDisconnect(
 				Height: s.CurStamp.Height,
 				Header: &header,
 			},
-			SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			},
+			ContinueOutbox{},
 		}},
 	}, nil
 }
@@ -356,9 +324,7 @@ func (s *StateSyncing) handleAddWatch(
 			},
 			Events: &EmittedEvent{
 				Outbox: []OutboxEvent{
-					SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					},
+					ContinueOutbox{},
 				},
 			},
 		}, nil

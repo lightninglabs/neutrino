@@ -52,11 +52,6 @@ func (s *StateCurrent) ProcessEvent(
 	case StopEvent:
 		return &StateTransition{
 			NextState: &StateTerminal{},
-			Events: &EmittedEvent{
-				Outbox: []OutboxEvent{
-					CancelSubscriptionOutbox{},
-				},
-			},
 		}, nil
 
 	default:
@@ -90,9 +85,7 @@ func (s *StateCurrent) reconcileTip(
 			TargetHeight: uint32(s.CurStamp.Height - 1),
 		},
 		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			},
+			ContinueOutbox{},
 		}},
 	}, nil
 }
@@ -157,8 +150,8 @@ func (s *StateCurrent) handleBlockConnected(
 		event.Header.Timestamp.After(env.StartTime)
 	if scanning && len(watch.List) > 0 {
 		// Fetch the filter for this block.
-		filter, err := FetchFilterForBlock(
-			env.Chain, blockHash, env.QueryOpts...,
+		filter, err := env.Chain.GetCFilter(
+			blockHash, wire.GCSFilterRegular, env.QueryOpts...,
 		)
 		if err != nil {
 			return nil, err
@@ -284,9 +277,7 @@ func (s *StateCurrent) handleAddWatch(
 			},
 			Events: &EmittedEvent{
 				Outbox: []OutboxEvent{
-					SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					},
+					ContinueOutbox{},
 				},
 			},
 		}, nil

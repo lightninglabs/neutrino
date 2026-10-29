@@ -74,9 +74,7 @@ func (s *StateRewinding) processRewind(
 		// Check if we've reached the target.
 		if curStamp.Height <= int32(s.TargetHeight) {
 			// Transition to syncing from this point.
-			continuation := SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			}
+			continuation := ContinueOutbox{}
 			return &StateTransition{
 				NextState: &StateSyncing{
 					CurStamp:  curStamp,
@@ -122,9 +120,7 @@ func (s *StateRewinding) processRewind(
 			TargetHeight: s.TargetHeight,
 		},
 		Events: &EmittedEvent{
-			Outbox: append(outbox, SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			}),
+			Outbox: append(outbox, ContinueOutbox{}),
 		},
 	}, nil
 }
@@ -156,9 +152,7 @@ func (s *StateRewinding) handleDisconnect(
 				Height: s.CurStamp.Height,
 				Header: &header,
 			},
-			SelfTellOutbox{
-				Event: ProcessNextBlockEvent{},
-			},
+			ContinueOutbox{},
 		}},
 	}, nil
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // TestStateInitializingToSyncing tests that Initializing transitions to
-// Syncing on ProcessNextBlockEvent and emits a SelfTellOutbox.
+// Syncing on ProcessNextBlockEvent and emits a ContinueOutbox.
 func TestStateInitializingToSyncing(t *testing.T) {
 	chain := newMockChain(10)
 
@@ -41,13 +41,11 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	require.True(t, ok, "expected StateSyncing, got %T",
 		transition.NextState)
 
-	// Should emit a SelfTellOutbox with ProcessNextBlockEvent.
+	// Should emit a ContinueOutbox.
 	require.NotNil(t, transition.Events)
 	require.Len(t, transition.Events.Outbox, 1)
 
-	selfTell, ok := transition.Events.Outbox[0].(SelfTellOutbox)
-	require.True(t, ok)
-	_, ok = selfTell.Event.(ProcessNextBlockEvent)
+	_, ok = transition.Events.Outbox[0].(ContinueOutbox)
 	require.True(t, ok)
 }
 
@@ -126,24 +124,20 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	// CurStamp should be at the chain tip.
 	require.Equal(t, int32(4), nextState.CurStamp.Height)
 
-	// Should emit StartSubscriptionOutbox and RescanFinishedOutbox.
+	// Should emit RescanFinishedOutbox.
 	require.NotNil(t, transition.Events)
 
-	var hasStartSub, hasFinished bool
+	var hasFinished bool
 	for _, out := range transition.Events.Outbox {
-		switch out.(type) {
-		case StartSubscriptionOutbox:
-			hasStartSub = true
-		case RescanFinishedOutbox:
+		if _, ok := out.(RescanFinishedOutbox); ok {
 			hasFinished = true
 		}
 	}
-	require.True(t, hasStartSub, "expected StartSubscriptionOutbox")
 	require.True(t, hasFinished, "expected RescanFinishedOutbox")
 }
 
 // TestStateSyncingBatchContinue tests that Syncing processes a batch and
-// emits SelfTellOutbox when not yet current.
+// emits ContinueOutbox when not yet current.
 func TestStateSyncingBatchContinue(t *testing.T) {
 	chain := newMockChain(20) // 20 blocks.
 
@@ -179,11 +173,11 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	// Should have advanced by 5 blocks.
 	require.Equal(t, int32(5), nextState.CurStamp.Height)
 
-	// Last outbox event should be SelfTellOutbox.
+	// Last outbox event should be ContinueOutbox.
 	require.NotNil(t, transition.Events)
 	lastOutbox := transition.Events.Outbox[len(transition.Events.Outbox)-1]
-	_, ok = lastOutbox.(SelfTellOutbox)
-	require.True(t, ok, "expected SelfTellOutbox as last event")
+	_, ok = lastOutbox.(ContinueOutbox)
+	require.True(t, ok, "expected ContinueOutbox as last event")
 }
 
 // TestStateSyncingAddWatchRewind tests that AddWatchAddrs with a rewind
@@ -342,20 +336,11 @@ func TestStateCurrentAddWatchRewind(t *testing.T) {
 	_, ok := transition.NextState.(*StateRewinding)
 	require.True(t, ok)
 
-	// Should emit CancelSubscriptionOutbox and SelfTellOutbox.
+	// Should emit only a ContinueOutbox.
 	require.NotNil(t, transition.Events)
-
-	var hasCancelSub, hasSelfTell bool
-	for _, out := range transition.Events.Outbox {
-		switch out.(type) {
-		case CancelSubscriptionOutbox:
-			hasCancelSub = true
-		case SelfTellOutbox:
-			hasSelfTell = true
-		}
-	}
-	require.False(t, hasCancelSub)
-	require.True(t, hasSelfTell)
+	require.Equal(
+		t, []OutboxEvent{ContinueOutbox{}}, transition.Events.Outbox,
+	)
 }
 
 // TestStateRewindingToSyncing tests that Rewinding walks back to the target
@@ -424,7 +409,6 @@ func TestStateMachineFullCycle(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	fsm := NewStateMachine(StateMachineCfg{
-		ErrorReporter: &logErrorReporter{},
 		InitialState: &StateInitializing{
 			StartStamp: headerfs.BlockStamp{
 				Hash:   *genesisHash,
@@ -450,27 +434,26 @@ func TestStateMachineFullCycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// The first event transitions Initializing -> Syncing and emits a
-	// SelfTell. Process the self-tell manually.
+	// continuation. Process it manually.
 	require.NotEmpty(t, outbox)
 
-	// Find and process the SelfTell.
+	// Find and process the continuation.
 	for _, out := range outbox {
-		if selfTell, ok := out.(SelfTellOutbox); ok {
+		if _, ok := out.(ContinueOutbox); ok {
 			outbox2, err := fsm.AskEvent(
-				t.Context(), selfTell.Event,
+				t.Context(), ProcessNextBlockEvent{},
 			)
 			require.NoError(t, err)
 
 			// This should process all blocks and reach Current.
-			// Check for StartSubscriptionOutbox.
-			var hasStartSub bool
+			var hasFinished bool
 			for _, out2 := range outbox2 {
-				if _, ok := out2.(StartSubscriptionOutbox); ok {
-					hasStartSub = true
+				if _, ok := out2.(RescanFinishedOutbox); ok {
+					hasFinished = true
 				}
 			}
-			require.True(t, hasStartSub,
-				"expected StartSubscriptionOutbox")
+			require.True(t, hasFinished,
+				"expected RescanFinishedOutbox")
 		}
 	}
 

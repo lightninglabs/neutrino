@@ -1,14 +1,14 @@
 diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
 --- a/rescan/state_syncing.go
 +++ b/rescan/state_syncing.go
-@@ -167,10 +167,6 @@ func (s *StateSyncing) processNextBatch(
- 						curStamp.Height,
- 					),
- 				},
--				RescanFinishedOutbox{
--					Hash:   curStamp.Hash,
--					Height: curStamp.Height,
--				},
- 			)
+@@ -140,10 +140,6 @@ func (s *StateSyncing) processNextBatch(
+ 			// We're current. Include all accumulated outbox
+ 			// events from blocks processed in this batch,
+ 			// followed by the finished event.
+-			outbox = append(outbox, RescanFinishedOutbox{
+-				Hash:   curStamp.Hash,
+-				Height: curStamp.Height,
+-			})
  
  			return &StateTransition{
+ 				NextState: &StateCurrent{

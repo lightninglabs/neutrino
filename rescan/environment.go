@@ -4,7 +4,6 @@ import (
 	"time"
 
 	neutrino "github.com/lightninglabs/neutrino"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // Environment holds the immutable dependencies available to all FSM states
@@ -20,11 +19,6 @@ type Environment struct {
 	// skipped during scanning (only headers are advanced without filter
 	// checks).
 	StartTime time.Time
-
-	// EndBlock is an optional block stamp at which the rescan should
-	// stop. If nil, the rescan runs until stopped. This is used for
-	// bounded historical scans (e.g., utxoscanner).
-	EndBlock *headerfs.BlockStamp
 
 	// QueryOpts are query options passed through to chain queries
 	// (e.g., timeout, peer selection).

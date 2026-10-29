@@ -1,8 +1,8 @@
 diff --git a/rescan/actor.go b/rescan/actor.go
 --- a/rescan/actor.go
 +++ b/rescan/actor.go
-@@ -676,13 +676,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
- 			callback(e.Height, header, time.Unix(e.Timestamp, 0))
+@@ -652,13 +652,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
+ 			}
  
  		case BlockDisconnectedOutbox:
 -			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {

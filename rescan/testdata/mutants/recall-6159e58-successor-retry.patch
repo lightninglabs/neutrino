@@ -1,7 +1,7 @@
 diff --git a/rescan/actor.go b/rescan/actor.go
 --- a/rescan/actor.go
 +++ b/rescan/actor.go
-@@ -429,9 +429,6 @@ func (a *RescanActor) Receive(actorCtx context.Context,
+@@ -428,9 +428,6 @@ func (a *RescanActor) Receive(actorCtx context.Context,
  				return fn.Ok[RescanActorResp](&rescanActorAck{})
  			}
  			if m.Header.PrevBlock != cur.CurStamp.Hash {

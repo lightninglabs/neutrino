@@ -159,42 +159,6 @@ func copyInputsWithScripts(
 	return cloned
 }
 
-func actorMsgFromFSMEvent(
-	event RescanEvent,
-) (RescanActorMsg, error) {
-
-	switch e := event.(type) {
-	case ProcessNextBlockEvent:
-		return &processNextBlockMsg{}, nil
-
-	case BlockConnectedEvent:
-		return &blockConnectedMsg{
-			Header: e.Header,
-			Height: e.Height,
-		}, nil
-
-	case BlockDisconnectedEvent:
-		return &blockDisconnectedMsg{
-			Header:   e.Header,
-			Height:   e.Height,
-			ChainTip: e.ChainTip,
-		}, nil
-
-	case AddWatchAddrsEvent:
-		return newAddWatchAddrsMsg(
-			e.Addrs, e.Inputs, e.RewindTo,
-		), nil
-
-	case StopEvent:
-		return &stopRescanMsg{}, nil
-
-	default:
-		return nil, fmt.Errorf(
-			"unsupported self-tell event type: %T", event,
-		)
-	}
-}
-
 func cloneRetryMsg(msg RescanActorMsg) (RescanActorMsg, error) {
 	switch m := msg.(type) {
 	case *processNextBlockMsg:

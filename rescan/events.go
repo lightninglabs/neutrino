@@ -61,7 +61,7 @@ func (AddWatchAddrsEvent) rescanEventSealed() {}
 
 // ProcessNextBlockEvent is a self-directed event that triggers processing
 // of the next block during syncing or rewinding. It is emitted as an outbox
-// event (SelfTellOutbox) rather than an internal event so that the actor
+// event (ContinueOutbox) rather than an internal event so that the actor
 // mailbox can interleave AddWatchAddrs messages between blocks.
 type ProcessNextBlockEvent struct{}
 

@@ -36,36 +36,16 @@ type StateTransition struct {
 	Events *EmittedEvent
 }
 
-// EmittedEvent holds events produced by a state transition. Internal events
-// are fed back into the FSM immediately (drained before returning to the
-// actor mailbox). Outbox events are accumulated and returned to the caller
-// for external dispatch.
+// EmittedEvent holds the outbox events produced by a state transition. The
+// actor dispatches them after the transition commits.
 type EmittedEvent struct {
-	// InternalEvent contains events that should be processed by the FSM
-	// before returning control to the actor mailbox. These are drained
-	// in a loop by the state machine driver.
-	InternalEvent []RescanEvent
-
 	// Outbox contains events that should be dispatched externally by the
-	// actor wrapper (notifications to wallet, self-tells, subscription
-	// management). These are accumulated across all internal event
-	// processing and returned as a batch.
+	// actor wrapper: wallet notifications and continuations.
 	Outbox []OutboxEvent
-}
-
-// ErrorReporter is used to report errors that occur during state machine
-// execution.
-type ErrorReporter interface {
-	// ReportError reports an error that occurred during state machine
-	// execution.
-	ReportError(err error)
 }
 
 // StateMachineCfg is the configuration for creating a new StateMachine.
 type StateMachineCfg struct {
-	// ErrorReporter is used to report errors during state transitions.
-	ErrorReporter ErrorReporter
-
 	// InitialState is the starting state of the state machine.
 	InitialState RescanState
 
@@ -73,18 +53,15 @@ type StateMachineCfg struct {
 	Env *Environment
 }
 
-// StateMachine drives the rescan FSM. It accepts external events via
-// SendEvent, processes them through the current state's ProcessEvent method,
-// drains any internal events, and accumulates outbox events. The state
-// machine runs in its own goroutine started by Start().
+// StateMachine drives the rescan FSM. It accepts events via AskEvent,
+// processes them through the current state's ProcessEvent method, and returns
+// the outbox events. The state machine runs in its own goroutine started by
+// Start().
 //
 // This follows the same pattern as darepo-client's baselib/protofsm
 // StateMachine, simplified for neutrino's needs (no fn/v2 dependency).
 type StateMachine struct {
 	cfg StateMachineCfg
-
-	// events is the channel used to send new events to the FSM.
-	events chan RescanEvent
 
 	// syncEvents is used for synchronous event processing (Ask pattern)
 	// where the caller wants the accumulated outbox events back.
@@ -123,7 +100,6 @@ type stateQueryReq struct {
 func NewStateMachine(cfg StateMachineCfg) *StateMachine {
 	return &StateMachine{
 		cfg:        cfg,
-		events:     make(chan RescanEvent, 1),
 		syncEvents: make(chan syncEventRequest, 1),
 		stateQuery: make(chan stateQueryReq),
 		quit:       make(chan struct{}),
@@ -149,15 +125,6 @@ func (s *StateMachine) Stop() {
 		s.wg.Wait()
 		s.running.Store(false)
 	})
-}
-
-// SendEvent sends a new event to the state machine asynchronously (fire and
-// forget).
-func (s *StateMachine) SendEvent(event RescanEvent) {
-	select {
-	case s.events <- event:
-	case <-s.quit:
-	}
 }
 
 // AskEvent sends an event to the state machine and waits for processing to
@@ -214,51 +181,27 @@ func (s *StateMachine) IsRunning() bool {
 	return s.running.Load()
 }
 
-// applyEvents processes an event through the FSM, draining all internal
-// events and accumulating outbox events. Returns the final state, outbox
-// events, and any error.
-func (s *StateMachine) applyEvents(currentState RescanState,
-	newEvent RescanEvent) (RescanState, []OutboxEvent, error) {
+// applyEvent processes an event through the current state and returns the
+// next state and its outbox events.
+func (s *StateMachine) applyEvent(currentState RescanState,
+	event RescanEvent) (RescanState, []OutboxEvent, error) {
 
-	var allOutbox []OutboxEvent
-
-	// Process events in a queue. Internal events are added to the queue
-	// and processed before returning.
-	queue := []RescanEvent{newEvent}
-
-	for len(queue) > 0 {
-		event := queue[0]
-		queue = queue[1:]
-
-		transition, err := currentState.ProcessEvent(
-			context.TODO(), event, s.cfg.Env,
-		)
-		if err != nil {
-			return currentState, allOutbox, err
-		}
-
-		log.Debugf("FSM: %v -> %v (event: %T)",
-			currentState, transition.NextState, event)
-
-		// Update state.
-		currentState = transition.NextState
-
-		// Collect emitted events.
-		if transition.Events != nil {
-			queue = append(
-				queue, transition.Events.InternalEvent...,
-			)
-			allOutbox = append(
-				allOutbox, transition.Events.Outbox...,
-			)
-		}
-
-		if currentState.IsTerminal() {
-			break
-		}
+	transition, err := currentState.ProcessEvent(
+		context.TODO(), event, s.cfg.Env,
+	)
+	if err != nil {
+		return currentState, nil, err
 	}
 
-	return currentState, allOutbox, nil
+	log.Debugf("FSM: %v -> %v (event: %T)",
+		currentState, transition.NextState, event)
+
+	var outbox []OutboxEvent
+	if transition.Events != nil {
+		outbox = transition.Events.Outbox
+	}
+
+	return transition.NextState, outbox, nil
 }
 
 // driveMachine is the main event loop. It processes external events, drives
@@ -268,28 +211,12 @@ func (s *StateMachine) driveMachine() {
 
 	for {
 		select {
-		// Fire-and-forget event.
-		case newEvent := <-s.events:
-			newState, _, err := s.applyEvents(
-				currentState, newEvent,
-			)
-			if err != nil {
-				s.cfg.ErrorReporter.ReportError(err)
-				log.Errorf("FSM error processing event: %v",
-					err)
-
-				go s.Stop()
-				return
-			}
-
-			currentState = newState
-
 		// Synchronous event (Ask pattern) — return outbox events.
 		// On error, we return the error to the caller but do NOT
 		// stop the machine. The actor wrapper handles retries for
 		// transient errors (filter fetch failures, etc.).
 		case syncReq := <-s.syncEvents:
-			newState, outbox, err := s.applyEvents(
+			newState, outbox, err := s.applyEvent(
 				currentState, syncReq.event,
 			)
 			if err != nil {

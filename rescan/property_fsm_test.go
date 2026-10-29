@@ -97,7 +97,7 @@ func (m *fsmModel) apply(event RescanEvent) bool {
 		case RescanFinishedOutbox:
 			m.truth.finished(e.Height)
 
-		case SelfTellOutbox:
+		case ContinueOutbox:
 			m.next = true
 		}
 	}

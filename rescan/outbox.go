@@ -81,30 +81,9 @@ type RescanFinishedOutbox struct {
 
 func (RescanFinishedOutbox) outboxEventSealed() {}
 
-// StartSubscriptionOutbox instructs the actor wrapper to create a new block
-// subscription starting from the given height. The bridge goroutine will
-// convert subscription notifications into FSM events.
-type StartSubscriptionOutbox struct {
-	// BestHeight is the height from which the subscription backlog should
-	// begin.
-	BestHeight uint32
-}
+// ContinueOutbox instructs the actor wrapper to send a ProcessNextBlockEvent
+// back through its own mailbox. A state emits it instead of looping so the
+// mailbox can interleave AddWatchAddrs and notifications between batches.
+type ContinueOutbox struct{}
 
-func (StartSubscriptionOutbox) outboxEventSealed() {}
-
-// CancelSubscriptionOutbox instructs the actor wrapper to cancel the current
-// block subscription and stop the bridge goroutine.
-type CancelSubscriptionOutbox struct{}
-
-func (CancelSubscriptionOutbox) outboxEventSealed() {}
-
-// SelfTellOutbox instructs the actor wrapper to send the enclosed event back
-// through the actor mailbox. This is used instead of internal events when we
-// want the actor to check its mailbox between iterations (e.g., to
-// interleave AddWatchAddrs between block processing).
-type SelfTellOutbox struct {
-	// Event is the event to re-send through the actor mailbox.
-	Event RescanEvent
-}
-
-func (SelfTellOutbox) outboxEventSealed() {}
+func (ContinueOutbox) outboxEventSealed() {}

@@ -53,9 +53,7 @@ func (s *StateInitializing) ProcessEvent(
 			NextState: next,
 			Events: &EmittedEvent{
 				Outbox: []OutboxEvent{
-					SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					},
+					ContinueOutbox{},
 				},
 			},
 		}, nil

@@ -184,7 +184,6 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 
 	// Create the FSM with initial state and immutable environment.
 	fsm := NewStateMachine(StateMachineCfg{
-		ErrorReporter: &logErrorReporter{},
 		InitialState: &StateInitializing{
 			StartStamp:  cfg.StartStamp,
 			StartHeader: cfg.StartHeader,
@@ -572,21 +571,7 @@ func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
 func (a *RescanActor) handleStop(
 	actorCtx context.Context) fn.Result[RescanActorResp] {
 
-	if a.fsm.IsRunning() {
-		outbox, err := a.fsm.AskEvent(
-			actorCtx,
-			StopEvent{},
-		)
-		if err != nil {
-			return fn.Err[RescanActorResp](err)
-		}
-
-		a.dispatchOutbox(outbox)
-	}
-
-	a.cancelBridge()
-
-	return fn.Ok[RescanActorResp](&rescanActorAck{})
+	return a.handleFSMEvent(actorCtx, StopEvent{})
 }
 
 func (a *RescanActor) handleSubscriptionClosed(
@@ -659,21 +644,12 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
 			}
 
 		case BlockConnectedOutbox:
-			callback := a.cfg.Callbacks.OnBlockConnected
-			if callback == nil {
-				continue
+			if a.cfg.Callbacks.OnBlockConnected != nil {
+				a.cfg.Callbacks.OnBlockConnected(
+					e.Height, e.Header,
+					time.Unix(e.Timestamp, 0),
+				)
 			}
-			header := e.Header
-			getHeader := a.cfg.Chain.GetBlockHeaderByHeight
-			if header == nil {
-				var err error
-				header, err = getHeader(uint32(e.Height))
-				if err != nil {
-					log.Errorf("%d: %v", e.Height, err)
-					continue
-				}
-			}
-			callback(e.Height, header, time.Unix(e.Timestamp, 0))
 
 		case BlockDisconnectedOutbox:
 			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {
@@ -697,29 +673,8 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
 				a.cfg.Callbacks.OnRescanFinished(e.Height)
 			}
 
-		case StartSubscriptionOutbox:
-			a.startBridge(e.BestHeight)
-
-		case CancelSubscriptionOutbox:
-			a.cancelBridge()
-
-		case SelfTellOutbox:
-			selfMsg, err := actorMsgFromFSMEvent(e.Event)
-			if err != nil {
-				log.Errorf("Self-tell %T: %v", e.Event, err)
-
-				if a.cfg.OnError != nil {
-					a.cfg.OnError(err)
-				}
-
-				continue
-			}
-
-			if _, ok := selfMsg.(*processNextBlockMsg); ok {
-				a.enqueueContinuation()
-				continue
-			}
-			log.Errorf("unexpected self-tell message %T", selfMsg)
+		case ContinueOutbox:
+			a.enqueueContinuation()
 		}
 	}
 }
@@ -860,13 +815,6 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 	}
 }
 
-// logErrorReporter logs FSM errors.
-type logErrorReporter struct{}
-
-func (r *logErrorReporter) ReportError(err error) {
-	log.Errorf("RescanActor FSM error: %v", err)
-}
-
 // Ensure the mailbox behavior implements the lnd actor behavior interface.
 var _ lndactor.ActorBehavior[RescanActorMsg, RescanActorResp] = (*RescanActor)(
 	nil,
@@ -885,9 +833,7 @@ var _ OutboxEvent = (*BlockConnectedOutbox)(nil)
 var _ OutboxEvent = (*BlockDisconnectedOutbox)(nil)
 var _ OutboxEvent = (*RescanProgressOutbox)(nil)
 var _ OutboxEvent = (*RescanFinishedOutbox)(nil)
-var _ OutboxEvent = (*StartSubscriptionOutbox)(nil)
-var _ OutboxEvent = (*CancelSubscriptionOutbox)(nil)
-var _ OutboxEvent = (*SelfTellOutbox)(nil)
+var _ OutboxEvent = (*ContinueOutbox)(nil)
 
 // Ensure all events implement the RescanEvent interface at compile time.
 var _ RescanEvent = (*BlockConnectedEvent)(nil)
@@ -895,6 +841,3 @@ var _ RescanEvent = (*BlockDisconnectedEvent)(nil)
 var _ RescanEvent = (*AddWatchAddrsEvent)(nil)
 var _ RescanEvent = (*ProcessNextBlockEvent)(nil)
 var _ RescanEvent = (*StopEvent)(nil)
-
-// Ensure ErrorReporter is implemented.
-var _ ErrorReporter = (*logErrorReporter)(nil)
