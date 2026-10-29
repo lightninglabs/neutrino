@@ -3,6 +3,7 @@ package rescan
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -281,14 +282,17 @@ func TestCurrentIgnoresOlderConnect(t *testing.T) {
 	require.True(t, transition.NewEvents.IsNone())
 }
 
-// TestCurrentRetriesTransientHeaderRead ensures an active block is not
-// discarded when its canonical header lookup temporarily fails.
-func TestCurrentRetriesTransientHeaderRead(t *testing.T) {
+// TestCurrentFallsBackOnTransientHeaderRead ensures an active block is not
+// discarded when its canonical header lookup temporarily fails. Current falls
+// back to Syncing, which scans the block from the header store once the read
+// succeeds, and does not report finished a second time.
+func TestCurrentFallsBackOnTransientHeaderRead(t *testing.T) {
 	base := newMockChain(2)
 	chain := &failingHeaderChain{
 		mockChainSource: base,
 		failHeight:      1,
 	}
+	env := &Environment{Chain: chain}
 	genesis := base.ChainParams().GenesisBlock.Header
 	header := *base.blockHeaders[*base.blockHashesByHeight[1]]
 	state := &StateCurrent{
@@ -300,19 +304,26 @@ func TestCurrentRetriesTransientHeaderRead(t *testing.T) {
 		},
 	}
 	event := BlockConnectedEvent{Header: header, Height: 1}
-	_, err := state.ProcessEvent(
-		t.Context(),
-		event,
-		&Environment{Chain: chain},
+	transition, err := state.ProcessEvent(t.Context(), event, env)
+	require.NoError(t, err)
+	require.Equal(
+		t, &StateSyncing{Cursor: state.Cursor, finished: true},
+		transition.NextState,
 	)
-	require.Error(t, err)
-	chain.failHeight = 0
-	transition, err := state.ProcessEvent(t.Context(), event,
-		&Environment{Chain: chain})
+	require.Equal(t, []OutboxEvent{ContinueOutbox{}}, outboxOf(transition))
+
+	chain.failHeight = math.MaxUint32
+	transition, err = transition.NextState.ProcessEvent(
+		t.Context(), ProcessNextBlockEvent{}, env,
+	)
 	require.NoError(t, err)
 	require.Equal(
 		t,
 		header.BlockHash(),
 		transition.NextState.(*StateCurrent).CurStamp.Hash,
 	)
+	for _, out := range outboxOf(transition) {
+		_, finished := out.(RescanFinishedOutbox)
+		require.False(t, finished, "finished reported twice")
+	}
 }

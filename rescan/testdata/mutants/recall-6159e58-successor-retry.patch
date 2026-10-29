@@ -1,13 +1,15 @@
-diff --git a/rescan/actor.go b/rescan/actor.go
---- a/rescan/actor.go
-+++ b/rescan/actor.go
-@@ -419,9 +419,6 @@ func (a *RescanActor) Receive(actorCtx context.Context,
- 				return fn.Ok[RescanActorResp](&rescanActorAck{})
- 			}
- 			if m.Header.PrevBlock != cur.CurStamp.Hash {
--				anchor := cur.CurStamp
--				m.RetryAnchor = &anchor
--				a.scheduleRetry(m)
- 				return fn.Ok[RescanActorResp](&rescanActorAck{})
- 			}
+diff --git a/rescan/state_current.go b/rescan/state_current.go
+--- a/rescan/state_current.go
++++ b/rescan/state_current.go
+@@ -37,10 +37,7 @@ func (s *StateCurrent) ProcessEvent(
+ 			log.Warnf("StateCurrent: block %d: %v, falling back "+
+ 				"to Syncing", e.Height, err)
+ 
+-			return transition(&StateSyncing{
+-				Cursor:   s.Cursor,
+-				finished: true,
+-			}, ContinueOutbox{}), nil
++			return transition(s), nil
  		}
+ 
+ 		return next, nil

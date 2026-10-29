@@ -12,6 +12,11 @@ import (
 type StateSyncing struct {
 	// Cursor is the last scanned block.
 	Cursor
+
+	// finished records that RescanFinished was already reported for this
+	// scan, so reaching the tip again does not report it twice. It is set
+	// when Current falls back to Syncing, and clear after a rewind.
+	finished bool
 }
 
 // ProcessEvent handles events in the Syncing state. On ProcessNextBlockEvent,
@@ -31,7 +36,7 @@ func (s *StateSyncing) ProcessEvent(
 
 	case AddWatchAddrsEvent:
 		return s.updateWatch(&e, func(c Cursor) RescanState {
-			return &StateSyncing{Cursor: c}
+			return &StateSyncing{Cursor: c, finished: s.finished}
 		})
 
 	case BlockDisconnectedEvent:
@@ -40,9 +45,10 @@ func (s *StateSyncing) ProcessEvent(
 			return transition(s), nil
 		}
 
-		return transition(
-			&StateSyncing{Cursor: cursor}, undone, ContinueOutbox{},
-		), nil
+		return transition(&StateSyncing{
+			Cursor:   cursor,
+			finished: s.finished,
+		}, undone, ContinueOutbox{}), nil
 
 	case StopEvent:
 		return transition(&StateTerminal{}), nil
@@ -70,7 +76,7 @@ func (s *StateSyncing) processNextBatch(
 		}
 
 		return transition(
-			&StateSyncing{Cursor: cur},
+			&StateSyncing{Cursor: cur, finished: s.finished},
 			append(outbox, ContinueOutbox{})...,
 		), nil
 	}
@@ -114,11 +120,14 @@ func (s *StateSyncing) processNextBatch(
 		if cur.CurStamp.Height == bestBlock.Height {
 			// We're current. Include all accumulated outbox
 			// events from blocks processed in this batch,
-			// followed by the finished event.
-			outbox = append(outbox, RescanFinishedOutbox{
-				Hash:   cur.CurStamp.Hash,
-				Height: cur.CurStamp.Height,
-			})
+			// followed by the finished event unless this scan
+			// already reported it.
+			if !s.finished {
+				outbox = append(outbox, RescanFinishedOutbox{
+					Hash:   cur.CurStamp.Hash,
+					Height: cur.CurStamp.Height,
+				})
+			}
 
 			return transition(
 				&StateCurrent{Cursor: cur}, outbox...,
@@ -166,7 +175,8 @@ func (s *StateSyncing) processNextBatch(
 	// Batch complete but not yet current. Continue through the mailbox so
 	// any pending AddWatchAddrs runs first.
 	return transition(
-		&StateSyncing{Cursor: cur}, append(outbox, ContinueOutbox{})...,
+		&StateSyncing{Cursor: cur, finished: s.finished},
+		append(outbox, ContinueOutbox{})...,
 	), nil
 }
 

@@ -28,7 +28,22 @@ func (s *StateCurrent) ProcessEvent(
 		return s.reconcileTip(env)
 
 	case BlockConnectedEvent:
-		return s.handleBlockConnected(&e, env)
+		next, err := s.handleBlockConnected(&e, env)
+		if err != nil {
+			// Catch up from the header store instead of retrying
+			// this block. Syncing rescans every block above the
+			// cursor, this one included, and so also covers any
+			// successor that arrives in the meantime.
+			log.Warnf("StateCurrent: block %d: %v, falling back "+
+				"to Syncing", e.Height, err)
+
+			return transition(&StateSyncing{
+				Cursor:   s.Cursor,
+				finished: true,
+			}, ContinueOutbox{}), nil
+		}
+
+		return next, nil
 
 	case BlockDisconnectedEvent:
 		cursor, undone, ok := s.disconnect(&e)

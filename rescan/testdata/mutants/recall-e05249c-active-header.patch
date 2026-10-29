@@ -1,0 +1,12 @@
+diff --git a/rescan/state_current.go b/rescan/state_current.go
+--- a/rescan/state_current.go
++++ b/rescan/state_current.go
+@@ -126,7 +126,7 @@ func (s *StateCurrent) handleBlockConnected(
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if active.BlockHash() != blockHash {
++	if false && active.BlockHash() != blockHash {
+ 		return transition(s), nil
+ 	}
+ 

@@ -1,7 +1,7 @@
 diff --git a/rescan/state_current.go b/rescan/state_current.go
 --- a/rescan/state_current.go
 +++ b/rescan/state_current.go
-@@ -91,7 +91,7 @@ func (s *StateCurrent) handleBlockConnected(
+@@ -106,7 +106,7 @@ func (s *StateCurrent) handleBlockConnected(
  
  	// Notifications queued while catching up may arrive after this block
  	// has already been scanned. Keep the current tip unchanged.

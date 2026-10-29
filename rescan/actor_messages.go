@@ -8,7 +8,6 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
-	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
 
@@ -71,9 +70,8 @@ func (*addWatchAddrsMsg) rescanActorMsgSealed() {}
 type blockConnectedMsg struct {
 	lndactor.BaseMessage
 
-	RetryAnchor *headerfs.BlockStamp
-	Header      wire.BlockHeader
-	Height      uint32
+	Header wire.BlockHeader
+	Height uint32
 }
 
 func (*blockConnectedMsg) MessageType() string   { return "block_connected" }
@@ -166,20 +164,6 @@ func cloneRetryMsg(msg RescanActorMsg) (RescanActorMsg, error) {
 
 	case *subscriptionClosedMsg:
 		return &subscriptionClosedMsg{Sub: m.Sub}, nil
-
-	case *blockConnectedMsg:
-		return &blockConnectedMsg{
-			RetryAnchor: m.RetryAnchor,
-			Header:      m.Header,
-			Height:      m.Height,
-		}, nil
-
-	case *blockDisconnectedMsg:
-		return &blockDisconnectedMsg{
-			Header:   m.Header,
-			Height:   m.Height,
-			ChainTip: m.ChainTip,
-		}, nil
 
 	default:
 		return nil, fmt.Errorf(

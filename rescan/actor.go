@@ -400,46 +400,17 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		)
 
 	case *blockConnectedMsg:
-		if m.RetryAnchor != nil {
-			cur, ok := a.machine.CurrentState().(*StateCurrent)
-			if !ok {
-				return fn.Ok[RescanActorResp](&rescanActorAck{})
-			}
-			if int32(m.Height) <= cur.CurStamp.Height {
-				return fn.Ok[RescanActorResp](&rescanActorAck{})
-			}
-			header, err := a.cfg.Chain.GetBlockHeaderByHeight(
-				m.Height,
-			)
-			if err != nil {
-				a.scheduleRetry(m)
-				return fn.Ok[RescanActorResp](&rescanActorAck{})
-			}
-			if header.BlockHash() != m.Header.BlockHash() {
-				return fn.Ok[RescanActorResp](&rescanActorAck{})
-			}
-			if m.Header.PrevBlock != cur.CurStamp.Hash {
-				anchor := cur.CurStamp
-				m.RetryAnchor = &anchor
-				a.scheduleRetry(m)
-				return fn.Ok[RescanActorResp](&rescanActorAck{})
-			}
-		}
-		return a.handleRetriableEvent(
-			actorCtx, m, BlockConnectedEvent{
-				Header: m.Header,
-				Height: m.Height,
-			},
-		)
+		return a.handleFSMEvent(actorCtx, BlockConnectedEvent{
+			Header: m.Header,
+			Height: m.Height,
+		})
 
 	case *blockDisconnectedMsg:
-		return a.handleRetriableEvent(
-			actorCtx, m, BlockDisconnectedEvent{
-				Header:   m.Header,
-				Height:   m.Height,
-				ChainTip: m.ChainTip,
-			},
-		)
+		return a.handleFSMEvent(actorCtx, BlockDisconnectedEvent{
+			Header:   m.Header,
+			Height:   m.Height,
+			ChainTip: m.ChainTip,
+		})
 
 	case *addWatchAddrsMsg:
 		return a.handleFSMEvent(
@@ -491,13 +462,6 @@ func (a *RescanActor) handleRetriableEvent(
 			a.cfg.OnError(err)
 		}
 
-		if connected, ok := msg.(*blockConnectedMsg); ok {
-			state := a.machine.CurrentState()
-			if cur, ok := state.(*StateCurrent); ok {
-				anchor := cur.CurStamp
-				connected.RetryAnchor = &anchor
-			}
-		}
 		a.scheduleRetry(msg)
 	}
 
