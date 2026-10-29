@@ -120,10 +120,9 @@ type dstEvent struct {
 	hash   chainhash.Hash
 }
 type dstOracle struct {
-	tip      []chainhash.Hash
-	events   []dstEvent
-	payments []chainhash.Hash
-	err      string
+	tip    []chainhash.Hash
+	events []dstEvent
+	err    string
 }
 
 func (o *dstOracle) connect(height int32, h *wire.BlockHeader) {
