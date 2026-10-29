@@ -83,9 +83,6 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 	var result []dstEvent
 	synctest.Test(t, func(t *testing.T) {
 		chain := &dstChain{mockChainWithTxs: newMockChainWithTxs(2)}
-		if seed&128 != 0 {
-			chain.subscribeFailures = 1
-		}
 		entered, release := make(chan struct{}), make(chan struct{})
 		chain.filterEntered, chain.filterRelease = entered, release
 		genesis := chain.ChainParams().GenesisBlock.Header
@@ -167,14 +164,14 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 }
 
 func TestDSTCatchupMailboxBurst(t *testing.T) {
-	for _, seed := range []byte{0, 49, 63, 128} {
+	for _, seed := range []byte{0, 49, 63} {
 		first := runDSTCatchupMailboxBurst(t, seed)
 		require.Equal(t, first, runDSTCatchupMailboxBurst(t, seed))
 	}
 }
 
 func FuzzDSTCatchupMailboxBurst(f *testing.F) {
-	for _, seed := range []byte{0, 49, 63, 128} {
+	for _, seed := range []byte{0, 49, 63} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, seed byte) {
@@ -183,14 +180,12 @@ func FuzzDSTCatchupMailboxBurst(f *testing.F) {
 	})
 }
 
-// TestDSTInitializingRewind checks that an accepted update survives a failed
-// initial subscription and scans blocks below the original start stamp.
+// TestDSTInitializingRewind checks that an update sent before Start, which
+// Initializing buffers, is kept and scans blocks below the original start
+// stamp.
 func TestDSTInitializingRewind(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		chain := &dstChain{
-			mockChainWithTxs:  newMockChainWithTxs(4),
-			subscribeFailures: 1,
-		}
+		chain := &dstChain{mockChainWithTxs: newMockChainWithTxs(4)}
 		start, err := chain.GetBlockHeaderByHeight(2)
 		require.NoError(t, err)
 		var heights []int32
@@ -209,10 +204,15 @@ func TestDSTInitializingRewind(t *testing.T) {
 				},
 			},
 		})
-		actor.Start()
 		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+
+		// The update waits in the mailbox ahead of the first batch.
 		rewind := uint32(0)
-		require.NoError(t, actor.AddWatchAddrs(nil, nil, &rewind))
+		done := make(chan error, 1)
+		go func() { done <- actor.AddWatchAddrs(nil, nil, &rewind) }()
+		synctest.Wait()
+		actor.Start()
+		require.NoError(t, <-done)
 		for i := 0; i < 4; i++ {
 			time.Sleep(filterRetryInterval)
 			synctest.Wait()

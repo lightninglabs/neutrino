@@ -1,7 +1,7 @@
 diff --git a/rescan/state_current.go b/rescan/state_current.go
 --- a/rescan/state_current.go
 +++ b/rescan/state_current.go
-@@ -37,10 +37,7 @@ func (s *StateCurrent) ProcessEvent(
+@@ -40,10 +40,7 @@ func (s *StateCurrent) ProcessEvent(
  			log.Warnf("StateCurrent: block %d: %v, falling back "+
  				"to Syncing", e.Height, err)
  

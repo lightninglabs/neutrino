@@ -25,7 +25,10 @@ func (s *StateCurrent) ProcessEvent(
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
-		return s.reconcileTip(env)
+		// A continuation or retry queued before Syncing reached the
+		// tip. The subscription reports every later reorg, so there
+		// is nothing to check.
+		return transition(s), nil
 
 	case BlockConnectedEvent:
 		next, err := s.handleBlockConnected(&e, env)
@@ -70,30 +73,6 @@ func (s *StateCurrent) ProcessEvent(
 
 		return transition(s), nil
 	}
-}
-
-// reconcileTip checks the scanned tip after the subscription is installed.
-func (s *StateCurrent) reconcileTip(
-	env *Environment,
-) (*StateTransition, error) {
-
-	header, err := env.Chain.GetBlockHeaderByHeight(
-		uint32(s.CurStamp.Height),
-	)
-	if err != nil {
-		return nil, err
-	}
-	if header.BlockHash() == s.CurStamp.Hash {
-		return transition(s), nil
-	}
-	if s.CurStamp.Height <= 0 {
-		return nil, fmt.Errorf("genesis block changed")
-	}
-
-	return transition(&StateRewinding{
-		Cursor:       s.Cursor,
-		TargetHeight: uint32(s.CurStamp.Height - 1),
-	}, ContinueOutbox{}), nil
 }
 
 // handleBlockConnected processes a new block from the subscription.

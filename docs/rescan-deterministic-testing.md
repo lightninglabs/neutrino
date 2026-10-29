@@ -79,8 +79,8 @@ Each fault class reproduces a fault the scripted harness injected before:
 | --- | --- | --- |
 | 0 | filter | The first filter fetch fails. Each faulty new-block op fails the next `arg % 3` fetches. |
 | 1 | block | The first block fetch fails. |
-| 2 | subscribe | The first `Subscribe` fails. |
-| 3 | handoff | The first successful `Subscribe` replaces the tip before it registers, so the subscription never sees the reorg. The actor subscribes before it scans, so today this only reorgs the chain ahead of the scan. |
+| 2 | service stop | After the heal phase, the subscription manager stops, as a stopped ChainService does. The running actor's subscription closes, and a second actor's `Subscribe` fails. Each must report exactly one error, end in `StateTerminal` and deliver no more callbacks. |
+| 3 | handoff | The first successful `Subscribe` replaces the tip before it registers, so the subscription never sees the reorg. The actor subscribes before it scans, so this only reorgs the chain ahead of the scan. |
 | 4 | historical reorg | While the historical scan fetches the filter four blocks above the start, the chain reorgs from three blocks above the start. |
 | 5 | deep reorg | The same reorg from one block above the start, below the scanned tip. |
 | 6 | rewind reorg | The chain reorgs from three blocks above the start while the scripted rewind walks back through it. |
@@ -114,6 +114,9 @@ making progress. Ops 4 to 7 are honest placeholders for later fault classes.
    phase resets nothing production would not.
 6. **Quiescence.** The scan must be current at the active tip, and the
    oracle's quiescence checks must pass.
+7. **Service stop.** With the service-stop class on, stop the subscription
+   manager and start a second actor. Both actors must report one error each,
+   end in `StateTerminal` and deliver no more callbacks.
 
 ## The oracle
 
@@ -203,8 +206,8 @@ the syncing `RelevantTxs`.
 ## Known gaps
 
 - No op adds a watched address or outpoint, reorgs the chain, delays,
-  duplicates or reorders a notification, closes the subscription, fails a
-  header-store read, or stops the actor mid-run. The reverted e05249c guards
+  duplicates or reorders a notification, closes the subscription before the
+  service-stop phase, fails a header-store read, or stops the actor mid-run. The reverted e05249c guards
   need a stale notification after a disconnect, so the swarm does not find
   them. Their scripted tests in `dst_review_test.go` do.
 - A reorg replaces the whole branch before its first disconnect is

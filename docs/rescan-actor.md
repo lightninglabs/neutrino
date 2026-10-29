@@ -3,8 +3,10 @@
 The actor subscribes before historical scanning and keeps that subscription
 while catching up and rewinding. Disconnection notifications supply the
 headers needed to undo scanned blocks, including headers removed from the
-active header store. Subscription setup failures are retried before scanning
-starts.
+active header store. The subscription fails only once the ChainService has
+stopped: if `Subscribe` fails at start, or the subscription closes while the
+rescan runs, the actor reports the error once through `OnError` and stops in
+`StateTerminal`, as the legacy rescan loop does.
 
 The caller must provide a start stamp and header on the active chain. If the
 anchor was already disconnected before subscription, or if the subscription

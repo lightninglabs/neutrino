@@ -21,11 +21,11 @@ import (
 // dstChain injects faults at the ChainSource boundary used by the actor.
 type dstChain struct {
 	*mockChainWithTxs
-	muFault                                          sync.Mutex
-	filterFailures, blockFailures, subscribeFailures int
-	filterEntered, filterRelease                     chan struct{}
-	subscribeSuccesses                               int
-	onSubscribe                                      func()
+	muFault                       sync.Mutex
+	filterFailures, blockFailures int
+	filterEntered, filterRelease  chan struct{}
+	subscribeSuccesses            int
+	onSubscribe                   func()
 
 	onFilter          func(chainhash.Hash) error
 	onHeader          func(chainhash.Hash) error
@@ -99,11 +99,6 @@ func (c *dstChain) GetBlock(hash chainhash.Hash,
 }
 func (c *dstChain) Subscribe(height uint32) (*blockntfns.Subscription, error) {
 	c.muFault.Lock()
-	if c.subscribeFailures > 0 {
-		c.subscribeFailures--
-		c.muFault.Unlock()
-		return nil, errors.New("dst subscribe outage")
-	}
 	c.subscribeSuccesses++
 	hook := c.onSubscribe
 	c.onSubscribe = nil

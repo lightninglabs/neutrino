@@ -527,3 +527,36 @@ func TestRescanActorStopDuringStart(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// TestRescanActorSubscriptionClosedIsTerminal checks that a block
+// subscription closing underneath the rescan, which happens once the
+// ChainService stops, ends the rescan with exactly one error instead of a
+// resubscribe loop.
+func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := newMockChain(3)
+		params := chain.ChainParams()
+		var errs atomic.Int32
+		actor := NewRescanActor(ActorConfig{
+			Chain: chain,
+			StartStamp: headerfs.BlockStamp{
+				Hash: *params.GenesisHash,
+			},
+			StartHeader: params.GenesisBlock.Header,
+			OnError:     func(error) { errs.Add(1) },
+		})
+		actor.Start()
+		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+		synctest.Wait()
+
+		close(chain.ntfnChan)
+		synctest.Wait()
+		time.Sleep(10 * filterRetryInterval)
+		synctest.Wait()
+
+		require.Equal(t, int32(1), errs.Load())
+		state, err := actor.CurrentState()
+		require.NoError(t, err)
+		require.IsType(t, &StateTerminal{}, state)
+	})
+}

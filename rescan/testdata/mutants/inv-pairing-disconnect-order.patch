@@ -1,7 +1,7 @@
 diff --git a/rescan/actor.go b/rescan/actor.go
 --- a/rescan/actor.go
 +++ b/rescan/actor.go
-@@ -514,13 +514,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
+@@ -481,13 +481,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
  			}
  
  		case BlockDisconnectedOutbox:

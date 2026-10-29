@@ -26,8 +26,11 @@ const (
 	filterRetryInterval = 3 * time.Second
 )
 
+// errSubscriptionClosed is reported when the block subscription closes
+// while the rescan is still running, which happens once the ChainService
+// stops.
 var errSubscriptionClosed = errors.New(
-	"rescan block subscription closed unexpectedly",
+	"rescan block subscription was canceled",
 )
 
 // Callbacks defines the notification callbacks from the rescan actor to the
@@ -227,9 +230,11 @@ func (a *RescanActor) Start() {
 		a.machine.Start(a.ctx)
 		a.actor.Start()
 
-		if a.startBridge(0) {
-			a.ref.Tell(a.ctx, &processNextBlockMsg{})
+		if err := a.startBridge(); err != nil {
+			a.ref.Tell(a.ctx, &subscriptionFailedMsg{Err: err})
+			return
 		}
+		a.ref.Tell(a.ctx, &processNextBlockMsg{})
 	})
 }
 
@@ -318,9 +323,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 	switch m := msg.(type) {
 	case *processNextBlockMsg:
 		a.continuationPending = false
-		return a.handleRetriableEvent(
-			actorCtx, m, ProcessNextBlockEvent{},
-		)
+		return a.handleContinuation(actorCtx)
 
 	case *blockConnectedMsg:
 		return a.handleFSMEvent(actorCtx, BlockConnectedEvent{
@@ -350,8 +353,8 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 			State: snapshotState(a.machine.CurrentState()),
 		})
 
-	case *subscriptionClosedMsg:
-		return a.handleSubscriptionClosed(m)
+	case *subscriptionFailedMsg:
+		return a.handleSubscriptionFailed(actorCtx, m)
 
 	case *stopRescanMsg:
 		return a.handleStop(actorCtx)
@@ -363,29 +366,23 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 	}
 }
 
-func (a *RescanActor) handleRetriableEvent(
-	actorCtx context.Context,
-	msg RescanActorMsg,
-	event RescanEvent,
-) fn.Result[RescanActorResp] {
+// handleContinuation runs the next batch. A failed batch leaves the state
+// unchanged. It is reported through OnError and retried after
+// filterRetryInterval.
+func (a *RescanActor) handleContinuation(
+	actorCtx context.Context) fn.Result[RescanActorResp] {
 
-	result := a.handleFSMEvent(actorCtx, event)
+	result := a.handleFSMEvent(actorCtx, ProcessNextBlockEvent{})
 	if result.IsErr() {
 		err := result.Err()
-
-		log.Warnf(
-			"RescanActor: error processing %s: %v, "+
-				"retrying in %v",
-			msg.MessageType(),
-			err,
-			filterRetryInterval,
-		)
+		log.Warnf("RescanActor: error processing next block: %v, "+
+			"retrying in %v", err, filterRetryInterval)
 
 		if a.cfg.OnError != nil {
 			a.cfg.OnError(err)
 		}
 
-		a.scheduleRetry(msg)
+		a.scheduleRetry()
 	}
 
 	return result
@@ -404,18 +401,9 @@ func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
 
-func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
-	retryMsg, err := cloneRetryMsg(msg)
-	if err != nil {
-		log.Errorf(
-			"RescanActor: unable to clone retry message %T: %v",
-			msg,
-			err,
-		)
-
-		return
-	}
-
+// scheduleRetry sends a continuation after filterRetryInterval, unless the
+// actor stops first.
+func (a *RescanActor) scheduleRetry() {
 	a.asyncWG.Add(1)
 	go func() {
 		defer a.asyncWG.Done()
@@ -430,7 +418,7 @@ func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
 		case <-timer.C:
 		}
 
-		a.ref.Tell(a.ctx, retryMsg)
+		a.ref.Tell(a.ctx, &processNextBlockMsg{})
 	}()
 }
 
@@ -440,45 +428,24 @@ func (a *RescanActor) handleStop(
 	return a.handleFSMEvent(actorCtx, StopEvent{})
 }
 
-func (a *RescanActor) handleSubscriptionClosed(
-	msg *subscriptionClosedMsg,
-) fn.Result[RescanActorResp] {
+// handleSubscriptionFailed ends the rescan when its block subscription could
+// not be created or closed underneath it. Both happen only once the
+// ChainService has stopped, so the rescan reports the error once and moves
+// to Terminal, as the legacy rescan loop does, rather than retrying.
+func (a *RescanActor) handleSubscriptionFailed(actorCtx context.Context,
+	msg *subscriptionFailedMsg) fn.Result[RescanActorResp] {
 
-	a.bridgeMu.Lock()
-	active := a.sub
-	a.bridgeMu.Unlock()
-	if active != msg.Sub {
+	if a.ctx.Err() != nil || a.machine.CurrentState().IsTerminal() {
 		return fn.Ok[RescanActorResp](&rescanActorAck{})
 	}
 
-	select {
-	case <-a.ctx.Done():
-		return fn.Ok[RescanActorResp](&rescanActorAck{})
-	default:
-	}
-
-	state := a.machine.CurrentState()
-	if state.IsTerminal() {
-		return fn.Ok[RescanActorResp](&rescanActorAck{})
-	}
-	var height uint32
-	if cur, ok := state.(*StateCurrent); ok {
-		height = uint32(cur.CurStamp.Height)
-	}
-
-	log.Warnf(
-		"RescanActor: restarting closed subscription from height %d",
-		height,
-	)
+	log.Errorf("RescanActor: %v, stopping", msg.Err)
 	if a.cfg.OnError != nil {
-		a.cfg.OnError(errSubscriptionClosed)
+		a.cfg.OnError(msg.Err)
 	}
 	a.cancelBridge()
-	if a.startBridge(height) {
-		a.enqueueContinuation()
-	}
 
-	return fn.Ok[RescanActorResp](&rescanActorAck{})
+	return a.handleFSMEvent(actorCtx, StopEvent{})
 }
 
 // dispatchOutbox processes outbox events emitted by FSM state transitions.
@@ -554,41 +521,26 @@ func (a *RescanActor) enqueueContinuation() {
 	}()
 }
 
-// startBridge starts the subscription bridge goroutine that converts block
-// subscription notifications into mailbox messages.
-func (a *RescanActor) startBridge(bestHeight uint32) bool {
+// startBridge subscribes to block notifications with no backlog and starts
+// the bridge goroutine that turns them into mailbox messages.
+func (a *RescanActor) startBridge() error {
 	a.bridgeMu.Lock()
 	defer a.bridgeMu.Unlock()
-
-	if a.sub != nil {
-		return true
-	}
 
 	// Stop cancels the context before it cancels the bridge under this
 	// lock, so checking it here means a Start racing Stop either leaves
 	// the subscription for Stop to cancel or never creates it.
-	if a.ctx.Err() != nil {
-		return false
+	if err := a.ctx.Err(); err != nil {
+		return err
+	}
+
+	sub, err := a.cfg.Chain.Subscribe(0)
+	if err != nil {
+		return fmt.Errorf("unable to register block subscription: %w",
+			err)
 	}
 
 	bridgeCtx, bridgeCancel := context.WithCancel(a.ctx)
-	sub, err := a.cfg.Chain.Subscribe(bestHeight)
-	if err != nil {
-		bridgeCancel()
-
-		log.Errorf(
-			"RescanActor: failed to subscribe at height %d: %v",
-			bestHeight,
-			err,
-		)
-		if a.cfg.OnError != nil {
-			a.cfg.OnError(err)
-		}
-		a.scheduleRetry(&subscriptionClosedMsg{})
-
-		return false
-	}
-
 	a.bridgeCancel = bridgeCancel
 	a.sub = sub
 
@@ -597,7 +549,8 @@ func (a *RescanActor) startBridge(bestHeight uint32) bool {
 		defer a.asyncWG.Done()
 		a.bridgeSubscription(bridgeCtx, sub)
 	}()
-	return true
+
+	return nil
 }
 
 // cancelBridge cancels the current subscription bridge goroutine.
@@ -635,7 +588,9 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 					"RescanActor: subscription closed",
 				)
 
-				a.ref.Tell(ctx, &subscriptionClosedMsg{Sub: sub})
+				a.ref.Tell(ctx, &subscriptionFailedMsg{
+					Err: errSubscriptionClosed,
+				})
 
 				return
 			}

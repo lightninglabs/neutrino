@@ -1,13 +1,10 @@
 package rescan
 
 import (
-	"fmt"
-
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
-	"github.com/lightninglabs/neutrino/blockntfns"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
 
@@ -90,16 +87,17 @@ type currentStateReq struct {
 func (*currentStateReq) MessageType() string   { return "current_state" }
 func (*currentStateReq) rescanActorMsgSealed() {}
 
-type subscriptionClosedMsg struct {
+type subscriptionFailedMsg struct {
 	lndactor.BaseMessage
-	Sub *blockntfns.Subscription
+
+	Err error
 }
 
-func (*subscriptionClosedMsg) MessageType() string {
-	return "subscription_closed"
+func (*subscriptionFailedMsg) MessageType() string {
+	return "subscription_failed"
 }
 
-func (*subscriptionClosedMsg) rescanActorMsgSealed() {}
+func (*subscriptionFailedMsg) rescanActorMsgSealed() {}
 
 type rescanActorAck struct{}
 
@@ -147,19 +145,4 @@ func copyInputsWithScripts(
 	}
 
 	return cloned
-}
-
-func cloneRetryMsg(msg RescanActorMsg) (RescanActorMsg, error) {
-	switch m := msg.(type) {
-	case *processNextBlockMsg:
-		return &processNextBlockMsg{}, nil
-
-	case *subscriptionClosedMsg:
-		return &subscriptionClosedMsg{Sub: m.Sub}, nil
-
-	default:
-		return nil, fmt.Errorf(
-			"message type %T is not retryable", msg,
-		)
-	}
 }
