@@ -305,8 +305,10 @@ func (fx *dstFixture) build(parent *dstBlock, salt uint32) *dstBlock {
 		binary.LittleEndian.PutUint32(tag[4:], salt)
 		coinbase := wire.NewMsgTx(1)
 		coinbase.AddTxIn(&wire.TxIn{
-			PreviousOutPoint: wire.OutPoint{Index: wire.MaxPrevOutIndex},
-			SignatureScript:  tag[:],
+			PreviousOutPoint: wire.OutPoint{
+				Index: wire.MaxPrevOutIndex,
+			},
+			SignatureScript: tag[:],
 		})
 		coinbase.AddTxOut(wire.NewTxOut(
 			50, []byte{txscript.OP_TRUE},
