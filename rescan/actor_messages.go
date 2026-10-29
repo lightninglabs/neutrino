@@ -29,9 +29,9 @@ type RescanActorResp interface {
 	rescanActorRespSealed()
 }
 
-// processNextBlockMsg is a continuation: it runs the next Syncing or Rewinding
-// batch. The actor sends it to itself, and a retry sends it after a failed
-// batch.
+// processNextBlockMsg is a continuation: it runs the next batch of Syncing
+// or Rewinding steps. The actor sends it to itself, and a retry sends it
+// after a failed step or while Initializing waits for the chain.
 type processNextBlockMsg struct {
 	lndactor.BaseMessage
 }

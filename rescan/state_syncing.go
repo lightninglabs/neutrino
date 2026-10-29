@@ -17,7 +17,7 @@ import (
 // an update that rewinds below the cursor, and to Terminal on StopEvent. A
 // disconnect of the cursor block moves the cursor back and stays. Connect
 // notifications are ignored: the header store already holds a block when its
-// notification arrives, so the next batch scans it.
+// notification arrives, so a later step scans it.
 type StateSyncing struct {
 	// Cursor is the last scanned block.
 	Cursor

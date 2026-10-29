@@ -31,7 +31,8 @@ var (
 )
 
 // ChainSource is an interface that's in charge of retrieving information about
-// the existing chain.
+// the existing chain. A rescan adapts it to the narrower rescan.ChainSource
+// that the rescan actor scans with.
 type ChainSource interface {
 	// ChainParams returns the parameters of the current chain.
 	ChainParams() chaincfg.Params
@@ -51,7 +52,7 @@ type ChainSource interface {
 	GetBlock(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
 
 	// GetFilterHeaderByHeight returns the filter header of the block with
-	// the given height.
+	// the given height. The rescan no longer calls it.
 	GetFilterHeaderByHeight(uint32) (*chainhash.Hash, error)
 
 	// GetCFilter returns the filter of the given type for the block with
@@ -108,7 +109,8 @@ func defaultRescanOptions() *rescanOptions {
 	return &rescanOptions{}
 }
 
-// QueryOptions pass onto the underlying queries.
+// QueryOptions pass onto the rescan's block fetches. Filter fetches use the
+// rescan's own options, as they always have.
 func QueryOptions(options ...QueryOption) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.queryOptions = options

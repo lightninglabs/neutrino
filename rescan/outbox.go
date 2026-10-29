@@ -122,9 +122,10 @@ type WaitOutbox struct{}
 
 func (WaitOutbox) outboxEventSealed() {}
 
-// ContinueOutbox instructs the actor wrapper to send a ProcessNextBlockEvent
-// back through its own mailbox. A state emits it instead of looping so the
-// mailbox can interleave AddWatchAddrs and notifications between batches.
+// ContinueOutbox asks the actor for the next ProcessNextBlockEvent. The
+// actor delivers it in the same turn while its batch lasts, and otherwise
+// sends it through its own mailbox, so AddWatchAddrs and notifications can
+// interleave between batches.
 type ContinueOutbox struct{}
 
 func (ContinueOutbox) outboxEventSealed() {}

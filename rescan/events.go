@@ -67,11 +67,11 @@ type AddWatchAddrsEvent struct {
 
 func (AddWatchAddrsEvent) rescanEventSealed() {}
 
-// ProcessNextBlockEvent is the continuation event. It leaves Initializing,
-// and runs the next batch of up to Environment.BatchSize blocks in Syncing
-// or Rewinding. Current ignores it. A state asks for it with a
-// ContinueOutbox rather than looping, so the actor mailbox can interleave
-// AddWatchAddrs and notifications between batches.
+// ProcessNextBlockEvent is the continuation event. It leaves Initializing
+// once the chain is ready, and scans or undoes the next block in Syncing or
+// Rewinding. Current ignores it. A state asks for it with a ContinueOutbox
+// rather than looping, so the actor can dispatch each block's callbacks and
+// interleave AddWatchAddrs and notifications between blocks.
 type ProcessNextBlockEvent struct{}
 
 func (ProcessNextBlockEvent) rescanEventSealed() {}

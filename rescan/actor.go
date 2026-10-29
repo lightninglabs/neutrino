@@ -22,8 +22,7 @@ import (
 )
 
 const (
-	// retryInterval is how long the actor waits before it retries a
-	// Syncing or Rewinding batch that failed.
+	// retryInterval is the default ActorConfig.RetryInterval.
 	retryInterval = 3 * time.Second
 
 	// stopTimeout bounds how long Stop waits for the turn in flight.
@@ -139,14 +138,17 @@ type ActorConfig struct {
 	EndBlock headerfs.BlockStamp
 
 	// RetryInterval is how long the actor waits before it retries a
-	// batch that failed. Defaults to three seconds if zero.
+	// Syncing or Rewinding step that failed, and between two checks of a
+	// chain that is not ready for the first scan. Defaults to three
+	// seconds if zero.
 	RetryInterval time.Duration
 
 	// OnError reports errors for observation only. It is called when a
-	// Syncing or Rewinding batch fails, which the actor retries on its
-	// own after retryInterval, and once when the block subscription
-	// fails, after which the rescan has stopped in StateTerminal. Like the
-	// callbacks, it runs on the actor goroutine.
+	// Syncing or Rewinding step fails, which the actor retries on its own
+	// after RetryInterval, and once when the block subscription fails,
+	// after which the rescan has stopped in StateTerminal. A step that
+	// Stop cancelled is not reported. Like the callbacks, it runs on the
+	// actor goroutine.
 	OnError func(err error)
 }
 
