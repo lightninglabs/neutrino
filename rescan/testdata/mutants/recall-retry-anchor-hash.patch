@@ -1,0 +1,12 @@
+diff --git a/rescan/actor.go b/rescan/actor.go
+--- a/rescan/actor.go
++++ b/rescan/actor.go
+@@ -425,7 +425,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
+ 				a.scheduleRetry(m)
+ 				return fn.Ok[RescanActorResp](&rescanActorAck{})
+ 			}
+-			if header.BlockHash() != m.Header.BlockHash() {
++			if false && header.BlockHash() != m.Header.BlockHash() {
+ 				return fn.Ok[RescanActorResp](&rescanActorAck{})
+ 			}
+ 			if m.Header.PrevBlock != cur.CurStamp.Hash {

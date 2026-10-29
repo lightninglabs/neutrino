@@ -1,0 +1,24 @@
+diff --git a/rescan/actor.go b/rescan/actor.go
+--- a/rescan/actor.go
++++ b/rescan/actor.go
+@@ -425,7 +425,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
+ 				a.scheduleRetry(m)
+ 				return fn.Ok[RescanActorResp](&rescanActorAck{})
+ 			}
+-			if header.BlockHash() != m.Header.BlockHash() {
++			if false && header.BlockHash() != m.Header.BlockHash() {
+ 				return fn.Ok[RescanActorResp](&rescanActorAck{})
+ 			}
+ 			if m.Header.PrevBlock != cur.CurStamp.Hash {
+diff --git a/rescan/state_current.go b/rescan/state_current.go
+--- a/rescan/state_current.go
++++ b/rescan/state_current.go
+@@ -127,7 +127,7 @@ func (s *StateCurrent) handleBlockConnected(
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if active.BlockHash() != blockHash {
++	if false && active.BlockHash() != blockHash {
+ 		return &StateTransition{NextState: s}, nil
+ 	}
+ 
