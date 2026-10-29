@@ -50,4 +50,11 @@ type ChainSource interface {
 	// IsCurrent reports whether the chain believes its view of the
 	// network is current.
 	IsCurrent() bool
+
+	// MarkAsConfirmed tells the chain that a relevant transaction was
+	// found in a scanned block, so it can stop rebroadcasting it. The
+	// actor calls it for every relevant transaction, after the
+	// transaction's OnRedeemingTx and OnRecvTx callbacks, as the legacy
+	// rescan did. A chain that broadcasts nothing does nothing.
+	MarkAsConfirmed(txHash chainhash.Hash)
 }

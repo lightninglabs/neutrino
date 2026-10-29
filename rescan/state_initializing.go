@@ -17,9 +17,9 @@ type StateInitializing struct {
 	// Cursor is the start block, which counts as already scanned.
 	Cursor
 
-	// rewindTo records the lowest rewind target below the start that an
-	// update asked for before scanning began.
-	rewindTo *uint32
+	// rewinds records the rewinds below the start that updates asked
+	// for before scanning began.
+	rewinds rewindPlan
 }
 
 // ProcessEvent handles events in the Initializing state.
@@ -35,11 +35,8 @@ func (s *StateInitializing) ProcessEvent(
 	case ProcessNextBlockEvent:
 		// Apply a rewind accepted during subscription setup.
 		var next RescanState = &StateSyncing{Cursor: s.Cursor}
-		if s.rewindTo != nil {
-			next = &StateRewinding{
-				Cursor:       s.Cursor,
-				TargetHeight: *s.rewindTo,
-			}
+		if len(s.rewinds) > 0 {
+			next = newRewinding(s.Cursor, s.rewinds)
 		}
 		return transition(next, ContinueOutbox{}), nil
 
@@ -50,14 +47,14 @@ func (s *StateInitializing) ProcessEvent(
 			return nil, err
 		}
 
-		rewindTo := s.rewindTo
-		if rewind != nil && (rewindTo == nil || *rewind < *rewindTo) {
-			rewindTo = rewind
+		rewinds := s.rewinds
+		if rewind != nil {
+			rewinds = rewinds.lower(*rewind)
 		}
 
 		return transition(&StateInitializing{
-			Cursor:   cursor,
-			rewindTo: rewindTo,
+			Cursor:  cursor,
+			rewinds: rewinds,
 		}), nil
 
 	case StopEvent:

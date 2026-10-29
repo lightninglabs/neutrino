@@ -2,6 +2,8 @@ package rescan
 
 import (
 	"time"
+
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // Environment holds the immutable dependencies available to all FSM states
@@ -23,6 +25,18 @@ type Environment struct {
 	// continuation overhead while still allowing AddWatchAddrs to
 	// interleave between batches. Zero means DefaultBatchSize.
 	BatchSize int
+
+	// EndBlock is the block the scan stops at. The zero value never
+	// matches, so the scan follows the chain until it is stopped.
+	EndBlock headerfs.BlockStamp
+}
+
+// reachedEnd reports whether the cursor at stamp has reached the end block.
+// It matches the legacy rescan's test: the end block's hash, or its height
+// when that is set.
+func (e *Environment) reachedEnd(stamp headerfs.BlockStamp) bool {
+	return stamp.Hash == e.EndBlock.Hash ||
+		(e.EndBlock.Height > 0 && stamp.Height == e.EndBlock.Height)
 }
 
 // DefaultBatchSize is the number of blocks processed per batch during

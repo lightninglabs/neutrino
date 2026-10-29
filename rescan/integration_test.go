@@ -92,9 +92,10 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 	pkScript, _ := txscript.PayToAddrScript(addr)
 	_ = pkScript
 
-	err := actor.AddWatchAddrs(
-		[]address.Address{addr}, nil, &rewindTo,
-	)
+	err := actor.AddWatchAddrs(WatchUpdate{
+		Addrs:    []address.Address{addr},
+		RewindTo: &rewindTo,
+	})
 	require.NoError(t, err)
 
 	// Wait for the rewind and re-sync to find the tx.
@@ -211,9 +212,10 @@ func TestIntegrationRaceConditionPrevention(t *testing.T) {
 	}()
 
 	// Add the address with rewind right after (or simultaneously).
-	err := actor.AddWatchAddrs(
-		[]address.Address{addr}, nil, &rewindTo,
-	)
+	err := actor.AddWatchAddrs(WatchUpdate{
+		Addrs:    []address.Address{addr},
+		RewindTo: &rewindTo,
+	})
 	require.NoError(t, err)
 
 	<-done

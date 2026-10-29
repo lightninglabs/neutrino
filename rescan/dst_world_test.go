@@ -699,6 +699,10 @@ func (s *dstSource) Subscribe(
 	return sub, nil
 }
 
+// MarkAsConfirmed is part of the ChainSource interface. The DST broadcasts
+// nothing.
+func (s *dstSource) MarkAsConfirmed(chainhash.Hash) {}
+
 // IsCurrent is part of the ChainSource interface.
 func (s *dstSource) IsCurrent() bool {
 	return true

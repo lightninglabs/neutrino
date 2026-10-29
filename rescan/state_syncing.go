@@ -90,6 +90,13 @@ func (s *StateSyncing) processNextBatch(ctx context.Context,
 	}
 
 	for i := 0; i < env.batchSize(); i++ {
+		// Stop once the cursor reaches the end block, before anything
+		// above it is scanned.
+		if env.reachedEnd(cur.CurStamp) {
+			return transition(&StateTerminal{},
+				append(outbox, EndReachedOutbox{})...), nil
+		}
+
 		// Check if we've caught up to the chain tip.
 		bestBlock, err := env.Chain.BestBlock()
 		if err != nil {

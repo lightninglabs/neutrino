@@ -225,3 +225,7 @@ func (c *mockChainSource) Subscribe(
 func (c *mockChainSource) IsCurrent() bool {
 	return true
 }
+
+// MarkAsConfirmed is part of the ChainSource interface. The mock broadcasts
+// nothing.
+func (c *mockChainSource) MarkAsConfirmed(chainhash.Hash) {}

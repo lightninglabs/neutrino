@@ -32,6 +32,11 @@ type dstCallback struct {
 	height int32
 	hash   chainhash.Hash
 	txs    int
+
+	// header is the header a filtered callback carried. The plain twin
+	// reports only the hash, so its continuity check reads the header
+	// from here. The double run does not compare it.
+	header *wire.BlockHeader
 }
 
 // dstRewind is a rewind request the oracle holds production to.
@@ -53,6 +58,7 @@ type dstRewind struct {
 type dstTruth struct {
 	mu sync.Mutex
 
+	w         *dstWorld
 	fx        *dstFixture
 	startTime time.Time
 
@@ -94,11 +100,12 @@ type dstTruth struct {
 
 // newDSTTruth returns an oracle for a scan that starts at start with the
 // given address scripts watched.
-func newDSTTruth(fx *dstFixture, start *dstBlock, startTime time.Time,
+func newDSTTruth(w *dstWorld, start *dstBlock, startTime time.Time,
 	scripts ...[]byte) *dstTruth {
 
 	o := &dstTruth{
-		fx:            fx,
+		w:             w,
+		fx:            w.fx,
 		startTime:     startTime,
 		stack:         []*dstBlock{start},
 		scripts:       make(map[string]int),
@@ -169,7 +176,9 @@ func (o *dstTruth) identify(h *wire.BlockHeader) (*dstBlock, chainhash.Hash) {
 func (o *dstTruth) record(kind string, height int32, hash chainhash.Hash,
 	txs int) {
 
-	o.events = append(o.events, dstCallback{kind, height, hash, txs})
+	o.events = append(o.events, dstCallback{
+		kind: kind, height: height, hash: hash, txs: txs,
+	})
 }
 
 // watchScript starts watching an address script from the next callback on.
@@ -240,7 +249,9 @@ func (o *dstTruth) filteredConnected(height int32, header *wire.BlockHeader,
 		o.fail(invPairing, "filtered connect %d after unpaired %s %d",
 			height, o.pair.kind, o.pair.height)
 	}
-	o.pair = &dstCallback{kind: "filtered", height: height, hash: hash}
+	o.pair = &dstCallback{
+		kind: "filtered", height: height, hash: hash, header: header,
+	}
 
 	if o.live[hash] {
 		o.fail(invDuplicate, "block %d %v reported twice without a "+
@@ -284,29 +295,32 @@ func (o *dstTruth) filteredConnected(height int32, header *wire.BlockHeader,
 }
 
 // blockConnected checks one OnBlockConnected callback.
-func (o *dstTruth) blockConnected(height int32, header *wire.BlockHeader) {
+func (o *dstTruth) blockConnected(hash *chainhash.Hash, height int32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	b, hash := o.identify(header)
-	o.record("connect", height, hash, 0)
+	b, _ := o.fx.lookup(*hash)
+	o.record("connect", height, *hash, 0)
 
-	if o.pair == nil || o.pair.kind != "filtered" ||
-		o.pair.height != height || o.pair.hash != hash {
+	pair := o.pair
+	o.pair = nil
+	if pair == nil || pair.kind != "filtered" ||
+		pair.height != height || pair.hash != *hash {
 
 		o.fail(invPairing, "connect %d %v without its filtered "+
-			"connect", height, hash)
+			"connect", height, *hash)
+		return
 	}
-	o.pair = nil
 
 	top := o.top()
-	if height != int32(top.height)+1 || header.PrevBlock != top.hash {
+	if height != int32(top.height)+1 ||
+		pair.header.PrevBlock != top.hash {
 		o.fail(invContinuity, "connect %d %v does not extend tip %d "+
-			"%v", height, hash, top.height, top.hash)
+			"%v", height, *hash, top.height, top.hash)
 		return
 	}
 	if b == nil {
-		o.fail(invContinuity, "connect of unknown block %v", hash)
+		o.fail(invContinuity, "connect of unknown block %v", *hash)
 		return
 	}
 	o.stack = append(o.stack, b)
@@ -321,30 +335,47 @@ func (o *dstTruth) filteredDisconnected(height int32,
 
 	_, hash := o.identify(header)
 	o.record("unfiltered", height, hash, 0)
-
-	if o.pair != nil {
-		o.fail(invPairing, "filtered disconnect %d after unpaired "+
-			"%s %d", height, o.pair.kind, o.pair.height)
-	}
-	o.pair = &dstCallback{kind: "unfiltered", height: height, hash: hash}
-	delete(o.live, hash)
+	o.disconnectHalf("unfiltered", "disconnect", height, hash)
 }
 
 // blockDisconnected checks one OnBlockDisconnected callback.
-func (o *dstTruth) blockDisconnected(height int32, header *wire.BlockHeader) {
+func (o *dstTruth) blockDisconnected(hash *chainhash.Hash, height int32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	_, hash := o.identify(header)
-	o.record("disconnect", height, hash, 0)
+	o.record("disconnect", height, *hash, 0)
+	o.disconnectHalf("disconnect", "unfiltered", height, *hash)
+}
 
-	if o.pair == nil || o.pair.kind != "unfiltered" ||
-		o.pair.height != height || o.pair.hash != hash {
+// disconnectHalf checks one half of a disconnect pair. A disconnect
+// notification reports the filtered half first and a rewind the plain half
+// first, as the legacy rescan does. Only a rewind undoes a block that is
+// still on the active chain, so such a block must come plain half first. A
+// block off the active chain may come either way, since a rewind can also
+// walk over one. The second half applies the disconnect. The caller holds
+// mu.
+func (o *dstTruth) disconnectHalf(kind, twin string, height int32,
+	hash chainhash.Hash) {
 
-		o.fail(invPairing, "disconnect %d %v without its filtered "+
-			"disconnect", height, hash)
+	if o.pair == nil {
+		b, ok := o.fx.lookup(hash)
+		if kind == "unfiltered" && ok && o.w.onActive(b) {
+			o.fail(invPairing, "disconnect of active block %d "+
+				"%v reported filtered first", height, hash)
+		}
+		o.pair = &dstCallback{kind: kind, height: height, hash: hash}
+		return
 	}
+
+	pair := o.pair
 	o.pair = nil
+	if pair.kind != twin || pair.height != height || pair.hash != hash {
+		o.fail(invPairing, "%s %d %v after unpaired %s %d", kind,
+			height, hash, pair.kind, pair.height)
+		return
+	}
+
+	delete(o.live, hash)
 
 	top := o.top()
 	if len(o.stack) == 1 || height != int32(top.height) ||
@@ -506,15 +537,22 @@ func (o *dstTruth) callbacks() Callbacks {
 		OnFilteredBlockConnected:    o.filteredConnected,
 		OnBlockConnected:            o.blockConnectedAt,
 		OnFilteredBlockDisconnected: o.filteredDisconnected,
-		OnBlockDisconnected:         o.blockDisconnected,
+		OnBlockDisconnected:         o.blockDisconnectedAt,
 		OnRescanProgress:            o.progress,
 		OnRescanFinished:            o.finished,
 	}
 }
 
 // blockConnectedAt adapts blockConnected to the callback signature.
-func (o *dstTruth) blockConnectedAt(height int32, header *wire.BlockHeader,
+func (o *dstTruth) blockConnectedAt(hash *chainhash.Hash, height int32,
 	_ time.Time) {
 
-	o.blockConnected(height, header)
+	o.blockConnected(hash, height)
+}
+
+// blockDisconnectedAt adapts blockDisconnected to the callback signature.
+func (o *dstTruth) blockDisconnectedAt(hash *chainhash.Hash, height int32,
+	_ time.Time) {
+
+	o.blockDisconnected(hash, height)
 }

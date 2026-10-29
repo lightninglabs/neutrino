@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -131,51 +132,72 @@ func FetchAndMatchFilter(ctx context.Context, chain ChainSource,
 // ExtractBlockMatches fetches the target block from the network and filters
 // out any relevant transactions. It also updates the provided WatchState
 // with new inputs discovered from matching outputs (so future spends are
-// also watched). Returns the relevant transactions and the updated watch
-// state.
+// also watched). Returns the relevant transactions, why each matched, and
+// the updated watch state.
 func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 	curStamp *headerfs.BlockStamp, filter *gcs.Filter,
-	ws WatchState) ([]*btcutil.Tx, WatchState, error) {
+	ws WatchState) ([]*btcutil.Tx, []TxMatch, WatchState, error) {
 
 	ws = ws.Clone()
 	block, err := chain.GetBlock(ctx, curStamp.Hash)
 	if err != nil {
-		return nil, ws, err
+		return nil, nil, ws, err
 	}
 	if block == nil {
-		return nil, ws, fmt.Errorf("couldn't get block %d (%s) from "+
-			"network", curStamp.Height, curStamp.Hash)
+		return nil, nil, ws, fmt.Errorf("couldn't get block %d (%s) "+
+			"from network", curStamp.Height, curStamp.Hash)
 	}
 
 	if err := ws.cacheAddrScripts(); err != nil {
-		return nil, ws, err
+		return nil, nil, ws, err
 	}
 
 	// Verify the filter against the downloaded block.
 	_, err = filtermatch.VerifyBasicBlockFilter(filter, block)
 	if err != nil {
-		return nil, ws, fmt.Errorf("error verifying filter against "+
-			"block %d (%s), possibly invalid filter from peer: %v",
-			curStamp.Height, curStamp.Hash, err)
+		return nil, nil, ws, fmt.Errorf("error verifying filter "+
+			"against block %d (%s), possibly invalid filter from "+
+			"peer: %v", curStamp.Height, curStamp.Hash, err)
+	}
+
+	// The per-transaction callbacks get the same block details the
+	// legacy rescan built, including the height the block was fetched
+	// with.
+	blockDetails := btcjson.BlockDetails{
+		Height: block.Height(),
+		Hash:   block.Hash().String(),
+		Time:   block.MsgBlock().Header.Timestamp.Unix(),
 	}
 
 	relevantTxs := make([]*btcutil.Tx, 0, len(block.Transactions()))
-	for _, tx := range block.Transactions() {
-		relevant := filtermatch.SpendsWatchedInput(tx, ws.Inputs)
+	var matches []TxMatch
+	for txIdx, tx := range block.Transactions() {
+		spends := filtermatch.SpendsWatchedInput(tx, ws.Inputs)
 
 		// Even though the transaction may already be known as
 		// relevant, we need to check its outputs anyway, as each one
-		// that pays a watched address becomes a watched input.
+		// that pays a watched address becomes a watched input. The
+		// spend check runs first, so a transaction never matches as
+		// a spend of its own outputs.
 		paid := filtermatch.PaysWatchedScript(tx, ws.addrScripts)
 		for _, input := range paid {
 			ws.Inputs = append(ws.Inputs, input)
 			ws.List = append(ws.List, input.PkScript)
 		}
 
-		if relevant || len(paid) > 0 {
-			relevantTxs = append(relevantTxs, tx)
+		if !spends && len(paid) == 0 {
+			continue
 		}
+
+		details := blockDetails
+		details.Index = txIdx
+		relevantTxs = append(relevantTxs, tx)
+		matches = append(matches, TxMatch{
+			Spends:  spends,
+			Pays:    len(paid) > 0,
+			Details: details,
+		})
 	}
 
-	return relevantTxs, ws, nil
+	return relevantTxs, matches, ws, nil
 }

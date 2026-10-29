@@ -44,7 +44,7 @@ func newFSMModel(t *rapid.T) *fsmModel {
 			BatchSize: rapid.IntRange(1, 4).Draw(t, "batch"),
 		},
 		truth: newDSTTruth(
-			w.fx, start, w.fx.genesis.header.Timestamp,
+			w, start, w.fx.genesis.header.Timestamp,
 			w.fx.scripts[dstAddrA],
 		),
 		next:  true,
@@ -84,11 +84,18 @@ func (m *fsmModel) apply(event RescanEvent) bool {
 			)
 
 		case BlockConnectedOutbox:
-			m.truth.blockConnected(e.Height, e.Header)
+			m.truth.blockConnected(&e.Hash, e.Height)
 
 		case BlockDisconnectedOutbox:
+			// Report the two halves in the order the actor's
+			// dispatch does.
+			if e.Rewind {
+				m.truth.blockDisconnected(&e.Hash, e.Height)
+				m.truth.filteredDisconnected(e.Height, e.Header)
+				break
+			}
 			m.truth.filteredDisconnected(e.Height, e.Header)
-			m.truth.blockDisconnected(e.Height, e.Header)
+			m.truth.blockDisconnected(&e.Hash, e.Height)
 
 		case RescanProgressOutbox:
 			m.truth.progress(e.Height)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -40,8 +41,17 @@ var errSubscriptionClosed = errors.New(
 )
 
 // Callbacks defines the notification callbacks from the rescan actor to the
-// wallet layer. These correspond to the existing rpcclient.NotificationHandlers
-// but are simplified for the actor model.
+// wallet layer. The neutrino package maps its rpcclient.NotificationHandlers
+// onto them one for one, so each has the signature and the place in the
+// callback order that the legacy rescan loop gave it. Every field is
+// optional.
+//
+// For each scanned block, the actor calls, in order: OnRedeemingTx and then
+// OnRecvTx for each relevant transaction, in block order, then
+// OnFilteredBlockConnected, then OnBlockConnected. A disconnect notification
+// calls OnFilteredBlockDisconnected and then OnBlockDisconnected. A rewind
+// calls them the other way around, OnBlockDisconnected first, and not at all
+// if its update disabled them.
 //
 // Every callback, and ActorConfig.OnError, runs on the actor goroutine inside
 // a mailbox turn. A callback must therefore not call back into the actor: a
@@ -49,39 +59,45 @@ var errSubscriptionClosed = errors.New(
 // turn until it times out, and a call to Stop stalls for its stop timeout.
 type Callbacks struct {
 	// OnFilteredBlockConnected is called for every scanned block, matched
-	// or not, before OnBlockConnected. The relevantTxs slice holds the
-	// block's transactions that pay a watched script or spend a watched
-	// outpoint, and is empty for a block with none.
+	// or not. The relevantTxs slice holds the block's transactions that
+	// pay a watched script or spend a watched outpoint. It is nil when
+	// the block was not fetched, and empty when it was fetched and
+	// nothing in it matched.
 	OnFilteredBlockConnected func(height int32, header *wire.BlockHeader,
 		relevantTxs []*btcutil.Tx)
 
-	// OnBlockConnected is called for every block that is connected,
-	// regardless of whether it matches the watch list. Used to advance
-	// the wallet's sync state.
-	OnBlockConnected func(height int32, header *wire.BlockHeader,
-		timestamp time.Time)
+	// OnBlockConnected is called for every scanned block, right after
+	// OnFilteredBlockConnected, with the block's header timestamp.
+	OnBlockConnected func(hash *chainhash.Hash, height int32,
+		t time.Time)
 
-	// OnBlockDisconnected is called when a block is disconnected during
-	// a reorg or rewind.
-	OnBlockDisconnected func(height int32, header *wire.BlockHeader)
-
-	// OnFilteredBlockDisconnected is called when a block is disconnected,
-	// just before OnBlockDisconnected. Matches the old rescan's behavior
-	// of calling both OnFilteredBlockDisconnected and OnBlockDisconnected.
+	// OnFilteredBlockDisconnected is called for every block the rescan
+	// undoes.
 	OnFilteredBlockDisconnected func(height int32, header *wire.BlockHeader)
 
-	// OnRescanProgress is called periodically during historical sync to
-	// report progress.
+	// OnBlockDisconnected is called for every block the rescan undoes,
+	// with the block's header timestamp.
+	OnBlockDisconnected func(hash *chainhash.Hash, height int32,
+		t time.Time)
+
+	// OnRedeemingTx is called for each relevant transaction that spends
+	// a watched outpoint.
+	OnRedeemingTx func(tx *btcutil.Tx, details *btcjson.BlockDetails)
+
+	// OnRecvTx is called for each relevant transaction that pays a
+	// watched address. A transaction that does both gets OnRedeemingTx
+	// first.
+	OnRecvTx func(tx *btcutil.Tx, details *btcjson.BlockDetails)
+
+	// OnRescanProgress is called every ProgressInterval blocks during
+	// historical sync. The legacy rescan has no such callback, so the
+	// neutrino package leaves it unset.
 	OnRescanProgress func(height int32)
 
 	// OnRescanFinished is called when the rescan catches up to the chain
-	// tip. It is called again only after a rewind.
+	// tip. It is called again only after a rewind. The neutrino package
+	// leaves it unset, as the legacy rescan never reported it.
 	OnRescanFinished func(height int32)
-
-	// OnTxConfirmed is called for each relevant transaction found in a
-	// block. This is used to mark transactions as confirmed on the
-	// broadcaster, preventing unnecessary rebroadcasts.
-	OnTxConfirmed func(txHash chainhash.Hash)
 }
 
 // ActorConfig configures a new RescanActor.
@@ -114,6 +130,16 @@ type ActorConfig struct {
 	// BatchSize controls how many blocks are processed per batch during
 	// historical sync. Defaults to DefaultBatchSize if zero.
 	BatchSize int
+
+	// EndBlock is the block the rescan stops at, once it has scanned it.
+	// The zero value never matches, so the rescan follows the chain until
+	// it is stopped. A non-zero height matches by height, and a non-zero
+	// hash by hash.
+	EndBlock headerfs.BlockStamp
+
+	// RetryInterval is how long the actor waits before it retries a
+	// batch that failed. Defaults to three seconds if zero.
+	RetryInterval time.Duration
 
 	// OnError reports errors for observation only. It is called when a
 	// Syncing or Rewinding batch fails, which the actor retries on its
@@ -163,6 +189,16 @@ type RescanActor struct {
 	// the mailbox, so at most one is in flight. Only the actor goroutine
 	// touches it.
 	continuationPending bool
+
+	// turnMu is held for each mailbox turn, so WaitForShutdown can wait
+	// for the turn in flight, and with it the last callback.
+	turnMu sync.Mutex
+
+	// done is closed, and err set, when the rescan ends: it reached its
+	// end block, its subscription failed, or Stop ran.
+	doneOnce sync.Once
+	done     chan struct{}
+	err      error
 }
 
 // NewRescanActor creates a new rescan actor with the given configuration.
@@ -194,14 +230,20 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
 			BatchSize: cfg.BatchSize,
+			EndBlock:  cfg.EndBlock,
 		},
 	)
+
+	if cfg.RetryInterval <= 0 {
+		cfg.RetryInterval = retryInterval
+	}
 
 	a := &RescanActor{
 		machine: machine,
 		cfg:     cfg,
 		ctx:     ctx,
 		cancel:  cancel,
+		done:    make(chan struct{}),
 	}
 
 	act, err := lndactor.NewActor(lndactor.ActorConfig[
@@ -270,28 +312,75 @@ func (a *RescanActor) Stop() {
 		a.actor.Stop()
 		a.cancelBridge()
 		a.machine.Stop()
+		a.finish(errRescanStopped)
 	})
 }
 
 // WaitForShutdown blocks until the bridge, retry and continuation goroutines
-// have stopped. It does not wait for the actor goroutine.
+// have stopped and no mailbox turn is in flight. Once Stop has run, no
+// callback starts after it returns.
 func (a *RescanActor) WaitForShutdown() {
 	a.asyncWG.Wait()
+
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+}
+
+// Done returns a channel that is closed once the rescan has ended: it
+// reached its end block, its block subscription failed, or Stop ran. Err
+// then says which.
+func (a *RescanActor) Done() <-chan struct{} {
+	return a.done
+}
+
+// Err returns nil if the rescan ended at its end block, the subscription
+// error if its subscription failed, and an error if Stop ended it. It
+// returns nil until Done is closed.
+func (a *RescanActor) Err() error {
+	select {
+	case <-a.done:
+		return a.err
+	default:
+		return nil
+	}
+}
+
+// finish records why the rescan ended and closes done. Only the first call
+// counts.
+func (a *RescanActor) finish(err error) {
+	a.doneOnce.Do(func() {
+		a.err = err
+		close(a.done)
+	})
+}
+
+// WatchUpdate is a watch-list update for AddWatchAddrs.
+type WatchUpdate struct {
+	// Addrs are addresses to watch for payments.
+	Addrs []address.Address
+
+	// Inputs are outpoints to watch for spends.
+	Inputs []filtermatch.InputWithScript
+
+	// RewindTo, if set below the scanned tip, rewinds the rescan to that
+	// height: every block above it is disconnected and scanned again, and
+	// the block at RewindTo itself is kept.
+	RewindTo *uint32
+
+	// DisableDisconnectedNtfns suppresses the disconnect callbacks of
+	// the blocks the rewind undoes.
+	DisableDisconnectedNtfns bool
 }
 
 // AddWatchAddrs sends an AddWatchAddrs mailbox request so watch-list changes
 // are serialized with all other actor work and any FSM failure is surfaced to
-// the caller. Without rewindTo the update applies to blocks scanned after it.
-// With rewindTo, the rescan disconnects every block above that height and
-// scans them again, so the block at rewindTo itself is kept. A timeout leaves
-// the outcome unknown: the update may still apply after the call returns.
-func (a *RescanActor) AddWatchAddrs(
-	addrs []address.Address,
-	inputs []filtermatch.InputWithScript,
-	rewindTo *uint32,
-) error {
-
-	req := newAddWatchAddrsMsg(addrs, inputs, rewindTo)
+// the caller. Without a rewind the update applies to blocks scanned after it.
+// With one, the rescan disconnects every block above the rewind height and
+// scans them again, so the block at the rewind height itself is kept. A
+// timeout leaves the outcome unknown: the update may still apply after the
+// call returns.
+func (a *RescanActor) AddWatchAddrs(update WatchUpdate) error {
+	req := newAddWatchAddrsMsg(update)
 
 	reqCtx, cancel := context.WithTimeout(
 		context.Background(), requestTimeout,

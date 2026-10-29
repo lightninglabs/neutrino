@@ -58,6 +58,11 @@ type AddWatchAddrsEvent struct {
 	// tip, no rewind is performed and only future blocks are scanned with
 	// the updated filter.
 	RewindTo *uint32
+
+	// DisableDisconnectedNtfns suppresses the disconnect callbacks for
+	// the blocks this update's rewind undoes. It does not affect the
+	// disconnects that a reorg reports.
+	DisableDisconnectedNtfns bool
 }
 
 func (AddWatchAddrsEvent) rescanEventSealed() {}

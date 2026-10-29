@@ -88,9 +88,9 @@ func TestRescanActorReceiveAddWatchAddrs(t *testing.T) {
 	require.NoError(t, err)
 
 	result := actor.Receive(
-		t.Context(), newAddWatchAddrsMsg(
-			[]address.Address{addr}, nil, nil,
-		),
+		t.Context(), newAddWatchAddrsMsg(WatchUpdate{
+			Addrs: []address.Address{addr},
+		}),
 	)
 	require.True(t, result.IsOk())
 
@@ -127,9 +127,8 @@ func TestRescanActorLifecycle(t *testing.T) {
 		StartHeader: *genesisHeader,
 		StartTime:   time.Time{},
 		Callbacks: Callbacks{
-			OnBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				timestamp time.Time) {
+			OnBlockConnected: func(_ *chainhash.Hash, _ int32,
+				_ time.Time) {
 
 				blocksConnected.Add(1)
 			},
@@ -196,7 +195,7 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 		chainhash.HashB([]byte("test-addr"))[:20],
 		&chaincfg.MainNetParams,
 	)
-	err := actor.AddWatchAddrs([]address.Address{addr}, nil, nil)
+	err := actor.AddWatchAddrs(WatchUpdate{Addrs: []address.Address{addr}})
 	require.NoError(t, err)
 
 	// Wait for the address to appear in state.
@@ -242,9 +241,9 @@ func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
 		actor.WaitForShutdown()
 	})
 
-	err := actor.AddWatchAddrs(
-		[]address.Address{invalidTestAddress{}}, nil, nil,
-	)
+	err := actor.AddWatchAddrs(WatchUpdate{
+		Addrs: []address.Address{invalidTestAddress{}},
+	})
 	require.Error(t, err)
 }
 
@@ -331,9 +330,8 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 		StartHeader: *genesisHeader,
 		StartTime:   time.Time{},
 		Callbacks: Callbacks{
-			OnBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				timestamp time.Time) {
+			OnBlockConnected: func(_ *chainhash.Hash, _ int32,
+				_ time.Time) {
 
 				blocksConnected.Add(1)
 			},
@@ -565,7 +563,7 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 
 		// The mailbox still runs, but an update is never scanned, so
 		// it must fail rather than report success.
-		err = actor.AddWatchAddrs(nil, nil, nil)
+		err = actor.AddWatchAddrs(WatchUpdate{})
 		require.ErrorIs(t, err, errRescanStopped)
 	})
 }
@@ -622,9 +620,9 @@ func TestNewRescanActorRejectsInvalidAddress(t *testing.T) {
 	watch := cursorOf(t, state).Watch
 	require.Len(t, watch.Addrs, 1)
 	require.Len(t, watch.List, 1)
-	require.NoError(t, actor.AddWatchAddrs(
-		[]address.Address{valid}, nil, nil,
-	))
+	require.NoError(t, actor.AddWatchAddrs(WatchUpdate{
+		Addrs: []address.Address{valid},
+	}))
 }
 
 // cursorOf returns the cursor of a non-terminal state.

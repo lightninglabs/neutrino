@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2"
+
 	lndactor "github.com/lightningnetwork/lnd/actor"
 	fn "github.com/lightningnetwork/lnd/fn/v2"
 )
@@ -12,6 +14,19 @@ import (
 // Receive processes mailbox messages one at a time in the lnd actor runtime.
 func (a *RescanActor) Receive(actorCtx context.Context,
 	msg RescanActorMsg) fn.Result[RescanActorResp] {
+
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+
+	// Once Stop has cancelled the actor, only the stop barrier and state
+	// queries still run, so no callback can start after WaitForShutdown.
+	if a.ctx.Err() != nil {
+		switch msg.(type) {
+		case *stopRescanMsg, *currentStateReq:
+		default:
+			return fn.Err[RescanActorResp](errRescanStopped)
+		}
+	}
 
 	switch m := msg.(type) {
 	case *processNextBlockMsg:
@@ -32,14 +47,13 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		})
 
 	case *addWatchAddrsMsg:
-		return a.handleFSMEvent(
-			actorCtx,
-			AddWatchAddrsEvent{
-				Addrs:    m.Addrs,
-				Inputs:   m.Inputs,
-				RewindTo: m.RewindTo,
-			},
-		)
+		silent := m.DisableDisconnectedNtfns
+		return a.handleFSMEvent(actorCtx, AddWatchAddrsEvent{
+			Addrs:                    m.Addrs,
+			Inputs:                   m.Inputs,
+			RewindTo:                 m.RewindTo,
+			DisableDisconnectedNtfns: silent,
+		})
 
 	case *currentStateReq:
 		return fn.Ok[RescanActorResp](&currentStateResp{
@@ -61,7 +75,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 
 // handleContinuation runs the next batch. A failed batch leaves the state
 // unchanged. It is reported through OnError and retried after
-// retryInterval.
+// RetryInterval.
 func (a *RescanActor) handleContinuation(
 	actorCtx context.Context) fn.Result[RescanActorResp] {
 
@@ -69,7 +83,7 @@ func (a *RescanActor) handleContinuation(
 	if result.IsErr() {
 		err := result.Err()
 		log.Warnf("RescanActor: error processing next block: %v, "+
-			"retrying in %v", err, retryInterval)
+			"retrying in %v", err, a.cfg.RetryInterval)
 
 		if a.cfg.OnError != nil {
 			a.cfg.OnError(err)
@@ -97,8 +111,8 @@ func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 	return fn.Ok[RescanActorResp](&rescanActorAck{})
 }
 
-// scheduleRetry sends a continuation after retryInterval, unless the
-// actor stops first.
+// scheduleRetry sends a continuation after RetryInterval, unless the actor
+// stops first.
 func (a *RescanActor) scheduleRetry() {
 	// Once Stop has cancelled the actor, a turn that outlived the stop
 	// barrier must not add to asyncWG while WaitForShutdown may already be
@@ -112,7 +126,7 @@ func (a *RescanActor) scheduleRetry() {
 	go func() {
 		defer a.asyncWG.Done()
 
-		timer := time.NewTimer(retryInterval)
+		timer := time.NewTimer(a.cfg.RetryInterval)
 		defer timer.Stop()
 
 		select {
@@ -142,16 +156,14 @@ func (a *RescanActor) handleSubscriptionFailed(actorCtx context.Context,
 	msg *subscriptionFailedMsg) fn.Result[RescanActorResp] {
 
 	// Only one subscriptionFailedMsg is ever sent: Start sends it instead
-	// of starting the bridge, or the bridge sends it and exits.
-	if a.ctx.Err() != nil {
-		return fn.Ok[RescanActorResp](&rescanActorAck{})
-	}
-
+	// of starting the bridge, or the bridge sends it and exits. Receive
+	// drops it once Stop has run.
 	log.Errorf("RescanActor: %v, stopping", msg.Err)
 	if a.cfg.OnError != nil {
 		a.cfg.OnError(msg.Err)
 	}
 	a.cancelBridge()
+	a.finish(msg.Err)
 
 	return a.handleFSMEvent(actorCtx, StopEvent{})
 }
@@ -170,37 +182,23 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
 
 		switch e := event.(type) {
 		case FilteredBlockOutbox:
+			a.dispatchMatches(e.RelevantTxs, e.Matches)
+
 			if callbacks.OnFilteredBlockConnected != nil {
 				callbacks.OnFilteredBlockConnected(
 					e.Height, e.Header, e.RelevantTxs,
 				)
 			}
 
-			if callbacks.OnTxConfirmed != nil {
-				for _, tx := range e.RelevantTxs {
-					callbacks.OnTxConfirmed(*tx.Hash())
-				}
-			}
-
 		case BlockConnectedOutbox:
 			if callbacks.OnBlockConnected != nil {
 				callbacks.OnBlockConnected(
-					e.Height, e.Header,
-					time.Unix(e.Timestamp, 0),
+					&e.Hash, e.Height, e.Header.Timestamp,
 				)
 			}
 
 		case BlockDisconnectedOutbox:
-			if callbacks.OnFilteredBlockDisconnected != nil {
-				callbacks.OnFilteredBlockDisconnected(
-					e.Height, e.Header,
-				)
-			}
-			if callbacks.OnBlockDisconnected != nil {
-				callbacks.OnBlockDisconnected(
-					e.Height, e.Header,
-				)
-			}
+			a.dispatchDisconnect(e)
 
 		case RescanProgressOutbox:
 			if callbacks.OnRescanProgress != nil {
@@ -212,10 +210,65 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
 				callbacks.OnRescanFinished(e.Height)
 			}
 
+		case EndReachedOutbox:
+			log.Debugf("RescanActor: reached the end block")
+			a.cancelBridge()
+			a.finish(nil)
+
 		case ContinueOutbox:
 			a.enqueueContinuation()
 		}
 	}
+}
+
+// dispatchMatches calls the per-transaction callbacks of a scanned block and
+// marks each relevant transaction confirmed, in the legacy rescan's order:
+// for each transaction, OnRedeemingTx, OnRecvTx, then MarkAsConfirmed.
+func (a *RescanActor) dispatchMatches(txs []*btcutil.Tx, matches []TxMatch) {
+	callbacks := a.cfg.Callbacks
+	for i, tx := range txs {
+		match := matches[i]
+		if match.Spends && callbacks.OnRedeemingTx != nil {
+			details := match.Details
+			callbacks.OnRedeemingTx(tx, &details)
+		}
+		if match.Pays && callbacks.OnRecvTx != nil {
+			details := match.Details
+			callbacks.OnRecvTx(tx, &details)
+		}
+
+		a.cfg.Chain.MarkAsConfirmed(*tx.Hash())
+	}
+}
+
+// dispatchDisconnect calls the two disconnect callbacks of an undone block.
+// A disconnect notification reports the filtered callback first, and a
+// rewind the plain one first, as the legacy rescan does.
+func (a *RescanActor) dispatchDisconnect(e BlockDisconnectedOutbox) {
+	callbacks := a.cfg.Callbacks
+	filtered := func() {
+		if callbacks.OnFilteredBlockDisconnected != nil {
+			callbacks.OnFilteredBlockDisconnected(
+				e.Height, e.Header,
+			)
+		}
+	}
+	plain := func() {
+		if callbacks.OnBlockDisconnected != nil {
+			callbacks.OnBlockDisconnected(
+				&e.Hash, e.Height, e.Header.Timestamp,
+			)
+		}
+	}
+
+	if e.Rewind {
+		plain()
+		filtered()
+		return
+	}
+
+	filtered()
+	plain()
 }
 
 // enqueueContinuation sends a continuation to the actor's own mailbox. The

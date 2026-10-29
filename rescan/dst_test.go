@@ -16,7 +16,6 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -195,7 +194,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 		src:   &dstSource{w: w, mgr: mgr},
 		start: start,
 		truth: newDSTTruth(
-			w.fx, start, startTime, w.fx.scripts[dstAddrA],
+			w, start, startTime, w.fx.scripts[dstAddrA],
 		),
 	}
 	d.armStartFaults()
@@ -336,7 +335,7 @@ func (d *dstRun) requireAtTip(label string) {
 // connects already in flight that may still be delivered first.
 func (d *dstRun) rewind(target uint32, allowance int) error {
 	d.truth.beginRewind(target, allowance)
-	return d.actor.AddWatchAddrs(nil, nil, &target)
+	return d.actor.AddWatchAddrs(WatchUpdate{RewindTo: &target})
 }
 
 // initialSync starts the actor and lets the historical scan reach the tip.
@@ -460,7 +459,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	done := make(chan error, 1)
 	d.truth.beginRewind(target, allowance)
 	go func() {
-		done <- d.actor.AddWatchAddrs(nil, nil, &target)
+		done <- d.actor.AddWatchAddrs(WatchUpdate{RewindTo: &target})
 	}()
 	synctest.Wait()
 	close(release)
@@ -487,7 +486,7 @@ func (d *dstRun) step(i int, value byte) {
 		require.NoError(d.t, d.rewind(target, 0))
 
 	case 3:
-		require.NoError(d.t, d.actor.AddWatchAddrs(nil, nil, nil))
+		require.NoError(d.t, d.actor.AddWatchAddrs(WatchUpdate{}))
 
 	case 7:
 		_, err := d.actor.CurrentState()
@@ -564,7 +563,7 @@ func (d *dstRun) stopService() {
 		StartHeader: d.start.header,
 		OnError:     func(error) { lateErrors.Add(1) },
 		Callbacks: Callbacks{
-			OnBlockConnected: func(int32, *wire.BlockHeader,
+			OnBlockConnected: func(*chainhash.Hash, int32,
 				time.Time) {
 
 				lateCallbacks.Add(1)

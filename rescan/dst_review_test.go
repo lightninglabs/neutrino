@@ -35,9 +35,9 @@ func TestDSTCanonicalRetrySuccessor(t *testing.T) {
 			StartHeader: genesis,
 			WatchAddrs:  []address.Address{addr},
 			Callbacks: Callbacks{
-				OnBlockConnected: func(h int32,
+				OnFilteredBlockConnected: func(h int32,
 					hdr *wire.BlockHeader,
-					_ time.Time) {
+					_ []*btcutil.Tx) {
 
 					oracle.connect(h, hdr)
 				},
@@ -101,16 +101,11 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 			WatchAddrs:  []address.Address{addr},
 			BatchSize:   1,
 			Callbacks: Callbacks{
-				OnBlockConnected: func(h int32,
+				OnFilteredBlockConnected: func(h int32,
 					hdr *wire.BlockHeader,
-					_ time.Time) {
-
-					oracle.connect(h, hdr)
-				},
-				OnFilteredBlockConnected: func(_ int32,
-					_ *wire.BlockHeader,
 					txs []*btcutil.Tx) {
 
+					oracle.connect(h, hdr)
 					for _, tx := range txs {
 						hash := *tx.Hash()
 						payments = append(
@@ -196,9 +191,8 @@ func TestDSTInitializingRewind(t *testing.T) {
 			},
 			StartHeader: *start,
 			Callbacks: Callbacks{
-				OnBlockConnected: func(h int32,
-					_ *wire.BlockHeader,
-					_ time.Time) {
+				OnBlockConnected: func(_ *chainhash.Hash,
+					h int32, _ time.Time) {
 
 					heights = append(heights, h)
 				},
@@ -209,7 +203,11 @@ func TestDSTInitializingRewind(t *testing.T) {
 		// The update waits in the mailbox ahead of the first batch.
 		rewind := uint32(0)
 		done := make(chan error, 1)
-		go func() { done <- actor.AddWatchAddrs(nil, nil, &rewind) }()
+		go func() {
+			done <- actor.AddWatchAddrs(WatchUpdate{
+				RewindTo: &rewind,
+			})
+		}()
 		synctest.Wait()
 		actor.Start()
 		require.NoError(t, <-done)
@@ -259,9 +257,9 @@ func TestDSTWatchUpdateAfterTimeout(t *testing.T) {
 		<-entered
 		done := make(chan error, 1)
 		go func() {
-			done <- actor.AddWatchAddrs(
-				[]address.Address{next}, nil, nil,
-			)
+			done <- actor.AddWatchAddrs(WatchUpdate{
+				Addrs: []address.Address{next},
+			})
 		}()
 		synctest.Wait()
 		time.Sleep(5 * time.Second)
@@ -314,8 +312,9 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 			BatchSize:   1,
 			OnError:     func(error) { errorsReported++ },
 			Callbacks: Callbacks{
-				OnBlockConnected: func(h int32,
-					hdr *wire.BlockHeader, _ time.Time) {
+				OnFilteredBlockConnected: func(h int32,
+					hdr *wire.BlockHeader,
+					_ []*btcutil.Tx) {
 
 					oracle.connect(h, hdr)
 				},
@@ -370,20 +369,16 @@ func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
 			StartHeader: genesis,
 			WatchAddrs:  []address.Address{addr},
 			Callbacks: Callbacks{
-				OnBlockConnected: func(h int32,
-					hdr *wire.BlockHeader, _ time.Time) {
-
-					oracle.connect(h, hdr)
-				},
-				OnBlockDisconnected: func(h int32,
+				OnFilteredBlockDisconnected: func(h int32,
 					hdr *wire.BlockHeader) {
 
 					oracle.disconnect(h, hdr)
 				},
-				OnFilteredBlockConnected: func(_ int32,
-					_ *wire.BlockHeader,
+				OnFilteredBlockConnected: func(h int32,
+					hdr *wire.BlockHeader,
 					txs []*btcutil.Tx) {
 
+					oracle.connect(h, hdr)
 					for _, tx := range txs {
 						payments = append(
 							payments,

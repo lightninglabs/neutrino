@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -23,9 +24,28 @@ type FilteredBlockOutbox struct {
 	// Header is the block header.
 	Header *wire.BlockHeader
 
-	// RelevantTxs contains the transactions that matched the watch list.
-	// It is empty for a block with no match.
+	// RelevantTxs contains the transactions that matched the watch list,
+	// in block order. It is nil when the block was not fetched, because
+	// the scan had not passed the birthday, the watch list was empty or
+	// the filter did not match, and empty but not nil for a fetched block
+	// with no match, as in the legacy rescan.
 	RelevantTxs []*btcutil.Tx
+
+	// Matches says why each of RelevantTxs matched, index for index.
+	Matches []TxMatch
+}
+
+// TxMatch records why a relevant transaction matched the watch list, and
+// where it sits in its block, for the per-transaction callbacks.
+type TxMatch struct {
+	// Spends is set if the transaction spends a watched outpoint.
+	Spends bool
+
+	// Pays is set if the transaction pays a watched address.
+	Pays bool
+
+	// Details locates the transaction in its block.
+	Details btcjson.BlockDetails
 }
 
 func (FilteredBlockOutbox) outboxEventSealed() {}
@@ -60,6 +80,11 @@ type BlockDisconnectedOutbox struct {
 
 	// Header is the disconnected block's header.
 	Header *wire.BlockHeader
+
+	// Rewind is set when a watch-list rewind undid the block, and clear
+	// when a disconnect notification did. The legacy rescan reports the
+	// two in opposite callback orders, and the actor keeps both.
+	Rewind bool
 }
 
 func (BlockDisconnectedOutbox) outboxEventSealed() {}
@@ -83,6 +108,12 @@ type RescanFinishedOutbox struct {
 }
 
 func (RescanFinishedOutbox) outboxEventSealed() {}
+
+// EndReachedOutbox signals that the scan reached its end block, and that the
+// rescan has stopped in Terminal.
+type EndReachedOutbox struct{}
+
+func (EndReachedOutbox) outboxEventSealed() {}
 
 // ContinueOutbox instructs the actor wrapper to send a ProcessNextBlockEvent
 // back through its own mailbox. A state emits it instead of looping so the

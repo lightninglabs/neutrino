@@ -63,7 +63,7 @@ func (s *StateCurrent) ProcessEvent(
 			return transition(s), nil
 		}
 
-		return transition(&StateCurrent{Cursor: cursor}, undone), nil
+		return current(env, cursor, undone), nil
 
 	case AddWatchAddrsEvent:
 		return s.updateWatch(&e, func(c Cursor) RescanState {
@@ -130,7 +130,20 @@ func (s *StateCurrent) handleBlockConnected(ctx context.Context,
 		return nil, err
 	}
 
-	return transition(&StateCurrent{Cursor: next}, outbox...), nil
+	return current(env, next, outbox...), nil
+}
+
+// current returns a transition to Current at cursor that emits outbox, or to
+// Terminal if cursor has reached the end block.
+func current(env *Environment, cursor Cursor,
+	outbox ...OutboxEvent) *StateTransition {
+
+	if env.reachedEnd(cursor.CurStamp) {
+		return transition(&StateTerminal{},
+			append(outbox, EndReachedOutbox{})...)
+	}
+
+	return transition(&StateCurrent{Cursor: cursor}, outbox...)
 }
 
 // IsTerminal returns false since Current is not terminal.

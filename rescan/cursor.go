@@ -45,7 +45,10 @@ func (c Cursor) scanBlock(ctx context.Context, env *Environment,
 		Scanning:  c.Scanning || header.Timestamp.After(env.StartTime),
 	}
 
-	var relevantTxs []*btcutil.Tx
+	var (
+		relevantTxs []*btcutil.Tx
+		matches     []TxMatch
+	)
 	if next.Scanning && len(next.Watch.List) > 0 {
 		matched, filter, err := FetchAndMatchFilter(
 			ctx, env.Chain, &hash, next.Watch.List, batch,
@@ -55,10 +58,11 @@ func (c Cursor) scanBlock(ctx context.Context, env *Environment,
 		}
 
 		if matched {
-			relevantTxs, next.Watch, err = ExtractBlockMatches(
-				ctx, env.Chain, &next.CurStamp, filter,
-				next.Watch,
-			)
+			relevantTxs, matches, next.Watch, err =
+				ExtractBlockMatches(
+					ctx, env.Chain, &next.CurStamp,
+					filter, next.Watch,
+				)
 			if err != nil {
 				return c, nil, err
 			}
@@ -73,6 +77,7 @@ func (c Cursor) scanBlock(ctx context.Context, env *Environment,
 			Height:      next.CurStamp.Height,
 			Header:      &headerCopy,
 			RelevantTxs: relevantTxs,
+			Matches:     matches,
 		},
 		BlockConnectedOutbox{
 			Header:    &headerCopy,
@@ -112,11 +117,53 @@ func (c Cursor) disconnect(event *BlockDisconnectedEvent) (Cursor,
 	return c, undone, true
 }
 
+// rewindStep is one update's rewind: every block above Target is undone,
+// with its disconnect callbacks suppressed if Silent is set.
+type rewindStep struct {
+	Target uint32
+	Silent bool
+}
+
+// rewindPlan is the rewinds a state still owes, in arrival order, each with a
+// lower target than the one before. The legacy rescan applied each update's
+// rewind in full before it read the next update, so the blocks above the
+// first target take the first update's Silent flag, and the blocks between
+// the first and the second target take the second's.
+type rewindPlan []rewindStep
+
+// lower adds step to the plan if it rewinds below every step already in it. A
+// step that does not is a no-op, since the legacy rescan would already have
+// walked below its target when it read the update.
+func (p rewindPlan) lower(step rewindStep) rewindPlan {
+	if len(p) > 0 && step.Target >= p[len(p)-1].Target {
+		return p
+	}
+
+	return append(append(rewindPlan(nil), p...), step)
+}
+
+// target returns the lowest target in the plan.
+func (p rewindPlan) target() uint32 {
+	return p[len(p)-1].Target
+}
+
+// silentAt reports whether undoing the block at height must not report its
+// disconnect: the block belongs to the first step whose target is below it.
+func (p rewindPlan) silentAt(height int32) bool {
+	for _, step := range p {
+		if height > int32(step.Target) {
+			return step.Silent
+		}
+	}
+
+	return false
+}
+
 // addWatch applies an AddWatchAddrs update to the cursor's watch list. It
-// also returns the update's rewind target when that target is below the
-// cursor, and nil when the update needs no rewind. The target block itself
-// is kept: a rewind to height h rescans from h+1.
-func (c Cursor) addWatch(event *AddWatchAddrsEvent) (Cursor, *uint32,
+// also returns the update's rewind when its target is below the cursor, and
+// nil when the update needs no rewind. The target block itself is kept: a
+// rewind to height h rescans from h+1.
+func (c Cursor) addWatch(event *AddWatchAddrsEvent) (Cursor, *rewindStep,
 	error) {
 
 	watch, err := c.Watch.ApplyUpdate(event)
@@ -125,12 +172,16 @@ func (c Cursor) addWatch(event *AddWatchAddrsEvent) (Cursor, *uint32,
 	}
 	c.Watch = watch
 
-	if event.RewindTo == nil || int32(*event.RewindTo) >= c.CurStamp.Height {
+	if event.RewindTo == nil ||
+		int32(*event.RewindTo) >= c.CurStamp.Height {
+
 		return c, nil, nil
 	}
 
-	target := *event.RewindTo
-	return c, &target, nil
+	return c, &rewindStep{
+		Target: *event.RewindTo,
+		Silent: event.DisableDisconnectedNtfns,
+	}, nil
 }
 
 // updateWatch handles an AddWatchAddrs update in a state that scans forward.
@@ -147,8 +198,6 @@ func (c Cursor) updateWatch(event *AddWatchAddrsEvent,
 		return transition(stay(next)), nil
 	}
 
-	return transition(&StateRewinding{
-		Cursor:       next,
-		TargetHeight: *rewind,
-	}, ContinueOutbox{}), nil
+	return transition(newRewinding(next, rewindPlan{*rewind}),
+		ContinueOutbox{}), nil
 }

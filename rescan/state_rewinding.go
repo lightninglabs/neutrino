@@ -13,15 +13,29 @@ import (
 //
 // It is entered from Initializing, Syncing or Current on an update that
 // rewinds below the cursor. A later update can lower the target. Once the
-// cursor reaches the target, it leaves to Syncing with Scanning set, so the
-// rescanned blocks are checked even if they predate the wallet birthday. It
-// leaves to Terminal on StopEvent.
+// cursor reaches the target, it leaves to Syncing, which scans the undone
+// blocks again with the cursor's Scanning flag as it was, as the legacy
+// rescan does. It leaves to Terminal on StopEvent.
 type StateRewinding struct {
 	// Cursor is the position, walking backwards.
 	Cursor
 
-	// TargetHeight is the height to rewind to.
+	// TargetHeight is the height to rewind to, the lowest target of plan.
 	TargetHeight uint32
+
+	// plan holds each update's rewind, so a block is undone silently
+	// exactly when the update whose rewind covers it asked for that. A
+	// nil plan reports every disconnect.
+	plan rewindPlan
+}
+
+// newRewinding returns a Rewinding state that walks cursor back through plan.
+func newRewinding(cursor Cursor, plan rewindPlan) *StateRewinding {
+	return &StateRewinding{
+		Cursor:       cursor,
+		TargetHeight: plan.target(),
+		plan:         plan,
+	}
 }
 
 // ProcessEvent handles events in the Rewinding state.
@@ -49,6 +63,7 @@ func (s *StateRewinding) ProcessEvent(
 		return transition(&StateRewinding{
 			Cursor:       cursor,
 			TargetHeight: s.TargetHeight,
+			plan:         s.plan,
 		}, undone, ContinueOutbox{}), nil
 
 	case StopEvent:
@@ -73,20 +88,24 @@ func (s *StateRewinding) processRewind(
 		// Check if we've reached the target.
 		if cur.CurStamp.Height <= int32(s.TargetHeight) {
 			// Transition to syncing from this point.
-			cur.Scanning = true
 			return transition(
 				&StateSyncing{Cursor: cur},
 				append(outbox, ContinueOutbox{})...,
 			), nil
 		}
 
-		// Emit disconnection notification for the current block.
+		// Emit disconnection notification for the current block,
+		// unless the update that asked for this part of the rewind
+		// disabled it.
 		headerCopy := cur.CurHeader
-		outbox = append(outbox, BlockDisconnectedOutbox{
-			Hash:   cur.CurStamp.Hash,
-			Height: cur.CurStamp.Height,
-			Header: &headerCopy,
-		})
+		if !s.plan.silentAt(cur.CurStamp.Height) {
+			outbox = append(outbox, BlockDisconnectedOutbox{
+				Hash:   cur.CurStamp.Hash,
+				Height: cur.CurStamp.Height,
+				Header: &headerCopy,
+				Rewind: true,
+			})
+		}
 
 		// Walk back to the previous block.
 		header, height, err := env.Chain.GetBlockHeader(
@@ -107,6 +126,7 @@ func (s *StateRewinding) processRewind(
 	return transition(&StateRewinding{
 		Cursor:       cur,
 		TargetHeight: s.TargetHeight,
+		plan:         s.plan,
 	}, append(outbox, ContinueOutbox{})...), nil
 }
 
@@ -120,15 +140,15 @@ func (s *StateRewinding) handleAddWatch(
 		return nil, err
 	}
 
-	targetHeight := s.TargetHeight
-	if rewind != nil && *rewind < targetHeight {
-		targetHeight = *rewind
+	plan := s.plan
+	if plan == nil {
+		plan = rewindPlan{{Target: s.TargetHeight}}
+	}
+	if rewind != nil {
+		plan = plan.lower(*rewind)
 	}
 
-	return transition(&StateRewinding{
-		Cursor:       cursor,
-		TargetHeight: targetHeight,
-	}), nil
+	return transition(newRewinding(cursor, plan)), nil
 }
 
 // IsTerminal returns false since Rewinding is not terminal.

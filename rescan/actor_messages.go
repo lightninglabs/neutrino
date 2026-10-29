@@ -57,6 +57,8 @@ type addWatchAddrsMsg struct {
 	Addrs    []address.Address
 	Inputs   []filtermatch.InputWithScript
 	RewindTo *uint32
+
+	DisableDisconnectedNtfns bool
 }
 
 func (*addWatchAddrsMsg) MessageType() string   { return "add_watch_addrs" }
@@ -125,19 +127,16 @@ func (*currentStateResp) rescanActorRespSealed() {}
 
 // newAddWatchAddrsMsg builds an addWatchAddrsMsg from copies of its
 // arguments, so the caller may reuse them once the call returns.
-func newAddWatchAddrsMsg(
-	addrs []address.Address,
-	inputs []filtermatch.InputWithScript,
-	rewindTo *uint32,
-) *addWatchAddrsMsg {
-
+func newAddWatchAddrsMsg(update WatchUpdate) *addWatchAddrsMsg {
 	msg := &addWatchAddrsMsg{
-		Addrs:  append([]address.Address(nil), addrs...),
-		Inputs: copyInputsWithScripts(inputs),
+		Addrs:  append([]address.Address(nil), update.Addrs...),
+		Inputs: copyInputsWithScripts(update.Inputs),
+
+		DisableDisconnectedNtfns: update.DisableDisconnectedNtfns,
 	}
 
-	if rewindTo != nil {
-		rewind := *rewindTo
+	if update.RewindTo != nil {
+		rewind := *update.RewindTo
 		msg.RewindTo = &rewind
 	}
 
