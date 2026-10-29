@@ -11,7 +11,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -166,41 +165,21 @@ type RescanActor struct {
 
 // NewRescanActor creates a new rescan actor with the given configuration.
 // Call Start to begin processing. A request sent before Start waits in the
-// mailbox until Start runs.
-func NewRescanActor(cfg ActorConfig) *RescanActor {
+// mailbox until Start runs. It fails if a watch address has no payment
+// script.
+func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
+	// Build the initial watch list the same way a later update extends
+	// it, so a bad address fails here instead of staying in the list and
+	// failing every later update.
+	watch, err := (&WatchState{}).ApplyUpdate(&AddWatchAddrsEvent{
+		Addrs:  cfg.WatchAddrs,
+		Inputs: copyInputsWithScripts(cfg.WatchInputs),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid watch address: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Build the initial watch state from config.
-	watch := WatchState{
-		Addrs: make(
-			[]address.Address,
-			len(cfg.WatchAddrs),
-		),
-		Inputs: make(
-			[]neutrino.InputWithScript,
-			len(cfg.WatchInputs),
-		),
-	}
-	copy(watch.Addrs, cfg.WatchAddrs)
-	watch.Inputs = copyInputsWithScripts(cfg.WatchInputs)
-
-	// Convert addresses to pkScripts for the watch list.
-	for _, addr := range watch.Addrs {
-		script, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-			log.Errorf(
-				"Failed to convert addr to script: %v",
-				err,
-			)
-			continue
-		}
-
-		watch.List = append(watch.List, script)
-	}
-	for _, input := range watch.Inputs {
-		watch.List = append(watch.List, input.PkScript)
-	}
-
 	queryOpts := append([]neutrino.QueryOption(nil), cfg.QueryOpts...)
 	queryOpts = append(queryOpts, neutrino.CancelQuery(ctx.Done()))
 
@@ -234,14 +213,13 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		MailboxSize: mailboxSize,
 	})
 	if err != nil {
-		// NewActor fails only for an empty ID or a nil behavior, and
-		// both are fixed here.
-		panic(err)
+		cancel()
+		return nil, err
 	}
 	a.actor = act
 	a.ref = act.Ref()
 
-	return a
+	return a, nil
 }
 
 // Start begins the rescan actor. It starts the FSM and the mailbox,

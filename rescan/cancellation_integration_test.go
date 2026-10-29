@@ -82,7 +82,7 @@ func TestActorStopsProductionFilterQuery(t *testing.T) {
 		result: make(chan error, 1),
 	}
 	genesis := base.ChainParams().GenesisBlock.Header
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain:       chain,
 		StartStamp:  headerfs.BlockStamp{Hash: genesis.BlockHash()},
 		StartHeader: genesis,

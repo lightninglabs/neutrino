@@ -39,7 +39,7 @@ func newActorReceiveHarness(t *testing.T) *RescanActor {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -118,7 +118,7 @@ func TestRescanActorLifecycle(t *testing.T) {
 		finished        atomic.Bool
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -170,7 +170,7 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 
 	var finished atomic.Bool
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -225,7 +225,7 @@ func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -270,7 +270,7 @@ func TestRescanActorWithTxMatch(t *testing.T) {
 		finished       atomic.Bool
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain.mockChainSource,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -322,7 +322,7 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 		blocksConnected atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -468,7 +468,7 @@ func newLifecycleActor(t *testing.T) (*RescanActor, *lifecycleChain) {
 
 	chain := &lifecycleChain{mockChainSource: newMockChain(3)}
 	params := chain.ChainParams()
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash: *params.GenesisHash,
@@ -537,7 +537,7 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		chain := newMockChain(3)
 		params := chain.ChainParams()
 		var errs atomic.Int32
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: *params.GenesisHash,
@@ -559,4 +559,80 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		require.NoError(t, err)
 		require.IsType(t, &StateTerminal{}, state)
 	})
+}
+
+// mustNewRescanActor creates a rescan actor and fails the test if the
+// configuration is rejected.
+func mustNewRescanActor(t *testing.T, cfg ActorConfig) *RescanActor {
+	t.Helper()
+
+	actor, err := NewRescanActor(cfg)
+	require.NoError(t, err)
+
+	return actor
+}
+
+// TestNewRescanActorRejectsInvalidAddress is a regression test: an initial
+// watch address with no payment script used to be logged and kept in the
+// watch list, where it made every later AddWatchAddrs fail. The constructor
+// now builds the list with ApplyUpdate and rejects the address instead.
+func TestNewRescanActorRejectsInvalidAddress(t *testing.T) {
+	chain := newMockChain(1)
+	params := chain.ChainParams()
+	valid, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	cfg := ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash: *params.GenesisHash,
+		},
+		StartHeader: params.GenesisBlock.Header,
+		WatchAddrs: []address.Address{
+			valid, invalidTestAddress{},
+		},
+	}
+	_, err = NewRescanActor(cfg)
+	require.Error(t, err)
+
+	// The valid address alone builds the same list ApplyUpdate would, and
+	// a later update still succeeds.
+	cfg.WatchAddrs = cfg.WatchAddrs[:1]
+	actor, err := NewRescanActor(cfg)
+	require.NoError(t, err)
+	actor.Start()
+	t.Cleanup(func() {
+		actor.Stop()
+		actor.WaitForShutdown()
+	})
+
+	state, err := actor.CurrentState()
+	require.NoError(t, err)
+	watch := cursorOf(t, state).Watch
+	require.Len(t, watch.Addrs, 1)
+	require.Len(t, watch.List, 1)
+	require.NoError(t, actor.AddWatchAddrs(
+		[]address.Address{valid}, nil, nil,
+	))
+}
+
+// cursorOf returns the cursor of a non-terminal state.
+func cursorOf(t *testing.T, state RescanState) Cursor {
+	t.Helper()
+
+	switch s := state.(type) {
+	case *StateInitializing:
+		return s.Cursor
+	case *StateSyncing:
+		return s.Cursor
+	case *StateCurrent:
+		return s.Cursor
+	case *StateRewinding:
+		return s.Cursor
+	}
+	t.Fatalf("state %v has no cursor", state)
+
+	return Cursor{}
 }

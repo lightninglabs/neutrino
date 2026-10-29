@@ -27,7 +27,7 @@ func TestDSTCanonicalRetrySuccessor(t *testing.T) {
 		)
 		require.NoError(t, err)
 		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: genesis.BlockHash(),
@@ -92,7 +92,7 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 		require.NoError(t, err)
 		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
 		var payments []chainhash.Hash
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: genesis.BlockHash(),
@@ -189,7 +189,7 @@ func TestDSTInitializingRewind(t *testing.T) {
 		start, err := chain.GetBlockHeaderByHeight(2)
 		require.NoError(t, err)
 		var heights []int32
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: start.BlockHash(), Height: 2,
@@ -246,7 +246,7 @@ func TestDSTWatchUpdateAfterTimeout(t *testing.T) {
 			nextBytes, &chaincfg.MainNetParams,
 		)
 		require.NoError(t, err)
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: genesis.BlockHash(),
@@ -304,7 +304,7 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 		require.NoError(t, err)
 		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
 		var errorsReported int
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: genesis.BlockHash(),
@@ -362,7 +362,7 @@ func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
 		require.NoError(t, err)
 		oracle := &dstOracle{tip: []chainhash.Hash{genesis.BlockHash()}}
 		var payments []chainhash.Hash
-		actor := NewRescanActor(ActorConfig{
+		actor := mustNewRescanActor(t, ActorConfig{
 			Chain: chain,
 			StartStamp: headerfs.BlockStamp{
 				Hash: genesis.BlockHash(),

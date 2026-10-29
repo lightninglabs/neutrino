@@ -200,7 +200,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 	}
 	d.armStartFaults()
 
-	d.actor = NewRescanActor(ActorConfig{
+	d.actor = mustNewRescanActor(t, ActorConfig{
 		Chain:       d.src,
 		StartStamp:  start.stamp(),
 		StartHeader: start.header,
@@ -558,7 +558,7 @@ func (d *dstRun) stopService() {
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
 
 	var lateErrors, lateCallbacks atomic.Int32
-	late := NewRescanActor(ActorConfig{
+	late := mustNewRescanActor(d.t, ActorConfig{
 		Chain:       d.src,
 		StartStamp:  d.start.stamp(),
 		StartHeader: d.start.header,

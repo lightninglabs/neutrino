@@ -225,7 +225,7 @@ func TestStopCancelsBeforeWaitingForMailbox(t *testing.T) {
 		entered:         make(chan struct{}),
 	}
 	genesis := base.ChainParams().GenesisBlock.Header
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash: genesis.BlockHash(),
