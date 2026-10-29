@@ -100,6 +100,14 @@ func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 // scheduleRetry sends a continuation after retryInterval, unless the
 // actor stops first.
 func (a *RescanActor) scheduleRetry() {
+	// Once Stop has cancelled the actor, a turn that outlived the stop
+	// barrier must not add to asyncWG while WaitForShutdown may already be
+	// waiting on it. Stop cancels before it returns, so a retry added
+	// after this check is still added before WaitForShutdown can run.
+	if a.ctx.Err() != nil {
+		return
+	}
+
 	a.asyncWG.Add(1)
 	go func() {
 		defer a.asyncWG.Done()
@@ -133,7 +141,9 @@ func (a *RescanActor) handleStop(
 func (a *RescanActor) handleSubscriptionFailed(actorCtx context.Context,
 	msg *subscriptionFailedMsg) fn.Result[RescanActorResp] {
 
-	if a.ctx.Err() != nil || a.machine.CurrentState().IsTerminal() {
+	// Only one subscriptionFailedMsg is ever sent: Start sends it instead
+	// of starting the bridge, or the bridge sends it and exits.
+	if a.ctx.Err() != nil {
 		return fn.Ok[RescanActorResp](&rescanActorAck{})
 	}
 

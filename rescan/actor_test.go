@@ -486,7 +486,11 @@ func TestRescanActorStopBeforeStart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		actor, chain := newLifecycleActor(t)
 
+		// No mailbox runs yet, so Stop must not wait for a barrier
+		// nothing can answer.
+		begin := time.Now()
 		actor.Stop()
+		require.Less(t, time.Since(begin), stopTimeout)
 		actor.Start()
 		actor.WaitForShutdown()
 
@@ -558,6 +562,11 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		state, err := actor.CurrentState()
 		require.NoError(t, err)
 		require.IsType(t, &StateTerminal{}, state)
+
+		// The mailbox still runs, but an update is never scanned, so
+		// it must fail rather than report success.
+		err = actor.AddWatchAddrs(nil, nil, nil)
+		require.ErrorIs(t, err, errRescanStopped)
 	})
 }
 

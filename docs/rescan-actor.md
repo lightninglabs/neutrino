@@ -23,7 +23,7 @@ stateDiagram-v2
     Current --> Rewinding: AddWatchAddrs below the cursor
     Rewinding --> Rewinding: batch above the target, or cursor disconnect
     Rewinding --> Syncing: cursor reaches the target
-    Initializing --> Terminal: Stop
+    Initializing --> Terminal: Stop, or subscription fails
     Syncing --> Terminal: Stop, or subscription fails
     Current --> Terminal: Stop, or subscription fails
     Rewinding --> Terminal: Stop, or subscription fails
@@ -47,8 +47,9 @@ stateDiagram-v2
   continuation, and reports a disconnect for every block above the target.
   It then hands the cursor to Syncing with `Scanning` set, so the rescanned
   blocks are checked even if they predate the wallet birthday.
-- **Terminal** ignores everything. `Stop` moves the rescan here, and so does
-  a failed subscription.
+- **Terminal** ignores everything except a watch-list update, which fails
+  with an error since it would never be scanned. `Stop` moves the rescan
+  here, and so does a failed subscription.
 
 Syncing, Current and Rewinding undo the cursor block on a disconnect
 notification that names it, and ignore any other disconnect. Initializing
@@ -111,7 +112,8 @@ out, and a call to `Stop` stalls for a second.
 `OnError` is for observation only. A Syncing or Rewinding batch that fails is
 reported there and retried by the actor after three seconds, so a caller must
 not build its own retry on it. The one error after which the rescan stops is
-a failed subscription, and the state is then `StateTerminal`.
+a failed subscription, and the state is then `StateTerminal`. A later
+`AddWatchAddrs` returns an error.
 
 The neutrino package does not register the rescan logger, because that would
 be an import cycle. The rescan's logs are silent until the embedding program

@@ -1,3 +1,8 @@
+6159e58 kept retrying a live block's successors after the block failed.
+That retry path is gone: Current now falls back to Syncing. This patch
+makes Current keep its cursor and drop the block instead, which strands
+the block and its successors the same way.
+
 diff --git a/rescan/state_current.go b/rescan/state_current.go
 --- a/rescan/state_current.go
 +++ b/rescan/state_current.go

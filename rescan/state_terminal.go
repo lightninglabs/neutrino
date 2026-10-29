@@ -1,6 +1,13 @@
 package rescan
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// errRescanStopped is returned for a watch-list update that reaches a rescan
+// that has already stopped, so the caller does not mistake it for applied.
+var errRescanStopped = errors.New("rescan has stopped")
 
 // StateTerminal is the terminal state of the rescan FSM. Every other state
 // moves here on StopEvent, which the actor sends when Stop runs and when the
@@ -10,11 +17,17 @@ type StateTerminal struct{}
 
 // ProcessEvent leaves the state unchanged. It is still called for messages
 // that were already in the mailbox, such as a retry or a notification that
-// arrived just before the stop.
+// arrived just before the stop, and, after a failed subscription, for later
+// requests. A watch-list update fails with errRescanStopped, since it will
+// never be scanned.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateTerminal) ProcessEvent(_ context.Context, _ RescanEvent,
+func (s *StateTerminal) ProcessEvent(_ context.Context, event RescanEvent,
 	_ *Environment) (*StateTransition, error) {
+
+	if _, ok := event.(AddWatchAddrsEvent); ok {
+		return nil, errRescanStopped
+	}
 
 	return transition(s), nil
 }

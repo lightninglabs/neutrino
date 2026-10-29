@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -142,6 +143,10 @@ type RescanActor struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 
+	// started is set once Start has started the mailbox, so Stop knows
+	// whether a barrier request can be answered.
+	started atomic.Bool
+
 	// actor hosts the mailbox, and ref is its reference. Both are fixed
 	// at construction, so every method can use them without a lock.
 	actor *lndactor.Actor[RescanActorMsg, RescanActorResp]
@@ -232,6 +237,7 @@ func (a *RescanActor) Start() {
 		}
 
 		a.machine.Start(a.ctx)
+		a.started.Store(true)
 		a.actor.Start()
 
 		if err := a.startBridge(); err != nil {
@@ -251,14 +257,20 @@ func (a *RescanActor) Stop() {
 		// Cancel a network query before waiting for the actor mailbox.
 		a.cancel()
 
-		stopCtx, cancel := context.WithTimeout(
-			context.Background(), stopTimeout,
-		)
-		result := a.ref.Ask(stopCtx, &stopRescanMsg{}).Await(stopCtx)
-		cancel()
-		if result.IsErr() {
-			log.Debugf("RescanActor: graceful stop failed: %v",
-				result.Err())
+		// Wait for the turn in flight, if the mailbox ever started.
+		// Before Start nothing would answer, so the barrier would only
+		// cost the full stopTimeout.
+		if a.started.Load() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), stopTimeout,
+			)
+			result := a.ref.Ask(stopCtx, &stopRescanMsg{}).
+				Await(stopCtx)
+			cancel()
+			if result.IsErr() {
+				log.Debugf("RescanActor: graceful stop "+
+					"failed: %v", result.Err())
+			}
 		}
 
 		a.actor.Stop()
