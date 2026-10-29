@@ -121,12 +121,10 @@ type RescanActor struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 
-	mu         sync.RWMutex
-	startErr   error
-	actorID    string
-	serviceKey lndactor.ServiceKey[RescanActorMsg, RescanActorResp]
-	actorRef   lndactor.ActorRef[RescanActorMsg, RescanActorResp]
-	system     *lndactor.ActorSystem
+	// actor hosts the mailbox, and ref is its reference. Both are fixed
+	// at construction, so every method can use them without a lock.
+	actor *lndactor.Actor[RescanActorMsg, RescanActorResp]
+	ref   lndactor.ActorRef[RescanActorMsg, RescanActorResp]
 
 	bridgeMu     sync.Mutex
 	bridgeCancel context.CancelFunc
@@ -192,110 +190,71 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 		},
 	)
 
-	return &RescanActor{
-		machine:    machine,
-		cfg:        cfg,
-		ctx:        ctx,
-		cancel:     cancel,
-		actorID:    RescanActorServiceKeyName,
-		serviceKey: RescanActorServiceKey(),
+	a := &RescanActor{
+		machine: machine,
+		cfg:     cfg,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
+
+	act, err := lndactor.NewActor(lndactor.ActorConfig[
+		RescanActorMsg, RescanActorResp,
+	]{
+		ID:          rescanActorID,
+		Behavior:    a,
+		MailboxSize: mailboxSize,
+	})
+	if err != nil {
+		// NewActor fails only for an empty ID or a nil behavior, and
+		// both are fixed here.
+		panic(err)
+	}
+	a.actor = act
+	a.ref = act.Ref()
+
+	return a
 }
 
-// Start begins the rescan actor. It starts the FSM, spawns the actor runtime,
-// and enqueues the initial block-processing message through the mailbox.
+// Start begins the rescan actor. It starts the FSM and the mailbox,
+// subscribes to block notifications, and enqueues the first batch. Start does
+// nothing once Stop has run.
 func (a *RescanActor) Start() {
 	a.startOnce.Do(func() {
-		a.machine.Start(a.ctx)
-
-		system := lndactor.NewActorSystem()
-		ref, err := a.serviceKey.Spawn(
-			system,
-			a.actorID,
-			a,
-		)
-		if err != nil {
-			log.Errorf(
-				"RescanActor: spawn failed: %v",
-				err,
-			)
-
-			a.mu.Lock()
-			a.startErr = err
-			a.system = system
-			a.mu.Unlock()
-
-			a.machine.Stop()
-			_ = system.Shutdown()
-
+		if a.ctx.Err() != nil {
 			return
 		}
 
-		a.mu.Lock()
-		a.actorRef = ref
-		a.system = system
-		a.mu.Unlock()
+		a.machine.Start(a.ctx)
+		a.actor.Start()
 
 		if a.startBridge(0) {
-			ref.Tell(
-				context.Background(),
-				&processNextBlockMsg{},
-			)
+			a.ref.Tell(a.ctx, &processNextBlockMsg{})
 		}
 	})
 }
 
-// Stop signals the rescan actor to shut down. It asks the mailbox to process a
-// stop message so shutdown side effects are serialized with the rest of the
-// actor's work, then tears down the runtime and FSM.
+// Stop signals the rescan actor to shut down. It cancels in-flight chain
+// queries, waits briefly for the mailbox to finish its current turn and
+// record the stop, then stops the mailbox, the subscription and the FSM. Stop
+// may run before, during or after Start.
 func (a *RescanActor) Stop() {
 	a.stopOnce.Do(func() {
 		// Cancel a network query before waiting for the actor mailbox.
 		a.cancel()
-		ref, system, startErr := a.runtimeSnapshot()
-		if startErr == nil && ref != nil {
-			stopCtx, cancel := context.WithTimeout(
-				context.Background(),
-				time.Second,
-			)
-			result := ref.Ask(stopCtx, &stopRescanMsg{}).
-				Await(stopCtx)
-			cancel()
 
-			if result.IsErr() {
-				log.Debugf(
-					"RescanActor: graceful stop "+
-						"failed: %v",
-					result.Err(),
-				)
-			}
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(), time.Second,
+		)
+		result := a.ref.Ask(stopCtx, &stopRescanMsg{}).Await(stopCtx)
+		cancel()
+		if result.IsErr() {
+			log.Debugf("RescanActor: graceful stop failed: %v",
+				result.Err())
 		}
 
+		a.actor.Stop()
 		a.cancelBridge()
-
-		if system != nil {
-			if ref != nil {
-				a.serviceKey.Unregister(
-					system,
-					ref,
-				)
-			}
-
-			if err := system.Shutdown(); err != nil {
-				log.Debugf(
-					"RescanActor: actor system shutdown "+
-						"failed: %v",
-					err,
-				)
-			}
-		}
-
 		a.machine.Stop()
-
-		a.mu.Lock()
-		a.actorRef = nil
-		a.system = nil
-		a.mu.Unlock()
 	})
 }
 
@@ -313,11 +272,6 @@ func (a *RescanActor) AddWatchAddrs(
 	rewindTo *uint32,
 ) error {
 
-	ref, err := a.requireActorRef()
-	if err != nil {
-		return err
-	}
-
 	req := newAddWatchAddrsMsg(addrs, inputs, rewindTo)
 
 	reqCtx, cancel := context.WithTimeout(
@@ -325,7 +279,7 @@ func (a *RescanActor) AddWatchAddrs(
 	)
 	defer cancel()
 
-	result := ref.Ask(reqCtx, req).Await(reqCtx)
+	result := a.ref.Ask(reqCtx, req).Await(reqCtx)
 	if result.IsErr() {
 		return result.Err()
 	}
@@ -336,17 +290,12 @@ func (a *RescanActor) AddWatchAddrs(
 // CurrentState returns the current FSM state after all prior mailbox messages
 // have been processed.
 func (a *RescanActor) CurrentState() (RescanState, error) {
-	ref, err := a.requireActorRef()
-	if err != nil {
-		return nil, err
-	}
-
 	queryCtx, cancel := context.WithTimeout(
 		context.Background(), 5*time.Second,
 	)
 	defer cancel()
 
-	result := ref.Ask(queryCtx, &currentStateReq{}).
+	result := a.ref.Ask(queryCtx, &currentStateReq{}).
 		Await(queryCtx)
 	if result.IsErr() {
 		return nil, result.Err()
@@ -360,32 +309,6 @@ func (a *RescanActor) CurrentState() (RescanState, error) {
 	}
 
 	return resp.State, nil
-}
-
-func (a *RescanActor) runtimeSnapshot() (
-	lndactor.ActorRef[RescanActorMsg, RescanActorResp],
-	*lndactor.ActorSystem, error) {
-
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	return a.actorRef, a.system, a.startErr
-}
-
-func (a *RescanActor) requireActorRef() (
-	lndactor.ActorRef[RescanActorMsg, RescanActorResp], error) {
-
-	ref, _, startErr := a.runtimeSnapshot()
-	if startErr != nil {
-		return nil, startErr
-	}
-	if ref == nil {
-		return nil, fmt.Errorf(
-			"rescan actor not started",
-		)
-	}
-
-	return ref, nil
 }
 
 // Receive processes mailbox messages one at a time in the lnd actor runtime.
@@ -507,12 +430,7 @@ func (a *RescanActor) scheduleRetry(msg RescanActorMsg) {
 		case <-timer.C:
 		}
 
-		ref, err := a.requireActorRef()
-		if err != nil {
-			return
-		}
-
-		ref.Tell(a.ctx, retryMsg)
+		a.ref.Tell(a.ctx, retryMsg)
 	}()
 }
 
@@ -628,15 +546,11 @@ func (a *RescanActor) enqueueContinuation() {
 	if a.continuationPending {
 		return
 	}
-	ref, err := a.requireActorRef()
-	if err != nil {
-		return
-	}
 	a.continuationPending = true
 	a.asyncWG.Add(1)
 	go func() {
 		defer a.asyncWG.Done()
-		ref.Tell(a.ctx, &processNextBlockMsg{})
+		a.ref.Tell(a.ctx, &processNextBlockMsg{})
 	}()
 }
 
@@ -648,6 +562,13 @@ func (a *RescanActor) startBridge(bestHeight uint32) bool {
 
 	if a.sub != nil {
 		return true
+	}
+
+	// Stop cancels the context before it cancels the bridge under this
+	// lock, so checking it here means a Start racing Stop either leaves
+	// the subscription for Stop to cancel or never creates it.
+	if a.ctx.Err() != nil {
+		return false
 	}
 
 	bridgeCtx, bridgeCancel := context.WithCancel(a.ctx)
@@ -714,15 +635,7 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 					"RescanActor: subscription closed",
 				)
 
-				ref, err := a.requireActorRef()
-				if err == nil {
-					ref.Tell(
-						ctx,
-						&subscriptionClosedMsg{
-							Sub: sub,
-						},
-					)
-				}
+				a.ref.Tell(ctx, &subscriptionClosedMsg{Sub: sub})
 
 				return
 			}
@@ -749,12 +662,7 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 				continue
 			}
 
-			ref, err := a.requireActorRef()
-			if err != nil {
-				return
-			}
-
-			ref.Tell(ctx, msg)
+			a.ref.Tell(ctx, msg)
 		}
 	}
 }

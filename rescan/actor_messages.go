@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	// RescanActorServiceKeyName is the receptionist key used to discover a
-	// rescan actor within its actor system.
-	RescanActorServiceKeyName = "neutrino-rescan"
+	// rescanActorID is the ID of the actor that hosts a rescan.
+	rescanActorID = "neutrino-rescan"
+
+	// mailboxSize is the capacity of the rescan actor's mailbox.
+	mailboxSize = 100
 )
 
 // RescanActorMsg is the sealed interface for all mailbox messages handled by
@@ -28,16 +30,6 @@ type RescanActorMsg interface {
 // actor runtime.
 type RescanActorResp interface {
 	rescanActorRespSealed()
-}
-
-// RescanActorServiceKey returns the service key used to spawn and discover the
-// rescan actor within an actor system.
-func RescanActorServiceKey() lndactor.ServiceKey[
-	RescanActorMsg, RescanActorResp] {
-
-	return lndactor.NewServiceKey[RescanActorMsg, RescanActorResp](
-		RescanActorServiceKeyName,
-	)
 }
 
 type processNextBlockMsg struct {

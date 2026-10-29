@@ -1,8 +1,11 @@
 package rescan
 
 import (
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -429,4 +432,98 @@ func TestWatchStateClone(t *testing.T) {
 	clone.List = append(clone.List, []byte{0x03})
 	require.Len(t, original.List, 1)
 	require.Len(t, clone.List, 2)
+}
+
+// lifecycleChain counts live subscriptions and runs an optional hook inside
+// Subscribe, so a test can stop the actor while Start is subscribing.
+type lifecycleChain struct {
+	*mockChainSource
+
+	hook       func()
+	subscribed atomic.Int32
+	live       atomic.Int32
+}
+
+func (c *lifecycleChain) Subscribe(uint32) (*blockntfns.Subscription,
+	error) {
+
+	if c.hook != nil {
+		c.hook()
+	}
+	c.subscribed.Add(1)
+	c.live.Add(1)
+
+	var once sync.Once
+	return &blockntfns.Subscription{
+		Notifications: make(chan blockntfns.BlockNtfn),
+		Cancel: func() {
+			once.Do(func() { c.live.Add(-1) })
+		},
+	}, nil
+}
+
+// newLifecycleActor returns an actor over a lifecycleChain.
+func newLifecycleActor(t *testing.T) (*RescanActor, *lifecycleChain) {
+	t.Helper()
+
+	chain := &lifecycleChain{mockChainSource: newMockChain(3)}
+	params := chain.ChainParams()
+	actor := NewRescanActor(ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash: *params.GenesisHash,
+		},
+		StartHeader: params.GenesisBlock.Header,
+	})
+
+	return actor, chain
+}
+
+// TestRescanActorStopBeforeStart checks that Stop before Start leaves nothing
+// running: Start then neither subscribes nor starts the mailbox. The synctest
+// bubble fails the test if any goroutine is left behind.
+func TestRescanActorStopBeforeStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		actor, chain := newLifecycleActor(t)
+
+		actor.Stop()
+		actor.Start()
+		actor.WaitForShutdown()
+
+		require.Zero(t, chain.subscribed.Load())
+		_, err := actor.CurrentState()
+		require.Error(t, err)
+	})
+}
+
+// TestRescanActorStopDuringStart checks that a Stop that runs while Start is
+// subscribing still cancels the subscription Start creates, and that nothing
+// keeps running afterwards.
+func TestRescanActorStopDuringStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		actor, chain := newLifecycleActor(t)
+
+		stopped := make(chan struct{})
+		chain.hook = func() {
+			go func() {
+				actor.Stop()
+				close(stopped)
+			}()
+
+			// Return only once Stop has cancelled the actor, so
+			// the subscription is created after Stop began.
+			for actor.ctx.Err() == nil {
+				runtime.Gosched()
+			}
+		}
+
+		actor.Start()
+		<-stopped
+		actor.WaitForShutdown()
+
+		require.Equal(t, int32(1), chain.subscribed.Load())
+		require.Zero(t, chain.live.Load(), "subscription leaked")
+		_, err := actor.CurrentState()
+		require.Error(t, err)
+	})
 }
