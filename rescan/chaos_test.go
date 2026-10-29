@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -103,7 +102,7 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 	wg.Wait()
 
 	// Verify the actor is in Current state and has addresses.
-	state, err := actor.CurrentState(context.Background())
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 
 	cur, ok := state.(*StateCurrent)
@@ -179,7 +178,7 @@ func TestChaosBlockNotificationBurst(t *testing.T) {
 		"all burst blocks should be processed")
 
 	// Verify state is at the new tip.
-	state, err := actor.CurrentState(context.Background())
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 
 	cur, ok := state.(*StateCurrent)

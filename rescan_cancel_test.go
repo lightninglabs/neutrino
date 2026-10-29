@@ -2,7 +2,6 @@ package neutrino
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -97,7 +96,7 @@ func TestRescanQuitCancelsProductionFilterQuery(t *testing.T) {
 	close(quit)
 	select {
 	case err := <-errChan:
-		require.True(t, errors.Is(err, ErrRescanExit), err)
+		require.ErrorIs(t, err, ErrRescanExit)
 	case <-time.After(5 * time.Second):
 		t.Fatal("rescan shutdown did not cancel the production query")
 	}

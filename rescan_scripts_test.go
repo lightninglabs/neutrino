@@ -20,7 +20,7 @@ import (
 // addNewBlockWithTxs advances the chain by one block holding txs, with a
 // filter built over their outputs and prevScripts, and notifies it.
 func (c *mockChainSource) addNewBlockWithTxs(prevScripts [][]byte,
-	txs ...*wire.MsgTx) headerfs.BlockStamp {
+	txs ...*wire.MsgTx) {
 
 	header := c.nextHeader()
 	msg := wire.NewMsgBlock(header)
@@ -59,8 +59,6 @@ func (c *mockChainSource) addNewBlockWithTxs(prevScripts [][]byte,
 	c.mu.Unlock()
 
 	c.notify(stamp)
-
-	return stamp
 }
 
 // notify sends a connect notification for the block at stamp.

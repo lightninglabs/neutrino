@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -169,7 +168,7 @@ func waitCurrent(t *testing.T, actor *RescanActor, height int32) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		if err != nil {
 			return false
 		}
@@ -295,7 +294,7 @@ func TestActorEndBlock(t *testing.T) {
 		"fc 1 0", "bc 1", "fc 2 0", "bc 2", "fc 3 0", "bc 3",
 	}, log.take())
 
-	state, err := actor.CurrentState(context.Background())
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 	require.IsType(t, &StateTerminal{}, state)
 }

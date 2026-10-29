@@ -198,7 +198,6 @@ func (a *RescanActor) scheduleRetry() {
 // handleStop moves the FSM to Terminal. Stop sends it as a barrier: its
 // answer means the turn that was in flight when Stop began has finished.
 func (a *RescanActor) handleStop() fn.Result[RescanActorResp] {
-
 	return a.handleFSMEvent(StopEvent{})
 }
 

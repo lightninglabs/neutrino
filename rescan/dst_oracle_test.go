@@ -336,6 +336,7 @@ func (o *dstTruth) blockConnected(hash *chainhash.Hash, height int32) {
 	top := o.top()
 	if height != int32(top.height)+1 ||
 		pair.header.PrevBlock != top.hash {
+
 		o.fail(invContinuity, "connect %d %v does not extend tip %d "+
 			"%v", height, *hash, top.height, top.hash)
 		return

@@ -385,7 +385,6 @@ func (c *mockChainSource) Subscribe(
 	// A height of zero asks for no backlog.
 	for i := bestHeight + 1; bestHeight != 0 &&
 		i <= uint32(c.bestBlock.Height); i++ {
-
 		hash := c.blockHashesByHeight[i]
 		header := c.blockHeaders[*hash]
 		c.ntfnChan <- blockntfns.NewBlockConnected(*header, i)

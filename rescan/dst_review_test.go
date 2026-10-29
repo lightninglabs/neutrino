@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -65,7 +64,7 @@ func TestDSTCanonicalRetrySuccessor(t *testing.T) {
 			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -142,7 +141,7 @@ func runDSTCatchupMailboxBurst(t *testing.T, seed byte) []dstEvent {
 			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -216,7 +215,7 @@ func TestDSTInitializingRewind(t *testing.T) {
 			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -276,7 +275,7 @@ func TestDSTWatchUpdateAfterTimeout(t *testing.T) {
 		close(release)
 		synctest.Wait()
 		require.NoError(t, <-done)
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -334,7 +333,7 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 		<-entered
 		close(release)
 		synctest.Wait()
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		_, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -344,7 +343,7 @@ func TestDSTDelayedConnectAfterCatchup(t *testing.T) {
 			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
-		state, err = actor.CurrentState(context.Background())
+		state, err = actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -400,7 +399,7 @@ func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
 		actor.Start()
 		defer func() { actor.Stop(); actor.WaitForShutdown() }()
 		synctest.Wait()
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok := state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)
@@ -451,7 +450,7 @@ func TestDSTDelayedOrphanConnectRejectsCachedFilter(t *testing.T) {
 			time.Sleep(retryInterval)
 			synctest.Wait()
 		}
-		state, err = actor.CurrentState(context.Background())
+		state, err = actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		current, ok = state.(*StateCurrent)
 		require.True(t, ok, "state %T", state)

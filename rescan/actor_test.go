@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -152,7 +151,7 @@ func TestRescanActorLifecycle(t *testing.T) {
 		"should have connected at least 1 block")
 
 	// Should be in Current state.
-	state, err := actor.CurrentState(context.Background())
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 	_, ok := state.(*StateCurrent)
 	require.True(t, ok, "expected StateCurrent, got %T", state)
@@ -204,7 +203,7 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 
 	// Wait for the address to appear in state.
 	require.Eventually(t, func() bool {
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		if err != nil {
 			return false
 		}
@@ -362,7 +361,7 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 
 	// Wait for the block to be processed.
 	require.Eventually(t, func() bool {
-		state, _ := actor.CurrentState(context.Background())
+		state, _ := actor.CurrentState(t.Context())
 		if cur, ok := state.(*StateCurrent); ok {
 			return cur.CurStamp.Height == newBest.Height
 		}
@@ -497,7 +496,7 @@ func TestRescanActorStopBeforeStart(t *testing.T) {
 		actor.WaitForShutdown()
 
 		require.Zero(t, chain.subscribed.Load())
-		_, err := actor.CurrentState(context.Background())
+		_, err := actor.CurrentState(t.Context())
 		require.Error(t, err)
 	})
 }
@@ -529,7 +528,7 @@ func TestRescanActorStopDuringStart(t *testing.T) {
 
 		require.Equal(t, int32(1), chain.subscribed.Load())
 		require.Zero(t, chain.live.Load(), "subscription leaked")
-		_, err := actor.CurrentState(context.Background())
+		_, err := actor.CurrentState(t.Context())
 		require.Error(t, err)
 	})
 }
@@ -561,7 +560,7 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		synctest.Wait()
 
 		require.Equal(t, int32(1), errs.Load())
-		state, err := actor.CurrentState(context.Background())
+		state, err := actor.CurrentState(t.Context())
 		require.NoError(t, err)
 		require.IsType(t, &StateTerminal{}, state)
 
@@ -619,7 +618,7 @@ func TestNewRescanActorRejectsInvalidAddress(t *testing.T) {
 		actor.WaitForShutdown()
 	})
 
-	state, err := actor.CurrentState(context.Background())
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 	watch := cursorOf(t, state).Watch
 	require.Len(t, watch.Addrs, 1)
