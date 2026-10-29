@@ -70,18 +70,18 @@ func SpendsWatchedInput(tx *btcutil.Tx, inputs []InputWithScript) bool {
 	return false
 }
 
-// PaysWatchedScript returns an input for every output of tx that pays one of
-// the watched address scripts, keyed by the script bytes, so the caller can
-// watch for the spend of each. It returns nil if tx pays none of them.
+// PaysWatchedScript returns an input for every output of tx whose script
+// watched reports as a watched address script, so the caller can watch for
+// the spend of each. It returns nil if tx pays none of them.
 //
-// The scripts must hold only address scripts. The script of a watched input
-// must not be in it, since paying that script is not a payment to the wallet.
+// watched must report only address scripts. The script of a watched input
+// must not count, since paying that script is not a payment to the wallet.
 func PaysWatchedScript(tx *btcutil.Tx,
-	scripts map[string]struct{}) []InputWithScript {
+	watched func(script []byte) bool) []InputWithScript {
 
 	var paid []InputWithScript
 	for outIdx, out := range tx.MsgTx().TxOut {
-		if _, ok := scripts[string(out.PkScript)]; !ok {
+		if !watched(out.PkScript) {
 			continue
 		}
 

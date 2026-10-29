@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -17,6 +18,15 @@ import (
 // WatchState holds the mutable watch list state that is carried within FSM
 // state structs. This groups the watch-related fields that need to travel
 // together during state transitions.
+//
+// The watch list only grows, and a state's successor extends it in place:
+// ApplyUpdate and ExtractBlockMatches append to the slices they were given
+// rather than copy them, so an update costs O(1) amortized however long the
+// list is. That is safe because a state's slices are read only up to their
+// own lengths, which an append past them never changes, and because a state
+// has at most one successor that lives on: the FSM commits one transition
+// per event, and a transition that fails appends nothing it keeps. A watch
+// state handed outside the FSM must be a Clone, which owns its memory.
 type WatchState struct {
 	// Addrs is the set of addresses being watched for incoming payments.
 	Addrs []address.Address
@@ -28,59 +38,77 @@ type WatchState struct {
 	// This is the union of scripts derived from Addrs and Inputs.
 	List [][]byte
 
-	// addrScripts indexes payment scripts for matching transaction outputs.
-	addrScripts map[string]struct{}
+	// addrList holds the payment script of each of Addrs, index for
+	// index. It grows with Addrs.
+	addrList [][]byte
+
+	// addrScripts maps a payment script to the index in addrList where
+	// it was first added. Successors share and extend it, so an entry
+	// counts for a state only if its index is within that state's
+	// addrList and addrList holds the same script there. A nil map is
+	// built lazily from addrList.
+	addrScripts map[string]int
 }
 
-// Clone returns a deep copy of the WatchState so that state transitions
-// don't share underlying slice memory.
+// Clone returns a deep copy of the WatchState that shares no memory with it.
+// Every slice of the copy has its length as its capacity, so appending to the
+// copy can never write into the original. The copy builds its own script
+// lookup on first use.
 func (ws *WatchState) Clone() WatchState {
 	clone := WatchState{
-		Addrs:  make([]address.Address, len(ws.Addrs)),
-		Inputs: copyInputsWithScripts(ws.Inputs),
-		List:   make([][]byte, len(ws.List)),
+		Addrs:    append([]address.Address(nil), ws.Addrs...),
+		Inputs:   copyInputsWithScripts(ws.Inputs),
+		List:     copyScripts(ws.List),
+		addrList: copyScripts(ws.addrList),
 	}
-	copy(clone.Addrs, ws.Addrs)
-	for i, script := range ws.List {
-		clone.List[i] = append([]byte(nil), script...)
-	}
-	if ws.addrScripts != nil {
-		clone.addrScripts = make(
-			map[string]struct{},
-			len(ws.addrScripts),
-		)
-		for script := range ws.addrScripts {
-			clone.addrScripts[script] = struct{}{}
-		}
-	}
+	clone.Addrs = clone.Addrs[:len(clone.Addrs):len(clone.Addrs)]
 
 	return clone
 }
 
+// copyScripts returns a deep copy of scripts whose capacity is its length.
+func copyScripts(scripts [][]byte) [][]byte {
+	if scripts == nil {
+		return nil
+	}
+
+	copied := make([][]byte, len(scripts))
+	for i, script := range scripts {
+		copied[i] = append([]byte(nil), script...)
+	}
+
+	return copied
+}
+
 // ApplyUpdate adds the addresses and inputs from an AddWatchAddrsEvent
 // to the watch state. It converts addresses to pkScripts and appends
-// everything to the appropriate slices. It returns a new WatchState and leaves
-// the original unchanged, or returns the original and an error if an address
-// has no payment script.
+// everything to the appropriate slices. It returns the extended WatchState,
+// whose slices may share memory with the original's but leave everything the
+// original reads unchanged, or returns the original and an error if an
+// address has no payment script, in which case nothing was appended.
 func (ws *WatchState) ApplyUpdate(
 	event *AddWatchAddrsEvent) (WatchState, error) {
 
-	newWS := ws.Clone()
-	if err := newWS.cacheAddrScripts(); err != nil {
-		return *ws, err
-	}
-
-	newWS.Addrs = append(newWS.Addrs, event.Addrs...)
-	newWS.Inputs = append(newWS.Inputs, event.Inputs...)
-
-	for _, addr := range event.Addrs {
+	// Convert every address first, so a bad one fails the update before
+	// anything is appended.
+	scripts := make([][]byte, len(event.Addrs))
+	for i, addr := range event.Addrs {
 		script, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			return *ws, err
 		}
+		scripts[i] = script
+	}
 
+	newWS := *ws
+	newWS.cacheAddrScripts()
+
+	newWS.Addrs = append(newWS.Addrs, event.Addrs...)
+	newWS.Inputs = append(newWS.Inputs, event.Inputs...)
+
+	for _, script := range scripts {
 		newWS.List = append(newWS.List, script)
-		newWS.addrScripts[string(script)] = struct{}{}
+		newWS.addAddrScript(script)
 	}
 
 	for _, input := range event.Inputs {
@@ -90,21 +118,39 @@ func (ws *WatchState) ApplyUpdate(
 	return newWS, nil
 }
 
-// cacheAddrScripts builds the output lookup once for this watch state.
-func (ws *WatchState) cacheAddrScripts() error {
+// cacheAddrScripts builds the payment script lookup if this watch state has
+// none yet.
+func (ws *WatchState) cacheAddrScripts() {
 	if ws.addrScripts != nil {
-		return nil
+		return
 	}
-	ws.addrScripts = make(map[string]struct{}, len(ws.Addrs))
-	for _, addr := range ws.Addrs {
-		script, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-			ws.addrScripts = nil
-			return err
+
+	ws.addrScripts = make(map[string]int, len(ws.addrList))
+	for i, script := range ws.addrList {
+		if _, ok := ws.addrScripts[string(script)]; !ok {
+			ws.addrScripts[string(script)] = i
 		}
-		ws.addrScripts[string(script)] = struct{}{}
 	}
-	return nil
+}
+
+// addAddrScript appends the payment script of an address just appended to
+// Addrs, and indexes it unless this state already watches it.
+func (ws *WatchState) addAddrScript(script []byte) {
+	if !ws.watchesScript(script) {
+		ws.addrScripts[string(script)] = len(ws.addrList)
+	}
+	ws.addrList = append(ws.addrList, script)
+}
+
+// watchesScript reports whether script is the payment script of one of this
+// state's watched addresses. An entry another successor added, past this
+// state's addrList or for a different script at that index, does not count.
+func (ws *WatchState) watchesScript(script []byte) bool {
+	ws.cacheAddrScripts()
+
+	i, ok := ws.addrScripts[string(script)]
+	return ok && i < len(ws.addrList) &&
+		bytes.Equal(ws.addrList[i], script)
 }
 
 // FetchAndMatchFilter fetches the compact filter for the given block hash
@@ -138,7 +184,6 @@ func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 	curStamp *headerfs.BlockStamp, filter *gcs.Filter,
 	ws WatchState) ([]*btcutil.Tx, []TxMatch, WatchState, error) {
 
-	ws = ws.Clone()
 	block, err := chain.GetBlock(ctx, curStamp.Hash)
 	if err != nil {
 		return nil, nil, ws, err
@@ -146,10 +191,6 @@ func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 	if block == nil {
 		return nil, nil, ws, fmt.Errorf("couldn't get block %d (%s) "+
 			"from network", curStamp.Height, curStamp.Hash)
-	}
-
-	if err := ws.cacheAddrScripts(); err != nil {
-		return nil, nil, ws, err
 	}
 
 	// Verify the filter against the downloaded block.
@@ -179,7 +220,7 @@ func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 		// that pays a watched address becomes a watched input. The
 		// spend check runs first, so a transaction never matches as
 		// a spend of its own outputs.
-		paid := filtermatch.PaysWatchedScript(tx, ws.addrScripts)
+		paid := filtermatch.PaysWatchedScript(tx, ws.watchesScript)
 		for _, input := range paid {
 			ws.Inputs = append(ws.Inputs, input)
 			ws.List = append(ws.List, input.PkScript)

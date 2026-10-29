@@ -178,11 +178,11 @@ func TestWatchedScriptCacheTracksUpdates(t *testing.T) {
 			PkScript: script1,
 		}, {PkScript: script2}, {PkScript: []byte{0x51}},
 	}})
-	inputs := filtermatch.PaysWatchedScript(tx, updated.addrScripts)
+	inputs := filtermatch.PaysWatchedScript(tx, updated.watchesScript)
 	require.Len(t, inputs, 2)
 	require.Equal(t, uint32(0), inputs[0].OutPoint.Index)
 	require.Equal(t, uint32(1), inputs[1].OutPoint.Index)
-	inputs = filtermatch.PaysWatchedScript(tx, watch.addrScripts)
+	inputs = filtermatch.PaysWatchedScript(tx, watch.watchesScript)
 	require.Len(t, inputs, 1)
 }
 

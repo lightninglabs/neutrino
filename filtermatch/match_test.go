@@ -16,7 +16,11 @@ import (
 // and no other, becomes an input to watch, in output order.
 func TestPaysWatchedScript(t *testing.T) {
 	a, b, other := []byte{0x51, 1}, []byte{0x51, 2}, []byte{0x51, 3}
-	scripts := map[string]struct{}{string(a): {}, string(b): {}}
+	set := map[string]struct{}{string(a): {}, string(b): {}}
+	scripts := func(script []byte) bool {
+		_, ok := set[string(script)]
+		return ok
+	}
 
 	msg := wire.NewMsgTx(2)
 	for _, script := range [][]byte{a, other, b, a} {
@@ -79,13 +83,17 @@ func TestSpendsWatchedInput(t *testing.T) {
 func BenchmarkPaysWatchedScript(b *testing.B) {
 	for _, size := range []int{1000, 10000} {
 		b.Run(fmt.Sprintf("addresses=%d", size), func(b *testing.B) {
-			scripts := make(map[string]struct{}, size)
+			set := make(map[string]struct{}, size)
 			for i := 0; i < size; i++ {
 				script := make([]byte, 34)
 				binary.LittleEndian.PutUint64(
 					script[2:], uint64(i),
 				)
-				scripts[string(script)] = struct{}{}
+				set[string(script)] = struct{}{}
+			}
+			scripts := func(script []byte) bool {
+				_, ok := set[string(script)]
+				return ok
 			}
 			msg := wire.NewMsgTx(2)
 			for i := 0; i < 2000; i++ {

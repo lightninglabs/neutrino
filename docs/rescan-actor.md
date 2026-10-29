@@ -210,6 +210,13 @@ own, so the actor logs where the legacy loop did.
 
 ## Watch-list updates
 
+The watch list only grows. A state's successor extends its slices and its
+script index in place, so an update costs O(1) amortized however long the
+list is, as with the legacy loop's appends. A state reads its slices only up
+to its own lengths, and validates a script index entry against its own
+script list, so a successor's appends never change what an earlier state
+watches. `CurrentState` hands out a deep copy.
+
 An `AddWatchAddrs` update with no rewind applies to future scanning only. To
 cover blocks already processed or concurrent with registration, callers must
 provide a prior active-chain rewind height. Scanning resumes after that anchor.
