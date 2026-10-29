@@ -14,6 +14,7 @@ import (
 	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/pushtx"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
+	"github.com/lightninglabs/neutrino/rescan"
 	"github.com/lightninglabs/neutrino/sqldb"
 )
 
@@ -44,6 +45,7 @@ func UseLogger(logger btclog.Logger) {
 	addrmgr.UseLogger(logger)
 	blockntfns.UseLogger(logger)
 	pushtx.UseLogger(logger)
+	rescan.UseLogger(logger)
 	connmgr.UseLogger(logger)
 	querysyncwm.UseLogger(logger)
 	filterdb.UseLogger(logger)

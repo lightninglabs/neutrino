@@ -225,6 +225,13 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 			CurStamp:  cfg.StartStamp,
 			CurHeader: cfg.StartHeader,
 			Watch:     watch,
+
+			// The start block itself decides whether the first
+			// scanned block is checked, as in the legacy rescan,
+			// since a block's timestamp may precede its parent's.
+			Scanning: cfg.StartHeader.Timestamp.After(
+				cfg.StartTime,
+			),
 		}},
 		&Environment{
 			Chain:     cfg.Chain,
@@ -312,7 +319,7 @@ func (a *RescanActor) Stop() {
 		a.actor.Stop()
 		a.cancelBridge()
 		a.machine.Stop()
-		a.finish(errRescanStopped)
+		a.finish(ErrStopped)
 	})
 }
 
@@ -389,10 +396,20 @@ func (a *RescanActor) AddWatchAddrs(update WatchUpdate) error {
 
 	result := a.ref.Ask(reqCtx, req).Await(reqCtx)
 	if result.IsErr() {
-		return result.Err()
+		return stoppedErr(result.Err())
 	}
 
 	return nil
+}
+
+// stoppedErr maps the mailbox's error for a request to a stopped actor to
+// ErrStopped, and returns any other error unchanged.
+func stoppedErr(err error) error {
+	if errors.Is(err, lndactor.ErrActorTerminated) {
+		return ErrStopped
+	}
+
+	return err
 }
 
 // CurrentState returns the current FSM state after all prior mailbox messages

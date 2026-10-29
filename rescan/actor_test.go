@@ -564,7 +564,7 @@ func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
 		// The mailbox still runs, but an update is never scanned, so
 		// it must fail rather than report success.
 		err = actor.AddWatchAddrs(WatchUpdate{})
-		require.ErrorIs(t, err, errRescanStopped)
+		require.ErrorIs(t, err, ErrStopped)
 	})
 }
 

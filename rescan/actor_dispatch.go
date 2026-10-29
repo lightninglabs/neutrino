@@ -24,7 +24,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		switch msg.(type) {
 		case *stopRescanMsg, *currentStateReq:
 		default:
-			return fn.Err[RescanActorResp](errRescanStopped)
+			return fn.Err[RescanActorResp](ErrStopped)
 		}
 	}
 

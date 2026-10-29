@@ -28,7 +28,6 @@
 //
 // # Logging
 //
-// The neutrino package does not register this package's logger, since that
-// would be an import cycle. Its logs are silent until the embedding program
-// calls UseLogger.
+// neutrino.UseLogger registers this package's logger along with its own, so
+// the actor logs where the legacy rescan loop did.
 package rescan
