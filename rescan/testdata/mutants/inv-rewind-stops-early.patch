@@ -1,12 +1,13 @@
 diff --git a/rescan/state_rewinding.go b/rescan/state_rewinding.go
+index 08d8502..e510a8f 100644
 --- a/rescan/state_rewinding.go
 +++ b/rescan/state_rewinding.go
-@@ -71,7 +71,7 @@ func (s *StateRewinding) processRewind(
+@@ -85,7 +85,7 @@ func (s *StateRewinding) processRewind(
+ 	cur := s.Cursor
  
- 	for i := 0; i < env.batchSize(); i++ {
- 		// Check if we've reached the target.
--		if cur.CurStamp.Height <= int32(s.TargetHeight) {
-+		if cur.CurStamp.Height <= int32(s.TargetHeight)+1 {
- 			// Transition to syncing from this point.
- 			cur.Scanning = true
- 			return transition(
+ 	// Check if we've reached the target.
+-	if cur.CurStamp.Height <= int32(s.TargetHeight) {
++	if cur.CurStamp.Height <= int32(s.TargetHeight)+1 {
+ 		// Transition to syncing from this point.
+ 		return transition(
+ 			&StateSyncing{Cursor: cur}, ContinueOutbox{},

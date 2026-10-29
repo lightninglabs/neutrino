@@ -97,7 +97,26 @@ const (
 	// dstFaultGate holds a live filter fetch while a rewind waits in
 	// the mailbox.
 	dstFaultGate
+
+	// dstFaultNotCurrent makes IsCurrent report false for the first few
+	// calls, as a chain service that is still syncing does. No callback
+	// and no error may fire until it reports true.
+	dstFaultNotCurrent
+
+	// dstFaultStopFetch stops a second actor while its first filter
+	// fetch is in progress. The cancelled fetch must not be reported
+	// through OnError, and no callback may follow the stop.
+	dstFaultStopFetch
+
+	// dstFaultSlowBatch makes every filter fetch slow while the scan
+	// rescans the blocks a rewind undid, and sends an update in the
+	// middle of a fetch. The update must wait for that block only, not
+	// for the rest of the batch.
+	dstFaultSlowBatch
 )
+
+// dstSlowFetch is how long a filter fetch takes under dstFaultSlowBatch.
+const dstSlowFetch = 10 * time.Second
 
 // dstConfig is the decoded swarm configuration of one seed.
 type dstConfig struct {
@@ -198,6 +217,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 			w, start, startTime, w.fx.scripts[dstAddrA],
 		),
 	}
+	d.truth.src = d.src
 	d.armStartFaults()
 
 	d.actor = mustNewRescanActor(t, ActorConfig{
@@ -218,9 +238,19 @@ func (d *dstRun) enabled(fault dstFault) bool {
 	return d.cfg.faults&fault != 0
 }
 
+// notCurrentPolls returns how many IsCurrent calls report false under
+// dstFaultNotCurrent, between one and five, taken from the seed.
+func (d *dstRun) notCurrentPolls() int {
+	return 1 + len(d.ops)%5
+}
+
 // armStartFaults arms the faults that hit the initial sync.
 func (d *dstRun) armStartFaults() {
 	s := d.src
+	if d.enabled(dstFaultNotCurrent) {
+		s.notCurrent = d.notCurrentPolls()
+		s.notCurrentArmed = true
+	}
 	if d.enabled(dstFaultFilter) {
 		s.filterFail = 1
 	}
@@ -344,6 +374,9 @@ func (d *dstRun) initialSync() {
 	d.actor.Start()
 	synctest.Wait()
 	d.sleepRetries(6)
+	if d.enabled(dstFaultNotCurrent) {
+		d.sleepRetries(d.notCurrentPolls())
+	}
 
 	d.src.mu.Lock()
 	subscriptions := d.src.subscriptions
@@ -415,6 +448,94 @@ func (d *dstRun) liveReorg() {
 	require.Equal(d.t, errors, d.truth.errorCount(),
 		"obsolete retry after recovery, seed %x", d.seed)
 	d.requireAtTip("live reorg")
+}
+
+// slowBatch rewinds to two blocks above the start with every filter fetch
+// slow, and sends an empty update in the middle of the second fetch of the
+// rescan. The batch must yield to the update after the block in progress,
+// so the update waits for less than one fetch.
+func (d *dstRun) slowBatch() {
+	d.src.mu.Lock()
+	d.src.filterDelay = dstSlowFetch
+	d.src.mu.Unlock()
+
+	require.NoError(d.t, d.rewind(d.start.height+2, 0))
+	time.Sleep(dstSlowFetch + dstSlowFetch/2)
+
+	began := time.Now()
+	require.NoError(d.t, addWatch(d.actor, WatchUpdate{}))
+	waited := time.Since(began)
+
+	d.src.mu.Lock()
+	d.src.filterDelay = 0
+	d.src.mu.Unlock()
+
+	if waited > dstSlowFetch {
+		d.truth.mu.Lock()
+		d.truth.fail(invUpdateLatency, "update waited %v behind "+
+			"%v fetches", waited, dstSlowFetch)
+		d.truth.mu.Unlock()
+	}
+
+	synctest.Wait()
+	d.sleepRetries(4)
+	d.requireAtTip("slow batch")
+}
+
+// stopDuringFetch starts a second actor, holds its first filter fetch, and
+// stops it there. The stop cancels the fetch. That must not be reported
+// through OnError, and no callback may follow the stop.
+func (d *dstRun) stopDuringFetch() {
+	entered := make(chan struct{})
+	d.src.mu.Lock()
+	d.src.holdEntered = entered
+	d.src.mu.Unlock()
+
+	var (
+		stopping            atomic.Bool
+		errs, lateCallbacks atomic.Int32
+	)
+	late := mustNewRescanActor(d.t, ActorConfig{
+		Chain:       d.src,
+		StartStamp:  d.start.stamp(),
+		StartHeader: d.start.header,
+		WatchAddrs:  []address.Address{d.w.fx.addrs[dstAddrA]},
+		BatchSize:   d.cfg.batchSize(),
+		OnError:     func(error) { errs.Add(1) },
+		Callbacks: Callbacks{
+			OnBlockConnected: func(*chainhash.Hash, int32,
+				time.Time) {
+
+				if stopping.Load() {
+					lateCallbacks.Add(1)
+				}
+			},
+		},
+	})
+	late.Start()
+	select {
+	case <-entered:
+	case <-time.After(time.Hour):
+		d.t.Fatalf("second actor never fetched a filter, seed %x",
+			d.seed)
+	}
+
+	stopping.Store(true)
+	late.Stop()
+	late.WaitForShutdown()
+	d.sleepRetries(3)
+
+	d.truth.mu.Lock()
+	if n := errs.Load(); n != 0 {
+		d.truth.fail(invStopSilent, "%d errors after a stop during "+
+			"a fetch", n)
+	}
+	if n := lateCallbacks.Load(); n != 0 {
+		d.truth.fail(invStopSilent, "%d callbacks after a stop "+
+			"during a fetch", n)
+	}
+	d.truth.mu.Unlock()
+	d.check("stop during fetch")
 }
 
 // newBlock extends the chain by one block and announces it. With the filter
@@ -607,11 +728,17 @@ func runRescanDST(t *testing.T, seed []byte) dstSnapshot {
 		d.initialSync()
 		d.rewindPhase()
 		d.liveReorg()
+		if d.enabled(dstFaultSlowBatch) {
+			d.slowBatch()
+		}
 		for i, value := range d.ops {
 			d.step(i, value)
 		}
 		d.heal()
 		snap = d.snapshot()
+		if d.enabled(dstFaultStopFetch) {
+			d.stopDuringFetch()
+		}
 		if d.enabled(dstFaultServiceStop) {
 			d.stopService()
 		}

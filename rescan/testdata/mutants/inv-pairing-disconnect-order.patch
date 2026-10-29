@@ -1,21 +1,13 @@
 diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index defb471..025c804 100644
 --- a/rescan/actor_dispatch.go
 +++ b/rescan/actor_dispatch.go
-@@ -191,13 +191,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
- 			}
+@@ -298,7 +298,7 @@ func (a *RescanActor) dispatchDisconnect(e BlockDisconnectedOutbox) {
+ 		}
+ 	}
  
- 		case BlockDisconnectedOutbox:
--			if callbacks.OnFilteredBlockDisconnected != nil {
--				callbacks.OnFilteredBlockDisconnected(
-+			if callbacks.OnBlockDisconnected != nil {
-+				callbacks.OnBlockDisconnected(
- 					e.Height, e.Header,
- 				)
- 			}
--			if callbacks.OnBlockDisconnected != nil {
--				callbacks.OnBlockDisconnected(
-+			if callbacks.OnFilteredBlockDisconnected != nil {
-+				callbacks.OnFilteredBlockDisconnected(
- 					e.Height, e.Header,
- 				)
- 			}
+-	if e.Rewind {
++	if !e.Rewind {
+ 		plain()
+ 		filtered()
+ 		return

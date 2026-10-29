@@ -23,6 +23,9 @@ const (
 	invRewind         = "rewindRedelivers"
 	invFinished       = "finishedOnce"
 	invQuiescentAtTip = "quiescentAtTip"
+	invWaitCurrent    = "waitsForCurrent"
+	invStopSilent     = "stopIsSilent"
+	invUpdateLatency  = "updateWaitsOneBlock"
 )
 
 // dstCallback is one recorded callback. The double run compares the whole
@@ -58,8 +61,12 @@ type dstRewind struct {
 type dstTruth struct {
 	mu sync.Mutex
 
-	w         *dstWorld
-	fx        *dstFixture
+	w  *dstWorld
+	fx *dstFixture
+
+	// src is the fault layer, if the run has one. While it has not yet
+	// reported the chain current, no callback may fire.
+	src       *dstSource
 	startTime time.Time
 
 	// stack is the chain the callbacks have delivered, from the start
@@ -172,13 +179,25 @@ func (o *dstTruth) identify(h *wire.BlockHeader) (*dstBlock, chainhash.Hash) {
 	return nil, h.BlockHash()
 }
 
-// record appends a callback to the event log. The caller holds mu.
+// record appends a callback to the event log, and checks waitsForCurrent:
+// the scan must not report anything before the chain is current. The caller
+// holds mu.
 func (o *dstTruth) record(kind string, height int32, hash chainhash.Hash,
 	txs int) {
 
 	o.events = append(o.events, dstCallback{
 		kind: kind, height: height, hash: hash, txs: txs,
 	})
+	o.checkCurrent(kind)
+}
+
+// checkCurrent fails waitsForCurrent if the chain has not been reported
+// current yet. The caller holds mu.
+func (o *dstTruth) checkCurrent(kind string) {
+	if o.src != nil && !o.src.isCurrentYet() {
+		o.fail(invWaitCurrent, "%s before the chain was current",
+			kind)
+	}
 }
 
 // watchScript starts watching an address script from the next callback on.
@@ -457,6 +476,7 @@ func (o *dstTruth) onError(error) {
 	defer o.mu.Unlock()
 
 	o.errors++
+	o.checkCurrent("error")
 }
 
 // errorCount returns the number of OnError callbacks so far.

@@ -1,12 +1,13 @@
 diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
+index 52037f7..a6d2889 100644
 --- a/rescan/state_syncing.go
 +++ b/rescan/state_syncing.go
-@@ -171,7 +171,7 @@ func (s *StateSyncing) processNextBatch(
- 				outbox,
- 				RescanProgressOutbox{
- 					Height: int32(
--						nextHeight,
-+						nextHeight - 1,
- 					),
- 				},
- 			)
+@@ -138,7 +138,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
+ 	// Emit progress periodically.
+ 	if nextHeight%ProgressInterval == 0 {
+ 		outbox = append(outbox, RescanProgressOutbox{
+-			Height: int32(nextHeight),
++			Height: int32(nextHeight - 1),
+ 		})
+ 	}
+ 

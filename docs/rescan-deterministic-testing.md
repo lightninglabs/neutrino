@@ -1,6 +1,7 @@
 # Deterministic rescan testing
 
-`rescan/dst_test.go` runs the production rescan actor inside
+`rescan/dst_test.go` runs the rescan actor, which the public `neutrino.Rescan`
+runs on, inside
 `testing/synctest` against a simulated chain. Each run is driven by a seed,
 and the same seed always produces the same run, so a failing seed is a
 reproducible bug report. The harness follows the header-sync DST in
@@ -86,8 +87,11 @@ Each fault class reproduces a fault the scripted harness injected before:
 | 6 | rewind reorg | The chain reorgs from three blocks above the start while the scripted rewind walks back through it. |
 | 7 | live retry | The filter fetch of a live block fails just before the block is replaced. |
 | 8 | gate | A new block's filter fetch is held while a rewind waits in the mailbox. |
+| 9 | not current | `IsCurrent` reports false for the first one to five calls, taken from the seed, as a chain service that is still syncing does. |
+| 10 | stop during fetch | After the heal phase, a second actor starts, its first filter fetch is held until its context ends, and the actor is stopped there. |
+| 11 | slow batch | After the live reorg, every filter fetch takes ten seconds while the scan rescans the blocks of a rewind, and an empty update is sent in the middle of the second fetch. |
 
-Bits 9 to 15 are free for the fault classes of later work.
+Bits 12 to 15 are free for the fault classes of later work.
 
 | Op | Action |
 | --- | --- |
@@ -109,12 +113,18 @@ making progress. Ops 4 to 7 are honest placeholders for later fault classes.
    if its class is on. The scan must be current at the tip again.
 3. **Live reorg.** Announce a new block, replace it with a sibling, and
    check that no obsolete retry reports an error afterwards.
-4. **Ops.** Apply each op, settle, and run the op-boundary checks.
-5. **Heal.** Turn every fault off and sleep 20 retry intervals. The heal
+4. **Slow batch.** With the slow-batch class on, rewind to two blocks above
+   the start with slow filter fetches, send an empty update in the middle of
+   the second fetch, and require it to return within one fetch.
+5. **Ops.** Apply each op, settle, and run the op-boundary checks.
+6. **Heal.** Turn every fault off and sleep 20 retry intervals. The heal
    phase resets nothing production would not.
-6. **Quiescence.** The scan must be current at the active tip, and the
+7. **Quiescence.** The scan must be current at the active tip, and the
    oracle's quiescence checks must pass.
-7. **Service stop.** With the service-stop class on, stop the subscription
+8. **Stop during fetch.** With that class on, start a second actor, hold its
+   first filter fetch and stop it. It must report no error and deliver no
+   callback after the stop.
+9. **Service stop.** With the service-stop class on, stop the subscription
    manager and start a second actor. Both actors must report one error each,
    end in `StateTerminal` and deliver no more callbacks.
 
@@ -132,12 +142,15 @@ after every callback and at every op boundary.
 | --- | --- |
 | `noMissedRelevantTx` | Each filtered connect carries exactly the block's transactions that pay a watched script or spend a watched outpoint, taken in block order. |
 | `noDuplicateFiltered` | No block gets a second filtered connect without a filtered disconnect in between. |
-| `filteredPairing` | Each filtered connect or disconnect is followed at once by its plain twin, and no other callback interleaves. |
+| `filteredPairing` | Each filtered connect is followed at once by its plain twin, and each disconnect comes as a filtered and plain pair with no other callback in between. A block still on the active chain, which only a rewind undoes, must come plain half first, the legacy rewind order. A block off the active chain may come either way. |
 | `progressMonotone` | Progress reports the delivered tip, and rises unless the delivered chain dropped below the last report. |
 | `rewindRedelivers` | After a rewind below the delivered tip, no connect beyond those already in flight arrives before the delivered chain walks back to the target. Every rewind walks back by quiescence. |
 | `finishedOnce` | Finished reports the delivered tip, never repeats without a disconnect in between, and has fired since the start and since the last rewind that walked back whenever the scan is current at a phase boundary. |
 | `callbackContinuity` | Each connect extends the delivered tip, and each disconnect removes it. |
 | `quiescentAtTip` | At each phase boundary and after heal, the actor is current at the active tip and the delivered chain is the active chain. |
+| `waitsForCurrent` | No callback and no error fires before `IsCurrent` has reported true. |
+| `stopIsSilent` | A stop during a fetch reports no error, and no callback follows it. |
+| `updateWaitsOneBlock` | An update sent during a batch of slow fetches waits for the fetch in progress only. |
 
 No invariant has an excuse. Every one fails on at least one hand-written
 mutant of production code. The mutants live in `rescan/testdata/mutants` as
@@ -200,8 +213,10 @@ recall.sh --repo . --cmd "go test ./rescan/ -run '^TestRescanDSTSwarm\$' \
 ```
 
 The `recall-` patches revert recorded fixes, the `inv-` patches each break
-the property one invariant names, and `probe-drop-relevant-txs.patch` empties
-`RelevantTxs` in the block scan that Syncing and Current share.
+the property one invariant names, the `fix-` patches each revert one of the
+three fixes the public rescan needed before it could run on the actor, and
+`probe-drop-relevant-txs.patch` empties `RelevantTxs` in the block scan that
+Syncing and Current share.
 
 ## Known gaps
 
@@ -218,8 +233,9 @@ the property one invariant names, and `probe-drop-relevant-txs.patch` empties
   `actor*.go` files are out of its reach.
 - The heal phase only sleeps. It does not check that no retry is armed, that
   `continuationPending` is clear, or that nothing fires after `Stop`.
-- The fixture's `IsCurrent` always reports true, so the "rescan started
-  before the chain is current" behaviour is not reached.
+- The not-current class makes `IsCurrent` false only for the first calls.
+  The best block never lags the start block, so the other half of the wait
+  is not reached.
 - Determinism comes from settling between stimuli. The harness does not
   choose the order of messages that become ready at the same instant.
 - The race detector is not part of the swarm. Run `go test -race ./rescan`

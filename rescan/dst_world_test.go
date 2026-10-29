@@ -546,7 +546,31 @@ type dstSource struct {
 	// harness releases it.
 	gateEntered, gateRelease chan struct{}
 
+	// holdEntered, if set, is closed by the next filter fetch, which then
+	// waits for its context to end and fails with the context's error, as
+	// a production fetch does when the rescan stops.
+	holdEntered chan struct{}
+
+	// filterDelay is how long each filter fetch takes, in virtual time. A
+	// fetch whose context ends first fails with the context's error.
+	filterDelay time.Duration
+
+	// notCurrent is how many more IsCurrent calls report false, and
+	// notCurrentArmed records that the harness set it. becameCurrent is
+	// set once a call has reported true.
+	notCurrent      int
+	notCurrentArmed bool
+	becameCurrent   bool
+
 	subscriptions int
+}
+
+// isCurrentYet reports whether IsCurrent has reported true yet.
+func (s *dstSource) isCurrentYet() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.becameCurrent || !s.notCurrentArmed
 }
 
 var _ ChainSource = (*dstSource)(nil)
@@ -557,6 +581,7 @@ func (s *dstSource) clearFaults() {
 	defer s.mu.Unlock()
 
 	s.filterFail, s.blockFail, s.subscribeFail = 0, 0, 0
+	s.filterDelay, s.holdEntered = 0, nil
 }
 
 // ChainParams is part of the ChainSource interface.
@@ -648,6 +673,8 @@ func (s *dstSource) GetCFilter(ctx context.Context,
 	hook := s.onFilter
 	entered, release := s.gateEntered, s.gateRelease
 	s.gateEntered, s.gateRelease = nil, nil
+	held, delay := s.holdEntered, s.filterDelay
+	s.holdEntered = nil
 	s.mu.Unlock()
 	if hook != nil {
 		if err := hook(b); err != nil {
@@ -657,6 +684,18 @@ func (s *dstSource) GetCFilter(ctx context.Context,
 	if entered != nil {
 		close(entered)
 		<-release
+	}
+	if held != nil {
+		close(held)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	s.mu.Lock()
@@ -703,7 +742,16 @@ func (s *dstSource) Subscribe(
 // nothing.
 func (s *dstSource) MarkAsConfirmed(chainhash.Hash) {}
 
-// IsCurrent is part of the ChainSource interface.
+// IsCurrent is part of the ChainSource interface. It reports false for the
+// first notCurrent calls, as a chain service still syncing does.
 func (s *dstSource) IsCurrent() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.notCurrent > 0 {
+		s.notCurrent--
+		return false
+	}
+	s.becameCurrent = true
 	return true
 }
