@@ -42,10 +42,10 @@ func TestStateInitializingToSyncing(t *testing.T) {
 		transition.NextState)
 
 	// Should emit a ContinueOutbox.
-	require.NotNil(t, transition.Events)
-	require.Len(t, transition.Events.Outbox, 1)
+	require.True(t, transition.NewEvents.IsSome())
+	require.Len(t, outboxOf(transition), 1)
 
-	_, ok = transition.Events.Outbox[0].(ContinueOutbox)
+	_, ok = outboxOf(transition)[0].(ContinueOutbox)
 	require.True(t, ok)
 }
 
@@ -125,10 +125,10 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	require.Equal(t, int32(4), nextState.CurStamp.Height)
 
 	// Should emit RescanFinishedOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 
 	var hasFinished bool
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if _, ok := out.(RescanFinishedOutbox); ok {
 			hasFinished = true
 		}
@@ -174,8 +174,8 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	require.Equal(t, int32(5), nextState.CurStamp.Height)
 
 	// Last outbox event should be ContinueOutbox.
-	require.NotNil(t, transition.Events)
-	lastOutbox := transition.Events.Outbox[len(transition.Events.Outbox)-1]
+	require.True(t, transition.NewEvents.IsSome())
+	lastOutbox := outboxOf(transition)[len(outboxOf(transition))-1]
 	_, ok = lastOutbox.(ContinueOutbox)
 	require.True(t, ok, "expected ContinueOutbox as last event")
 }
@@ -255,9 +255,9 @@ func TestStateCurrentBlockConnected(t *testing.T) {
 	require.Equal(t, newBest.Hash, nextState.CurStamp.Hash)
 
 	// Should emit BlockConnectedOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 	var hasBlockConnected bool
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if _, ok := out.(BlockConnectedOutbox); ok {
 			hasBlockConnected = true
 		}
@@ -303,9 +303,9 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 	require.Equal(t, bestBlock.Height-1, nextState.CurStamp.Height)
 
 	// Should emit BlockDisconnectedOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 	var hasDisconnected bool
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if _, ok := out.(BlockDisconnectedOutbox); ok {
 			hasDisconnected = true
 		}
@@ -337,9 +337,9 @@ func TestStateCurrentAddWatchRewind(t *testing.T) {
 	require.True(t, ok)
 
 	// Should emit only a ContinueOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 	require.Equal(
-		t, []OutboxEvent{ContinueOutbox{}}, transition.Events.Outbox,
+		t, []OutboxEvent{ContinueOutbox{}}, outboxOf(transition),
 	)
 }
 
@@ -379,10 +379,10 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	require.LessOrEqual(t, nextState.CurStamp.Height, int32(5))
 
 	// Should emit BlockDisconnectedOutbox events.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 
 	disconnectCount := 0
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if disconnected, ok := out.(BlockDisconnectedOutbox); ok {
 			require.Equal(
 				t,
@@ -408,8 +408,8 @@ func TestStateMachineFullCycle(t *testing.T) {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	fsm := NewStateMachine(StateMachineCfg{
-		InitialState: &StateInitializing{
+	fsm := newStateMachine(
+		&StateInitializing{
 			StartStamp: headerfs.BlockStamp{
 				Hash:   *genesisHash,
 				Height: 0,
@@ -417,18 +417,18 @@ func TestStateMachineFullCycle(t *testing.T) {
 			StartHeader: *genesisHeader,
 			Watch:       WatchState{},
 		},
-		Env: &Environment{
+		&Environment{
 			Chain:     chain,
 			StartTime: time.Time{},
 			BatchSize: 100,
 		},
-	})
+	)
 
-	fsm.Start()
+	fsm.Start(t.Context())
 	defer fsm.Stop()
 
 	// Send ProcessNextBlockEvent to kick off.
-	outbox, err := fsm.AskEvent(
+	outbox, err := fsm.ProcessEvent(
 		t.Context(), ProcessNextBlockEvent{},
 	)
 	require.NoError(t, err)
@@ -440,7 +440,7 @@ func TestStateMachineFullCycle(t *testing.T) {
 	// Find and process the continuation.
 	for _, out := range outbox {
 		if _, ok := out.(ContinueOutbox); ok {
-			outbox2, err := fsm.AskEvent(
+			outbox2, err := fsm.ProcessEvent(
 				t.Context(), ProcessNextBlockEvent{},
 			)
 			require.NoError(t, err)
@@ -458,9 +458,7 @@ func TestStateMachineFullCycle(t *testing.T) {
 	}
 
 	// Verify we're in Current state.
-	state, err := fsm.CurrentState()
-	require.NoError(t, err)
-
+	state := fsm.CurrentState()
 	_, ok := state.(*StateCurrent)
 	require.True(t, ok, "expected StateCurrent, got %T", state)
 }

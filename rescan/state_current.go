@@ -50,14 +50,12 @@ func (s *StateCurrent) ProcessEvent(
 		return s.handleAddWatch(&e)
 
 	case StopEvent:
-		return &StateTransition{
-			NextState: &StateTerminal{},
-		}, nil
+		return transition(&StateTerminal{}), nil
 
 	default:
 		log.Warnf("StateCurrent: ignoring unexpected event %T", event)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 }
 
@@ -73,21 +71,16 @@ func (s *StateCurrent) reconcileTip(
 		return nil, err
 	}
 	if header.BlockHash() == s.CurStamp.Hash {
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 	if s.CurStamp.Height <= 0 {
 		return nil, fmt.Errorf("genesis block changed")
 	}
-	return &StateTransition{
-		NextState: &StateRewinding{
-			CurStamp: s.CurStamp, CurHeader: s.CurHeader,
-			Watch:        s.Watch,
-			TargetHeight: uint32(s.CurStamp.Height - 1),
-		},
-		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			ContinueOutbox{},
-		}},
-	}, nil
+	return transition(&StateRewinding{
+		CurStamp: s.CurStamp, CurHeader: s.CurHeader,
+		Watch:        s.Watch,
+		TargetHeight: uint32(s.CurStamp.Height - 1),
+	}, ContinueOutbox{}), nil
 }
 
 // handleBlockConnected processes a new block from the subscription.
@@ -101,7 +94,7 @@ func (s *StateCurrent) handleBlockConnected(
 	// Notifications queued while catching up may arrive after this block
 	// has already been scanned. Keep the current tip unchanged.
 	if int32(event.Height) < s.CurStamp.Height {
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 
 	// Duplicate delivery of the block at our current tip can happen when a
@@ -111,7 +104,7 @@ func (s *StateCurrent) handleBlockConnected(
 	if event.Height == uint32(s.CurStamp.Height) &&
 		blockHash == s.CurStamp.Hash {
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 
 	// A filter notification can be delayed past a reorg. Only process the
@@ -121,7 +114,7 @@ func (s *StateCurrent) handleBlockConnected(
 		return nil, err
 	}
 	if active.BlockHash() != blockHash {
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 
 	// Validate the block connects to our current tip.
@@ -199,17 +192,12 @@ func (s *StateCurrent) handleBlockConnected(
 		Timestamp: event.Header.Timestamp.Unix(),
 	})
 
-	return &StateTransition{
-		NextState: &StateCurrent{
-			CurStamp:  newStamp,
-			CurHeader: event.Header,
-			Watch:     watch,
-			Scanning:  scanning,
-		},
-		Events: &EmittedEvent{
-			Outbox: outbox,
-		},
-	}, nil
+	return transition(&StateCurrent{
+		CurStamp:  newStamp,
+		CurHeader: event.Header,
+		Watch:     watch,
+		Scanning:  scanning,
+	}, outbox...), nil
 }
 
 // handleBlockDisconnected processes a block disconnection (reorg) from the
@@ -227,30 +215,23 @@ func (s *StateCurrent) handleBlockDisconnected(
 			s.CurStamp.Hash,
 		)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 
 	headerCopy := s.CurHeader
-	return &StateTransition{
-		NextState: &StateCurrent{
-			CurStamp: headerfs.BlockStamp{
-				Hash:   event.ChainTip.BlockHash(),
-				Height: s.CurStamp.Height - 1,
-			},
-			CurHeader: event.ChainTip,
-			Watch:     s.Watch,
-			Scanning:  s.Scanning,
+	return transition(&StateCurrent{
+		CurStamp: headerfs.BlockStamp{
+			Hash:   event.ChainTip.BlockHash(),
+			Height: s.CurStamp.Height - 1,
 		},
-		Events: &EmittedEvent{
-			Outbox: []OutboxEvent{
-				BlockDisconnectedOutbox{
-					Hash:   s.CurStamp.Hash,
-					Height: s.CurStamp.Height,
-					Header: &headerCopy,
-				},
-			},
-		},
-	}, nil
+		CurHeader: event.ChainTip,
+		Watch:     s.Watch,
+		Scanning:  s.Scanning,
+	}, BlockDisconnectedOutbox{
+		Hash:   s.CurStamp.Hash,
+		Height: s.CurStamp.Height,
+		Header: &headerCopy,
+	}), nil
 }
 
 // handleAddWatch handles an AddWatchAddrsEvent while current.
@@ -268,30 +249,21 @@ func (s *StateCurrent) handleAddWatch(
 	if event.RewindTo != nil &&
 		int32(*event.RewindTo) < s.CurStamp.Height {
 
-		return &StateTransition{
-			NextState: &StateRewinding{
-				CurStamp:     s.CurStamp,
-				CurHeader:    s.CurHeader,
-				Watch:        newWatch,
-				TargetHeight: *event.RewindTo,
-			},
-			Events: &EmittedEvent{
-				Outbox: []OutboxEvent{
-					ContinueOutbox{},
-				},
-			},
-		}, nil
+		return transition(&StateRewinding{
+			CurStamp:     s.CurStamp,
+			CurHeader:    s.CurHeader,
+			Watch:        newWatch,
+			TargetHeight: *event.RewindTo,
+		}, ContinueOutbox{}), nil
 	}
 
 	// No rewind — stay current with updated watch list.
-	return &StateTransition{
-		NextState: &StateCurrent{
-			CurStamp:  s.CurStamp,
-			CurHeader: s.CurHeader,
-			Watch:     newWatch,
-			Scanning:  s.Scanning,
-		},
-	}, nil
+	return transition(&StateCurrent{
+		CurStamp:  s.CurStamp,
+		CurHeader: s.CurHeader,
+		Watch:     newWatch,
+		Scanning:  s.Scanning,
+	}), nil
 }
 
 // IsTerminal returns false since Current is not terminal.

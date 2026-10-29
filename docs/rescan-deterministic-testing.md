@@ -12,7 +12,7 @@ determinism check.
 
 | Component | Real or simulated |
 | --- | --- |
-| `RescanActor`, its lnd actor mailbox, the FSM goroutine, the retry timers and the subscription bridge | Real, inside the synctest bubble |
+| `RescanActor`, its lnd actor mailbox and protofsm machine, the retry timers and the subscription bridge | Real, inside the synctest bubble |
 | `blockntfns.SubscriptionManager`, including backlog delivery from the requested height | Real, over the simulated notification source |
 | Chain headers, filters and blocks | Simulated by `dstWorld` and the fault layer `dstSource` |
 | Time | Virtual, from synctest |

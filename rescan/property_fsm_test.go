@@ -74,10 +74,7 @@ func (m *fsmModel) apply(event RescanEvent) bool {
 		return false
 	}
 	m.state = transition.NextState
-	if transition.Events == nil {
-		return true
-	}
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		switch e := out.(type) {
 		case FilteredBlockOutbox:
 			m.truth.filteredConnected(

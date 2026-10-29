@@ -45,15 +45,13 @@ func (s *StateRewinding) ProcessEvent(
 		return s.handleDisconnect(&e)
 
 	case StopEvent:
-		return &StateTransition{
-			NextState: &StateTerminal{},
-		}, nil
+		return transition(&StateTerminal{}), nil
 
 	default:
 		log.Warnf("StateRewinding: ignoring unexpected event %T",
 			event)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 }
 
@@ -75,17 +73,12 @@ func (s *StateRewinding) processRewind(
 		if curStamp.Height <= int32(s.TargetHeight) {
 			// Transition to syncing from this point.
 			continuation := ContinueOutbox{}
-			return &StateTransition{
-				NextState: &StateSyncing{
-					CurStamp:  curStamp,
-					CurHeader: curHeader,
-					Watch:     s.Watch,
-					Scanning:  true,
-				},
-				Events: &EmittedEvent{
-					Outbox: append(outbox, continuation),
-				},
-			}, nil
+			return transition(&StateSyncing{
+				CurStamp:  curStamp,
+				CurHeader: curHeader,
+				Watch:     s.Watch,
+				Scanning:  true,
+			}, append(outbox, continuation)...), nil
 		}
 
 		// Emit disconnection notification for the current block.
@@ -112,17 +105,12 @@ func (s *StateRewinding) processRewind(
 	}
 
 	// Batch complete but not yet at target. Self-Tell to continue.
-	return &StateTransition{
-		NextState: &StateRewinding{
-			CurStamp:     curStamp,
-			CurHeader:    curHeader,
-			Watch:        s.Watch,
-			TargetHeight: s.TargetHeight,
-		},
-		Events: &EmittedEvent{
-			Outbox: append(outbox, ContinueOutbox{}),
-		},
-	}, nil
+	return transition(&StateRewinding{
+		CurStamp:     curStamp,
+		CurHeader:    curHeader,
+		Watch:        s.Watch,
+		TargetHeight: s.TargetHeight,
+	}, append(outbox, ContinueOutbox{})...), nil
 }
 
 // handleDisconnect applies a reorg notification while rewinding.
@@ -133,28 +121,22 @@ func (s *StateRewinding) handleDisconnect(
 	if event.Header.BlockHash() != s.CurStamp.Hash ||
 		int32(event.Height) != s.CurStamp.Height {
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 	header := event.Header
-	return &StateTransition{
-		NextState: &StateRewinding{
-			CurStamp: headerfs.BlockStamp{
-				Hash:   event.ChainTip.BlockHash(),
-				Height: s.CurStamp.Height - 1,
-			},
-			CurHeader:    event.ChainTip,
-			Watch:        s.Watch,
-			TargetHeight: s.TargetHeight,
+	return transition(&StateRewinding{
+		CurStamp: headerfs.BlockStamp{
+			Hash:   event.ChainTip.BlockHash(),
+			Height: s.CurStamp.Height - 1,
 		},
-		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			BlockDisconnectedOutbox{
-				Hash:   s.CurStamp.Hash,
-				Height: s.CurStamp.Height,
-				Header: &header,
-			},
-			ContinueOutbox{},
-		}},
-	}, nil
+		CurHeader:    event.ChainTip,
+		Watch:        s.Watch,
+		TargetHeight: s.TargetHeight,
+	}, BlockDisconnectedOutbox{
+		Hash:   s.CurStamp.Hash,
+		Height: s.CurStamp.Height,
+		Header: &header,
+	}, ContinueOutbox{}), nil
 }
 
 // handleAddWatch handles an AddWatchAddrsEvent during rewinding. If the
@@ -174,14 +156,12 @@ func (s *StateRewinding) handleAddWatch(
 		targetHeight = *event.RewindTo
 	}
 
-	return &StateTransition{
-		NextState: &StateRewinding{
-			CurStamp:     s.CurStamp,
-			CurHeader:    s.CurHeader,
-			Watch:        newWatch,
-			TargetHeight: targetHeight,
-		},
-	}, nil
+	return transition(&StateRewinding{
+		CurStamp:     s.CurStamp,
+		CurHeader:    s.CurHeader,
+		Watch:        newWatch,
+		TargetHeight: targetHeight,
+	}), nil
 }
 
 // IsTerminal returns false since Rewinding is not terminal.

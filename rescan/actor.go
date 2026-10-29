@@ -112,8 +112,8 @@ type ActorConfig struct {
 // calls, self-tells, retries, and subscription bridge notifications are routed
 // through one mailbox and handled by Receive.
 type RescanActor struct {
-	fsm *StateMachine
-	cfg ActorConfig
+	machine *stateMachine
+	cfg     ActorConfig
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -183,22 +183,22 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 	queryOpts = append(queryOpts, neutrino.CancelQuery(ctx.Done()))
 
 	// Create the FSM with initial state and immutable environment.
-	fsm := NewStateMachine(StateMachineCfg{
-		InitialState: &StateInitializing{
+	machine := newStateMachine(
+		&StateInitializing{
 			StartStamp:  cfg.StartStamp,
 			StartHeader: cfg.StartHeader,
 			Watch:       watch,
 		},
-		Env: &Environment{
+		&Environment{
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
 			QueryOpts: queryOpts,
 			BatchSize: batchSize,
 		},
-	})
+	)
 
 	return &RescanActor{
-		fsm:        fsm,
+		machine:    machine,
 		cfg:        cfg,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -211,7 +211,7 @@ func NewRescanActor(cfg ActorConfig) *RescanActor {
 // and enqueues the initial block-processing message through the mailbox.
 func (a *RescanActor) Start() {
 	a.startOnce.Do(func() {
-		a.fsm.Start()
+		a.machine.Start(a.ctx)
 
 		system := lndactor.NewActorSystem()
 		ref, err := a.serviceKey.Spawn(
@@ -230,7 +230,7 @@ func (a *RescanActor) Start() {
 			a.system = system
 			a.mu.Unlock()
 
-			a.fsm.Stop()
+			a.machine.Stop()
 			_ = system.Shutdown()
 
 			return
@@ -295,7 +295,7 @@ func (a *RescanActor) Stop() {
 			}
 		}
 
-		a.fsm.Stop()
+		a.machine.Stop()
 
 		a.mu.Lock()
 		a.actorRef = nil
@@ -406,11 +406,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 
 	case *blockConnectedMsg:
 		if m.RetryAnchor != nil {
-			state, err := a.fsm.CurrentState()
-			if err != nil {
-				return fn.Err[RescanActorResp](err)
-			}
-			cur, ok := state.(*StateCurrent)
+			cur, ok := a.machine.CurrentState().(*StateCurrent)
 			if !ok {
 				return fn.Ok[RescanActorResp](&rescanActorAck{})
 			}
@@ -461,13 +457,8 @@ func (a *RescanActor) Receive(actorCtx context.Context,
 		)
 
 	case *currentStateReq:
-		state, err := a.fsm.CurrentState()
-		if err != nil {
-			return fn.Err[RescanActorResp](err)
-		}
-
 		return fn.Ok[RescanActorResp](&currentStateResp{
-			State: state,
+			State: snapshotState(a.machine.CurrentState()),
 		})
 
 	case *subscriptionClosedMsg:
@@ -506,12 +497,10 @@ func (a *RescanActor) handleRetriableEvent(
 		}
 
 		if connected, ok := msg.(*blockConnectedMsg); ok {
-			state, stateErr := a.fsm.CurrentState()
-			if stateErr == nil {
-				if cur, ok := state.(*StateCurrent); ok {
-					anchor := cur.CurStamp
-					connected.RetryAnchor = &anchor
-				}
+			state := a.machine.CurrentState()
+			if cur, ok := state.(*StateCurrent); ok {
+				anchor := cur.CurStamp
+				connected.RetryAnchor = &anchor
 			}
 		}
 		a.scheduleRetry(msg)
@@ -523,7 +512,7 @@ func (a *RescanActor) handleRetriableEvent(
 func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 	event RescanEvent) fn.Result[RescanActorResp] {
 
-	outbox, err := a.fsm.AskEvent(actorCtx, event)
+	outbox, err := a.machine.ProcessEvent(actorCtx, event)
 	if err != nil {
 		return fn.Err[RescanActorResp](err)
 	}
@@ -591,11 +580,7 @@ func (a *RescanActor) handleSubscriptionClosed(
 	default:
 	}
 
-	state, err := a.fsm.CurrentState()
-	if err != nil {
-		return fn.Err[RescanActorResp](err)
-	}
-
+	state := a.machine.CurrentState()
 	if state.IsTerminal() {
 		return fn.Ok[RescanActorResp](&rescanActorAck{})
 	}
@@ -812,6 +797,31 @@ func (a *RescanActor) bridgeSubscription(ctx context.Context,
 
 			ref.Tell(ctx, msg)
 		}
+	}
+}
+
+// snapshotState returns a copy of state whose watch list the caller may
+// mutate without touching the state the machine holds.
+func snapshotState(state RescanState) RescanState {
+	switch s := state.(type) {
+	case *StateInitializing:
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
+	case *StateSyncing:
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
+	case *StateCurrent:
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
+	case *StateRewinding:
+		snapshot := *s
+		snapshot.Watch = s.Watch.Clone()
+		return &snapshot
+	default:
+		return state
 	}
 }
 

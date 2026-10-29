@@ -1,12 +1,12 @@
 diff --git a/rescan/state_current.go b/rescan/state_current.go
 --- a/rescan/state_current.go
 +++ b/rescan/state_current.go
-@@ -245,7 +245,7 @@ func (s *StateCurrent) handleBlockDisconnected(
- 			Outbox: []OutboxEvent{
- 				BlockDisconnectedOutbox{
- 					Hash:   s.CurStamp.Hash,
--					Height: s.CurStamp.Height,
-+					Height: s.CurStamp.Height - 1,
- 					Header: &headerCopy,
- 				},
- 			},
+@@ -229,7 +229,7 @@ func (s *StateCurrent) handleBlockDisconnected(
+ 		Scanning:  s.Scanning,
+ 	}, BlockDisconnectedOutbox{
+ 		Hash:   s.CurStamp.Hash,
+-		Height: s.CurStamp.Height,
++		Height: s.CurStamp.Height - 1,
+ 		Header: &headerCopy,
+ 	}), nil
+ }

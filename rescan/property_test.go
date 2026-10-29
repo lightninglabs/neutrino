@@ -220,12 +220,9 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 				)
 			}
 
-			if transition.Events != nil {
-				allOutbox = append(
-					allOutbox,
-					transition.Events.Outbox...,
-				)
-			}
+			allOutbox = append(
+				allOutbox, outboxOf(transition)...,
+			)
 
 			currentState = transition.NextState
 

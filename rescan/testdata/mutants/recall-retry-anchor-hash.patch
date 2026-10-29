@@ -1,7 +1,7 @@
 diff --git a/rescan/actor.go b/rescan/actor.go
 --- a/rescan/actor.go
 +++ b/rescan/actor.go
-@@ -424,7 +424,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
+@@ -420,7 +420,7 @@ func (a *RescanActor) Receive(actorCtx context.Context,
  				a.scheduleRetry(m)
  				return fn.Ok[RescanActorResp](&rescanActorAck{})
  			}

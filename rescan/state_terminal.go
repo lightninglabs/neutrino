@@ -13,7 +13,7 @@ type StateTerminal struct{}
 func (s *StateTerminal) ProcessEvent(_ context.Context, _ RescanEvent,
 	_ *Environment) (*StateTransition, error) {
 
-	return &StateTransition{NextState: s}, nil
+	return transition(s), nil
 }
 
 // IsTerminal returns true — this is the terminal state.

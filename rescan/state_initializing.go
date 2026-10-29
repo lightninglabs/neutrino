@@ -49,14 +49,7 @@ func (s *StateInitializing) ProcessEvent(
 				Watch:     s.Watch, TargetHeight: *s.rewindTo,
 			}
 		}
-		return &StateTransition{
-			NextState: next,
-			Events: &EmittedEvent{
-				Outbox: []OutboxEvent{
-					ContinueOutbox{},
-				},
-			},
-		}, nil
+		return transition(next, ContinueOutbox{}), nil
 
 	case AddWatchAddrsEvent:
 		// Buffer addresses into the watch state.
@@ -74,25 +67,21 @@ func (s *StateInitializing) ProcessEvent(
 			rewindTo = &height
 		}
 
-		return &StateTransition{
-			NextState: &StateInitializing{
-				StartStamp:  s.StartStamp,
-				StartHeader: s.StartHeader,
-				Watch:       newWatch,
-				rewindTo:    rewindTo,
-			},
-		}, nil
+		return transition(&StateInitializing{
+			StartStamp:  s.StartStamp,
+			StartHeader: s.StartHeader,
+			Watch:       newWatch,
+			rewindTo:    rewindTo,
+		}), nil
 
 	case StopEvent:
-		return &StateTransition{
-			NextState: &StateTerminal{},
-		}, nil
+		return transition(&StateTerminal{}), nil
 
 	default:
 		log.Warnf("StateInitializing: ignoring unexpected event %T",
 			event)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 }
 

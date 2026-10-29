@@ -50,14 +50,12 @@ func (s *StateSyncing) ProcessEvent(
 		return s.handleDisconnect(&e)
 
 	case StopEvent:
-		return &StateTransition{
-			NextState: &StateTerminal{},
-		}, nil
+		return transition(&StateTerminal{}), nil
 
 	default:
 		log.Warnf("StateSyncing: ignoring unexpected event %T", event)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 }
 
@@ -79,18 +77,10 @@ func (s *StateSyncing) processNextBatch(
 		if len(outbox) == 0 {
 			return nil, err
 		}
-		return &StateTransition{
-			NextState: &StateSyncing{
-				CurStamp: curStamp, CurHeader: curHeader,
-				Watch: watch, Scanning: scanning,
-			},
-			Events: &EmittedEvent{
-				Outbox: append(
-					outbox,
-					ContinueOutbox{},
-				),
-			},
-		}, nil
+		return transition(&StateSyncing{
+			CurStamp: curStamp, CurHeader: curHeader,
+			Watch: watch, Scanning: scanning,
+		}, append(outbox, ContinueOutbox{})...), nil
 	}
 
 	batchSize := env.BatchSize
@@ -145,17 +135,12 @@ func (s *StateSyncing) processNextBatch(
 				Height: curStamp.Height,
 			})
 
-			return &StateTransition{
-				NextState: &StateCurrent{
-					CurStamp:  curStamp,
-					CurHeader: curHeader,
-					Watch:     watch,
-					Scanning:  scanning,
-				},
-				Events: &EmittedEvent{
-					Outbox: outbox,
-				},
-			}, nil
+			return transition(&StateCurrent{
+				CurStamp:  curStamp,
+				CurHeader: curHeader,
+				Watch:     watch,
+				Scanning:  scanning,
+			}, outbox...), nil
 		}
 
 		// Advance to the next block.
@@ -256,17 +241,12 @@ func (s *StateSyncing) processNextBatch(
 
 	// Batch complete but not yet current. Emit self-Tell to continue
 	// after checking the mailbox for any pending AddWatchAddrs.
-	return &StateTransition{
-		NextState: &StateSyncing{
-			CurStamp:  curStamp,
-			CurHeader: curHeader,
-			Watch:     watch,
-			Scanning:  scanning,
-		},
-		Events: &EmittedEvent{
-			Outbox: append(outbox, ContinueOutbox{}),
-		},
-	}, nil
+	return transition(&StateSyncing{
+		CurStamp:  curStamp,
+		CurHeader: curHeader,
+		Watch:     watch,
+		Scanning:  scanning,
+	}, append(outbox, ContinueOutbox{})...), nil
 }
 
 // handleDisconnect applies a queued chain disconnection to the scanned tip.
@@ -277,28 +257,22 @@ func (s *StateSyncing) handleDisconnect(
 	if event.Header.BlockHash() != s.CurStamp.Hash ||
 		int32(event.Height) != s.CurStamp.Height {
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 	header := event.Header
-	return &StateTransition{
-		NextState: &StateSyncing{
-			CurStamp: headerfs.BlockStamp{
-				Hash:   event.ChainTip.BlockHash(),
-				Height: s.CurStamp.Height - 1,
-			},
-			CurHeader: event.ChainTip,
-			Watch:     s.Watch,
-			Scanning:  s.Scanning,
+	return transition(&StateSyncing{
+		CurStamp: headerfs.BlockStamp{
+			Hash:   event.ChainTip.BlockHash(),
+			Height: s.CurStamp.Height - 1,
 		},
-		Events: &EmittedEvent{Outbox: []OutboxEvent{
-			BlockDisconnectedOutbox{
-				Hash:   s.CurStamp.Hash,
-				Height: s.CurStamp.Height,
-				Header: &header,
-			},
-			ContinueOutbox{},
-		}},
-	}, nil
+		CurHeader: event.ChainTip,
+		Watch:     s.Watch,
+		Scanning:  s.Scanning,
+	}, BlockDisconnectedOutbox{
+		Hash:   s.CurStamp.Hash,
+		Height: s.CurStamp.Height,
+		Header: &header,
+	}, ContinueOutbox{}), nil
 }
 
 // handleAddWatch handles an AddWatchAddrsEvent during syncing.
@@ -315,30 +289,21 @@ func (s *StateSyncing) handleAddWatch(
 	if event.RewindTo != nil &&
 		int32(*event.RewindTo) < s.CurStamp.Height {
 
-		return &StateTransition{
-			NextState: &StateRewinding{
-				CurStamp:     s.CurStamp,
-				CurHeader:    s.CurHeader,
-				Watch:        newWatch,
-				TargetHeight: *event.RewindTo,
-			},
-			Events: &EmittedEvent{
-				Outbox: []OutboxEvent{
-					ContinueOutbox{},
-				},
-			},
-		}, nil
+		return transition(&StateRewinding{
+			CurStamp:     s.CurStamp,
+			CurHeader:    s.CurHeader,
+			Watch:        newWatch,
+			TargetHeight: *event.RewindTo,
+		}, ContinueOutbox{}), nil
 	}
 
 	// No rewind needed. Stay in syncing with updated watch list.
-	return &StateTransition{
-		NextState: &StateSyncing{
-			CurStamp:  s.CurStamp,
-			CurHeader: s.CurHeader,
-			Watch:     newWatch,
-			Scanning:  s.Scanning,
-		},
-	}, nil
+	return transition(&StateSyncing{
+		CurStamp:  s.CurStamp,
+		CurHeader: s.CurHeader,
+		Watch:     newWatch,
+		Scanning:  s.Scanning,
+	}), nil
 }
 
 // IsTerminal returns false since Syncing is not terminal.

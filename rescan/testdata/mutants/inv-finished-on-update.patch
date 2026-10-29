@@ -1,13 +1,12 @@
 diff --git a/rescan/state_current.go b/rescan/state_current.go
 --- a/rescan/state_current.go
 +++ b/rescan/state_current.go
-@@ -291,6 +291,9 @@ func (s *StateCurrent) handleAddWatch(
- 			Watch:     newWatch,
- 			Scanning:  s.Scanning,
- 		},
-+		Events: &EmittedEvent{Outbox: []OutboxEvent{
-+			RescanFinishedOutbox{Height: s.CurStamp.Height},
-+		}},
- 	}, nil
+@@ -263,7 +263,7 @@ func (s *StateCurrent) handleAddWatch(
+ 		CurHeader: s.CurHeader,
+ 		Watch:     newWatch,
+ 		Scanning:  s.Scanning,
+-	}), nil
++	}, RescanFinishedOutbox{Height: s.CurStamp.Height}), nil
  }
  
+ // IsTerminal returns false since Current is not terminal.

@@ -47,10 +47,10 @@ func newActorReceiveHarness(t *testing.T) *RescanActor {
 		BatchSize:   100,
 	})
 
-	actor.fsm.Start()
+	actor.machine.Start(t.Context())
 	t.Cleanup(func() {
 		actor.cancel()
-		actor.fsm.Stop()
+		actor.machine.Stop()
 	})
 
 	return actor

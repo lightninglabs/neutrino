@@ -1,7 +1,7 @@
 diff --git a/rescan/state_rewinding.go b/rescan/state_rewinding.go
 --- a/rescan/state_rewinding.go
 +++ b/rescan/state_rewinding.go
-@@ -90,11 +90,7 @@ func (s *StateRewinding) processRewind(
+@@ -83,11 +83,7 @@ func (s *StateRewinding) processRewind(
  
  		// Emit disconnection notification for the current block.
  		headerCopy := curHeader

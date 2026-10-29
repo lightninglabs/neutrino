@@ -56,7 +56,7 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 	next := transition.NextState.(*StateSyncing)
 	require.Equal(t, int32(2), next.CurStamp.Height)
 	var heights []int32
-	for _, event := range transition.Events.Outbox {
+	for _, event := range outboxOf(transition) {
 		if connected, ok := event.(FilteredBlockOutbox); ok {
 			heights = append(heights, connected.Height)
 		}
@@ -268,7 +268,7 @@ func TestCurrentIgnoresOlderConnect(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, state, transition.NextState)
-	require.Nil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsNone())
 }
 
 // TestCurrentRetriesTransientHeaderRead ensures an active block is not
