@@ -2,8 +2,6 @@ package rescan
 
 import (
 	"time"
-
-	neutrino "github.com/lightninglabs/neutrino"
 )
 
 // Environment holds the immutable dependencies available to all FSM states
@@ -13,16 +11,12 @@ import (
 type Environment struct {
 	// Chain provides access to block headers, filters, blocks, and
 	// subscriptions.
-	Chain neutrino.ChainSource
+	Chain ChainSource
 
 	// StartTime is the wallet birthday. Blocks before this time are
 	// skipped during scanning (only headers are advanced without filter
 	// checks).
 	StartTime time.Time
-
-	// QueryOpts are query options passed through to chain queries
-	// (e.g., timeout, peer selection).
-	QueryOpts []neutrino.QueryOption
 
 	// BatchSize controls how many blocks are processed per
 	// ProcessNextBlockEvent while syncing or rewinding. This amortizes the

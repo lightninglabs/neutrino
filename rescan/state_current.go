@@ -23,7 +23,7 @@ type StateCurrent struct {
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateCurrent) ProcessEvent(
-	_ context.Context,
+	ctx context.Context,
 	event RescanEvent,
 	env *Environment,
 ) (*StateTransition, error) {
@@ -36,7 +36,7 @@ func (s *StateCurrent) ProcessEvent(
 		return transition(s), nil
 
 	case BlockConnectedEvent:
-		next, err := s.handleBlockConnected(&e, env)
+		next, err := s.handleBlockConnected(ctx, &e, env)
 		if err != nil {
 			// Catch up from the header store instead of retrying
 			// this block. Syncing rescans every block above the
@@ -81,7 +81,7 @@ func (s *StateCurrent) ProcessEvent(
 }
 
 // handleBlockConnected processes a new block from the subscription.
-func (s *StateCurrent) handleBlockConnected(
+func (s *StateCurrent) handleBlockConnected(ctx context.Context,
 	event *BlockConnectedEvent,
 	env *Environment,
 ) (*StateTransition, error) {
@@ -125,7 +125,7 @@ func (s *StateCurrent) handleBlockConnected(
 		)
 	}
 
-	next, outbox, err := s.scanBlock(env, &event.Header, false)
+	next, outbox, err := s.scanBlock(ctx, env, &event.Header, false)
 	if err != nil {
 		return nil, err
 	}

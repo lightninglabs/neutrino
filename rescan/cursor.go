@@ -1,9 +1,10 @@
 package rescan
 
 import (
+	"context"
+
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -30,8 +31,8 @@ type Cursor struct {
 // is fetched only once the birthday has passed and the watch list is not
 // empty. batch asks the chain to fetch the filters of the following blocks
 // in the same query, which pays off only during historical catch-up.
-func (c Cursor) scanBlock(env *Environment, header *wire.BlockHeader,
-	batch bool) (Cursor, []OutboxEvent, error) {
+func (c Cursor) scanBlock(ctx context.Context, env *Environment,
+	header *wire.BlockHeader, batch bool) (Cursor, []OutboxEvent, error) {
 
 	hash := header.BlockHash()
 	next := Cursor{
@@ -46,18 +47,8 @@ func (c Cursor) scanBlock(env *Environment, header *wire.BlockHeader,
 
 	var relevantTxs []*btcutil.Tx
 	if next.Scanning && len(next.Watch.List) > 0 {
-		opts := env.QueryOpts
-		if batch {
-			opts = append(
-				[]neutrino.QueryOption{
-					neutrino.OptimisticBatch(),
-				},
-				opts...,
-			)
-		}
-
 		matched, filter, err := FetchAndMatchFilter(
-			env.Chain, &hash, next.Watch.List, opts...,
+			ctx, env.Chain, &hash, next.Watch.List, batch,
 		)
 		if err != nil {
 			return c, nil, err
@@ -65,8 +56,8 @@ func (c Cursor) scanBlock(env *Environment, header *wire.BlockHeader,
 
 		if matched {
 			relevantTxs, next.Watch, err = ExtractBlockMatches(
-				env.Chain, &next.CurStamp, filter, next.Watch,
-				env.QueryOpts...,
+				ctx, env.Chain, &next.CurStamp, filter,
+				next.Watch,
 			)
 			if err != nil {
 				return c, nil, err

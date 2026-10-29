@@ -4,7 +4,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
 
@@ -55,7 +55,7 @@ type addWatchAddrsMsg struct {
 	lndactor.BaseMessage
 
 	Addrs    []address.Address
-	Inputs   []neutrino.InputWithScript
+	Inputs   []filtermatch.InputWithScript
 	RewindTo *uint32
 }
 
@@ -127,7 +127,7 @@ func (*currentStateResp) rescanActorRespSealed() {}
 // arguments, so the caller may reuse them once the call returns.
 func newAddWatchAddrsMsg(
 	addrs []address.Address,
-	inputs []neutrino.InputWithScript,
+	inputs []filtermatch.InputWithScript,
 	rewindTo *uint32,
 ) *addWatchAddrsMsg {
 
@@ -147,14 +147,14 @@ func newAddWatchAddrsMsg(
 // copyInputsWithScripts returns a deep copy of inputs, including each
 // PkScript.
 func copyInputsWithScripts(
-	inputs []neutrino.InputWithScript,
-) []neutrino.InputWithScript {
+	inputs []filtermatch.InputWithScript,
+) []filtermatch.InputWithScript {
 
 	if len(inputs) == 0 {
 		return nil
 	}
 
-	cloned := make([]neutrino.InputWithScript, len(inputs))
+	cloned := make([]filtermatch.InputWithScript, len(inputs))
 	for i := range inputs {
 		cloned[i] = inputs[i]
 		cloned[i].PkScript = append(

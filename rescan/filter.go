@@ -1,18 +1,15 @@
 package rescan
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
-
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
-	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
-	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -24,7 +21,7 @@ type WatchState struct {
 	Addrs []address.Address
 
 	// Inputs is the set of outpoints being watched for spends.
-	Inputs []neutrino.InputWithScript
+	Inputs []filtermatch.InputWithScript
 
 	// List holds the serialized pkScripts used for GCS filter matching.
 	// This is the union of scripts derived from Addrs and Inputs.
@@ -109,37 +106,14 @@ func (ws *WatchState) cacheAddrScripts() error {
 	return nil
 }
 
-// MatchBlockFilter checks whether the block filter matches any items in the
-// watch list. If this returns false, the block is certainly not interesting
-// to us.
-func MatchBlockFilter(
-	filter *gcs.Filter,
-	blockHash *chainhash.Hash,
-	watchList [][]byte,
-) (bool, error) {
-
-	key := builder.DeriveKey(blockHash)
-	matched, err := filter.MatchAny(key, watchList)
-	if err != nil {
-		return false, err
-	}
-
-	return matched, nil
-}
-
 // FetchAndMatchFilter fetches the compact filter for the given block hash
 // and checks it against the watch list. Returns the match result and the
 // filter (for potential later use in block extraction).
-func FetchAndMatchFilter(
-	chain neutrino.ChainSource,
-	blockHash *chainhash.Hash,
-	watchList [][]byte,
-	queryOpts ...neutrino.QueryOption,
-) (bool, *gcs.Filter, error) {
+func FetchAndMatchFilter(ctx context.Context, chain ChainSource,
+	blockHash *chainhash.Hash, watchList [][]byte,
+	batch bool) (bool, *gcs.Filter, error) {
 
-	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, queryOpts...,
-	)
+	filter, err := chain.GetCFilter(ctx, *blockHash, batch)
 	if err != nil {
 		return false, nil, err
 	}
@@ -149,11 +123,7 @@ func FetchAndMatchFilter(
 		return false, nil, nil
 	}
 
-	matched, err := MatchBlockFilter(
-		filter,
-		blockHash,
-		watchList,
-	)
+	matched, err := filtermatch.MatchFilter(filter, blockHash, watchList)
 
 	return matched, filter, err
 }
@@ -163,26 +133,18 @@ func FetchAndMatchFilter(
 // with new inputs discovered from matching outputs (so future spends are
 // also watched). Returns the relevant transactions and the updated watch
 // state.
-func ExtractBlockMatches(
-	chain neutrino.ChainSource,
-	curStamp *headerfs.BlockStamp,
-	filter *gcs.Filter,
-	ws WatchState,
-	queryOpts ...neutrino.QueryOption,
-) ([]*btcutil.Tx, WatchState, error) {
+func ExtractBlockMatches(ctx context.Context, chain ChainSource,
+	curStamp *headerfs.BlockStamp, filter *gcs.Filter,
+	ws WatchState) ([]*btcutil.Tx, WatchState, error) {
 
 	ws = ws.Clone()
-	block, err := chain.GetBlock(curStamp.Hash, queryOpts...)
+	block, err := chain.GetBlock(ctx, curStamp.Hash)
 	if err != nil {
 		return nil, ws, err
 	}
 	if block == nil {
-		return nil, ws, fmt.Errorf(
-			"couldn't get block %d (%s) from "+
-				"network",
-			curStamp.Height,
-			curStamp.Hash,
-		)
+		return nil, ws, fmt.Errorf("couldn't get block %d (%s) from "+
+			"network", curStamp.Height, curStamp.Hash)
 	}
 
 	if err := ws.cacheAddrScripts(); err != nil {
@@ -190,124 +152,30 @@ func ExtractBlockMatches(
 	}
 
 	// Verify the filter against the downloaded block.
-	_, err = neutrino.VerifyBasicBlockFilter(filter, block)
+	_, err = filtermatch.VerifyBasicBlockFilter(filter, block)
 	if err != nil {
-		return nil, ws, fmt.Errorf(
-			"error verifying filter against "+
-				"block %d (%s), possibly invalid "+
-				"filter from peer: %v",
-			curStamp.Height,
-			curStamp.Hash,
-			err,
-		)
+		return nil, ws, fmt.Errorf("error verifying filter against "+
+			"block %d (%s), possibly invalid filter from peer: %v",
+			curStamp.Height, curStamp.Hash, err)
 	}
 
-	relevantTxs := make(
-		[]*btcutil.Tx,
-		0,
-		len(block.Transactions()),
-	)
+	relevantTxs := make([]*btcutil.Tx, 0, len(block.Transactions()))
 	for _, tx := range block.Transactions() {
-		var relevant bool
-
-		if SpendsWatchedInput(tx, ws.Inputs) {
-			relevant = true
-		}
+		relevant := filtermatch.SpendsWatchedInput(tx, ws.Inputs)
 
 		// Even though the transaction may already be known as
-		// relevant, we need to call paysWatchedScripts anyway as it
-		// discovers new inputs to watch.
-		pays, newInputs := paysWatchedScripts(
-			tx,
-			ws.addrScripts,
-		)
-
-		if pays {
-			relevant = true
+		// relevant, we need to check its outputs anyway, as each one
+		// that pays a watched address becomes a watched input.
+		paid := filtermatch.PaysWatchedScript(tx, ws.addrScripts)
+		for _, input := range paid {
+			ws.Inputs = append(ws.Inputs, input)
+			ws.List = append(ws.List, input.PkScript)
 		}
 
-		// Add any new inputs discovered from matching outputs.
-		if len(newInputs) > 0 {
-			ws.Inputs = append(
-				ws.Inputs,
-				newInputs...)
-			for _, input := range newInputs {
-				ws.List = append(
-					ws.List,
-					input.PkScript,
-				)
-			}
-		}
-
-		if relevant {
+		if relevant || len(paid) > 0 {
 			relevantTxs = append(relevantTxs, tx)
 		}
 	}
 
 	return relevantTxs, ws, nil
-}
-
-// SpendsWatchedInput returns whether the transaction spends any of the
-// watched inputs.
-func SpendsWatchedInput(tx *btcutil.Tx,
-	watchInputs []neutrino.InputWithScript) bool {
-
-	// zeroOutPoint indicates we should match on the output script being
-	// spent rather than the outpoint itself.
-	var zeroOutPoint wire.OutPoint
-
-	for _, in := range tx.MsgTx().TxIn {
-		for _, input := range watchInputs {
-			switch {
-			case input.OutPoint == zeroOutPoint:
-				pkScript, err := txscript.ComputePkScript(
-					in.SignatureScript,
-					in.Witness,
-				)
-				if err != nil {
-					continue
-				}
-
-				if bytes.Equal(
-					pkScript.Script(),
-					input.PkScript,
-				) {
-
-					return true
-				}
-
-			case in.PreviousOutPoint == input.OutPoint:
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// paysWatchedScripts returns whether the transaction has an output paying to
-// one of the watched scripts. It also returns an InputWithScript for each
-// matching output, so that future spends of these outputs are also watched.
-func paysWatchedScripts(
-	tx *btcutil.Tx,
-	scripts map[string]struct{},
-) (bool, []neutrino.InputWithScript) {
-
-	var newInputs []neutrino.InputWithScript
-	for outIdx, out := range tx.MsgTx().TxOut {
-		if _, ok := scripts[string(out.PkScript)]; !ok {
-			continue
-		}
-		newInputs = append(
-			newInputs,
-			neutrino.InputWithScript{
-				PkScript: out.PkScript,
-				OutPoint: wire.OutPoint{
-					Hash:  *tx.Hash(),
-					Index: uint32(outIdx),
-				},
-			},
-		)
-	}
-	return len(newInputs) > 0, newInputs
 }

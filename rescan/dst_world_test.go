@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -549,7 +549,7 @@ type dstSource struct {
 	subscriptions int
 }
 
-var _ neutrino.ChainSource = (*dstSource)(nil)
+var _ ChainSource = (*dstSource)(nil)
 
 // clearFaults disarms every fault for the heal phase.
 func (s *dstSource) clearFaults() {
@@ -606,8 +606,8 @@ func (s *dstSource) GetBlockHeader(
 
 // GetBlock is part of the ChainSource interface. Peers serve any block they
 // have seen, including orphans.
-func (s *dstSource) GetBlock(hash chainhash.Hash,
-	_ ...neutrino.QueryOption) (*btcutil.Block, error) {
+func (s *dstSource) GetBlock(ctx context.Context,
+	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	s.mu.Lock()
 	if s.blockFail > 0 {
@@ -636,8 +636,8 @@ func (s *dstSource) GetFilterHeaderByHeight(uint32) (*chainhash.Hash,
 
 // GetCFilter is part of the ChainSource interface. Like the filter cache, it
 // serves orphaned blocks' filters too.
-func (s *dstSource) GetCFilter(hash chainhash.Hash, _ wire.FilterType,
-	_ ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (s *dstSource) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	b, ok := s.w.fx.lookup(hash)
 	if !ok {

@@ -12,7 +12,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -349,4 +348,4 @@ func TestPropertyReorgConsistency(t *testing.T) {
 }
 
 // Ensure the mock implements ChainSource.
-var _ neutrino.ChainSource = (*mockChainWithTxs)(nil)
+var _ ChainSource = (*mockChainWithTxs)(nil)

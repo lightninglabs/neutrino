@@ -14,7 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +85,7 @@ func TestStateSnapshotOwnsWatchScripts(t *testing.T) {
 	original := &StateCurrent{
 		Cursor: Cursor{
 			Watch: WatchState{
-				Inputs: []neutrino.InputWithScript{
+				Inputs: []filtermatch.InputWithScript{
 					{PkScript: []byte{1, 2}},
 				},
 				List: [][]byte{{3, 4}},
@@ -108,14 +108,11 @@ type countingFilterChain struct {
 	calls int
 }
 
-func (c *countingFilterChain) GetCFilter(
-	hash chainhash.Hash,
-	filterType wire.FilterType,
-	opts ...neutrino.QueryOption,
-) (*gcs.Filter, error) {
+func (c *countingFilterChain) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	c.calls++
-	return c.mockChainSource.GetCFilter(hash, filterType, opts...)
+	return c.mockChainSource.GetCFilter(ctx, hash, batch)
 }
 
 func TestCurrentRetainsBirthdayGate(t *testing.T) {
@@ -189,12 +186,11 @@ func TestWatchedScriptCacheTracksUpdates(t *testing.T) {
 			PkScript: script1,
 		}, {PkScript: script2}, {PkScript: []byte{0x51}},
 	}})
-	matched, inputs := paysWatchedScripts(tx, updated.addrScripts)
-	require.True(t, matched)
+	inputs := filtermatch.PaysWatchedScript(tx, updated.addrScripts)
 	require.Len(t, inputs, 2)
 	require.Equal(t, uint32(0), inputs[0].OutPoint.Index)
 	require.Equal(t, uint32(1), inputs[1].OutPoint.Index)
-	_, inputs = paysWatchedScripts(tx, watch.addrScripts)
+	inputs = filtermatch.PaysWatchedScript(tx, watch.addrScripts)
 	require.Len(t, inputs, 1)
 }
 
@@ -204,11 +200,8 @@ type shutdownFilterChain struct {
 	cancel  <-chan struct{}
 }
 
-func (c *shutdownFilterChain) GetCFilter(
-	_ chainhash.Hash,
-	_ wire.FilterType,
-	_ ...neutrino.QueryOption,
-) (*gcs.Filter, error) {
+func (c *shutdownFilterChain) GetCFilter(ctx context.Context,
+	_ chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	close(c.entered)
 	<-c.cancel
@@ -231,7 +224,7 @@ func TestStopCancelsBeforeWaitingForMailbox(t *testing.T) {
 			Hash: genesis.BlockHash(),
 		},
 		StartHeader: genesis,
-		WatchInputs: []neutrino.InputWithScript{
+		WatchInputs: []filtermatch.InputWithScript{
 			{PkScript: []byte{0x51}},
 		},
 	})

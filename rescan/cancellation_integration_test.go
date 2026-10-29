@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -24,14 +25,13 @@ type productionFilterChain struct {
 	result  chan error
 }
 
-func (c *productionFilterChain) GetCFilter(
-	hash chainhash.Hash,
-	typ wire.FilterType,
-	opts ...neutrino.QueryOption,
-) (*gcs.Filter, error) {
+func (c *productionFilterChain) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	close(c.entered)
-	filter, err := c.service.GetCFilter(hash, typ, opts...)
+	filter, err := c.service.GetCFilter(
+		hash, wire.GCSFilterRegular, neutrino.CancelQuery(ctx.Done()),
+	)
 	c.result <- err
 	return filter, err
 }
@@ -86,7 +86,7 @@ func TestActorStopsProductionFilterQuery(t *testing.T) {
 		Chain:       chain,
 		StartStamp:  headerfs.BlockStamp{Hash: genesis.BlockHash()},
 		StartHeader: genesis,
-		WatchInputs: []neutrino.InputWithScript{
+		WatchInputs: []filtermatch.InputWithScript{
 			{PkScript: []byte{0x51}},
 		},
 	})

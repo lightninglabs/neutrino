@@ -13,8 +13,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
@@ -88,7 +88,7 @@ type Callbacks struct {
 type ActorConfig struct {
 	// Chain provides access to headers, filters, blocks, and
 	// subscriptions.
-	Chain neutrino.ChainSource
+	Chain ChainSource
 
 	// StartStamp is the block stamp to begin scanning from. It counts as
 	// already scanned, so the first block scanned is StartStamp.Height+1.
@@ -106,10 +106,7 @@ type ActorConfig struct {
 	WatchAddrs []address.Address
 
 	// WatchInputs is the initial set of outpoints to watch for spends.
-	WatchInputs []neutrino.InputWithScript
-
-	// QueryOpts are passed through to chain queries.
-	QueryOpts []neutrino.QueryOption
+	WatchInputs []filtermatch.InputWithScript
 
 	// Callbacks provides notification hooks back to the wallet layer.
 	Callbacks Callbacks
@@ -185,8 +182,6 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	queryOpts := append([]neutrino.QueryOption(nil), cfg.QueryOpts...)
-	queryOpts = append(queryOpts, neutrino.CancelQuery(ctx.Done()))
 
 	// Create the FSM with initial state and immutable environment.
 	machine := newStateMachine(
@@ -198,7 +193,6 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 		&Environment{
 			Chain:     cfg.Chain,
 			StartTime: cfg.StartTime,
-			QueryOpts: queryOpts,
 			BatchSize: cfg.BatchSize,
 		},
 	)
@@ -293,7 +287,7 @@ func (a *RescanActor) WaitForShutdown() {
 // the outcome unknown: the update may still apply after the call returns.
 func (a *RescanActor) AddWatchAddrs(
 	addrs []address.Address,
-	inputs []neutrino.InputWithScript,
+	inputs []filtermatch.InputWithScript,
 	rewindTo *uint32,
 ) error {
 

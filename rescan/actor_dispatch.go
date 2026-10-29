@@ -87,7 +87,7 @@ func (a *RescanActor) handleContinuation(
 func (a *RescanActor) handleFSMEvent(actorCtx context.Context,
 	event RescanEvent) fn.Result[RescanActorResp] {
 
-	outbox, err := a.machine.ProcessEvent(actorCtx, event)
+	outbox, err := a.machine.ProcessEvent(a.ctx, event)
 	if err != nil {
 		return fn.Err[RescanActorResp](err)
 	}

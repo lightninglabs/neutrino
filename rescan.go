@@ -3,7 +3,6 @@
 package neutrino
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"sync"
@@ -14,21 +13,17 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
-	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 var (
-	// zeroOutPoint indicates that we should match on an output's script
-	// when dispatching a spend notification.
-	zeroOutPoint wire.OutPoint
-
 	// ErrRescanExit is an error returned to the caller in case the ongoing
 	// rescan exits.
 	ErrRescanExit = errors.New("rescan exited")
@@ -195,12 +190,29 @@ func WatchAddrs(watchAddrs ...address.Address) RescanOption {
 // InputWithScript couples an previous outpoint along with its input script.
 // We'll use the prev script to match the filter itself, but then scan for the
 // particular outpoint when we need to make a notification decision.
+//
+// It has the same fields as filtermatch.InputWithScript, which the rescan
+// actor matches with, and converts to it field for field.
 type InputWithScript struct {
 	// OutPoint identifies the previous output to watch.
 	OutPoint wire.OutPoint
 
 	// PkScript is the script of the previous output.
 	PkScript []byte
+}
+
+// matchInputs converts inputs to the type the rescan actor matches with.
+func matchInputs(inputs []InputWithScript) []filtermatch.InputWithScript {
+	if inputs == nil {
+		return nil
+	}
+
+	converted := make([]filtermatch.InputWithScript, len(inputs))
+	for i, input := range inputs {
+		converted[i] = filtermatch.InputWithScript(input)
+	}
+
+	return converted
 }
 
 // WatchInputs specifies the outpoints to watch for on-chain spends. We also
@@ -1232,16 +1244,7 @@ func (rs *rescanState) notifyBlockWithFilter(header *wire.BlockHeader,
 func matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
 	blockHash *chainhash.Hash) (bool, error) {
 
-	// Now that we have the filter as well as the block hash of the block
-	// used to construct the filter, we'll check to see if the block
-	// matches any items in our watch list.
-	key := builder.DeriveKey(blockHash)
-	matched, err := filter.MatchAny(key, ro.watchList)
-	if err != nil {
-		return false, err
-	}
-
-	return matched, nil
+	return filtermatch.MatchFilter(filter, blockHash, ro.watchList)
 }
 
 // blockFilterMatches returns whether the block filter matches the watched
@@ -1354,56 +1357,22 @@ func (ro *rescanOptions) updateFilter(chain ChainSource, update *updateOptions,
 // spendsWatchedInput returns whether the transaction matches the filter by
 // spending a watched input.
 func (ro *rescanOptions) spendsWatchedInput(tx *btcutil.Tx) bool {
-	for _, in := range tx.MsgTx().TxIn {
-		for _, input := range ro.watchInputs {
-			switch {
-			// If we're watching for a zero outpoint, then we should
-			// match on the output script being spent instead.
-			case input.OutPoint == zeroOutPoint:
-				pkScript, err := txscript.ComputePkScript(
-					in.SignatureScript, in.Witness,
-				)
-				if err != nil {
-					continue
-				}
-
-				if bytes.Equal(pkScript.Script(), input.PkScript) {
-					return true
-				}
-
-			// Otherwise, we'll match on the outpoint being spent.
-			case in.PreviousOutPoint == input.OutPoint:
-				return true
-			}
-		}
-	}
-	return false
+	return filtermatch.SpendsWatchedInput(tx, matchInputs(ro.watchInputs))
 }
 
 // paysWatchedAddr returns whether the transaction matches the filter by having
 // an output paying to a watched address. If that is the case, this also
 // updates the filter to watch the newly created output going forward.
 func (ro *rescanOptions) paysWatchedAddr(tx *btcutil.Tx) (bool, error) {
-	anyMatchingOutputs := false
-	for outIdx, out := range tx.MsgTx().TxOut {
-		pkScript := out.PkScript
-		if _, ok := ro.watchScripts[string(pkScript)]; !ok {
-			continue
-		}
-
-		anyMatchingOutputs = true
-		outPoint := wire.OutPoint{
-			Hash:  *tx.Hash(),
-			Index: uint32(outIdx),
-		}
-		ro.watchInputs = append(ro.watchInputs, InputWithScript{
-			PkScript: pkScript,
-			OutPoint: outPoint,
-		})
-		ro.watchList = append(ro.watchList, pkScript)
+	paid := filtermatch.PaysWatchedScript(tx, ro.watchScripts)
+	for _, input := range paid {
+		ro.watchInputs = append(
+			ro.watchInputs, InputWithScript(input),
+		)
+		ro.watchList = append(ro.watchList, input.PkScript)
 	}
 
-	return anyMatchingOutputs, nil
+	return len(paid) > 0, nil
 }
 
 // Rescan is an object that represents a long-running rescan/notification

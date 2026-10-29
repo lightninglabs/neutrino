@@ -33,14 +33,14 @@ type StateSyncing struct {
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateSyncing) ProcessEvent(
-	_ context.Context,
+	ctx context.Context,
 	event RescanEvent,
 	env *Environment,
 ) (*StateTransition, error) {
 
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
-		return s.processNextBatch(env)
+		return s.processNextBatch(ctx, env)
 
 	case AddWatchAddrsEvent:
 		return s.updateWatch(&e, func(c Cursor) RescanState {
@@ -70,7 +70,7 @@ func (s *StateSyncing) ProcessEvent(
 
 // processNextBatch processes up to env.BatchSize blocks during historical
 // catch-up.
-func (s *StateSyncing) processNextBatch(
+func (s *StateSyncing) processNextBatch(ctx context.Context,
 	env *Environment) (*StateTransition, error) {
 
 	cur := s.Cursor
@@ -159,7 +159,7 @@ func (s *StateSyncing) processNextBatch(
 			)
 		}
 
-		next, blockOutbox, err := cur.scanBlock(env, header, true)
+		next, blockOutbox, err := cur.scanBlock(ctx, env, header, true)
 		if err != nil {
 			return partial(err)
 		}

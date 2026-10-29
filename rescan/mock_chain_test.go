@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -11,12 +12,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// mockChainSource is a mock implementation of neutrino.ChainSource for
+// mockChainSource is a mock implementation of ChainSource for
 // testing the rescan FSM states.
 type mockChainSource struct {
 	mu sync.Mutex
@@ -32,7 +32,7 @@ type mockChainSource struct {
 	ntfnChan chan blockntfns.BlockNtfn
 }
 
-var _ neutrino.ChainSource = (*mockChainSource)(nil)
+var _ ChainSource = (*mockChainSource)(nil)
 
 // newMockChain creates a mock chain with numBlocks blocks starting from
 // genesis. All blocks have empty filters (no matching transactions).
@@ -171,8 +171,8 @@ func (c *mockChainSource) GetBlockHeader(
 	return blockHeader, blockHeight, nil
 }
 
-func (c *mockChainSource) GetBlock(hash chainhash.Hash,
-	_ ...neutrino.QueryOption) (*btcutil.Block, error) {
+func (c *mockChainSource) GetBlock(ctx context.Context,
+	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -199,9 +199,8 @@ func (c *mockChainSource) GetFilterHeaderByHeight(
 	return filterHeader, nil
 }
 
-func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
-	_ wire.FilterType,
-	_ ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (c *mockChainSource) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,7 +10,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -57,8 +57,8 @@ func (c *dstChain) GetBlockHeader(hash *chainhash.Hash) (
 	return c.mockChainSource.GetBlockHeader(hash)
 }
 
-func (c *dstChain) GetCFilter(hash chainhash.Hash, typ wire.FilterType,
-	opts ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (c *dstChain) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	c.muFault.Lock()
 	hook := c.onFilter
@@ -83,10 +83,10 @@ func (c *dstChain) GetCFilter(hash chainhash.Hash, typ wire.FilterType,
 		return nil, errors.New("dst filter outage")
 	}
 	c.muFault.Unlock()
-	return c.mockChainSource.GetCFilter(hash, typ, opts...)
+	return c.mockChainSource.GetCFilter(ctx, hash, batch)
 }
-func (c *dstChain) GetBlock(hash chainhash.Hash,
-	opts ...neutrino.QueryOption) (*btcutil.Block, error) {
+func (c *dstChain) GetBlock(ctx context.Context,
+	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	c.muFault.Lock()
 	if c.blockFailures > 0 {
@@ -95,7 +95,7 @@ func (c *dstChain) GetBlock(hash chainhash.Hash,
 		return nil, errors.New("dst block outage")
 	}
 	c.muFault.Unlock()
-	return c.mockChainSource.GetBlock(hash, opts...)
+	return c.mockChainSource.GetBlock(ctx, hash)
 }
 func (c *dstChain) Subscribe(height uint32) (*blockntfns.Subscription, error) {
 	c.muFault.Lock()

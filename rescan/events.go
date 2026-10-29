@@ -3,7 +3,7 @@ package rescan
 import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 )
 
 // RescanEvent is a sealed interface representing all events that can be
@@ -50,7 +50,7 @@ type AddWatchAddrsEvent struct {
 	Addrs []address.Address
 
 	// Inputs contains new outpoints to watch for spends.
-	Inputs []neutrino.InputWithScript
+	Inputs []filtermatch.InputWithScript
 
 	// RewindTo specifies the height to rewind to after updating the watch
 	// list. The block at RewindTo is kept, and every block above it is
