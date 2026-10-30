@@ -1,9 +1,11 @@
 package rescan
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand/v2"
@@ -16,7 +18,6 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -97,7 +98,36 @@ const (
 	// dstFaultGate holds a live filter fetch while a rewind waits in
 	// the mailbox.
 	dstFaultGate
+
+	// dstFaultNotCurrent makes IsCurrent report false for the first few
+	// calls, as a chain service that is still syncing does. No callback
+	// and no error may fire until it reports true.
+	dstFaultNotCurrent
+
+	// dstFaultStopFetch stops a second actor while its first filter
+	// fetch is in progress. The cancelled fetch must not be reported
+	// through OnError, and no callback may follow the stop.
+	dstFaultStopFetch
+
+	// dstFaultSlowBatch makes every filter fetch slow while the scan
+	// rescans the blocks a rewind undid, and sends an update in the
+	// middle of a fetch. The update must wait for that block only, not
+	// for the rest of the batch.
+	dstFaultSlowBatch
+
+	// dstFaultShutdownFetch starts a second actor after the heal phase
+	// whose fetches fail with the shutdown error. The rescan must end
+	// with that error, reported once, and deliver nothing more.
+	dstFaultShutdownFetch
+
+	// dstFaultStoreFail starts a second actor after the heal phase whose
+	// header reads by height fail. The rescan must end with a
+	// HeaderStoreError, reported once, and deliver nothing more.
+	dstFaultStoreFail
 )
+
+// dstSlowFetch is how long a filter fetch takes under dstFaultSlowBatch.
+const dstSlowFetch = 10 * time.Second
 
 // dstConfig is the decoded swarm configuration of one seed.
 type dstConfig struct {
@@ -195,9 +225,10 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 		src:   &dstSource{w: w, mgr: mgr},
 		start: start,
 		truth: newDSTTruth(
-			w.fx, start, startTime, w.fx.scripts[dstAddrA],
+			w, start, startTime, w.fx.scripts[dstAddrA],
 		),
 	}
+	d.truth.src = d.src
 	d.armStartFaults()
 
 	d.actor = mustNewRescanActor(t, ActorConfig{
@@ -207,6 +238,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 		StartTime:   startTime,
 		WatchAddrs:  []address.Address{w.fx.addrs[dstAddrA]},
 		BatchSize:   cfg.batchSize(),
+		ErrShutdown: errDSTShutdown,
 		OnError:     d.truth.onError,
 		Callbacks:   d.truth.callbacks(),
 	})
@@ -218,9 +250,19 @@ func (d *dstRun) enabled(fault dstFault) bool {
 	return d.cfg.faults&fault != 0
 }
 
+// notCurrentPolls returns how many IsCurrent calls report false under
+// dstFaultNotCurrent, between one and five, taken from the seed.
+func (d *dstRun) notCurrentPolls() int {
+	return 1 + len(d.ops)%5
+}
+
 // armStartFaults arms the faults that hit the initial sync.
 func (d *dstRun) armStartFaults() {
 	s := d.src
+	if d.enabled(dstFaultNotCurrent) {
+		s.notCurrent = d.notCurrentPolls()
+		s.notCurrentArmed = true
+	}
 	if d.enabled(dstFaultFilter) {
 		s.filterFail = 1
 	}
@@ -294,7 +336,7 @@ func (d *dstRun) check(label string) {
 // current returns the actor's state, which must be StateCurrent.
 func (d *dstRun) current(label string) *StateCurrent {
 	d.t.Helper()
-	state, err := d.actor.CurrentState()
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err, "%s, seed %x", label, d.seed)
 	cur, ok := state.(*StateCurrent)
 	require.True(d.t, ok, "%s: state %v, %v, seed %x", label, state,
@@ -310,7 +352,7 @@ func (d *dstRun) requireAtTip(label string) {
 	d.t.Helper()
 	d.truth.checkFinished()
 	d.check(label)
-	state, err := d.actor.CurrentState()
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err, "%s, seed %x", label, d.seed)
 	tip := d.w.tip()
 	cur, ok := state.(*StateCurrent)
@@ -336,7 +378,7 @@ func (d *dstRun) requireAtTip(label string) {
 // connects already in flight that may still be delivered first.
 func (d *dstRun) rewind(target uint32, allowance int) error {
 	d.truth.beginRewind(target, allowance)
-	return d.actor.AddWatchAddrs(nil, nil, &target)
+	return addWatch(d.actor, WatchUpdate{RewindTo: &target})
 }
 
 // initialSync starts the actor and lets the historical scan reach the tip.
@@ -344,6 +386,9 @@ func (d *dstRun) initialSync() {
 	d.actor.Start()
 	synctest.Wait()
 	d.sleepRetries(6)
+	if d.enabled(dstFaultNotCurrent) {
+		d.sleepRetries(d.notCurrentPolls())
+	}
 
 	d.src.mu.Lock()
 	subscriptions := d.src.subscriptions
@@ -417,6 +462,189 @@ func (d *dstRun) liveReorg() {
 	d.requireAtTip("live reorg")
 }
 
+// slowBatch rewinds to two blocks above the start with every filter fetch
+// slow, and sends an empty update in the middle of the second fetch of the
+// rescan. The batch must yield to the update after the block in progress,
+// so the update waits for less than one fetch.
+func (d *dstRun) slowBatch() {
+	d.src.mu.Lock()
+	d.src.filterDelay = dstSlowFetch
+	d.src.mu.Unlock()
+
+	require.NoError(d.t, d.rewind(d.start.height+2, 0))
+	time.Sleep(dstSlowFetch + dstSlowFetch/2)
+
+	began := time.Now()
+	require.NoError(d.t, addWatch(d.actor, WatchUpdate{}))
+	waited := time.Since(began)
+
+	d.src.mu.Lock()
+	d.src.filterDelay = 0
+	d.src.mu.Unlock()
+
+	if waited > dstSlowFetch {
+		d.truth.mu.Lock()
+		d.truth.fail(invUpdateLatency, "update waited %v behind "+
+			"%v fetches", waited, dstSlowFetch)
+		d.truth.mu.Unlock()
+	}
+
+	synctest.Wait()
+	d.sleepRetries(4)
+	d.requireAtTip("slow batch")
+}
+
+// stopDuringFetch starts a second actor, holds its first filter fetch, and
+// stops it there. The stop cancels the fetch. That must not be reported
+// through OnError, and no callback may follow the stop.
+func (d *dstRun) stopDuringFetch() {
+	entered := make(chan struct{})
+	d.src.mu.Lock()
+	d.src.holdEntered = entered
+	d.src.mu.Unlock()
+
+	var (
+		stopping            atomic.Bool
+		errs, lateCallbacks atomic.Int32
+	)
+	late := mustNewRescanActor(d.t, ActorConfig{
+		Chain:       d.src,
+		StartStamp:  d.start.stamp(),
+		StartHeader: d.start.header,
+		WatchAddrs:  []address.Address{d.w.fx.addrs[dstAddrA]},
+		BatchSize:   d.cfg.batchSize(),
+		OnError:     func(error) { errs.Add(1) },
+		Callbacks: Callbacks{
+			OnBlockConnected: func(*chainhash.Hash, int32,
+				time.Time) {
+
+				if stopping.Load() {
+					lateCallbacks.Add(1)
+				}
+			},
+		},
+	})
+	late.Start()
+	select {
+	case <-entered:
+	case <-time.After(time.Hour):
+		d.t.Fatalf("second actor never fetched a filter, seed %x",
+			d.seed)
+	}
+
+	stopping.Store(true)
+	late.Stop()
+	late.WaitForShutdown()
+	d.sleepRetries(3)
+
+	d.truth.mu.Lock()
+	if n := errs.Load(); n != 0 {
+		d.truth.fail(invStopSilent, "%d errors after a stop during "+
+			"a fetch", n)
+	}
+	if n := lateCallbacks.Load(); n != 0 {
+		d.truth.fail(invStopSilent, "%d callbacks after a stop "+
+			"during a fetch", n)
+	}
+	d.truth.mu.Unlock()
+	d.check("stop during fetch")
+}
+
+// endsWith starts a second actor scanning from the start with arm applied to
+// the fault layer, and requires it to end on its own with an error that
+// matches, reported exactly once, and with no callback after it ended. The
+// fault is cleared before it returns.
+func (d *dstRun) endsWith(label, inv string, arm func(on bool),
+	match func(error) bool) {
+
+	var (
+		ended               atomic.Bool
+		errs, lateCallbacks atomic.Int32
+	)
+	arm(true)
+	defer arm(false)
+
+	late := mustNewRescanActor(d.t, ActorConfig{
+		Chain:       d.src,
+		StartStamp:  d.start.stamp(),
+		StartHeader: d.start.header,
+		WatchAddrs:  []address.Address{d.w.fx.addrs[dstAddrA]},
+		BatchSize:   d.cfg.batchSize(),
+		ErrShutdown: errDSTShutdown,
+		OnError:     func(error) { errs.Add(1) },
+		Callbacks: Callbacks{
+			OnBlockConnected: func(*chainhash.Hash, int32,
+				time.Time) {
+
+				if ended.Load() {
+					lateCallbacks.Add(1)
+				}
+			},
+		},
+	})
+	late.Start()
+	defer func() { late.Stop(); late.WaitForShutdown() }()
+
+	select {
+	case <-late.Done():
+	case <-time.After(20 * retryInterval):
+	}
+	ended.Store(true)
+	d.sleepRetries(3)
+
+	d.truth.mu.Lock()
+	select {
+	case <-late.Done():
+		if err := late.Err(); !match(err) {
+			d.truth.fail(inv, "%s ended the rescan with %v", label,
+				err)
+		}
+		if n := errs.Load(); n != 1 {
+			d.truth.fail(inv, "%s reported %d errors", label, n)
+		}
+		if n := lateCallbacks.Load(); n != 0 {
+			d.truth.fail(inv, "%d callbacks after %s ended the "+
+				"rescan", n, label)
+		}
+
+	default:
+		d.truth.fail(inv, "%s did not end the rescan, %d errors",
+			label, errs.Load())
+	}
+	d.truth.mu.Unlock()
+	d.check(label)
+}
+
+// shutdownDuringFetch checks that a fetch failing with the shutdown error
+// ends the rescan with it.
+func (d *dstRun) shutdownDuringFetch() {
+	d.endsWith("shutdown during fetch", invShutdownEnds,
+		func(on bool) {
+			d.src.mu.Lock()
+			d.src.shutdown = on
+			d.src.mu.Unlock()
+		},
+		func(err error) bool { return errors.Is(err, errDSTShutdown) },
+	)
+}
+
+// storeFailure checks that a failed header store read ends the rescan with
+// a HeaderStoreError.
+func (d *dstRun) storeFailure() {
+	d.endsWith("header store failure", invStoreEnds,
+		func(on bool) {
+			d.src.mu.Lock()
+			d.src.storeFail = on
+			d.src.mu.Unlock()
+		},
+		func(err error) bool {
+			var storeErr *HeaderStoreError
+			return errors.As(err, &storeErr) &&
+				errors.Is(err, errDSTStore)
+		},
+	)
+}
+
 // newBlock extends the chain by one block and announces it. With the filter
 // class on, the next arg%3 filter fetches fail. With the gate class on and
 // bit 4 of arg set, the block's filter fetch is held while a rewind waits in
@@ -425,7 +653,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	gate := false
 	if faulty && d.enabled(dstFaultGate) && arg&16 != 0 {
 		// Only a current scan fetches the new block's filter at once.
-		state, err := d.actor.CurrentState()
+		state, err := d.actor.CurrentState(context.Background())
 		require.NoError(d.t, err)
 		cur, ok := state.(*StateCurrent)
 		gate = ok && cur.CurStamp.Hash == d.w.tip().hash
@@ -460,7 +688,7 @@ func (d *dstRun) newBlock(arg byte, faulty bool) {
 	done := make(chan error, 1)
 	d.truth.beginRewind(target, allowance)
 	go func() {
-		done <- d.actor.AddWatchAddrs(nil, nil, &target)
+		done <- addWatch(d.actor, WatchUpdate{RewindTo: &target})
 	}()
 	synctest.Wait()
 	close(release)
@@ -487,10 +715,10 @@ func (d *dstRun) step(i int, value byte) {
 		require.NoError(d.t, d.rewind(target, 0))
 
 	case 3:
-		require.NoError(d.t, d.actor.AddWatchAddrs(nil, nil, nil))
+		require.NoError(d.t, addWatch(d.actor, WatchUpdate{}))
 
 	case 7:
-		_, err := d.actor.CurrentState()
+		_, err := d.actor.CurrentState(context.Background())
 		require.NoError(d.t, err)
 	}
 	d.settle()
@@ -541,7 +769,7 @@ func (d *dstRun) stopService() {
 	d.truth.mu.Lock()
 	callbacks := len(d.truth.events)
 	d.truth.mu.Unlock()
-	errors := d.truth.errorCount()
+	errCount := d.truth.errorCount()
 
 	d.mgr.Stop()
 	d.settle()
@@ -551,9 +779,16 @@ func (d *dstRun) stopService() {
 	require.Len(d.t, d.truth.events, callbacks,
 		"callback after the service stopped, seed %x", d.seed)
 	d.truth.mu.Unlock()
-	require.Equal(d.t, errors+1, d.truth.errorCount(),
+	require.Equal(d.t, errCount+1, d.truth.errorCount(),
 		"closed subscription errors, seed %x", d.seed)
-	state, err := d.actor.CurrentState()
+	if err := d.actor.Err(); !errors.Is(err, errDSTShutdown) {
+		d.truth.mu.Lock()
+		d.truth.fail(invShutdownEnds, "closed subscription ended "+
+			"the rescan with %v", err)
+		d.truth.mu.Unlock()
+	}
+	d.check("service stop")
+	state, err := d.actor.CurrentState(context.Background())
 	require.NoError(d.t, err)
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
 
@@ -564,7 +799,7 @@ func (d *dstRun) stopService() {
 		StartHeader: d.start.header,
 		OnError:     func(error) { lateErrors.Add(1) },
 		Callbacks: Callbacks{
-			OnBlockConnected: func(int32, *wire.BlockHeader,
+			OnBlockConnected: func(*chainhash.Hash, int32,
 				time.Time) {
 
 				lateCallbacks.Add(1)
@@ -581,7 +816,7 @@ func (d *dstRun) stopService() {
 	require.Equal(d.t, int32(1), lateErrors.Load(),
 		"failed subscribe errors, seed %x", d.seed)
 	require.Zero(d.t, lateCallbacks.Load(), "seed %x", d.seed)
-	state, err = late.CurrentState()
+	state, err = late.CurrentState(context.Background())
 	require.NoError(d.t, err)
 	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
 
@@ -607,11 +842,23 @@ func runRescanDST(t *testing.T, seed []byte) dstSnapshot {
 		d.initialSync()
 		d.rewindPhase()
 		d.liveReorg()
+		if d.enabled(dstFaultSlowBatch) {
+			d.slowBatch()
+		}
 		for i, value := range d.ops {
 			d.step(i, value)
 		}
 		d.heal()
 		snap = d.snapshot()
+		if d.enabled(dstFaultStopFetch) {
+			d.stopDuringFetch()
+		}
+		if d.enabled(dstFaultShutdownFetch) {
+			d.shutdownDuringFetch()
+		}
+		if d.enabled(dstFaultStoreFail) {
+			d.storeFailure()
+		}
 		if d.enabled(dstFaultServiceStop) {
 			d.stopService()
 		}

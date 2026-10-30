@@ -1,0 +1,15 @@
+Reverts the third MED fix: a batch runs to its end while a request waits.
+
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index defb471..a32f2e1 100644
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -93,7 +93,7 @@ func (a *RescanActor) handleContinuation() fn.Result[RescanActorResp] {
+ 			return fn.Ok[RescanActorResp](&rescanActorAck{})
+ 		}
+ 
+-		if a.requests.Load() > 0 || a.ctx.Err() != nil {
++		if a.ctx.Err() != nil {
+ 			break
+ 		}
+ 	}

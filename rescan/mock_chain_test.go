@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -11,12 +12,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// mockChainSource is a mock implementation of neutrino.ChainSource for
+// mockChainSource is a mock implementation of ChainSource for
 // testing the rescan FSM states.
 type mockChainSource struct {
 	mu sync.Mutex
@@ -32,7 +32,7 @@ type mockChainSource struct {
 	ntfnChan chan blockntfns.BlockNtfn
 }
 
-var _ neutrino.ChainSource = (*mockChainSource)(nil)
+var _ ChainSource = (*mockChainSource)(nil)
 
 // newMockChain creates a mock chain with numBlocks blocks starting from
 // genesis. All blocks have empty filters (no matching transactions).
@@ -143,11 +143,11 @@ func (c *mockChainSource) GetBlockHeaderByHeight(
 
 	blockHash, ok := c.blockHashesByHeight[height]
 	if !ok {
-		return nil, errors.New("block height not found")
+		return nil, headerfs.ErrHeightNotFound
 	}
 	blockHeader, ok := c.blockHeaders[*blockHash]
 	if !ok {
-		return nil, errors.New("block header not found")
+		return nil, headerfs.ErrHashNotFound
 	}
 
 	return blockHeader, nil
@@ -161,18 +161,18 @@ func (c *mockChainSource) GetBlockHeader(
 
 	blockHeader, ok := c.blockHeaders[*hash]
 	if !ok {
-		return nil, 0, errors.New("block header not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	blockHeight, ok := c.blockHeightIndex[*hash]
 	if !ok {
-		return nil, 0, errors.New("block height not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 
 	return blockHeader, blockHeight, nil
 }
 
-func (c *mockChainSource) GetBlock(hash chainhash.Hash,
-	_ ...neutrino.QueryOption) (*btcutil.Block, error) {
+func (c *mockChainSource) GetBlock(ctx context.Context,
+	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -199,9 +199,8 @@ func (c *mockChainSource) GetFilterHeaderByHeight(
 	return filterHeader, nil
 }
 
-func (c *mockChainSource) GetCFilter(hash chainhash.Hash,
-	_ wire.FilterType,
-	_ ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (c *mockChainSource) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -225,4 +224,13 @@ func (c *mockChainSource) Subscribe(
 
 func (c *mockChainSource) IsCurrent() bool {
 	return true
+}
+
+// MarkAsConfirmed is part of the ChainSource interface. The mock broadcasts
+// nothing.
+func (c *mockChainSource) MarkAsConfirmed(chainhash.Hash) {}
+
+// addWatch sends actor a watch-list update and waits for it to apply.
+func addWatch(actor *RescanActor, update WatchUpdate) error {
+	return actor.AddWatchAddrs(context.Background(), update)
 }

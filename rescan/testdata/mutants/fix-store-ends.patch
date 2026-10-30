@@ -1,0 +1,16 @@
+Retries a step whose header store read failed instead of ending the
+rescan.
+
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index 98be845..e4cc5ba 100644
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -132,7 +132,7 @@ func (a *RescanActor) stepFailed(err error) fn.Result[RescanActorResp] {
+ 	case a.cfg.ErrShutdown != nil && errors.Is(err, a.cfg.ErrShutdown):
+ 		return a.endWith(a.cfg.ErrShutdown)
+ 
+-	case errors.As(err, &storeErr):
++	case false && errors.As(err, &storeErr):
+ 		return a.endWith(err)
+ 	}
+ 

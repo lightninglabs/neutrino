@@ -1,7 +1,8 @@
 diff --git a/rescan/cursor.go b/rescan/cursor.go
+index 9acf0f2..0b77c83 100644
 --- a/rescan/cursor.go
 +++ b/rescan/cursor.go
-@@ -153,7 +153,9 @@ func (c Cursor) updateWatch(event *AddWatchAddrsEvent,
+@@ -195,7 +195,9 @@ func (c Cursor) updateWatch(event *AddWatchAddrsEvent,
  		return nil, err
  	}
  	if rewind == nil {
@@ -11,4 +12,4 @@ diff --git a/rescan/cursor.go b/rescan/cursor.go
 +		}), nil
  	}
  
- 	return transition(&StateRewinding{
+ 	return transition(newRewinding(next, rewindPlan{*rewind}),

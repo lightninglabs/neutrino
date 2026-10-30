@@ -1,0 +1,17 @@
+Retries a step that failed with the shutdown error instead of ending the
+rescan with it.
+
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index 98be845..343e87f 100644
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -129,7 +129,8 @@ func (a *RescanActor) stepFailed(err error) fn.Result[RescanActorResp] {
+ 	// ended the legacy loop. Fetch and filter failures are retried.
+ 	var storeErr *HeaderStoreError
+ 	switch {
+-	case a.cfg.ErrShutdown != nil && errors.Is(err, a.cfg.ErrShutdown):
++	case false && a.cfg.ErrShutdown != nil &&
++		errors.Is(err, a.cfg.ErrShutdown):
+ 		return a.endWith(a.cfg.ErrShutdown)
+ 
+ 	case errors.As(err, &storeErr):

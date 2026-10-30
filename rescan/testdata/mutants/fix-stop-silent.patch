@@ -1,0 +1,16 @@
+Reverts the second MED fix: a step that Stop cancelled is reported through
+OnError and retried.
+
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+index defb471..b03e52b 100644
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -107,7 +107,7 @@ func (a *RescanActor) handleContinuation() fn.Result[RescanActorResp] {
+ // failed because Stop cancelled its fetch is not an error the caller needs to
+ // see: it reports nothing, and nothing retries it.
+ func (a *RescanActor) stepFailed(err error) fn.Result[RescanActorResp] {
+-	if a.ctx.Err() != nil {
++	if false && a.ctx.Err() != nil {
+ 		log.Debugf("RescanActor: step cancelled by stop: %v", err)
+ 		return fn.Err[RescanActorResp](ErrStopped)
+ 	}

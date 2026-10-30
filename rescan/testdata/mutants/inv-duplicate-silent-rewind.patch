@@ -1,16 +1,13 @@
 diff --git a/rescan/state_rewinding.go b/rescan/state_rewinding.go
+index 08d8502..098f4eb 100644
 --- a/rescan/state_rewinding.go
 +++ b/rescan/state_rewinding.go
-@@ -82,11 +82,7 @@ func (s *StateRewinding) processRewind(
- 
- 		// Emit disconnection notification for the current block.
- 		headerCopy := cur.CurHeader
--		outbox = append(outbox, BlockDisconnectedOutbox{
--			Hash:   cur.CurStamp.Hash,
--			Height: cur.CurStamp.Height,
--			Header: &headerCopy,
--		})
-+		_ = headerCopy
- 
- 		// Walk back to the previous block.
- 		header, height, err := env.Chain.GetBlockHeader(
+@@ -96,7 +96,7 @@ func (s *StateRewinding) processRewind(
+ 	// update that asked for this part of the rewind disabled it.
+ 	var outbox []OutboxEvent
+ 	headerCopy := cur.CurHeader
+-	if !s.plan.silentAt(cur.CurStamp.Height) {
++	if false && !s.plan.silentAt(cur.CurStamp.Height) {
+ 		outbox = append(outbox, BlockDisconnectedOutbox{
+ 			Hash:   cur.CurStamp.Hash,
+ 			Height: cur.CurStamp.Height,

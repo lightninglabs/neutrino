@@ -251,11 +251,11 @@ func (c *mockChainSource) GetBlockHeaderByHeight(
 
 	blockHash, ok := c.blockHashesByHeight[height]
 	if !ok {
-		return nil, errors.New("block height not found")
+		return nil, headerfs.ErrHeightNotFound
 	}
 	blockHeader, ok := c.blockHeaders[*blockHash]
 	if !ok {
-		return nil, errors.New("block header not found")
+		return nil, headerfs.ErrHashNotFound
 	}
 	return blockHeader, nil
 }
@@ -269,11 +269,11 @@ func (c *mockChainSource) GetBlockHeader(
 
 	blockHeader, ok := c.blockHeaders[*hash]
 	if !ok {
-		return nil, 0, errors.New("block header not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	blockHeight, ok := c.blockHeightIndex[*hash]
 	if !ok {
-		return nil, 0, errors.New("block height not found")
+		return nil, 0, headerfs.ErrHashNotFound
 	}
 	return blockHeader, blockHeight, nil
 }
@@ -382,7 +382,9 @@ func (c *mockChainSource) Subscribe(
 		return c.subscribeOverride(bestHeight)
 	}
 
-	for i := bestHeight + 1; i <= uint32(c.bestBlock.Height); i++ {
+	// A height of zero asks for no backlog.
+	for i := bestHeight + 1; bestHeight != 0 &&
+		i <= uint32(c.bestBlock.Height); i++ {
 		hash := c.blockHashesByHeight[i]
 		header := c.blockHeaders[*hash]
 		c.ntfnChan <- blockntfns.NewBlockConnected(*header, i)
@@ -459,12 +461,12 @@ func (ctx *rescanTestContext) start(waitUntilSynced bool) { // nolint:unparam
 	}
 
 	// Override the mock chain subscribe implementation so that it delivers
-	// a signal once synced.
+	// a signal once the rescan subscribes. The rescan subscribes before it
+	// scans anything, and starts at the best block, so it catches up from
+	// the header store if a block arrives before it is current.
 	signal := make(chan struct{})
-	deliverSyncSignal := func(bestHeight uint32) (*blockntfns.Subscription, error) {
-		if bestHeight == uint32(ctx.chain.bestBlock.Height) {
-			close(signal)
-		}
+	deliverSyncSignal := func(uint32) (*blockntfns.Subscription, error) {
+		close(signal)
 		return &blockntfns.Subscription{
 			Notifications: ctx.chain.ntfnChan,
 			Cancel:        func() {},
@@ -688,8 +690,8 @@ func TestRescanNewBlockAfterRetry(t *testing.T) {
 	ctx.chain.setFailGetFilter(false)
 
 	// The blocks should now be notified in their expected order.
-	ctx.assertFilterQueried(block1.Hash)
-	ctx.recvBlockConnected(block1)
+	// A retry that read the failure may still be in flight.
+	ctx.recvBlockConnectedAfterRetries(block1)
 	ctx.assertFilterQueried(block2.Hash)
 	ctx.recvBlockConnected(block2)
 }
@@ -729,8 +731,8 @@ func TestRescanReorgAllButFirstRetryBlocks(t *testing.T) {
 
 	// Since the first block wasn't reorged, we should expect a notification
 	// for it.
-	ctx.assertFilterQueried(block.Hash)
-	ctx.recvBlockConnected(block)
+	// A retry that read the failure may still be in flight.
+	ctx.recvBlockConnectedAfterRetries(block)
 }
 
 // TestRescanReorgAllRetryBlocks ensures the rescan stops retrying blocks for
@@ -821,7 +823,7 @@ func TestRescanRetryBlocksAfterCatchingUp(t *testing.T) {
 	// manually.
 	block2 := ctx.chain.addNewBlock(false)
 	block3 := ctx.chain.addNewBlock(false)
-	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(wire.BlockHeader{}, 0)
+	ctx.chain.ntfnChan <- invalidNotification(block3)
 
 	// Revert the mocked chain so that block filters can be retrieved
 	// successfully.
@@ -829,8 +831,8 @@ func TestRescanRetryBlocksAfterCatchingUp(t *testing.T) {
 
 	// The notifications for all the blocks added above should now be
 	// delivered as part of catching up.
-	ctx.assertFilterQueried(block1.Hash)
-	ctx.recvBlockConnected(block1)
+	// A retry that read the failure may still be in flight.
+	ctx.recvBlockConnectedAfterRetries(block1)
 	ctx.assertFilterQueried(block2.Hash)
 	ctx.recvBlockConnected(block2)
 	ctx.assertFilterQueried(block3.Hash)
@@ -907,9 +909,7 @@ func TestRescanRetryBlockFetchWhileCatchingUp(t *testing.T) {
 	// an invalid block, which should prompt the rescan to catch up with
 	// the chain manually.
 	block := ctx.chain.addNewBlockMatching(testWatchScript, false)
-	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
-		wire.BlockHeader{}, 0,
-	)
+	ctx.chain.ntfnChan <- invalidNotification(block)
 
 	// While catching up, the block's filter and then the block itself
 	// should be queried. As the block fetch fails, the rescan should keep
@@ -955,9 +955,7 @@ func TestRescanRetryFilterFetchWhileCatchingUp(t *testing.T) {
 	// block, which should prompt the rescan to catch up with the chain
 	// manually.
 	block := ctx.chain.addNewBlock(false)
-	ctx.chain.ntfnChan <- blockntfns.NewBlockConnected(
-		wire.BlockHeader{}, 0,
-	)
+	ctx.chain.ntfnChan <- invalidNotification(block)
 
 	// While catching up, the block's filter should be queried until it
 	// succeeds.
@@ -976,12 +974,121 @@ func TestRescanRetryFilterFetchWhileCatchingUp(t *testing.T) {
 	}
 }
 
-// TestWaitForRetryShutdown ensures a retry wait does not delay shutdown.
-func TestWaitForRetryShutdown(t *testing.T) {
-	quit := make(chan struct{})
-	close(quit)
-	rs := &rescanState{opts: &rescanOptions{quit: quit}}
-	if err := rs.waitForRetry(time.Hour); !errors.Is(err, ErrRescanExit) {
-		t.Fatalf("expected rescan exit, got %v", err)
+// invalidNotification returns a connect notification for a block above tip
+// that the header store does not hold, which prompts the rescan to catch up
+// with the chain from the header store.
+func invalidNotification(tip headerfs.BlockStamp) blockntfns.BlockNtfn {
+	return blockntfns.NewBlockConnected(
+		wire.BlockHeader{}, uint32(tip.Height)+1,
+	)
+}
+
+// TestRescanQuitWhileRetrying ensures a rescan that keeps retrying a block it
+// cannot fetch still exits promptly once its quit channel closes.
+func TestRescanQuitWhileRetrying(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRescanTestContext(t, 10, []RescanOption{
+		StartTime(time.Time{}),
+		WatchInputs(InputWithScript{}),
+	}...)
+	ctx.start(true)
+
+	ctx.chain.setFailGetFilter(true)
+	block := ctx.chain.addNewBlock(true)
+	ctx.assertFilterQueried(block.Hash)
+	ctx.assertFilterQueried(block.Hash)
+
+	// Keep serving the failing queries while the rescan shuts down.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-ctx.chain.filtersQueried:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	close(ctx.quit)
+	select {
+	case err := <-ctx.errChan:
+		if !errors.Is(err, ErrRescanExit) {
+			t.Fatalf("expected rescan exit, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rescan did not exit while retrying")
+	}
+	ctx.rescan.WaitForShutdown()
+}
+
+// shutdownChain is a mock chain whose filter fetches fail with
+// ErrShuttingDown, and whose header reads by height can fail with a store
+// error.
+type shutdownChain struct {
+	*mockChainSource
+	storeErr error
+}
+
+// GetCFilter fails as a stopped ChainService does.
+func (c *shutdownChain) GetCFilter(chainhash.Hash, wire.FilterType,
+	...QueryOption) (*gcs.Filter, error) {
+
+	return nil, ErrShuttingDown
+}
+
+// GetBlockHeaderByHeight fails with storeErr when it is set.
+func (c *shutdownChain) GetBlockHeaderByHeight(
+	height uint32) (*wire.BlockHeader, error) {
+
+	if c.storeErr != nil && height > 0 {
+		return nil, c.storeErr
+	}
+	return c.mockChainSource.GetBlockHeaderByHeight(height)
+}
+
+// TestRescanEndsOnShutdownAndStoreErrors checks that, as in the legacy
+// rescan, a fetch failing with ErrShuttingDown ends the rescan with exactly
+// ErrShuttingDown, and a failed header store read ends it with the store's
+// error, rather than being retried.
+func TestRescanEndsOnShutdownAndStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	storeErr := errors.New("header store read failed")
+	for _, test := range []struct {
+		name     string
+		storeErr error
+		want     error
+	}{
+		{name: "shutdown", want: ErrShuttingDown},
+		{name: "store", storeErr: storeErr, want: storeErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chain := &shutdownChain{
+				mockChainSource: newMockChainSource(5),
+				storeErr:        test.storeErr,
+			}
+			genesis := chain.ChainParams().GenesisHash
+			start := &headerfs.BlockStamp{Hash: *genesis}
+			input := InputWithScript{PkScript: []byte{1}}
+			rescan := NewRescan(
+				chain, QuitChan(make(chan struct{})),
+				StartBlock(start), WatchInputs(input),
+			)
+			errChan := rescan.Start()
+
+			select {
+			case err := <-errChan:
+				if err != test.want {
+					t.Fatalf("want %v, got %v", test.want,
+						err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("rescan did not end")
+			}
+			rescan.WaitForShutdown()
+		})
 	}
 }

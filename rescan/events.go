@@ -3,7 +3,7 @@ package rescan
 import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 )
 
 // RescanEvent is a sealed interface representing all events that can be
@@ -50,7 +50,7 @@ type AddWatchAddrsEvent struct {
 	Addrs []address.Address
 
 	// Inputs contains new outpoints to watch for spends.
-	Inputs []neutrino.InputWithScript
+	Inputs []filtermatch.InputWithScript
 
 	// RewindTo specifies the height to rewind to after updating the watch
 	// list. The block at RewindTo is kept, and every block above it is
@@ -58,15 +58,20 @@ type AddWatchAddrsEvent struct {
 	// tip, no rewind is performed and only future blocks are scanned with
 	// the updated filter.
 	RewindTo *uint32
+
+	// DisableDisconnectedNtfns suppresses the disconnect callbacks for
+	// the blocks this update's rewind undoes. It does not affect the
+	// disconnects that a reorg reports.
+	DisableDisconnectedNtfns bool
 }
 
 func (AddWatchAddrsEvent) rescanEventSealed() {}
 
-// ProcessNextBlockEvent is the continuation event. It leaves Initializing,
-// and runs the next batch of up to Environment.BatchSize blocks in Syncing
-// or Rewinding. Current ignores it. A state asks for it with a
-// ContinueOutbox rather than looping, so the actor mailbox can interleave
-// AddWatchAddrs and notifications between batches.
+// ProcessNextBlockEvent is the continuation event. It leaves Initializing
+// once the chain is ready, and scans or undoes the next block in Syncing or
+// Rewinding. Current ignores it. A state asks for it with a ContinueOutbox
+// rather than looping, so the actor can dispatch each block's callbacks and
+// interleave AddWatchAddrs and notifications between blocks.
 type ProcessNextBlockEvent struct{}
 
 func (ProcessNextBlockEvent) rescanEventSealed() {}

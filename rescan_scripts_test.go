@@ -1,20 +1,79 @@
 package neutrino
 
 import (
-	"encoding/binary"
-	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
+// addNewBlockWithTxs advances the chain by one block holding txs, with a
+// filter built over their outputs and prevScripts, and notifies it.
+func (c *mockChainSource) addNewBlockWithTxs(prevScripts [][]byte,
+	txs ...*wire.MsgTx) {
+
+	header := c.nextHeader()
+	msg := wire.NewMsgBlock(header)
+	coinbase := wire.NewMsgTx(1)
+	coinbase.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: wire.MaxPrevOutIndex},
+	})
+	coinbase.AddTxOut(wire.NewTxOut(1, []byte{txscript.OP_TRUE}))
+	_ = msg.AddTransaction(coinbase)
+	for _, tx := range txs {
+		_ = msg.AddTransaction(tx)
+	}
+	filter, err := builder.BuildBasicFilter(msg, prevScripts)
+	if err != nil {
+		panic(err)
+	}
+
+	// Store the block, its filter and its headers in one step, so the
+	// rescan never sees the new tip without them.
+	c.mu.Lock()
+	height := uint32(c.bestBlock.Height + 1)
+	hash := header.BlockHash()
+	c.blockHeightIndex[hash] = height
+	c.blockHashesByHeight[height] = &hash
+	c.blockHeaders[hash] = header
+	c.blocks[hash] = btcutil.NewBlock(msg)
+	c.filters[hash] = filter
+	filterHeader, _ := builder.MakeHeaderForFilter(
+		filter, *c.filterHeadersByHeight[height-1],
+	)
+	c.filterHeadersByHeight[height] = &filterHeader
+	c.bestBlock = headerfs.BlockStamp{
+		Height: int32(height), Hash: hash, Timestamp: header.Timestamp,
+	}
+	stamp := c.bestBlock
+	c.mu.Unlock()
+
+	c.notify(stamp)
+}
+
+// notify sends a connect notification for the block at stamp.
+func (c *mockChainSource) notify(stamp headerfs.BlockStamp) {
+	c.mu.Lock()
+	header := *c.blockHeaders[stamp.Hash]
+	c.mu.Unlock()
+
+	c.ntfnChan <- blockntfns.NewBlockConnected(header, uint32(stamp.Height))
+}
+
 // TestWatchedAddressScripts checks initial and updated addresses, duplicates,
-// and the resulting outpoints and filter entries for multiple outputs.
+// and the outpoints the rescan then watches, through the public API: every
+// output that pays a watched address becomes a watched outpoint, and no
+// other output does.
 func TestWatchedAddressScripts(t *testing.T) {
 	makeAddr := func(n byte) address.Address {
 		t.Helper()
@@ -28,91 +87,133 @@ func TestWatchedAddressScripts(t *testing.T) {
 		}
 		return addr
 	}
-	a, b, other := makeAddr(1), makeAddr(2), makeAddr(3)
-	rs, err := newRescanState(
-		newMockChainSource(0), WatchAddrs(a, a),
-		QuitChan(make(chan struct{})),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = rs.opts.updateFilter(
-		rs.chain, &updateOptions{addrs: []address.Address{b}},
-		&headerfs.BlockStamp{}, &wire.BlockHeader{},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	msg := wire.NewMsgTx(2)
-	for _, addr := range []address.Address{a, other, b, a} {
+	scriptOf := func(addr address.Address) []byte {
+		t.Helper()
 		script, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		msg.AddTxOut(wire.NewTxOut(1, script))
+		return script
 	}
-	tx := btcutil.NewTx(msg)
-	matched, err := rs.opts.paysWatchedAddr(tx)
-	if err != nil || !matched {
-		t.Fatalf("matched=%v err=%v", matched, err)
-	}
-	if len(rs.opts.watchInputs) != 3 || len(rs.opts.watchList) != 6 {
-		t.Fatalf("unexpected input or filter count: %d %d",
-			len(rs.opts.watchInputs), len(rs.opts.watchList))
-	}
-	for i, index := range []uint32{0, 2, 3} {
-		input := rs.opts.watchInputs[i]
-		outputScript := msg.TxOut[index].PkScript
-		if input.OutPoint.Hash != *tx.Hash() ||
-			input.OutPoint.Index != index ||
-			string(input.PkScript) != string(outputScript) {
+	a, b, other := makeAddr(1), makeAddr(2), makeAddr(3)
 
-			t.Fatalf("incorrect watched input %d: %+v", i, input)
-		}
+	type event struct {
+		kind     string
+		index    int
+		relevant int
 	}
-	unmatched := wire.NewMsgTx(2)
-	script, err := txscript.PayToAddrScript(other)
-	if err != nil {
+	var (
+		mu     sync.Mutex
+		events []event
+	)
+	record := func(e event) {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+	}
+	quit := make(chan struct{})
+	chain := newMockChainSource(10)
+
+	// The mock reports every query on an unbuffered channel. Drain them.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-chain.filtersQueried:
+			case <-chain.blocksQueried:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	rescan := NewRescan(
+		chain, QuitChan(quit), WatchAddrs(a, a),
+		NotificationHandlers(rpcclient.NotificationHandlers{
+			OnRecvTx: func(_ *btcutil.Tx,
+				d *btcjson.BlockDetails) {
+
+				record(event{kind: "rv", index: d.Index})
+			},
+			OnRedeemingTx: func(_ *btcutil.Tx,
+				d *btcjson.BlockDetails) {
+
+				record(event{kind: "rd", index: d.Index})
+			},
+			OnFilteredBlockConnected: func(_ int32,
+				_ *wire.BlockHeader, txs []*btcutil.Tx) {
+
+				record(event{kind: "fc", relevant: len(txs)})
+			},
+		}),
+	)
+	errChan := rescan.Start()
+	defer func() {
+		close(quit)
+		<-errChan
+		rescan.WaitForShutdown()
+	}()
+	if err := rescan.Update(AddAddrs(b)); err != nil {
 		t.Fatal(err)
 	}
-	unmatched.AddTxOut(wire.NewTxOut(1, script))
-	matched, err = rs.opts.paysWatchedAddr(btcutil.NewTx(unmatched))
-	if err != nil || matched || len(rs.opts.watchInputs) != 3 {
-		t.Fatalf("unexpected non-match: %v %v", matched, err)
-	}
-}
 
-// BenchmarkWatchedAddressScripts measures the common unmatched-output path at
-// different watch set sizes, excluding one-time address conversion.
-func BenchmarkWatchedAddressScripts(b *testing.B) {
-	for _, size := range []int{1000, 10000} {
-		b.Run(fmt.Sprintf("addresses=%d", size), func(b *testing.B) {
-			ro := defaultRescanOptions()
-			for i := 0; i < size; i++ {
-				script := make([]byte, 34)
-				binary.LittleEndian.PutUint64(
-					script[2:], uint64(i),
-				)
-				ro.watchScripts[string(script)] = struct{}{}
-			}
-			msg := wire.NewMsgTx(2)
-			for i := 0; i < 2000; i++ {
-				script := make([]byte, 34)
-				binary.LittleEndian.PutUint64(
-					script[2:], uint64(size+i),
-				)
-				msg.AddTxOut(wire.NewTxOut(1, script))
-			}
-			tx := btcutil.NewTx(msg)
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				matched, err := ro.paysWatchedAddr(tx)
-				if err != nil || matched {
-					b.Fatal("unexpected match")
+	// One transaction pays a, other, b and a again, so three of its
+	// outputs become watched outpoints.
+	pay := wire.NewMsgTx(2)
+	for _, addr := range []address.Address{a, other, b, a} {
+		pay.AddTxOut(wire.NewTxOut(1, scriptOf(addr)))
+	}
+	payHash := pay.TxHash()
+	chain.addNewBlockWithTxs(nil, pay)
+
+	// A block that pays only an unwatched address is not relevant.
+	unmatched := wire.NewMsgTx(2)
+	unmatched.AddTxOut(wire.NewTxOut(1, scriptOf(other)))
+	chain.addNewBlockWithTxs(nil, unmatched)
+
+	// One transaction spends each output of pay. Only the spends of the
+	// three watched outputs are relevant.
+	var (
+		spends      []*wire.MsgTx
+		prevScripts [][]byte
+	)
+	for i, out := range pay.TxOut {
+		spend := wire.NewMsgTx(2)
+		spend.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+			Hash: payHash, Index: uint32(i),
+		}})
+		spend.AddTxOut(wire.NewTxOut(1, []byte{txscript.OP_TRUE}))
+		spends = append(spends, spend)
+		prevScripts = append(prevScripts, out.PkScript)
+	}
+	chain.addNewBlockWithTxs(prevScripts, spends...)
+
+	want := []event{
+		{kind: "rv", index: 1}, {kind: "fc", relevant: 1},
+		{kind: "fc"},
+		{kind: "rd", index: 1}, {kind: "rd", index: 3},
+		{kind: "rd", index: 4}, {kind: "fc", relevant: 3},
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]event(nil), events...)
+		mu.Unlock()
+		if len(got) >= len(want) {
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("event %d: want %+v, got "+
+						"%+v", i, want[i], got[i])
 				}
 			}
-		})
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("want events %+v, got %+v", want, got)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

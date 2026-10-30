@@ -1,12 +1,13 @@
 diff --git a/rescan/cursor.go b/rescan/cursor.go
+index 9acf0f2..4abc1aa 100644
 --- a/rescan/cursor.go
 +++ b/rescan/cursor.go
-@@ -81,7 +81,7 @@ func (c Cursor) scanBlock(env *Environment, header *wire.BlockHeader,
+@@ -76,7 +76,7 @@ func (c Cursor) scanBlock(ctx context.Context, env *Environment,
  		FilteredBlockOutbox{
  			Height:      next.CurStamp.Height,
  			Header:      &headerCopy,
 -			RelevantTxs: relevantTxs,
 +			RelevantTxs: relevantTxs[:0],
+ 			Matches:     matches,
  		},
  		BlockConnectedOutbox{
- 			Header:    &headerCopy,

@@ -1,0 +1,16 @@
+Reverts the first MED fix: Initializing scans at once, without waiting for
+the chain to be current.
+
+diff --git a/rescan/state_initializing.go b/rescan/state_initializing.go
+index ab55042..7966999 100644
+--- a/rescan/state_initializing.go
++++ b/rescan/state_initializing.go
+@@ -101,7 +101,7 @@ func (s *StateInitializing) chainReady(env *Environment) (bool, error) {
+ 	}
+ 
+ 	end := env.EndBlock
+-	return env.Chain.IsCurrent() ||
++	return true || env.Chain.IsCurrent() ||
+ 		(end.Height > 0 && best.Height >= end.Height) ||
+ 		best.Hash == end.Hash, nil
+ }

@@ -1,6 +1,7 @@
 package rescan
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -520,6 +520,14 @@ var _ blockntfns.NotificationSource = (*dstWorld)(nil)
 // errDSTFault is the error every injected fetch fault returns.
 var errDSTFault = errors.New("dst injected fault")
 
+// errDSTShutdown is what every fetch returns once the simulated chain
+// service has shut down, and the actors' ErrShutdown.
+var errDSTShutdown = errors.New("dst chain service shut down")
+
+// errDSTStore is what a failing header store read returns. It is not a
+// not-found result, so it must end the rescan.
+var errDSTStore = errors.New("dst header store read failed")
+
 // dstSource is the ChainSource the actor sees. Subscribe goes to the real
 // SubscriptionManager over the world, and every other method goes to the
 // world through one fault layer. With no fault armed, every method behaves
@@ -548,10 +556,39 @@ type dstSource struct {
 	// harness releases it.
 	gateEntered, gateRelease chan struct{}
 
+	// holdEntered, if set, is closed by the next filter fetch, which then
+	// waits for its context to end and fails with the context's error, as
+	// a production fetch does when the rescan stops.
+	holdEntered chan struct{}
+
+	// filterDelay is how long each filter fetch takes, in virtual time. A
+	// fetch whose context ends first fails with the context's error.
+	filterDelay time.Duration
+
+	// notCurrent is how many more IsCurrent calls report false, and
+	// notCurrentArmed records that the harness set it. becameCurrent is
+	// set once a call has reported true.
+	notCurrent      int
+	notCurrentArmed bool
+	becameCurrent   bool
+
+	// shutdown makes every fetch fail with errDSTShutdown, and storeFail
+	// every header read by height fail with errDSTStore.
+	shutdown  bool
+	storeFail bool
+
 	subscriptions int
 }
 
-var _ neutrino.ChainSource = (*dstSource)(nil)
+// isCurrentYet reports whether IsCurrent has reported true yet.
+func (s *dstSource) isCurrentYet() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.becameCurrent || !s.notCurrentArmed
+}
+
+var _ ChainSource = (*dstSource)(nil)
 
 // clearFaults disarms every fault for the heal phase.
 func (s *dstSource) clearFaults() {
@@ -559,6 +596,7 @@ func (s *dstSource) clearFaults() {
 	defer s.mu.Unlock()
 
 	s.filterFail, s.blockFail, s.subscribeFail = 0, 0, 0
+	s.filterDelay, s.holdEntered = 0, nil
 }
 
 // ChainParams is part of the ChainSource interface.
@@ -576,9 +614,17 @@ func (s *dstSource) BestBlock() (*headerfs.BlockStamp, error) {
 func (s *dstSource) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
 
+	s.mu.Lock()
+	storeFail := s.storeFail
+	s.mu.Unlock()
+	if storeFail {
+		return nil, errDSTStore
+	}
+
 	b, ok := s.w.at(height)
 	if !ok {
-		return nil, fmt.Errorf("height %d not found", height)
+		return nil, fmt.Errorf("height %d: %w", height,
+			headerfs.ErrHeightNotFound)
 	}
 	header := b.header
 	return &header, nil
@@ -608,10 +654,14 @@ func (s *dstSource) GetBlockHeader(
 
 // GetBlock is part of the ChainSource interface. Peers serve any block they
 // have seen, including orphans.
-func (s *dstSource) GetBlock(hash chainhash.Hash,
-	_ ...neutrino.QueryOption) (*btcutil.Block, error) {
+func (s *dstSource) GetBlock(ctx context.Context,
+	hash chainhash.Hash) (*btcutil.Block, error) {
 
 	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return nil, errDSTShutdown
+	}
 	if s.blockFail > 0 {
 		s.blockFail--
 		s.mu.Unlock()
@@ -638,8 +688,8 @@ func (s *dstSource) GetFilterHeaderByHeight(uint32) (*chainhash.Hash,
 
 // GetCFilter is part of the ChainSource interface. Like the filter cache, it
 // serves orphaned blocks' filters too.
-func (s *dstSource) GetCFilter(hash chainhash.Hash, _ wire.FilterType,
-	_ ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (s *dstSource) GetCFilter(ctx context.Context,
+	hash chainhash.Hash, batch bool) (*gcs.Filter, error) {
 
 	b, ok := s.w.fx.lookup(hash)
 	if !ok {
@@ -650,7 +700,13 @@ func (s *dstSource) GetCFilter(hash chainhash.Hash, _ wire.FilterType,
 	hook := s.onFilter
 	entered, release := s.gateEntered, s.gateRelease
 	s.gateEntered, s.gateRelease = nil, nil
+	held, delay := s.holdEntered, s.filterDelay
+	s.holdEntered = nil
+	shutdown := s.shutdown
 	s.mu.Unlock()
+	if shutdown {
+		return nil, errDSTShutdown
+	}
 	if hook != nil {
 		if err := hook(b); err != nil {
 			return nil, err
@@ -659,6 +715,18 @@ func (s *dstSource) GetCFilter(hash chainhash.Hash, _ wire.FilterType,
 	if entered != nil {
 		close(entered)
 		<-release
+	}
+	if held != nil {
+		close(held)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	s.mu.Lock()
@@ -701,7 +769,20 @@ func (s *dstSource) Subscribe(
 	return sub, nil
 }
 
-// IsCurrent is part of the ChainSource interface.
+// MarkAsConfirmed is part of the ChainSource interface. The DST broadcasts
+// nothing.
+func (s *dstSource) MarkAsConfirmed(chainhash.Hash) {}
+
+// IsCurrent is part of the ChainSource interface. It reports false for the
+// first notCurrent calls, as a chain service still syncing does.
 func (s *dstSource) IsCurrent() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.notCurrent > 0 {
+		s.notCurrent--
+		return false
+	}
+	s.becameCurrent = true
 	return true
 }

@@ -1,16 +1,13 @@
 diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
+index 52037f7..73f2777 100644
 --- a/rescan/state_syncing.go
 +++ b/rescan/state_syncing.go
-@@ -130,12 +130,6 @@ func (s *StateSyncing) processNextBatch(
- 			// events from blocks processed in this batch,
- 			// followed by the finished event unless this scan
- 			// already reported it.
--			if !s.finished {
--				outbox = append(outbox, RescanFinishedOutbox{
--					Hash:   cur.CurStamp.Hash,
--					Height: cur.CurStamp.Height,
--				})
--			}
- 
- 			return transition(
- 				&StateCurrent{Cursor: cur}, outbox...,
+@@ -108,7 +108,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
+ 	if cur.CurStamp.Height == bestBlock.Height {
+ 		// We're current. Report it unless this scan already did.
+ 		var outbox []OutboxEvent
+-		if !s.finished {
++		if false && !s.finished {
+ 			outbox = append(outbox, RescanFinishedOutbox{
+ 				Hash:   cur.CurStamp.Hash,
+ 				Height: cur.CurStamp.Height,

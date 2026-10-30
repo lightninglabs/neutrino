@@ -3,7 +3,7 @@ package rescan
 import (
 	"time"
 
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // Environment holds the immutable dependencies available to all FSM states
@@ -13,38 +13,31 @@ import (
 type Environment struct {
 	// Chain provides access to block headers, filters, blocks, and
 	// subscriptions.
-	Chain neutrino.ChainSource
+	Chain ChainSource
 
 	// StartTime is the wallet birthday. Blocks before this time are
 	// skipped during scanning (only headers are advanced without filter
 	// checks).
 	StartTime time.Time
 
-	// QueryOpts are query options passed through to chain queries
-	// (e.g., timeout, peer selection).
-	QueryOpts []neutrino.QueryOption
-
-	// BatchSize controls how many blocks are processed per
-	// ProcessNextBlockEvent while syncing or rewinding. This amortizes the
-	// continuation overhead while still allowing AddWatchAddrs to
-	// interleave between batches. Zero means DefaultBatchSize.
-	BatchSize int
+	// EndBlock is the block the scan stops at. The zero value never
+	// matches, so the scan follows the chain until it is stopped.
+	EndBlock headerfs.BlockStamp
 }
 
-// DefaultBatchSize is the number of blocks processed per batch during
-// historical sync. Chosen to balance throughput (avoiding per-block mailbox
-// overhead) with responsiveness to filter updates.
+// reachedEnd reports whether the cursor at stamp has reached the end block.
+// It matches the legacy rescan's test: the end block's hash, or its height
+// when that is set.
+func (e *Environment) reachedEnd(stamp headerfs.BlockStamp) bool {
+	return stamp.Hash == e.EndBlock.Hash ||
+		(e.EndBlock.Height > 0 && stamp.Height == e.EndBlock.Height)
+}
+
+// DefaultBatchSize is the number of blocks the actor scans per mailbox turn
+// during historical sync, unless a request is waiting. It amortizes the
+// per-turn overhead.
 const DefaultBatchSize = 100
 
 // ProgressInterval controls how frequently RescanProgressOutbox events are
 // emitted during historical sync (every N blocks).
 const ProgressInterval = 10_000
-
-// batchSize returns BatchSize, or DefaultBatchSize when it is not set.
-func (e *Environment) batchSize() int {
-	if e.BatchSize <= 0 {
-		return DefaultBatchSize
-	}
-
-	return e.BatchSize
-}

@@ -4,7 +4,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
 
@@ -29,9 +29,9 @@ type RescanActorResp interface {
 	rescanActorRespSealed()
 }
 
-// processNextBlockMsg is a continuation: it runs the next Syncing or Rewinding
-// batch. The actor sends it to itself, and a retry sends it after a failed
-// batch.
+// processNextBlockMsg is a continuation: it runs the next batch of Syncing
+// or Rewinding steps. The actor sends it to itself, and a retry sends it
+// after a failed step or while Initializing waits for the chain.
 type processNextBlockMsg struct {
 	lndactor.BaseMessage
 }
@@ -55,8 +55,10 @@ type addWatchAddrsMsg struct {
 	lndactor.BaseMessage
 
 	Addrs    []address.Address
-	Inputs   []neutrino.InputWithScript
+	Inputs   []filtermatch.InputWithScript
 	RewindTo *uint32
+
+	DisableDisconnectedNtfns bool
 }
 
 func (*addWatchAddrsMsg) MessageType() string   { return "add_watch_addrs" }
@@ -125,19 +127,16 @@ func (*currentStateResp) rescanActorRespSealed() {}
 
 // newAddWatchAddrsMsg builds an addWatchAddrsMsg from copies of its
 // arguments, so the caller may reuse them once the call returns.
-func newAddWatchAddrsMsg(
-	addrs []address.Address,
-	inputs []neutrino.InputWithScript,
-	rewindTo *uint32,
-) *addWatchAddrsMsg {
-
+func newAddWatchAddrsMsg(update WatchUpdate) *addWatchAddrsMsg {
 	msg := &addWatchAddrsMsg{
-		Addrs:  append([]address.Address(nil), addrs...),
-		Inputs: copyInputsWithScripts(inputs),
+		Addrs:  append([]address.Address(nil), update.Addrs...),
+		Inputs: copyInputsWithScripts(update.Inputs),
+
+		DisableDisconnectedNtfns: update.DisableDisconnectedNtfns,
 	}
 
-	if rewindTo != nil {
-		rewind := *rewindTo
+	if update.RewindTo != nil {
+		rewind := *update.RewindTo
 		msg.RewindTo = &rewind
 	}
 
@@ -147,14 +146,14 @@ func newAddWatchAddrsMsg(
 // copyInputsWithScripts returns a deep copy of inputs, including each
 // PkScript.
 func copyInputsWithScripts(
-	inputs []neutrino.InputWithScript,
-) []neutrino.InputWithScript {
+	inputs []filtermatch.InputWithScript,
+) []filtermatch.InputWithScript {
 
 	if len(inputs) == 0 {
 		return nil
 	}
 
-	cloned := make([]neutrino.InputWithScript, len(inputs))
+	cloned := make([]filtermatch.InputWithScript, len(inputs))
 	for i := range inputs {
 		cloned[i] = inputs[i]
 		cloned[i].PkScript = append(

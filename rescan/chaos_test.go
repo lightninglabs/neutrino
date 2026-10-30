@@ -77,9 +77,9 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 			addr := addrs[idx]
 			mu.Unlock()
 
-			err := actor.AddWatchAddrs(
-				[]address.Address{addr}, nil, nil,
-			)
+			err := addWatch(actor, WatchUpdate{
+				Addrs: []address.Address{addr},
+			})
 			if err != nil {
 				t.Errorf(
 					"AddWatchAddrs failed: %v",
@@ -102,7 +102,7 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 	wg.Wait()
 
 	// Verify the actor is in Current state and has addresses.
-	state, err := actor.CurrentState()
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 
 	cur, ok := state.(*StateCurrent)
@@ -138,9 +138,8 @@ func TestChaosBlockNotificationBurst(t *testing.T) {
 		StartHeader: *genesisHeader,
 		StartTime:   time.Time{},
 		Callbacks: Callbacks{
-			OnBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				timestamp time.Time) {
+			OnBlockConnected: func(_ *chainhash.Hash, _ int32,
+				_ time.Time) {
 
 				blocksProcessed.Add(1)
 			},
@@ -179,7 +178,7 @@ func TestChaosBlockNotificationBurst(t *testing.T) {
 		"all burst blocks should be processed")
 
 	// Verify state is at the new tip.
-	state, err := actor.CurrentState()
+	state, err := actor.CurrentState(t.Context())
 	require.NoError(t, err)
 
 	cur, ok := state.(*StateCurrent)
@@ -255,9 +254,10 @@ func TestChaosAddWatchWithRewindDuringCurrent(t *testing.T) {
 	pkScript, _ := txscript.PayToAddrScript(addr)
 	_ = pkScript
 
-	err := actor.AddWatchAddrs(
-		[]address.Address{addr}, nil, &rewindTo,
-	)
+	err := addWatch(actor, WatchUpdate{
+		Addrs:    []address.Address{addr},
+		RewindTo: &rewindTo,
+	})
 	require.NoError(t, err)
 
 	// Wait for the rewind and re-sync to find the tx.

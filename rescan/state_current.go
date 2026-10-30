@@ -23,7 +23,7 @@ type StateCurrent struct {
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateCurrent) ProcessEvent(
-	_ context.Context,
+	ctx context.Context,
 	event RescanEvent,
 	env *Environment,
 ) (*StateTransition, error) {
@@ -31,12 +31,26 @@ func (s *StateCurrent) ProcessEvent(
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		// A continuation or retry queued before Syncing reached the
-		// tip. The subscription reports every later reorg, so there
-		// is nothing to check.
-		return transition(s), nil
+		// tip, or the actor yielding a connect notification to a
+		// waiting request. If the header store holds blocks above the
+		// cursor, Syncing scans them, the notified block included.
+		// The subscription reports every later reorg, so there is
+		// nothing else to check.
+		best, err := env.bestBlock()
+		if err != nil {
+			return nil, err
+		}
+		if best.Height <= s.CurStamp.Height {
+			return transition(s), nil
+		}
+
+		return transition(&StateSyncing{
+			Cursor:   s.Cursor,
+			finished: true,
+		}, ContinueOutbox{}), nil
 
 	case BlockConnectedEvent:
-		next, err := s.handleBlockConnected(&e, env)
+		next, err := s.handleBlockConnected(ctx, &e, env)
 		if err != nil {
 			// Catch up from the header store instead of retrying
 			// this block. Syncing rescans every block above the
@@ -63,7 +77,7 @@ func (s *StateCurrent) ProcessEvent(
 			return transition(s), nil
 		}
 
-		return transition(&StateCurrent{Cursor: cursor}, undone), nil
+		return current(env, cursor, undone), nil
 
 	case AddWatchAddrsEvent:
 		return s.updateWatch(&e, func(c Cursor) RescanState {
@@ -81,7 +95,7 @@ func (s *StateCurrent) ProcessEvent(
 }
 
 // handleBlockConnected processes a new block from the subscription.
-func (s *StateCurrent) handleBlockConnected(
+func (s *StateCurrent) handleBlockConnected(ctx context.Context,
 	event *BlockConnectedEvent,
 	env *Environment,
 ) (*StateTransition, error) {
@@ -106,7 +120,7 @@ func (s *StateCurrent) handleBlockConnected(
 
 	// A filter notification can be delayed past a reorg. Only process the
 	// block if its height still identifies the active chain header.
-	active, err := env.Chain.GetBlockHeaderByHeight(event.Height)
+	active, err := env.headerByHeight(event.Height)
 	if err != nil {
 		return nil, err
 	}
@@ -125,12 +139,25 @@ func (s *StateCurrent) handleBlockConnected(
 		)
 	}
 
-	next, outbox, err := s.scanBlock(env, &event.Header, false)
+	next, outbox, err := s.scanBlock(ctx, env, &event.Header, false)
 	if err != nil {
 		return nil, err
 	}
 
-	return transition(&StateCurrent{Cursor: next}, outbox...), nil
+	return current(env, next, outbox...), nil
+}
+
+// current returns a transition to Current at cursor that emits outbox, or to
+// Terminal if cursor has reached the end block.
+func current(env *Environment, cursor Cursor,
+	outbox ...OutboxEvent) *StateTransition {
+
+	if env.reachedEnd(cursor.CurStamp) {
+		return transition(&StateTerminal{},
+			append(outbox, EndReachedOutbox{})...)
+	}
+
+	return transition(&StateCurrent{Cursor: cursor}, outbox...)
 }
 
 // IsTerminal returns false since Current is not terminal.

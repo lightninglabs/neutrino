@@ -12,7 +12,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	neutrino "github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -119,8 +118,6 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		// Chain: [genesis] + N empty blocks + [block with tx].
 		numEmpty := rapid.IntRange(3, 15).
 			Draw(t, "numEmpty")
-		batchSize := rapid.IntRange(1, 5).
-			Draw(t, "batchSize")
 
 		chain := newMockChainWithTxs(numEmpty + 1)
 
@@ -151,7 +148,6 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 		env := &Environment{
 			Chain:     chain.mockChainSource,
 			StartTime: time.Time{},
-			BatchSize: batchSize,
 		}
 
 		// Process some blocks to advance past the tx block.
@@ -349,4 +345,4 @@ func TestPropertyReorgConsistency(t *testing.T) {
 }
 
 // Ensure the mock implements ChainSource.
-var _ neutrino.ChainSource = (*mockChainWithTxs)(nil)
+var _ ChainSource = (*mockChainWithTxs)(nil)
