@@ -57,9 +57,11 @@ func newFSMModel(t *rapid.T) *fsmModel {
 		t.Fatalf("initial watch: %v", err)
 	}
 	m.state = &StateInitializing{
-		StartStamp:  start.stamp(),
-		StartHeader: start.header,
-		Watch:       watch,
+		Cursor: Cursor{
+			CurStamp:  start.stamp(),
+			CurHeader: start.header,
+			Watch:     watch,
+		},
 	}
 	return m
 }
@@ -74,10 +76,7 @@ func (m *fsmModel) apply(event RescanEvent) bool {
 		return false
 	}
 	m.state = transition.NextState
-	if transition.Events == nil {
-		return true
-	}
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		switch e := out.(type) {
 		case FilteredBlockOutbox:
 			m.truth.filteredConnected(
@@ -97,7 +96,7 @@ func (m *fsmModel) apply(event RescanEvent) bool {
 		case RescanFinishedOutbox:
 			m.truth.finished(e.Height)
 
-		case SelfTellOutbox:
+		case ContinueOutbox:
 			m.next = true
 		}
 	}

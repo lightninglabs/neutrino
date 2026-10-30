@@ -137,13 +137,15 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 
 		// Start with an EMPTY watch list.
 		state := &StateSyncing{
-			CurStamp: headerfs.BlockStamp{
-				Hash:   *genesisHash,
-				Height: 0,
+			Cursor: Cursor{
+				CurStamp: headerfs.BlockStamp{
+					Hash:   *genesisHash,
+					Height: 0,
+				},
+				CurHeader: *genesisHeader,
+				Watch:     WatchState{},
+				Scanning:  true,
 			},
-			CurHeader: *genesisHeader,
-			Watch:     WatchState{},
-			Scanning:  true,
 		}
 
 		env := &Environment{
@@ -220,12 +222,9 @@ func TestPropertyAddWatchMidSyncNeverMisses(t *testing.T) {
 				)
 			}
 
-			if transition.Events != nil {
-				allOutbox = append(
-					allOutbox,
-					transition.Events.Outbox...,
-				)
-			}
+			allOutbox = append(
+				allOutbox, outboxOf(transition)...,
+			)
 
 			currentState = transition.NextState
 
@@ -270,12 +269,14 @@ func TestPropertyReorgConsistency(t *testing.T) {
 		header := chain.blockHeaders[bestBlock.Hash]
 
 		state := &StateCurrent{
-			CurStamp: headerfs.BlockStamp{
-				Hash:   bestBlock.Hash,
-				Height: bestBlock.Height,
+			Cursor: Cursor{
+				CurStamp: headerfs.BlockStamp{
+					Hash:   bestBlock.Hash,
+					Height: bestBlock.Height,
+				},
+				CurHeader: *header,
+				Watch:     WatchState{},
 			},
-			CurHeader: *header,
-			Watch:     WatchState{},
 		}
 
 		env := &Environment{Chain: chain}

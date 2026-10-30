@@ -4,13 +4,12 @@ import (
 	"time"
 
 	neutrino "github.com/lightninglabs/neutrino"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // Environment holds the immutable dependencies available to all FSM states
-// during event processing. The environment is NEVER mutated — all mutable
-// state (CurStamp, WatchAddrs, WatchList, etc.) lives in the state structs
-// themselves and is carried forward via state transitions.
+// during event processing. The environment is never mutated. All mutable
+// state, the Cursor and its watch list, lives in the state structs and is
+// carried forward through state transitions.
 type Environment struct {
 	// Chain provides access to block headers, filters, blocks, and
 	// subscriptions.
@@ -21,19 +20,14 @@ type Environment struct {
 	// checks).
 	StartTime time.Time
 
-	// EndBlock is an optional block stamp at which the rescan should
-	// stop. If nil, the rescan runs until stopped. This is used for
-	// bounded historical scans (e.g., utxoscanner).
-	EndBlock *headerfs.BlockStamp
-
 	// QueryOpts are query options passed through to chain queries
 	// (e.g., timeout, peer selection).
 	QueryOpts []neutrino.QueryOption
 
 	// BatchSize controls how many blocks are processed per
-	// ProcessNextBlockEvent during syncing. This amortizes the self-Tell
-	// overhead while still allowing AddWatchAddrs to interleave between
-	// batches.
+	// ProcessNextBlockEvent while syncing or rewinding. This amortizes the
+	// continuation overhead while still allowing AddWatchAddrs to
+	// interleave between batches. Zero means DefaultBatchSize.
 	BatchSize int
 }
 
@@ -45,3 +39,12 @@ const DefaultBatchSize = 100
 // ProgressInterval controls how frequently RescanProgressOutbox events are
 // emitted during historical sync (every N blocks).
 const ProgressInterval = 10_000
+
+// batchSize returns BatchSize, or DefaultBatchSize when it is not set.
+func (e *Environment) batchSize() int {
+	if e.BatchSize <= 0 {
+		return DefaultBatchSize
+	}
+
+	return e.BatchSize
+}

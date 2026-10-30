@@ -50,7 +50,7 @@ func TestIntegrationFullLifecycle(t *testing.T) {
 		blocksReceived atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain.mockChainSource,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -162,7 +162,7 @@ func TestIntegrationRaceConditionPrevention(t *testing.T) {
 		filteredCount atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain.mockChainSource,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,

@@ -2,26 +2,23 @@ package rescan
 
 import (
 	"context"
-
-	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// StateInitializing is the initial state of the rescan FSM. It waits for a
-// ProcessNextBlockEvent to begin syncing. Any AddWatchAddrsEvents received
-// in this state are buffered into the watch state that will be carried
-// forward when transitioning to StateSyncing.
+// StateInitializing is the initial state of the rescan FSM, before the first
+// batch. The actor subscribes to block notifications before it sends the
+// first ProcessNextBlockEvent, and this state exists to hold AddWatchAddrs
+// updates until then: scanning without a subscription could miss a
+// disconnect. It buffers each update into the watch list, and remembers the
+// lowest rewind target below the start.
+//
+// It leaves on ProcessNextBlockEvent, to Syncing, or to Rewinding when a
+// buffered update asked to rewind, and on StopEvent to Terminal.
 type StateInitializing struct {
-	// StartStamp is the block stamp to begin scanning from.
-	StartStamp headerfs.BlockStamp
+	// Cursor is the start block, which counts as already scanned.
+	Cursor
 
-	// StartHeader is the header at StartStamp.
-	StartHeader wire.BlockHeader
-
-	// Watch holds the current watch list state.
-	Watch WatchState
-
-	// rewindTo records the earliest rewind before scanning.
+	// rewindTo records the lowest rewind target below the start that an
+	// update asked for before scanning began.
 	rewindTo *uint32
 }
 
@@ -37,64 +34,40 @@ func (s *StateInitializing) ProcessEvent(
 	switch e := event.(type) {
 	case ProcessNextBlockEvent:
 		// Apply a rewind accepted during subscription setup.
-		var next RescanState = &StateSyncing{
-			CurStamp:  s.StartStamp,
-			CurHeader: s.StartHeader,
-			Watch:     s.Watch,
-		}
+		var next RescanState = &StateSyncing{Cursor: s.Cursor}
 		if s.rewindTo != nil {
 			next = &StateRewinding{
-				CurStamp:  s.StartStamp,
-				CurHeader: s.StartHeader,
-				Watch:     s.Watch, TargetHeight: *s.rewindTo,
+				Cursor:       s.Cursor,
+				TargetHeight: *s.rewindTo,
 			}
 		}
-		return &StateTransition{
-			NextState: next,
-			Events: &EmittedEvent{
-				Outbox: []OutboxEvent{
-					SelfTellOutbox{
-						Event: ProcessNextBlockEvent{},
-					},
-				},
-			},
-		}, nil
+		return transition(next, ContinueOutbox{}), nil
 
 	case AddWatchAddrsEvent:
 		// Buffer addresses into the watch state.
-		newWatch, err := s.Watch.ApplyUpdate(&e)
+		cursor, rewind, err := s.addWatch(&e)
 		if err != nil {
 			return nil, err
 		}
 
 		rewindTo := s.rewindTo
-		if e.RewindTo != nil &&
-			int32(*e.RewindTo) < s.StartStamp.Height &&
-			(rewindTo == nil || *e.RewindTo < *rewindTo) {
-
-			height := *e.RewindTo
-			rewindTo = &height
+		if rewind != nil && (rewindTo == nil || *rewind < *rewindTo) {
+			rewindTo = rewind
 		}
 
-		return &StateTransition{
-			NextState: &StateInitializing{
-				StartStamp:  s.StartStamp,
-				StartHeader: s.StartHeader,
-				Watch:       newWatch,
-				rewindTo:    rewindTo,
-			},
-		}, nil
+		return transition(&StateInitializing{
+			Cursor:   cursor,
+			rewindTo: rewindTo,
+		}), nil
 
 	case StopEvent:
-		return &StateTransition{
-			NextState: &StateTerminal{},
-		}, nil
+		return transition(&StateTerminal{}), nil
 
 	default:
 		log.Warnf("StateInitializing: ignoring unexpected event %T",
 			event)
 
-		return &StateTransition{NextState: s}, nil
+		return transition(s), nil
 	}
 }
 

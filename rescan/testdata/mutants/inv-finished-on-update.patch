@@ -1,13 +1,14 @@
-diff --git a/rescan/state_current.go b/rescan/state_current.go
---- a/rescan/state_current.go
-+++ b/rescan/state_current.go
-@@ -300,6 +300,9 @@ func (s *StateCurrent) handleAddWatch(
- 			Watch:     newWatch,
- 			Scanning:  s.Scanning,
- 		},
-+		Events: &EmittedEvent{Outbox: []OutboxEvent{
-+			RescanFinishedOutbox{Height: s.CurStamp.Height},
-+		}},
- 	}, nil
- }
+diff --git a/rescan/cursor.go b/rescan/cursor.go
+--- a/rescan/cursor.go
++++ b/rescan/cursor.go
+@@ -153,7 +153,9 @@ func (c Cursor) updateWatch(event *AddWatchAddrsEvent,
+ 		return nil, err
+ 	}
+ 	if rewind == nil {
+-		return transition(stay(next)), nil
++		return transition(stay(next), RescanFinishedOutbox{
++			Height: next.CurStamp.Height,
++		}), nil
+ 	}
  
+ 	return transition(&StateRewinding{

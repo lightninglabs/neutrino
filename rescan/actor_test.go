@@ -1,8 +1,11 @@
 package rescan
 
 import (
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -36,7 +39,7 @@ func newActorReceiveHarness(t *testing.T) *RescanActor {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -47,10 +50,10 @@ func newActorReceiveHarness(t *testing.T) *RescanActor {
 		BatchSize:   100,
 	})
 
-	actor.fsm.Start()
+	actor.machine.Start(t.Context())
 	t.Cleanup(func() {
 		actor.cancel()
-		actor.fsm.Stop()
+		actor.machine.Stop()
 	})
 
 	return actor
@@ -115,7 +118,7 @@ func TestRescanActorLifecycle(t *testing.T) {
 		finished        atomic.Bool
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -167,7 +170,7 @@ func TestRescanActorAddWatchAddrs(t *testing.T) {
 
 	var finished atomic.Bool
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -222,7 +225,7 @@ func TestRescanActorAddWatchAddrsPropagatesError(t *testing.T) {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -267,7 +270,7 @@ func TestRescanActorWithTxMatch(t *testing.T) {
 		finished       atomic.Bool
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain.mockChainSource,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -319,7 +322,7 @@ func TestRescanActorBridgeBlockNotification(t *testing.T) {
 		blocksConnected atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -391,10 +394,12 @@ func TestStateIsTerminal(t *testing.T) {
 // state can lower the rewind target.
 func TestRewindingAddWatchLowerTarget(t *testing.T) {
 	state := &StateRewinding{
-		CurStamp: headerfs.BlockStamp{
-			Height: 10,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 10,
+			},
+			Watch: WatchState{},
 		},
-		Watch:        WatchState{},
 		TargetHeight: 5,
 	}
 
@@ -427,4 +432,216 @@ func TestWatchStateClone(t *testing.T) {
 	clone.List = append(clone.List, []byte{0x03})
 	require.Len(t, original.List, 1)
 	require.Len(t, clone.List, 2)
+}
+
+// lifecycleChain counts live subscriptions and runs an optional hook inside
+// Subscribe, so a test can stop the actor while Start is subscribing.
+type lifecycleChain struct {
+	*mockChainSource
+
+	hook       func()
+	subscribed atomic.Int32
+	live       atomic.Int32
+}
+
+func (c *lifecycleChain) Subscribe(uint32) (*blockntfns.Subscription,
+	error) {
+
+	if c.hook != nil {
+		c.hook()
+	}
+	c.subscribed.Add(1)
+	c.live.Add(1)
+
+	var once sync.Once
+	return &blockntfns.Subscription{
+		Notifications: make(chan blockntfns.BlockNtfn),
+		Cancel: func() {
+			once.Do(func() { c.live.Add(-1) })
+		},
+	}, nil
+}
+
+// newLifecycleActor returns an actor over a lifecycleChain.
+func newLifecycleActor(t *testing.T) (*RescanActor, *lifecycleChain) {
+	t.Helper()
+
+	chain := &lifecycleChain{mockChainSource: newMockChain(3)}
+	params := chain.ChainParams()
+	actor := mustNewRescanActor(t, ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash: *params.GenesisHash,
+		},
+		StartHeader: params.GenesisBlock.Header,
+	})
+
+	return actor, chain
+}
+
+// TestRescanActorStopBeforeStart checks that Stop before Start leaves nothing
+// running: Start then neither subscribes nor starts the mailbox. The synctest
+// bubble fails the test if any goroutine is left behind.
+func TestRescanActorStopBeforeStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		actor, chain := newLifecycleActor(t)
+
+		// No mailbox runs yet, so Stop must not wait for a barrier
+		// nothing can answer.
+		begin := time.Now()
+		actor.Stop()
+		require.Less(t, time.Since(begin), stopTimeout)
+		actor.Start()
+		actor.WaitForShutdown()
+
+		require.Zero(t, chain.subscribed.Load())
+		_, err := actor.CurrentState()
+		require.Error(t, err)
+	})
+}
+
+// TestRescanActorStopDuringStart checks that a Stop that runs while Start is
+// subscribing still cancels the subscription Start creates, and that nothing
+// keeps running afterwards.
+func TestRescanActorStopDuringStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		actor, chain := newLifecycleActor(t)
+
+		stopped := make(chan struct{})
+		chain.hook = func() {
+			go func() {
+				actor.Stop()
+				close(stopped)
+			}()
+
+			// Return only once Stop has cancelled the actor, so
+			// the subscription is created after Stop began.
+			for actor.ctx.Err() == nil {
+				runtime.Gosched()
+			}
+		}
+
+		actor.Start()
+		<-stopped
+		actor.WaitForShutdown()
+
+		require.Equal(t, int32(1), chain.subscribed.Load())
+		require.Zero(t, chain.live.Load(), "subscription leaked")
+		_, err := actor.CurrentState()
+		require.Error(t, err)
+	})
+}
+
+// TestRescanActorSubscriptionClosedIsTerminal checks that a block
+// subscription closing underneath the rescan, which happens once the
+// ChainService stops, ends the rescan with exactly one error instead of a
+// resubscribe loop.
+func TestRescanActorSubscriptionClosedIsTerminal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		chain := newMockChain(3)
+		params := chain.ChainParams()
+		var errs atomic.Int32
+		actor := mustNewRescanActor(t, ActorConfig{
+			Chain: chain,
+			StartStamp: headerfs.BlockStamp{
+				Hash: *params.GenesisHash,
+			},
+			StartHeader: params.GenesisBlock.Header,
+			OnError:     func(error) { errs.Add(1) },
+		})
+		actor.Start()
+		defer func() { actor.Stop(); actor.WaitForShutdown() }()
+		synctest.Wait()
+
+		close(chain.ntfnChan)
+		synctest.Wait()
+		time.Sleep(10 * retryInterval)
+		synctest.Wait()
+
+		require.Equal(t, int32(1), errs.Load())
+		state, err := actor.CurrentState()
+		require.NoError(t, err)
+		require.IsType(t, &StateTerminal{}, state)
+
+		// The mailbox still runs, but an update is never scanned, so
+		// it must fail rather than report success.
+		err = actor.AddWatchAddrs(nil, nil, nil)
+		require.ErrorIs(t, err, errRescanStopped)
+	})
+}
+
+// mustNewRescanActor creates a rescan actor and fails the test if the
+// configuration is rejected.
+func mustNewRescanActor(t *testing.T, cfg ActorConfig) *RescanActor {
+	t.Helper()
+
+	actor, err := NewRescanActor(cfg)
+	require.NoError(t, err)
+
+	return actor
+}
+
+// TestNewRescanActorRejectsInvalidAddress is a regression test: an initial
+// watch address with no payment script used to be logged and kept in the
+// watch list, where it made every later AddWatchAddrs fail. The constructor
+// now builds the list with ApplyUpdate and rejects the address instead.
+func TestNewRescanActorRejectsInvalidAddress(t *testing.T) {
+	chain := newMockChain(1)
+	params := chain.ChainParams()
+	valid, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	cfg := ActorConfig{
+		Chain: chain,
+		StartStamp: headerfs.BlockStamp{
+			Hash: *params.GenesisHash,
+		},
+		StartHeader: params.GenesisBlock.Header,
+		WatchAddrs: []address.Address{
+			valid, invalidTestAddress{},
+		},
+	}
+	_, err = NewRescanActor(cfg)
+	require.Error(t, err)
+
+	// The valid address alone builds the same list ApplyUpdate would, and
+	// a later update still succeeds.
+	cfg.WatchAddrs = cfg.WatchAddrs[:1]
+	actor, err := NewRescanActor(cfg)
+	require.NoError(t, err)
+	actor.Start()
+	t.Cleanup(func() {
+		actor.Stop()
+		actor.WaitForShutdown()
+	})
+
+	state, err := actor.CurrentState()
+	require.NoError(t, err)
+	watch := cursorOf(t, state).Watch
+	require.Len(t, watch.Addrs, 1)
+	require.Len(t, watch.List, 1)
+	require.NoError(t, actor.AddWatchAddrs(
+		[]address.Address{valid}, nil, nil,
+	))
+}
+
+// cursorOf returns the cursor of a non-terminal state.
+func cursorOf(t *testing.T, state RescanState) Cursor {
+	t.Helper()
+
+	switch s := state.(type) {
+	case *StateInitializing:
+		return s.Cursor
+	case *StateSyncing:
+		return s.Cursor
+	case *StateCurrent:
+		return s.Cursor
+	case *StateRewinding:
+		return s.Cursor
+	}
+	t.Fatalf("state %v has no cursor", state)
+
+	return Cursor{}
 }

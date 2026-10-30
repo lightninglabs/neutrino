@@ -3,6 +3,7 @@ package rescan
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -41,10 +42,12 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 	}
 	genesis := base.ChainParams().GenesisBlock.Header
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
 		},
-		CurHeader: genesis,
 	}
 	env := &Environment{Chain: chain, BatchSize: 10}
 	transition, err := state.ProcessEvent(
@@ -56,7 +59,7 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 	next := transition.NextState.(*StateSyncing)
 	require.Equal(t, int32(2), next.CurStamp.Height)
 	var heights []int32
-	for _, event := range transition.Events.Outbox {
+	for _, event := range outboxOf(transition) {
 		if connected, ok := event.(FilteredBlockOutbox); ok {
 			heights = append(heights, connected.Height)
 		}
@@ -79,12 +82,16 @@ func TestSyncBatchRetainsCompletedPrefix(t *testing.T) {
 }
 
 func TestStateSnapshotOwnsWatchScripts(t *testing.T) {
-	original := &StateCurrent{Watch: WatchState{
-		Inputs: []neutrino.InputWithScript{
-			{PkScript: []byte{1, 2}},
+	original := &StateCurrent{
+		Cursor: Cursor{
+			Watch: WatchState{
+				Inputs: []neutrino.InputWithScript{
+					{PkScript: []byte{1, 2}},
+				},
+				List: [][]byte{{3, 4}},
+			},
 		},
-		List: [][]byte{{3, 4}},
-	}}
+	}
 	snapshot := snapshotState(original).(*StateCurrent)
 	snapshot.Watch.Inputs[0].PkScript[0] = 9
 	snapshot.Watch.List[0][0] = 9
@@ -118,11 +125,13 @@ func TestCurrentRetainsBirthdayGate(t *testing.T) {
 	second := base.blockHeaders[*base.blockHashesByHeight[2]]
 	genesis := base.ChainParams().GenesisBlock.Header
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
+			Watch:     WatchState{List: [][]byte{{1}}},
 		},
-		CurHeader: genesis,
-		Watch:     WatchState{List: [][]byte{{1}}},
 	}
 	env := &Environment{
 		Chain:     chain,
@@ -216,7 +225,7 @@ func TestStopCancelsBeforeWaitingForMailbox(t *testing.T) {
 		entered:         make(chan struct{}),
 	}
 	genesis := base.ChainParams().GenesisBlock.Header
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash: genesis.BlockHash(),
@@ -255,8 +264,10 @@ func TestCurrentIgnoresOlderConnect(t *testing.T) {
 	tip, err := chain.BestBlock()
 	require.NoError(t, err)
 	state := &StateCurrent{
-		CurStamp:  *tip,
-		CurHeader: *chain.blockHeaders[tip.Hash],
+		Cursor: Cursor{
+			CurStamp:  *tip,
+			CurHeader: *chain.blockHeaders[tip.Hash],
+		},
 	}
 	header := chain.blockHeaders[*chain.blockHashesByHeight[1]]
 	transition, err := state.ProcessEvent(
@@ -268,39 +279,51 @@ func TestCurrentIgnoresOlderConnect(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, state, transition.NextState)
-	require.Nil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsNone())
 }
 
-// TestCurrentRetriesTransientHeaderRead ensures an active block is not
-// discarded when its canonical header lookup temporarily fails.
-func TestCurrentRetriesTransientHeaderRead(t *testing.T) {
+// TestCurrentFallsBackOnTransientHeaderRead ensures an active block is not
+// discarded when its canonical header lookup temporarily fails. Current falls
+// back to Syncing, which scans the block from the header store once the read
+// succeeds, and does not report finished a second time.
+func TestCurrentFallsBackOnTransientHeaderRead(t *testing.T) {
 	base := newMockChain(2)
 	chain := &failingHeaderChain{
 		mockChainSource: base,
 		failHeight:      1,
 	}
+	env := &Environment{Chain: chain}
 	genesis := base.ChainParams().GenesisBlock.Header
 	header := *base.blockHeaders[*base.blockHashesByHeight[1]]
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash: genesis.BlockHash(),
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash: genesis.BlockHash(),
+			},
+			CurHeader: genesis,
 		},
-		CurHeader: genesis,
 	}
 	event := BlockConnectedEvent{Header: header, Height: 1}
-	_, err := state.ProcessEvent(
-		t.Context(),
-		event,
-		&Environment{Chain: chain},
+	transition, err := state.ProcessEvent(t.Context(), event, env)
+	require.NoError(t, err)
+	require.Equal(
+		t, &StateSyncing{Cursor: state.Cursor, finished: true},
+		transition.NextState,
 	)
-	require.Error(t, err)
-	chain.failHeight = 0
-	transition, err := state.ProcessEvent(t.Context(), event,
-		&Environment{Chain: chain})
+	require.Equal(t, []OutboxEvent{ContinueOutbox{}}, outboxOf(transition))
+
+	chain.failHeight = math.MaxUint32
+	transition, err = transition.NextState.ProcessEvent(
+		t.Context(), ProcessNextBlockEvent{}, env,
+	)
 	require.NoError(t, err)
 	require.Equal(
 		t,
 		header.BlockHash(),
 		transition.NextState.(*StateCurrent).CurStamp.Hash,
 	)
+	for _, out := range outboxOf(transition) {
+		_, finished := out.(RescanFinishedOutbox)
+		require.False(t, finished, "finished reported twice")
+	}
 }

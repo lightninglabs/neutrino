@@ -9,7 +9,7 @@ import (
 )
 
 // TestStateInitializingToSyncing tests that Initializing transitions to
-// Syncing on ProcessNextBlockEvent and emits a SelfTellOutbox.
+// Syncing on ProcessNextBlockEvent and emits a ContinueOutbox.
 func TestStateInitializingToSyncing(t *testing.T) {
 	chain := newMockChain(10)
 
@@ -17,12 +17,14 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateInitializing{
-		StartStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
 		},
-		StartHeader: *genesisHeader,
-		Watch:       WatchState{},
 	}
 
 	env := &Environment{
@@ -41,13 +43,11 @@ func TestStateInitializingToSyncing(t *testing.T) {
 	require.True(t, ok, "expected StateSyncing, got %T",
 		transition.NextState)
 
-	// Should emit a SelfTellOutbox with ProcessNextBlockEvent.
-	require.NotNil(t, transition.Events)
-	require.Len(t, transition.Events.Outbox, 1)
+	// Should emit a ContinueOutbox.
+	require.True(t, transition.NewEvents.IsSome())
+	require.Len(t, outboxOf(transition), 1)
 
-	selfTell, ok := transition.Events.Outbox[0].(SelfTellOutbox)
-	require.True(t, ok)
-	_, ok = selfTell.Event.(ProcessNextBlockEvent)
+	_, ok = outboxOf(transition)[0].(ContinueOutbox)
 	require.True(t, ok)
 }
 
@@ -55,7 +55,9 @@ func TestStateInitializingToSyncing(t *testing.T) {
 // buffers addresses and stays in Initializing.
 func TestStateInitializingAddWatch(t *testing.T) {
 	state := &StateInitializing{
-		Watch: WatchState{},
+		Cursor: Cursor{
+			Watch: WatchState{},
+		},
 	}
 
 	env := &Environment{}
@@ -98,13 +100,15 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
+			Scanning:  false,
 		},
-		CurHeader: *genesisHeader,
-		Watch:     WatchState{},
-		Scanning:  false,
 	}
 
 	env := &Environment{
@@ -126,24 +130,20 @@ func TestStateSyncingCatchUp(t *testing.T) {
 	// CurStamp should be at the chain tip.
 	require.Equal(t, int32(4), nextState.CurStamp.Height)
 
-	// Should emit StartSubscriptionOutbox and RescanFinishedOutbox.
-	require.NotNil(t, transition.Events)
+	// Should emit RescanFinishedOutbox.
+	require.True(t, transition.NewEvents.IsSome())
 
-	var hasStartSub, hasFinished bool
-	for _, out := range transition.Events.Outbox {
-		switch out.(type) {
-		case StartSubscriptionOutbox:
-			hasStartSub = true
-		case RescanFinishedOutbox:
+	var hasFinished bool
+	for _, out := range outboxOf(transition) {
+		if _, ok := out.(RescanFinishedOutbox); ok {
 			hasFinished = true
 		}
 	}
-	require.True(t, hasStartSub, "expected StartSubscriptionOutbox")
 	require.True(t, hasFinished, "expected RescanFinishedOutbox")
 }
 
 // TestStateSyncingBatchContinue tests that Syncing processes a batch and
-// emits SelfTellOutbox when not yet current.
+// emits ContinueOutbox when not yet current.
 func TestStateSyncingBatchContinue(t *testing.T) {
 	chain := newMockChain(20) // 20 blocks.
 
@@ -151,13 +151,15 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *genesisHash,
-			Height: 0,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *genesisHash,
+				Height: 0,
+			},
+			CurHeader: *genesisHeader,
+			Watch:     WatchState{},
+			Scanning:  false,
 		},
-		CurHeader: *genesisHeader,
-		Watch:     WatchState{},
-		Scanning:  false,
 	}
 
 	env := &Environment{
@@ -179,11 +181,11 @@ func TestStateSyncingBatchContinue(t *testing.T) {
 	// Should have advanced by 5 blocks.
 	require.Equal(t, int32(5), nextState.CurStamp.Height)
 
-	// Last outbox event should be SelfTellOutbox.
-	require.NotNil(t, transition.Events)
-	lastOutbox := transition.Events.Outbox[len(transition.Events.Outbox)-1]
-	_, ok = lastOutbox.(SelfTellOutbox)
-	require.True(t, ok, "expected SelfTellOutbox as last event")
+	// Last outbox event should be ContinueOutbox.
+	require.True(t, transition.NewEvents.IsSome())
+	lastOutbox := outboxOf(transition)[len(outboxOf(transition))-1]
+	_, ok = lastOutbox.(ContinueOutbox)
+	require.True(t, ok, "expected ContinueOutbox as last event")
 }
 
 // TestStateSyncingAddWatchRewind tests that AddWatchAddrs with a rewind
@@ -192,11 +194,13 @@ func TestStateSyncingAddWatchRewind(t *testing.T) {
 	chain := newMockChain(10)
 
 	state := &StateSyncing{
-		CurStamp: headerfs.BlockStamp{
-			Height: 5,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 5,
+			},
+			Watch:    WatchState{},
+			Scanning: true,
 		},
-		Watch:    WatchState{},
-		Scanning: true,
 	}
 
 	env := &Environment{
@@ -229,12 +233,14 @@ func TestStateCurrentBlockConnected(t *testing.T) {
 	header := chain.blockHeaders[bestBlock.Hash]
 
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   bestBlock.Hash,
-			Height: bestBlock.Height,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   bestBlock.Hash,
+				Height: bestBlock.Height,
+			},
+			CurHeader: *header,
+			Watch:     WatchState{},
 		},
-		CurHeader: *header,
-		Watch:     WatchState{},
 	}
 
 	env := &Environment{
@@ -261,9 +267,9 @@ func TestStateCurrentBlockConnected(t *testing.T) {
 	require.Equal(t, newBest.Hash, nextState.CurStamp.Hash)
 
 	// Should emit BlockConnectedOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 	var hasBlockConnected bool
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if _, ok := out.(BlockConnectedOutbox); ok {
 			hasBlockConnected = true
 		}
@@ -283,12 +289,14 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 	prevHeader := chain.blockHeaders[curHeader.PrevBlock]
 
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   bestBlock.Hash,
-			Height: bestBlock.Height,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   bestBlock.Hash,
+				Height: bestBlock.Height,
+			},
+			CurHeader: *curHeader,
+			Watch:     WatchState{},
 		},
-		CurHeader: *curHeader,
-		Watch:     WatchState{},
 	}
 
 	env := &Environment{Chain: chain}
@@ -309,9 +317,9 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 	require.Equal(t, bestBlock.Height-1, nextState.CurStamp.Height)
 
 	// Should emit BlockDisconnectedOutbox.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 	var hasDisconnected bool
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if _, ok := out.(BlockDisconnectedOutbox); ok {
 			hasDisconnected = true
 		}
@@ -323,10 +331,12 @@ func TestStateCurrentBlockDisconnected(t *testing.T) {
 // Current transitions to Rewinding and keeps the subscription.
 func TestStateCurrentAddWatchRewind(t *testing.T) {
 	state := &StateCurrent{
-		CurStamp: headerfs.BlockStamp{
-			Height: 10,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Height: 10,
+			},
+			Watch: WatchState{},
 		},
-		Watch: WatchState{},
 	}
 
 	env := &Environment{}
@@ -342,20 +352,11 @@ func TestStateCurrentAddWatchRewind(t *testing.T) {
 	_, ok := transition.NextState.(*StateRewinding)
 	require.True(t, ok)
 
-	// Should emit CancelSubscriptionOutbox and SelfTellOutbox.
-	require.NotNil(t, transition.Events)
-
-	var hasCancelSub, hasSelfTell bool
-	for _, out := range transition.Events.Outbox {
-		switch out.(type) {
-		case CancelSubscriptionOutbox:
-			hasCancelSub = true
-		case SelfTellOutbox:
-			hasSelfTell = true
-		}
-	}
-	require.False(t, hasCancelSub)
-	require.True(t, hasSelfTell)
+	// Should emit only a ContinueOutbox.
+	require.True(t, transition.NewEvents.IsSome())
+	require.Equal(
+		t, []OutboxEvent{ContinueOutbox{}}, outboxOf(transition),
+	)
 }
 
 // TestStateRewindingToSyncing tests that Rewinding walks back to the target
@@ -368,12 +369,14 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	header := chain.blockHeaders[*hash]
 
 	state := &StateRewinding{
-		CurStamp: headerfs.BlockStamp{
-			Hash:   *hash,
-			Height: 8,
+		Cursor: Cursor{
+			CurStamp: headerfs.BlockStamp{
+				Hash:   *hash,
+				Height: 8,
+			},
+			CurHeader: *header,
+			Watch:     WatchState{},
 		},
-		CurHeader:    *header,
-		Watch:        WatchState{},
 		TargetHeight: 5,
 	}
 
@@ -394,10 +397,10 @@ func TestStateRewindingToSyncing(t *testing.T) {
 	require.LessOrEqual(t, nextState.CurStamp.Height, int32(5))
 
 	// Should emit BlockDisconnectedOutbox events.
-	require.NotNil(t, transition.Events)
+	require.True(t, transition.NewEvents.IsSome())
 
 	disconnectCount := 0
-	for _, out := range transition.Events.Outbox {
+	for _, out := range outboxOf(transition) {
 		if disconnected, ok := out.(BlockDisconnectedOutbox); ok {
 			require.Equal(
 				t,
@@ -423,61 +426,59 @@ func TestStateMachineFullCycle(t *testing.T) {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	fsm := NewStateMachine(StateMachineCfg{
-		ErrorReporter: &logErrorReporter{},
-		InitialState: &StateInitializing{
-			StartStamp: headerfs.BlockStamp{
-				Hash:   *genesisHash,
-				Height: 0,
+	fsm := newStateMachine(
+		&StateInitializing{
+			Cursor: Cursor{
+				CurStamp: headerfs.BlockStamp{
+					Hash:   *genesisHash,
+					Height: 0,
+				},
+				CurHeader: *genesisHeader,
+				Watch:     WatchState{},
 			},
-			StartHeader: *genesisHeader,
-			Watch:       WatchState{},
 		},
-		Env: &Environment{
+		&Environment{
 			Chain:     chain,
 			StartTime: time.Time{},
 			BatchSize: 100,
 		},
-	})
+	)
 
-	fsm.Start()
+	fsm.Start(t.Context())
 	defer fsm.Stop()
 
 	// Send ProcessNextBlockEvent to kick off.
-	outbox, err := fsm.AskEvent(
+	outbox, err := fsm.ProcessEvent(
 		t.Context(), ProcessNextBlockEvent{},
 	)
 	require.NoError(t, err)
 
 	// The first event transitions Initializing -> Syncing and emits a
-	// SelfTell. Process the self-tell manually.
+	// continuation. Process it manually.
 	require.NotEmpty(t, outbox)
 
-	// Find and process the SelfTell.
+	// Find and process the continuation.
 	for _, out := range outbox {
-		if selfTell, ok := out.(SelfTellOutbox); ok {
-			outbox2, err := fsm.AskEvent(
-				t.Context(), selfTell.Event,
+		if _, ok := out.(ContinueOutbox); ok {
+			outbox2, err := fsm.ProcessEvent(
+				t.Context(), ProcessNextBlockEvent{},
 			)
 			require.NoError(t, err)
 
 			// This should process all blocks and reach Current.
-			// Check for StartSubscriptionOutbox.
-			var hasStartSub bool
+			var hasFinished bool
 			for _, out2 := range outbox2 {
-				if _, ok := out2.(StartSubscriptionOutbox); ok {
-					hasStartSub = true
+				if _, ok := out2.(RescanFinishedOutbox); ok {
+					hasFinished = true
 				}
 			}
-			require.True(t, hasStartSub,
-				"expected StartSubscriptionOutbox")
+			require.True(t, hasFinished,
+				"expected RescanFinishedOutbox")
 		}
 	}
 
 	// Verify we're in Current state.
-	state, err := fsm.CurrentState()
-	require.NoError(t, err)
-
+	state := fsm.CurrentState()
 	_, ok := state.(*StateCurrent)
 	require.True(t, ok, "expected StateCurrent, got %T", state)
 }

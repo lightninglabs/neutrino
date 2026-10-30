@@ -1,22 +1,38 @@
 package rescan
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
-// StateTerminal is the terminal state of the rescan FSM. Once entered, no
-// further transitions are possible.
+// errRescanStopped is returned for a watch-list update that reaches a rescan
+// that has already stopped, so the caller does not mistake it for applied.
+var errRescanStopped = errors.New("rescan has stopped")
+
+// StateTerminal is the terminal state of the rescan FSM. Every other state
+// moves here on StopEvent, which the actor sends when Stop runs and when the
+// block subscription fails. Once entered, no further transitions are
+// possible.
 type StateTerminal struct{}
 
-// ProcessEvent is a no-op for terminal state. It should never be called
-// since the state machine stops processing when IsTerminal() returns true.
+// ProcessEvent leaves the state unchanged. It is still called for messages
+// that were already in the mailbox, such as a retry or a notification that
+// arrived just before the stop, and, after a failed subscription, for later
+// requests. A watch-list update fails with errRescanStopped, since it will
+// never be scanned.
 //
 // NOTE: This is part of the RescanState interface.
-func (s *StateTerminal) ProcessEvent(_ context.Context, _ RescanEvent,
+func (s *StateTerminal) ProcessEvent(_ context.Context, event RescanEvent,
 	_ *Environment) (*StateTransition, error) {
 
-	return &StateTransition{NextState: s}, nil
+	if _, ok := event.(AddWatchAddrsEvent); ok {
+		return nil, errRescanStopped
+	}
+
+	return transition(s), nil
 }
 
-// IsTerminal returns true — this is the terminal state.
+// IsTerminal returns true, since this is the terminal state.
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateTerminal) IsTerminal() bool { return true }

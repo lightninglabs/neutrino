@@ -42,7 +42,7 @@ func TestChaosRapidAddWatchDuringSync(t *testing.T) {
 		addrs = append(addrs, addr)
 	}
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -129,7 +129,7 @@ func TestChaosBlockNotificationBurst(t *testing.T) {
 		blocksProcessed atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -212,7 +212,7 @@ func TestChaosAddWatchWithRewindDuringCurrent(t *testing.T) {
 		filteredBlocks atomic.Int32
 	)
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain.mockChainSource,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,
@@ -278,7 +278,7 @@ func TestChaosStopDuringSync(t *testing.T) {
 	genesisHash := chain.ChainParams().GenesisHash
 	genesisHeader := &chain.ChainParams().GenesisBlock.Header
 
-	actor := NewRescanActor(ActorConfig{
+	actor := mustNewRescanActor(t, ActorConfig{
 		Chain: chain,
 		StartStamp: headerfs.BlockStamp{
 			Hash:   *genesisHash,

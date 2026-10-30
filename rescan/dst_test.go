@@ -9,12 +9,14 @@ import (
 	"math/rand/v2"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -65,15 +67,15 @@ const (
 	// dstFaultBlock fails the first block fetch.
 	dstFaultBlock
 
-	// dstFaultSubscribe fails the first Subscribe.
-	dstFaultSubscribe
+	// dstFaultServiceStop stops the subscription manager at the end of
+	// the run, as a stopped ChainService does. That closes the running
+	// actor's subscription, and a second actor's Subscribe then fails.
+	dstFaultServiceStop
 
 	// dstFaultHandoff replaces the tip inside the first successful
 	// Subscribe, before it registers, so the subscription never sees
 	// the reorg's notifications. The actor subscribes before it scans,
-	// so today this only reorgs the chain ahead of the scan. It reaches
-	// the handoff once a later fault class closes the subscription
-	// mid-run.
+	// so this only reorgs the chain ahead of the scan.
 	dstFaultHandoff
 
 	// dstFaultHistReorg reorgs the chain from three blocks above the
@@ -198,7 +200,7 @@ func newDSTRun(t *testing.T, seed []byte) *dstRun {
 	}
 	d.armStartFaults()
 
-	d.actor = NewRescanActor(ActorConfig{
+	d.actor = mustNewRescanActor(t, ActorConfig{
 		Chain:       d.src,
 		StartStamp:  start.stamp(),
 		StartHeader: start.header,
@@ -224,9 +226,6 @@ func (d *dstRun) armStartFaults() {
 	}
 	if d.enabled(dstFaultBlock) {
 		s.blockFail = 1
-	}
-	if d.enabled(dstFaultSubscribe) {
-		s.subscribeFail = 1
 	}
 	if d.enabled(dstFaultHandoff) {
 		s.onSubscribe = func() {
@@ -278,7 +277,7 @@ func (d *dstRun) settle() {
 // sleepRetries advances virtual time by n retry intervals.
 func (d *dstRun) sleepRetries(n int) {
 	for i := 0; i < n; i++ {
-		time.Sleep(filterRetryInterval)
+		time.Sleep(retryInterval)
 		synctest.Wait()
 	}
 }
@@ -350,7 +349,7 @@ func (d *dstRun) initialSync() {
 	subscriptions := d.src.subscriptions
 	d.src.mu.Unlock()
 	require.Positive(d.t, subscriptions,
-		"subscription did not recover, seed %x", d.seed)
+		"no subscription, seed %x", d.seed)
 	if d.enabled(dstFaultHistReorg | dstFaultDeepReorg) {
 		d.src.mu.Lock()
 		fired := d.src.onFilter == nil
@@ -479,7 +478,7 @@ func (d *dstRun) step(i int, value byte) {
 		d.newBlock(arg, op == 0)
 
 	case 1, 5:
-		time.Sleep(filterRetryInterval)
+		time.Sleep(retryInterval)
 
 	case 2:
 		// Rewind even when a retry is outstanding.
@@ -534,6 +533,62 @@ func (d *dstRun) snapshot() dstSnapshot {
 	}
 }
 
+// stopService checks what a stopped ChainService does to a rescan. It stops
+// the subscription manager, which closes the running actor's subscription,
+// and then starts a second actor, whose Subscribe fails. Each actor must
+// report exactly one error, end in Terminal and deliver no more callbacks.
+func (d *dstRun) stopService() {
+	d.truth.mu.Lock()
+	callbacks := len(d.truth.events)
+	d.truth.mu.Unlock()
+	errors := d.truth.errorCount()
+
+	d.mgr.Stop()
+	d.settle()
+	d.sleepRetries(3)
+
+	d.truth.mu.Lock()
+	require.Len(d.t, d.truth.events, callbacks,
+		"callback after the service stopped, seed %x", d.seed)
+	d.truth.mu.Unlock()
+	require.Equal(d.t, errors+1, d.truth.errorCount(),
+		"closed subscription errors, seed %x", d.seed)
+	state, err := d.actor.CurrentState()
+	require.NoError(d.t, err)
+	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
+
+	var lateErrors, lateCallbacks atomic.Int32
+	late := mustNewRescanActor(d.t, ActorConfig{
+		Chain:       d.src,
+		StartStamp:  d.start.stamp(),
+		StartHeader: d.start.header,
+		OnError:     func(error) { lateErrors.Add(1) },
+		Callbacks: Callbacks{
+			OnBlockConnected: func(int32, *wire.BlockHeader,
+				time.Time) {
+
+				lateCallbacks.Add(1)
+			},
+			OnRescanFinished: func(int32) {
+				lateCallbacks.Add(1)
+			},
+		},
+	})
+	late.Start()
+	d.settle()
+	d.sleepRetries(3)
+
+	require.Equal(d.t, int32(1), lateErrors.Load(),
+		"failed subscribe errors, seed %x", d.seed)
+	require.Zero(d.t, lateCallbacks.Load(), "seed %x", d.seed)
+	state, err = late.CurrentState()
+	require.NoError(d.t, err)
+	require.IsType(d.t, &StateTerminal{}, state, "seed %x", d.seed)
+
+	late.Stop()
+	late.WaitForShutdown()
+}
+
 // shutdown stops the actor and the subscription manager.
 func (d *dstRun) shutdown() {
 	d.actor.Stop()
@@ -557,6 +612,9 @@ func runRescanDST(t *testing.T, seed []byte) dstSnapshot {
 		}
 		d.heal()
 		snap = d.snapshot()
+		if d.enabled(dstFaultServiceStop) {
+			d.stopService()
+		}
 	})
 	return snap
 }

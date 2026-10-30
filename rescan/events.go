@@ -14,8 +14,9 @@ type RescanEvent interface {
 }
 
 // BlockConnectedEvent signals that a new block has been connected to the
-// chain. This is delivered either from the subscription bridge goroutine
-// (when current) or synthesized during historical catch-up.
+// chain. The subscription bridge delivers it in every state. Only Current
+// scans it: the other states catch up from the header store instead, which
+// already holds the block by the time its notification arrives.
 type BlockConnectedEvent struct {
 	// Header is the header of the connected block.
 	Header wire.BlockHeader
@@ -52,22 +53,26 @@ type AddWatchAddrsEvent struct {
 	Inputs []neutrino.InputWithScript
 
 	// RewindTo specifies the height to rewind to after updating the watch
-	// list. If nil, no rewind is performed and only future blocks are
-	// scanned with the updated filter.
+	// list. The block at RewindTo is kept, and every block above it is
+	// disconnected and scanned again. If nil, or not below the scanned
+	// tip, no rewind is performed and only future blocks are scanned with
+	// the updated filter.
 	RewindTo *uint32
 }
 
 func (AddWatchAddrsEvent) rescanEventSealed() {}
 
-// ProcessNextBlockEvent is a self-directed event that triggers processing
-// of the next block during syncing or rewinding. It is emitted as an outbox
-// event (SelfTellOutbox) rather than an internal event so that the actor
-// mailbox can interleave AddWatchAddrs messages between blocks.
+// ProcessNextBlockEvent is the continuation event. It leaves Initializing,
+// and runs the next batch of up to Environment.BatchSize blocks in Syncing
+// or Rewinding. Current ignores it. A state asks for it with a
+// ContinueOutbox rather than looping, so the actor mailbox can interleave
+// AddWatchAddrs and notifications between batches.
 type ProcessNextBlockEvent struct{}
 
 func (ProcessNextBlockEvent) rescanEventSealed() {}
 
-// StopEvent signals the rescan should shut down gracefully.
+// StopEvent moves every state to Terminal. The actor sends it when Stop runs
+// and when the block subscription fails.
 type StopEvent struct{}
 
 func (StopEvent) rescanEventSealed() {}

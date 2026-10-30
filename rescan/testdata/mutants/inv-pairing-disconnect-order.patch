@@ -1,21 +1,21 @@
-diff --git a/rescan/actor.go b/rescan/actor.go
---- a/rescan/actor.go
-+++ b/rescan/actor.go
-@@ -676,13 +676,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
- 			callback(e.Height, header, time.Unix(e.Timestamp, 0))
+diff --git a/rescan/actor_dispatch.go b/rescan/actor_dispatch.go
+--- a/rescan/actor_dispatch.go
++++ b/rescan/actor_dispatch.go
+@@ -191,13 +191,13 @@ func (a *RescanActor) dispatchOutbox(outbox []OutboxEvent) {
+ 			}
  
  		case BlockDisconnectedOutbox:
--			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {
--				a.cfg.Callbacks.OnFilteredBlockDisconnected(
-+			if a.cfg.Callbacks.OnBlockDisconnected != nil {
-+				a.cfg.Callbacks.OnBlockDisconnected(
+-			if callbacks.OnFilteredBlockDisconnected != nil {
+-				callbacks.OnFilteredBlockDisconnected(
++			if callbacks.OnBlockDisconnected != nil {
++				callbacks.OnBlockDisconnected(
  					e.Height, e.Header,
  				)
  			}
--			if a.cfg.Callbacks.OnBlockDisconnected != nil {
--				a.cfg.Callbacks.OnBlockDisconnected(
-+			if a.cfg.Callbacks.OnFilteredBlockDisconnected != nil {
-+				a.cfg.Callbacks.OnFilteredBlockDisconnected(
+-			if callbacks.OnBlockDisconnected != nil {
+-				callbacks.OnBlockDisconnected(
++			if callbacks.OnFilteredBlockDisconnected != nil {
++				callbacks.OnFilteredBlockDisconnected(
  					e.Height, e.Header,
  				)
  			}

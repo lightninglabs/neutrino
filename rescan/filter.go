@@ -6,7 +6,6 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 
-	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
@@ -39,15 +38,11 @@ type WatchState struct {
 // don't share underlying slice memory.
 func (ws *WatchState) Clone() WatchState {
 	clone := WatchState{
-		Addrs: make([]address.Address, len(ws.Addrs)),
-		Inputs: make(
-			[]neutrino.InputWithScript,
-			len(ws.Inputs),
-		),
-		List: make([][]byte, len(ws.List)),
+		Addrs:  make([]address.Address, len(ws.Addrs)),
+		Inputs: copyInputsWithScripts(ws.Inputs),
+		List:   make([][]byte, len(ws.List)),
 	}
 	copy(clone.Addrs, ws.Addrs)
-	clone.Inputs = copyInputsWithScripts(ws.Inputs)
 	for i, script := range ws.List {
 		clone.List[i] = append([]byte(nil), script...)
 	}
@@ -66,8 +61,9 @@ func (ws *WatchState) Clone() WatchState {
 
 // ApplyUpdate adds the addresses and inputs from an AddWatchAddrsEvent
 // to the watch state. It converts addresses to pkScripts and appends
-// everything to the appropriate slices. Returns a new WatchState — the
-// original is not modified.
+// everything to the appropriate slices. It returns a new WatchState and leaves
+// the original unchanged, or returns the original and an error if an address
+// has no payment script.
 func (ws *WatchState) ApplyUpdate(
 	event *AddWatchAddrsEvent) (WatchState, error) {
 
@@ -133,8 +129,7 @@ func MatchBlockFilter(
 
 // FetchAndMatchFilter fetches the compact filter for the given block hash
 // and checks it against the watch list. Returns the match result and the
-// filter (for potential later use in block extraction). Uses optimistic
-// batch queries for performance during historical catch-up.
+// filter (for potential later use in block extraction).
 func FetchAndMatchFilter(
 	chain neutrino.ChainSource,
 	blockHash *chainhash.Hash,
@@ -142,21 +137,15 @@ func FetchAndMatchFilter(
 	queryOpts ...neutrino.QueryOption,
 ) (bool, *gcs.Filter, error) {
 
-	opts := append(
-		[]neutrino.QueryOption{
-			neutrino.OptimisticBatch(),
-		},
-		queryOpts...)
-
 	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, opts...,
+		*blockHash, wire.GCSFilterRegular, queryOpts...,
 	)
 	if err != nil {
 		return false, nil, err
 	}
 
 	// If the filter is empty, no match is possible.
-	if filter.N() == 0 {
+	if filter == nil || filter.N() == 0 {
 		return false, nil, nil
 	}
 
@@ -213,22 +202,12 @@ func ExtractBlockMatches(
 		)
 	}
 
-	blockHeader := block.MsgBlock().Header
-	blockDetails := btcjson.BlockDetails{
-		Height: block.Height(),
-		Hash:   block.Hash().String(),
-		Time:   blockHeader.Timestamp.Unix(),
-	}
-
 	relevantTxs := make(
 		[]*btcutil.Tx,
 		0,
 		len(block.Transactions()),
 	)
-	for txIdx, tx := range block.Transactions() {
-		txDetails := blockDetails
-		txDetails.Index = txIdx
-
+	for _, tx := range block.Transactions() {
 		var relevant bool
 
 		if SpendsWatchedInput(tx, ws.Inputs) {
@@ -236,7 +215,7 @@ func ExtractBlockMatches(
 		}
 
 		// Even though the transaction may already be known as
-		// relevant, we need to call PaysWatchedAddr anyway as it
+		// relevant, we need to call paysWatchedScripts anyway as it
 		// discovers new inputs to watch.
 		pays, newInputs := paysWatchedScripts(
 			tx,
@@ -306,24 +285,9 @@ func SpendsWatchedInput(tx *btcutil.Tx,
 	return false
 }
 
-// PaysWatchedAddr returns whether the transaction has an output paying to any
-// of the watched addresses. It also returns any new InputWithScript entries
-// for the matching outputs, so that future spends of these outputs are also
-// watched.
-func PaysWatchedAddr(
-	tx *btcutil.Tx,
-	watchAddrs []address.Address,
-) (bool, []neutrino.InputWithScript,
-	error) {
-
-	ws := WatchState{Addrs: watchAddrs}
-	if err := ws.cacheAddrScripts(); err != nil {
-		return false, nil, err
-	}
-	matched, inputs := paysWatchedScripts(tx, ws.addrScripts)
-	return matched, inputs, nil
-}
-
+// paysWatchedScripts returns whether the transaction has an output paying to
+// one of the watched scripts. It also returns an InputWithScript for each
+// matching output, so that future spends of these outputs are also watched.
 func paysWatchedScripts(
 	tx *btcutil.Tx,
 	scripts map[string]struct{},
@@ -346,26 +310,4 @@ func paysWatchedScripts(
 		)
 	}
 	return len(newInputs) > 0, newInputs
-}
-
-// BlockStamp is a convenience type alias for headerfs.BlockStamp to avoid
-// importing headerfs everywhere.
-type BlockStamp = headerfs.BlockStamp
-
-// FetchFilterForBlock fetches the compact filter for a single block. Used
-// when the block is received from a subscription (not during batch catch-up).
-func FetchFilterForBlock(
-	chain neutrino.ChainSource,
-	blockHash chainhash.Hash,
-	queryOpts ...neutrino.QueryOption,
-) (*gcs.Filter, error) {
-
-	filter, err := chain.GetCFilter(
-		blockHash, wire.GCSFilterRegular, queryOpts...,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return filter, nil
 }

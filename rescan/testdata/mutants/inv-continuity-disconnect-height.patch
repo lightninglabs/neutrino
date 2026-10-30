@@ -1,12 +1,12 @@
-diff --git a/rescan/state_current.go b/rescan/state_current.go
---- a/rescan/state_current.go
-+++ b/rescan/state_current.go
-@@ -252,7 +252,7 @@ func (s *StateCurrent) handleBlockDisconnected(
- 			Outbox: []OutboxEvent{
- 				BlockDisconnectedOutbox{
- 					Hash:   s.CurStamp.Hash,
--					Height: s.CurStamp.Height,
-+					Height: s.CurStamp.Height - 1,
- 					Header: &headerCopy,
- 				},
- 			},
+diff --git a/rescan/cursor.go b/rescan/cursor.go
+--- a/rescan/cursor.go
++++ b/rescan/cursor.go
+@@ -108,7 +108,7 @@ func (c Cursor) disconnect(event *BlockDisconnectedEvent) (Cursor,
+ 	header := c.CurHeader
+ 	undone := BlockDisconnectedOutbox{
+ 		Hash:   c.CurStamp.Hash,
+-		Height: c.CurStamp.Height,
++		Height: c.CurStamp.Height - 1,
+ 		Header: &header,
+ 	}
+ 

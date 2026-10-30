@@ -1,21 +1,19 @@
 package rescan
 
 import (
-	"fmt"
-
 	"github.com/btcsuite/btcd/address/v2"
 
 	"github.com/btcsuite/btcd/wire/v2"
 	neutrino "github.com/lightninglabs/neutrino"
-	"github.com/lightninglabs/neutrino/blockntfns"
-	"github.com/lightninglabs/neutrino/headerfs"
 	lndactor "github.com/lightningnetwork/lnd/actor"
 )
 
 const (
-	// RescanActorServiceKeyName is the receptionist key used to discover a
-	// rescan actor within its actor system.
-	RescanActorServiceKeyName = "neutrino-rescan"
+	// rescanActorID is the ID of the actor that hosts a rescan.
+	rescanActorID = "neutrino-rescan"
+
+	// mailboxSize is the capacity of the rescan actor's mailbox.
+	mailboxSize = 100
 )
 
 // RescanActorMsg is the sealed interface for all mailbox messages handled by
@@ -31,16 +29,9 @@ type RescanActorResp interface {
 	rescanActorRespSealed()
 }
 
-// RescanActorServiceKey returns the service key used to spawn and discover the
-// rescan actor within an actor system.
-func RescanActorServiceKey() lndactor.ServiceKey[
-	RescanActorMsg, RescanActorResp] {
-
-	return lndactor.NewServiceKey[RescanActorMsg, RescanActorResp](
-		RescanActorServiceKeyName,
-	)
-}
-
+// processNextBlockMsg is a continuation: it runs the next Syncing or Rewinding
+// batch. The actor sends it to itself, and a retry sends it after a failed
+// batch.
 type processNextBlockMsg struct {
 	lndactor.BaseMessage
 }
@@ -50,6 +41,7 @@ func (*processNextBlockMsg) MessageType() string {
 }
 func (*processNextBlockMsg) rescanActorMsgSealed() {}
 
+// stopRescanMsg is the barrier Stop asks for. It moves the FSM to Terminal.
 type stopRescanMsg struct {
 	lndactor.BaseMessage
 }
@@ -57,6 +49,8 @@ type stopRescanMsg struct {
 func (*stopRescanMsg) MessageType() string   { return "stop_rescan" }
 func (*stopRescanMsg) rescanActorMsgSealed() {}
 
+// addWatchAddrsMsg carries an AddWatchAddrs request. Its slices are copies
+// that the caller no longer shares.
 type addWatchAddrsMsg struct {
 	lndactor.BaseMessage
 
@@ -68,17 +62,19 @@ type addWatchAddrsMsg struct {
 func (*addWatchAddrsMsg) MessageType() string   { return "add_watch_addrs" }
 func (*addWatchAddrsMsg) rescanActorMsgSealed() {}
 
+// blockConnectedMsg carries a connected-block notification from the bridge.
 type blockConnectedMsg struct {
 	lndactor.BaseMessage
 
-	RetryAnchor *headerfs.BlockStamp
-	Header      wire.BlockHeader
-	Height      uint32
+	Header wire.BlockHeader
+	Height uint32
 }
 
 func (*blockConnectedMsg) MessageType() string   { return "block_connected" }
 func (*blockConnectedMsg) rescanActorMsgSealed() {}
 
+// blockDisconnectedMsg carries a disconnected-block notification from the
+// bridge. ChainTip is the header of the block's parent, the new tip.
 type blockDisconnectedMsg struct {
 	lndactor.BaseMessage
 
@@ -93,6 +89,7 @@ func (*blockDisconnectedMsg) MessageType() string {
 
 func (*blockDisconnectedMsg) rescanActorMsgSealed() {}
 
+// currentStateReq asks for a copy of the current FSM state.
 type currentStateReq struct {
 	lndactor.BaseMessage
 }
@@ -100,27 +97,34 @@ type currentStateReq struct {
 func (*currentStateReq) MessageType() string   { return "current_state" }
 func (*currentStateReq) rescanActorMsgSealed() {}
 
-type subscriptionClosedMsg struct {
+// subscriptionFailedMsg reports that the block subscription could not be
+// created, or closed while the rescan ran. Either ends the rescan.
+type subscriptionFailedMsg struct {
 	lndactor.BaseMessage
-	Sub *blockntfns.Subscription
+
+	Err error
 }
 
-func (*subscriptionClosedMsg) MessageType() string {
-	return "subscription_closed"
+func (*subscriptionFailedMsg) MessageType() string {
+	return "subscription_failed"
 }
 
-func (*subscriptionClosedMsg) rescanActorMsgSealed() {}
+func (*subscriptionFailedMsg) rescanActorMsgSealed() {}
 
+// rescanActorAck is the answer to every request except currentStateReq.
 type rescanActorAck struct{}
 
 func (*rescanActorAck) rescanActorRespSealed() {}
 
+// currentStateResp answers currentStateReq.
 type currentStateResp struct {
 	State RescanState
 }
 
 func (*currentStateResp) rescanActorRespSealed() {}
 
+// newAddWatchAddrsMsg builds an addWatchAddrsMsg from copies of its
+// arguments, so the caller may reuse them once the call returns.
 func newAddWatchAddrsMsg(
 	addrs []address.Address,
 	inputs []neutrino.InputWithScript,
@@ -140,6 +144,8 @@ func newAddWatchAddrsMsg(
 	return msg
 }
 
+// copyInputsWithScripts returns a deep copy of inputs, including each
+// PkScript.
 func copyInputsWithScripts(
 	inputs []neutrino.InputWithScript,
 ) []neutrino.InputWithScript {
@@ -157,69 +163,4 @@ func copyInputsWithScripts(
 	}
 
 	return cloned
-}
-
-func actorMsgFromFSMEvent(
-	event RescanEvent,
-) (RescanActorMsg, error) {
-
-	switch e := event.(type) {
-	case ProcessNextBlockEvent:
-		return &processNextBlockMsg{}, nil
-
-	case BlockConnectedEvent:
-		return &blockConnectedMsg{
-			Header: e.Header,
-			Height: e.Height,
-		}, nil
-
-	case BlockDisconnectedEvent:
-		return &blockDisconnectedMsg{
-			Header:   e.Header,
-			Height:   e.Height,
-			ChainTip: e.ChainTip,
-		}, nil
-
-	case AddWatchAddrsEvent:
-		return newAddWatchAddrsMsg(
-			e.Addrs, e.Inputs, e.RewindTo,
-		), nil
-
-	case StopEvent:
-		return &stopRescanMsg{}, nil
-
-	default:
-		return nil, fmt.Errorf(
-			"unsupported self-tell event type: %T", event,
-		)
-	}
-}
-
-func cloneRetryMsg(msg RescanActorMsg) (RescanActorMsg, error) {
-	switch m := msg.(type) {
-	case *processNextBlockMsg:
-		return &processNextBlockMsg{}, nil
-
-	case *subscriptionClosedMsg:
-		return &subscriptionClosedMsg{Sub: m.Sub}, nil
-
-	case *blockConnectedMsg:
-		return &blockConnectedMsg{
-			RetryAnchor: m.RetryAnchor,
-			Header:      m.Header,
-			Height:      m.Height,
-		}, nil
-
-	case *blockDisconnectedMsg:
-		return &blockDisconnectedMsg{
-			Header:   m.Header,
-			Height:   m.Height,
-			ChainTip: m.ChainTip,
-		}, nil
-
-	default:
-		return nil, fmt.Errorf(
-			"message type %T is not retryable", msg,
-		)
-	}
 }
