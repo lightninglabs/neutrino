@@ -1,0 +1,13 @@
+diff --git a/rescan/state_current.go b/rescan/state_current.go
+--- a/rescan/state_current.go
++++ b/rescan/state_current.go
+@@ -300,6 +300,9 @@ func (s *StateCurrent) handleAddWatch(
+ 			Watch:     newWatch,
+ 			Scanning:  s.Scanning,
+ 		},
++		Events: &EmittedEvent{Outbox: []OutboxEvent{
++			RescanFinishedOutbox{Height: s.CurStamp.Height},
++		}},
+ 	}, nil
+ }
+ 

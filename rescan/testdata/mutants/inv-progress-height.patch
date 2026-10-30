@@ -1,0 +1,12 @@
+diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
+--- a/rescan/state_syncing.go
++++ b/rescan/state_syncing.go
+@@ -271,7 +271,7 @@ func (s *StateSyncing) processNextBatch(
+ 				outbox,
+ 				RescanProgressOutbox{
+ 					Height: int32(
+-						nextHeight,
++						nextHeight - 1,
+ 					),
+ 				},
+ 			)

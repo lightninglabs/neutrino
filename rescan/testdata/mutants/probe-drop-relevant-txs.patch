@@ -1,0 +1,12 @@
+diff --git a/rescan/state_syncing.go b/rescan/state_syncing.go
+--- a/rescan/state_syncing.go
++++ b/rescan/state_syncing.go
+@@ -254,7 +254,7 @@ func (s *StateSyncing) processNextBatch(
+ 		outbox = append(outbox, FilteredBlockOutbox{
+ 			Height:      int32(nextHeight),
+ 			Header:      &headerCopy,
+-			RelevantTxs: relevantTxs,
++			RelevantTxs: relevantTxs[:0],
+ 		})
+ 
+ 		// Also emit the simpler block connected notification.
