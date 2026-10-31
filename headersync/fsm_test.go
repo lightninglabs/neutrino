@@ -767,3 +767,36 @@ func commitLogStrictlyIncreasing(log []RangeID) bool {
 
 	return true
 }
+
+// TestCommitReadyRangesTrustsStopAnchor checks that committing a range makes
+// its stop boundary a trusted anchor. The caller validates the headers before
+// the commit, so the boundary is proven, and a rejection a conflicting
+// observation put on it is cleared.
+func TestCommitReadyRangesTrustsStopAnchor(t *testing.T) {
+	fsm := NewHeaderSyncFSM(0, testHash(100), ProductionConfig())
+	fsm.SeedCommittedAnchor()
+	fsm.AddOrConfirmAnchor(4, testHash(104), false)
+	_, ok := fsm.AddOrConfirmAnchor(4, testHash(66), false)
+	require.False(t, ok, "conflict rejects the recorded anchor")
+
+	_, ok = fsm.AddOrConfirmAnchor(4, testHash(104), false)
+	require.True(t, ok)
+	_, ok, err := fsm.StageDiscoveredRange(1, "peer", 0, 4, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+	anchor, _ := fsm.AnchorByHeight(4)
+	require.False(t, anchor.Trusted)
+
+	require.Equal(t, []RangeID{1}, fsm.CommitReadyRanges().Committed)
+	anchor, _ = fsm.AnchorByHeight(4)
+	require.True(t, anchor.Trusted)
+	require.False(t, anchor.Rejected)
+
+	// A later conflicting report no longer rejects the committed boundary.
+	_, ok = fsm.AddOrConfirmAnchor(4, testHash(66), false)
+	require.False(t, ok)
+	anchor, _ = fsm.AnchorByHeight(4)
+	require.Equal(t, testHash(104), anchor.Hash)
+	require.True(t, anchor.Trusted)
+	require.False(t, anchor.Rejected)
+}

@@ -1178,6 +1178,9 @@ func (h *HeaderSyncFSM) RequeueStagedRange(id RangeID) bool {
 }
 
 // CommitReadyRanges drains all staged ranges that connect to the visible tip.
+// The caller validates a range's headers before it asks for the commit, so the
+// boundary a range ends at is proven and becomes a trusted anchor. That also
+// clears a rejection a peer's disagreement earlier put on it.
 func (h *HeaderSyncFSM) CommitReadyRanges() CommitResult {
 	result := CommitResult{
 		TipHeight: h.committedTip,
@@ -1199,6 +1202,7 @@ func (h *HeaderSyncFSM) CommitReadyRanges() CommitResult {
 		h.committedHash = next.StopHash
 		h.commitLog = append(h.commitLog, next.ID)
 		h.metrics.RangesCommitted++
+		h.AddOrConfirmAnchor(next.StopHeight, next.StopHash, true)
 
 		result.Committed = append(result.Committed, next.ID)
 		result.TipHeight = h.committedTip
