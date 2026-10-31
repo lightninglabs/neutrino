@@ -39,6 +39,9 @@ type chainStoreRollback struct {
 func (chainStoreRollback) MessageType() string { return "rollback" }
 func (chainStoreRollback) chainStoreCommand()  {}
 
+// reorgMessageType names the reorg command.
+const reorgMessageType = "reorg"
+
 // chainStoreReorg applies a paired rollback and replacement block batch in
 // one actor turn, preventing another filter commit between the phases.
 type chainStoreReorg struct {
@@ -48,7 +51,7 @@ type chainStoreReorg struct {
 	Headers     []headerfs.BlockHeader
 }
 
-func (chainStoreReorg) MessageType() string { return "reorg" }
+func (chainStoreReorg) MessageType() string { return reorgMessageType }
 func (chainStoreReorg) chainStoreCommand()  {}
 
 // chainStoreFilterCommit requests a verified filter-header batch commit.

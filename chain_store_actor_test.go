@@ -98,7 +98,9 @@ func TestChainStoreAdmissionNonblocking(t *testing.T) {
 		<-ops.entered
 
 		// Fill the mailbox behind the running turn.
-		queued := make([]chan chainStoreResult, chainStoreMailboxCapacity)
+		queued := make(
+			[]chan chainStoreResult, chainStoreMailboxCapacity,
+		)
 		for i := range queued {
 			queued[i] = make(chan chainStoreResult, 1)
 			client.tryAsk(

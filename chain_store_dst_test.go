@@ -148,7 +148,9 @@ func (s *chainDSTBlocks) WriteHeaders(headers ...headerfs.BlockHeader) error {
 
 	case chainDSTTorn:
 		if half := len(headers) / 2; half > 0 {
-			err := s.BlockHeaderStore.WriteHeaders(headers[:half]...)
+			err := s.BlockHeaderStore.WriteHeaders(
+				headers[:half]...,
+			)
 			if err != nil {
 				return err
 			}
@@ -232,7 +234,9 @@ func (s *chainDSTFilters) WriteHeaders(
 
 	case chainDSTTorn:
 		if half := len(headers) / 2; half > 0 {
-			err := s.FilterHeaderStore.WriteHeaders(headers[:half]...)
+			err := s.FilterHeaderStore.WriteHeaders(
+				headers[:half]...,
+			)
 			if err != nil {
 				return err
 			}
@@ -400,16 +404,18 @@ func newChainDSTRun(t *testing.T, script []byte,
 				continue
 			}
 			prev := d.filterHeader[block.PrevBlock]
-			d.filterHash[id], d.filterHeader[id] = chainDSTFilterHeader(
-				id, prev,
-			)
+			filter, header := chainDSTFilterHeader(id, prev)
+			d.filterHash[id], d.filterHeader[id] = filter, header
 		}
 	}
 	for h := uint32(1); h <= cfg.filterStart; h++ {
 		id := d.fx.honest[h].BlockHash()
-		require.NoError(t, d.rawFilters.WriteHeaders(headerfs.FilterHeader{
-			HeaderHash: id, Height: h, FilterHash: d.filterHeader[id],
-		}))
+		require.NoError(t, d.rawFilters.WriteHeaders(
+			headerfs.FilterHeader{
+				HeaderHash: id, Height: h,
+				FilterHash: d.filterHeader[id],
+			},
+		))
 	}
 
 	d.blocks = &chainDSTBlocks{BlockHeaderStore: d.rawBlocks, run: d}
@@ -771,7 +777,6 @@ func (d *chainDSTRun) checkFilters(event string, blockHash []chainhash.Hash) {
 				"match block %v", h, blockHash[h])
 		}
 	}
-
 }
 
 // checkPublished verifies that the published filter tip is durable and names
@@ -1046,8 +1051,14 @@ func TestChainStoreDSTFaultCoverage(t *testing.T) {
 		script []byte
 		fault  string
 	}{
-		{[]byte{0x18, 0x0a, 13, 6, 1, 6, 6}, "fault:filter write ack lost"},
-		{[]byte{0x18, 0x0c, 12, 1, 6, 6, 9}, "fault:block write ack lost"},
+		{
+			[]byte{0x18, 0x0a, 13, 6, 1, 6, 6},
+			"fault:filter write ack lost",
+		},
+		{
+			[]byte{0x18, 0x0c, 12, 1, 6, 6, 9},
+			"fault:block write ack lost",
+		},
 		{[]byte{0x08, 0x0c, 22, 1, 9, 9}, "fault:block write torn"},
 		{[]byte{0x08, 0x0c, 32, 1, 9, 9}, "fault:block write down"},
 		{[]byte{0x08, 0x0a, 33, 6, 1, 9, 9}, "fault:filter write down"},
@@ -1078,7 +1089,8 @@ func TestChainStoreDSTSwarm(t *testing.T) {
 	start := time.Now()
 	for i := 0; i < *dstSwarmRuns; i++ {
 		script := chainDSTSwarmScript(rng)
-		ok := t.Run(fmt.Sprintf("%d_%x", i, script), func(t *testing.T) {
+		name := fmt.Sprintf("%d_%x", i, script)
+		ok := t.Run(name, func(t *testing.T) {
 			runChainStoreDST(t, script)
 		})
 		if !ok {

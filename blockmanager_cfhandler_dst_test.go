@@ -210,7 +210,7 @@ func testCFHeaderReadFailure(
 		require.NoError(t, err)
 	} else {
 		require.NoError(t, bm.getUncheckpointedCFHeaders(
-			store, wire.GCSFilterRegular,
+			wire.GCSFilterRegular,
 		))
 	}
 	synctest.Wait()
@@ -251,7 +251,6 @@ func testCFHeaderReadFailure(
 	require.NoError(
 		t,
 		bm.getUncheckpointedCFHeaders(
-			store,
 			wire.GCSFilterRegular,
 		),
 	)
@@ -416,7 +415,7 @@ func TestCFHeaderReorgDoesNotBanHonestPeer(t *testing.T) {
 		done := make(chan error, 1)
 		go func() {
 			done <- bm.getUncheckpointedCFHeaders(
-				filters, wire.GCSFilterRegular,
+				wire.GCSFilterRegular,
 			)
 		}()
 		<-gate.entered

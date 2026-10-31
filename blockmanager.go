@@ -1243,9 +1243,7 @@ waitForHeaders:
 
 		// At this point, we know that there're a set of new filter
 		// headers to fetch, so we'll grab them now.
-		if err = b.getUncheckpointedCFHeaders(
-			store, fType,
-		); err != nil {
+		if err = b.getUncheckpointedCFHeaders(fType); err != nil {
 			log.Debugf("couldn't get uncheckpointed headers for "+
 				"%v: %v", fType, err)
 
@@ -1269,7 +1267,7 @@ waitForHeaders:
 // network, if it can, and resolves any conflicts between them. It then writes
 // any verified headers to the store.
 func (b *blockManager) getUncheckpointedCFHeaders(
-	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
+	fType wire.FilterType) error {
 
 	// Reconcile and capture a consistent filter and block query plan.
 	snapshot, err := b.submitCFHeaderReconciliation()
@@ -1775,7 +1773,9 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 			// obtain the hash of the last filter header we've
 			// written to disk so we can properly set the
 			// PrevFilterHeader field of the next message.
-			curHeader, curHeight, err = b.submitCFHeaders(writeBatch)
+			curHeader, curHeight, err = b.submitCFHeaders(
+				writeBatch,
+			)
 			if err != nil {
 				return fmt.Errorf("couldn't write "+
 					"cfheaders messages: %w", err)
@@ -5730,6 +5730,11 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		return
 	}
 
+	// Late responses may contain only headers already in the store. They
+	// must not publish a new tip or start a request from an old hash, so
+	// the loop skips them. Such a reply usually answers an older request,
+	// so it says nothing about the outstanding one: its deadline stays
+	// armed.
 	for i, blockHeader := range msg.Headers {
 		blockHash := blockHeader.BlockHash()
 
@@ -5874,14 +5879,19 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				knownHead = &knownEl.Header
 				knownEl = knownEl.Prev()
 			} else {
-				// The walk left the validation list, so read the parent from the
-				// store. A read error says nothing about the peer, so we abandon
-				// this message and let the retry request the headers again.
+				// The walk left the validation list, so read
+				// the parent from the store. A read error
+				// says nothing about the peer, so we abandon
+				// this message and let the retry request the
+				// headers again.
 				parentHash := knownHead.PrevBlock
-				parent, _, err := b.cfg.BlockHeaders.FetchHeader(&parentHash)
+				parent, _, err := b.cfg.BlockHeaders.
+					FetchHeader(&parentHash)
 				if err != nil {
-					log.Errorf("Can't get block header for hash %s while "+
-						"comparing reorg work: %v", parentHash, err)
+					log.Errorf("Can't get block header "+
+						"for hash %s while comparing "+
+						"reorg work: %v", parentHash,
+						err)
 					b.scheduleHeaderCommitRetry()
 					return
 				}
@@ -5918,11 +5928,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 		return
 	}
-
-	// Late responses may contain only headers already in the store. They
-	// must not publish a new tip or start a request from an old hash. Such
-	// a reply usually answers an older request, so it says nothing about
-	// the outstanding one: leave its deadline armed.
 }
 
 // finishSerialHeaderFollowup advances the peer request after durable progress.

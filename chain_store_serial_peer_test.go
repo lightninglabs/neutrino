@@ -131,7 +131,8 @@ func TestReorgWorkComparisonStoreReadFailure(t *testing.T) {
 		// tip's parent from the store.
 		bm.cfg.BlockHeaders = &failingFetchHeaderStore{
 			BlockHeaderStore: blocks,
-			failHash:         fixture.honest[dstChainHeight-1].BlockHash(),
+			failHash: fixture.honest[dstChainHeight-1].
+				BlockHash(),
 		}
 		peer := newTestServerPeer(
 			t, "127.0.0.1:8333", int32(len(fixture.reorg)-1),
@@ -227,13 +228,19 @@ func TestCheckpointRollbackSnapshotDisconnectsPeer(t *testing.T) {
 					Header: *dstChains().honest[1],
 					Height: 1,
 				}
-				bm.pendingHeaderCommit = &pendingChainHeaderCommit{
-					checkpoint: &node,
-					message:    &headersMsg{peer: peer},
+				bm.pendingHeaderCommit =
+					&pendingChainHeaderCommit{
+						checkpoint: &node,
+						message: &headersMsg{
+							peer: peer,
+						},
+					}
+				failed := chainStoreResult{
+					reply: chainStoreReply{
+						Err: errDSTWrite,
+					},
 				}
-				bm.finishAsyncHeaderCommit(peers, chainStoreResult{
-					reply: chainStoreReply{Err: errDSTWrite},
-				})
+				bm.finishAsyncHeaderCommit(peers, failed)
 				settleHeaderCommit(t, bm, peers)
 
 				require.True(t, dstDisconnected(peer))

@@ -1889,7 +1889,7 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 			))
 		} else {
 			require.NoError(t, bm.getUncheckpointedCFHeaders(
-				store, dstFilterType,
+				dstFilterType,
 			))
 		}
 		synctest.Wait()

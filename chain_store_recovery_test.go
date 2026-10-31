@@ -419,8 +419,8 @@ func TestChainStoreRollbackFailureBeforeWrite(t *testing.T) {
 		synctest.Wait()
 		require.Empty(t, events)
 
-		// The handler reconciles through a snapshot, which completes the
-		// admitted rollback.
+		// The handler reconciles through a snapshot, which
+		// completes the admitted rollback.
 		reply, err = backend.snapshot()
 		require.NoError(t, err)
 		require.Equal(t, int32(2), reply.BlockTip.Height)
