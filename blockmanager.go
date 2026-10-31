@@ -3430,7 +3430,8 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 	b.syncPeerMutex.Unlock()
 
 	started := b.dispatchHeaderSyncWork(peers)
-	if started || b.headerSync.Session().HasActiveWork() || planned > 0 {
+	activity := b.headerSync.Driver().Activity()
+	if started || activity.HasWork() || planned > 0 {
 		return true
 	}
 
@@ -3527,7 +3528,7 @@ func (b *blockManager) resumeHeaderSyncWork(peers *list.List) bool {
 	}
 
 	return started || discoveryActive ||
-		b.headerSync.Session().HasActiveWork()
+		b.headerSync.Driver().Activity().HasWork()
 }
 
 func (b *blockManager) allowSerialHeaderFallback() bool {
@@ -3688,7 +3689,7 @@ func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
 	bestHeight uint32) bool {
 
 	if b.headerSync.Controller() == nil || b.nextCheckpoint == nil ||
-		b.headerSync.Session().HasActiveWork() || bestHeight == 0 {
+		b.headerSync.Driver().Activity().HasWork() || bestHeight == 0 {
 
 		return false
 	}
@@ -4119,7 +4120,7 @@ func (b *blockManager) conflictHeaderSyncAnchor(peers *list.List,
 		"anchor_rejected_by_conflict", anchor.Height, anchor.Hash,
 	) {
 
-		if !b.headerSync.Session().HasActiveWork() {
+		if !b.headerSync.Driver().Activity().HasWork() {
 			b.continueHeaderSync(peers)
 		}
 
@@ -4157,7 +4158,7 @@ func (b *blockManager) replanHeaderSyncAnchor(peers *list.List,
 	}
 
 	b.syncPeerMutex.Lock()
-	if b.headerSync.Session().ActiveAnchorCount() == 0 {
+	if b.headerSync.Driver().Activity().Anchors == 0 {
 		b.syncPeer = nil
 	}
 	b.syncPeerMutex.Unlock()
@@ -4181,7 +4182,7 @@ func (b *blockManager) maybeContinueHeaderAnchorDiscovery(peers *list.List,
 		return
 	}
 
-	if b.headerSync.Session().HasActiveWork() {
+	if b.headerSync.Driver().Activity().HasWork() {
 		return
 	}
 
@@ -4206,32 +4207,14 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 	ctx, cancel := b.headerSyncOpCtx()
 	defer cancel()
 
-	result, ok, err := b.headerSync.Controller().FinishAnchorHeaders(
-		ctx, peerID, hmsg.headers.Headers,
-		headersync.DefaultMaxRangeHeaders,
-	)
-
-	// Check the error before the match flag, so an actor failure is never
-	// mistaken for an unmatched reply. The request is already finished, so
-	// keep sync moving: otherwise nothing is in flight and nothing ever
-	// schedules the next request.
-	if err != nil {
-		log.Warnf("headersync unable to add discovered anchor "+
-			"peer=%s "+
-			"height=%d hash=%s: %v", peerID, result.Response.Height,
-			result.Response.Hash, err)
-
-		// The ask may have staged a discovered range without its
-		// headers. The commit retry requeues such a range.
-		b.scheduleHeaderCommitRetry()
-		b.continueHeaderSync(peers)
-		return true
+	reply := b.handleDriverEvent(peers, headersync.AnchorReply{
+		PeerID:  peerID,
+		Headers: hmsg.headers.Headers,
+	}).result.Anchor
+	if !reply.Matched {
+		return reply.Consumed
 	}
-	if !ok {
-		// Keep unmatched replies out of the compatibility path while
-		// discovery waits for a different locator response.
-		return b.headerSync.Session().AnchorActive(peerID)
-	}
+	result := reply.Finished
 
 	request := result.Request
 	if result.Rejected {
@@ -4269,16 +4252,16 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 			"peer=%s start_height=%d stop_height=%d: %v", peerID,
 			request.StartHeight, request.StopHeight, tipErr)
 	} else if !result.Staged && result.Response.Height <= tipHeight {
-		pruned := b.headerSync.Session().PruneAnchorsAtOrBefore(
-			tipHeight,
-		)
+		pruned := b.handleDriverEvent(nil, headersync.PruneAnchors{
+			AtOrBefore: tipHeight,
+		}).result.Pruned
 		log.Infof("headersync stale_anchor_completion peer=%s "+
 			"start_height=%d response_height=%d stop_height=%d "+
 			"tip_height=%d pruned_anchors=%d", peerID,
 			request.StartHeight, result.Response.Height,
 			request.StopHeight, tipHeight, pruned)
 
-		if !b.headerSync.Session().HasActiveWork() {
+		if !b.headerSync.Driver().Activity().HasWork() {
 			b.continueHeaderSync(peers)
 		}
 
@@ -4293,9 +4276,11 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		request.StartHeight, request.StopHeight)
 
 	if result.Staged {
-		b.headerSync.Session().StageRange(
-			result.Range.ID, hmsg.headers.Headers, peerID,
-		)
+		b.handleDriverEvent(nil, headersync.StageRange{
+			RangeID: result.Range.ID,
+			PeerID:  peerID,
+			Headers: hmsg.headers.Headers,
+		})
 		log.Infof("headersync range_staged_from_anchor peer=%s "+
 			"range_id=%d start_height=%d stop_height=%d "+
 			"header_count=%d", peerID, result.Range.ID,
@@ -4348,7 +4333,7 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		return true
 	}
 
-	if planned == 0 && !b.headerSync.Session().HasActiveWork() {
+	if planned == 0 && !b.headerSync.Driver().Activity().HasWork() {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
 		b.syncPeerMutex.Unlock()
@@ -4414,7 +4399,7 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 		// The FSM staged the range but its headers never reached the
 		// session: the completion ask applied and then reported an
 		// error. Fetch the span again rather than stop here forever.
-		staged, ok := b.headerSync.Session().StagedRange(rangeID)
+		staged, ok := b.headerSync.Driver().StagedRange(rangeID)
 		if !ok {
 			_, err := b.headerSync.Manager().RequeueStagedRange(
 				ctx, rangeID,
@@ -4663,8 +4648,10 @@ func (b *blockManager) finishReadyHeaderSyncRanges() error {
 			"tip_height=%d pruned=%d", commit.TipHeight,
 			commitResult.PrunedAnchors)
 	}
+	b.handleDriverEvent(nil, headersync.RetireStaged{
+		RangeIDs: commit.Committed,
+	})
 	for _, rangeID := range commit.Committed {
-		b.headerSync.Session().DeleteStagedRange(rangeID)
 		log.Infof(
 			"headersync range_committed range_id=%d "+
 				"tip_height=%d "+

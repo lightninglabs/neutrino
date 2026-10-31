@@ -87,6 +87,12 @@ type DriverResult struct {
 	// serial path.
 	Handled bool
 
+	// Anchor is the outcome of AnchorReply.
+	Anchor AnchorReplyOutcome
+
+	// Pruned is the number of requests PruneAnchors dropped.
+	Pruned int
+
 	// AnchorRejected is the outcome of RejectUntrustedAnchor: false only
 	// when the anchor was trusted, replaced or unknown, so that nothing
 	// changed.
@@ -211,6 +217,18 @@ func (d *Driver) Handle(ctx context.Context,
 
 	case RejectUntrustedAnchor:
 		d.handleRejectUntrustedAnchor(ctx, event, &result)
+
+	case AnchorReply:
+		d.handleAnchorReply(ctx, event, &result)
+
+	case StageRange:
+		d.handleStageRange(event)
+
+	case RetireStaged:
+		d.handleRetireStaged(event)
+
+	case PruneAnchors:
+		d.handlePruneAnchors(event, &result)
 
 	default:
 		err = fmt.Errorf("%w: %T", ErrUnknownDriverEvent, event)
