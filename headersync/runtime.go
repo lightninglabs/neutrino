@@ -43,6 +43,7 @@ type Runtime struct {
 	manager       *ManagerActor
 	session       *Session
 	controller    *Controller
+	driver        *Driver
 
 	peers map[string]*PeerActor
 
@@ -89,6 +90,7 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	}
 	runtime.controller.peerLookup = runtime.Peer
 	runtime.controller.askFault = cfg.AskFault
+	runtime.driver = newDriver(runtime, session)
 	return runtime, seeded
 }
 
@@ -145,6 +147,15 @@ func (r *Runtime) Controller() *Controller {
 	}
 
 	return r.controller
+}
+
+// Driver returns the header-sync driver.
+func (r *Runtime) Driver() *Driver {
+	if r == nil {
+		return nil
+	}
+
+	return r.driver
 }
 
 // Session returns the request/session bookkeeping state.
