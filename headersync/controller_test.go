@@ -528,14 +528,28 @@ func TestControllerFinishAnchorHeadersRejectsInvalidResponse(t *testing.T) {
 	require.False(t, ok)
 	require.True(t, session.AnchorActive("peer-a"),
 		"unmatched reply consumed a newer discovery request")
-	result, ok, err := controller.FinishAnchorHeaders(
+
+	// An empty reply carries no claim and has no identity, so it neither
+	// matches nor consumes the request.
+	_, ok, err = controller.FinishAnchorHeaders(
 		ctx, "peer-a", nil, DefaultMaxRangeHeaders,
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.True(t, session.AnchorActive("peer-a"),
+		"empty reply consumed a discovery request")
+
+	// A disconnected chain from the right start is still the peer's fault.
+	headers := makeTestHeaders(start, 2)
+	headers[1].PrevBlock = testHash(200)
+	result, ok, err := controller.FinishAnchorHeaders(
+		ctx, "peer-a", headers, DefaultMaxRangeHeaders,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.True(t, result.Rejected)
-	require.ErrorIs(t, result.Err, ErrNoHeaders)
-	require.Contains(t, result.Reason, ErrNoHeaders.Error())
+	require.ErrorIs(t, result.Err, ErrRangeDisconnected)
+	require.Contains(t, result.Reason, ErrRangeDisconnected.Error())
 	require.False(t, session.AnchorActive("peer-a"))
 }
 
