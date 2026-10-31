@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"container/list"
 	"errors"
 	"testing"
 	"time"
@@ -106,6 +107,7 @@ func TestInvalidDiscoveryRecovers(t *testing.T) {
 	honest := discoveryTestHeaders(t, bm, genesis, 2)
 	stageDiscovery(t, bm, "honest", request, honest)
 	require.NoError(t, bm.commitReadyHeaderSyncRanges(t.Context()))
+	settleHeaderCommit(t, bm, list.New())
 	tip, height, err := store.ChainTip()
 	require.NoError(t, err)
 	require.EqualValues(t, 2, height)
@@ -143,8 +145,8 @@ func TestHeaderCommitStorageFailurePreservesStaging(t *testing.T) {
 		BlockHeaderStore: store, writeErr: writeErr,
 	}
 	bm.cfg.BlockHeaders = failing
-	require.ErrorIs(t,
-		bm.commitReadyHeaderSyncRanges(t.Context()), writeErr)
+	require.NoError(t, bm.commitReadyHeaderSyncRanges(t.Context()))
+	settleHeaderCommit(t, bm, list.New())
 	_, staged := bm.headerSync.Session().StagedRange(rng.ID)
 	require.True(t, staged)
 	ready, err := bm.headerSync.Manager().ReadyRanges(t.Context())
@@ -156,6 +158,7 @@ func TestHeaderCommitStorageFailurePreservesStaging(t *testing.T) {
 
 	failing.writeErr = nil
 	require.NoError(t, bm.commitReadyHeaderSyncRanges(t.Context()))
+	settleHeaderCommit(t, bm, list.New())
 	_, height, err = store.ChainTip()
 	require.NoError(t, err)
 	require.EqualValues(t, 2, height)
@@ -247,6 +250,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 
 	failing.readErr = nil
 	require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+	settleHeaderCommit(t, bm, list.New())
 	tip, height, err := store.ChainTip()
 	require.NoError(t, err)
 	require.EqualValues(t, 12, height)

@@ -349,6 +349,8 @@ func setupDSTBlockManager(t *testing.T) (*blockManager,
 		},
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = bm.Stop() })
+
 	return bm, store
 }
 
@@ -631,6 +633,26 @@ func (d *dstRun) handle(message any) {
 	}
 	d.bm.handlePeerMessage(d.peers, message)
 	synctest.Wait()
+
+	// The real loop keeps reading its done-peer and timer channels while a
+	// chain store commit is pending, so deliver what is already queued
+	// before the commit completes.
+	for drained := true; drained; {
+		drained = false
+		select {
+		case peer := <-d.bm.donePeerChan:
+			d.bm.handleDonePeerMsg(d.peers, peer)
+			drained = true
+
+		case timer := <-d.bm.timerChan:
+			d.bm.handlePeerMessage(d.peers, timer)
+			drained = true
+
+		default:
+		}
+	}
+	synctest.Wait()
+	settleHeaderCommit(d.t, d.bm, d.peers)
 	d.reapRemoved()
 	d.check(fmt.Sprintf("message:%T", message))
 }
@@ -653,6 +675,7 @@ func (d *dstRun) reapRemoved() {
 		d.transport.take(peer)
 		d.bm.handlePeerMessage(d.peers, &donePeerMsg{peer: peer})
 		synctest.Wait()
+		settleHeaderCommit(d.t, d.bm, d.peers)
 	}
 }
 
@@ -713,6 +736,10 @@ func (d *dstRun) pump() {
 		for {
 			select {
 			case message := <-d.bm.peerChan:
+				messages = append(messages, message)
+			case message := <-d.bm.timerChan:
+				messages = append(messages, message)
+			case message := <-d.bm.timeoutChan:
 				messages = append(messages, message)
 			default:
 				break drain
@@ -1032,6 +1059,12 @@ func (d *dstRun) restart() {
 	for len(d.bm.peerChan) > 0 {
 		<-d.bm.peerChan
 	}
+	for len(d.bm.timerChan) > 0 {
+		<-d.bm.timerChan
+	}
+	for len(d.bm.timeoutChan) > 0 {
+		<-d.bm.timeoutChan
+	}
 	d.restarts++
 	d.transport.queued = nil
 	clear(d.transport.blocked)
@@ -1054,10 +1087,14 @@ func (d *dstRun) shutdown() {
 	require.NoError(d.t, d.bm.Stop())
 	d.stopped = true
 	synctest.Wait()
-	pending := len(d.bm.peerChan)
+	queued := func() int {
+		return len(d.bm.peerChan) + len(d.bm.timerChan) +
+			len(d.bm.timeoutChan)
+	}
+	pending := queued()
 	time.Sleep(3 * dstStall)
 	synctest.Wait()
-	require.Len(d.t, d.bm.peerChan, pending,
+	require.Equal(d.t, pending, queued(),
 		"request/retry callback survived shutdown")
 	require.Zero(d.t, d.bm.headerSync.Session().ActiveRangeCount())
 	require.Nil(d.t, d.bm.headerCommitRetryTimer)
@@ -1639,7 +1676,9 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 		}()
 		synctest.Wait()
 		calls := flaky.calls.Load()
-		require.GreaterOrEqual(t, calls, int32(2), "tip was never read")
+		require.GreaterOrEqual(
+			t, calls, int32(2), "tip was never read",
+		)
 
 		select {
 		case <-done:
@@ -1651,7 +1690,7 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 		require.Greater(t, flaky.calls.Load(), calls,
 			"cfHandler never read the tip again")
 
-		close(bm.quit)
+		require.NoError(t, bm.Stop())
 		bm.newHeadersSignal.Broadcast()
 		bm.newFilterHeadersSignal.Broadcast()
 		<-done
@@ -1705,6 +1744,7 @@ func TestSerialFollowUpUsesFullLocator(t *testing.T) {
 		bm.handleHeadersMsgWithPeers(peers, &headersMsg{
 			peer: other, headers: msg,
 		})
+		settleHeaderCommit(t, bm, peers)
 
 		require.Len(t, recorder.requests, 1)
 		require.Same(t, syncPeer, recorder.peers[0])
@@ -1830,13 +1870,11 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 			}
 		}()
 		t.Cleanup(func() {
-			close(bm.quit)
+			_ = bm.Stop()
 			<-done
 		})
 
-		_, _, err = bm.writeCFHeadersMsgs(
-			[]*wire.MsgCFHeaders{msg}, store,
-		)
+		_, _, err = bm.submitCFHeaders([]*wire.MsgCFHeaders{msg})
 		require.ErrorIs(t, err, errDSTWrite)
 		checkpoint, durable, err := filters.ChainTip()
 		require.NoError(t, err)
@@ -1851,7 +1889,7 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 			))
 		} else {
 			require.NoError(t, bm.getUncheckpointedCFHeaders(
-				store, dstFilterType,
+				dstFilterType,
 			))
 		}
 		synctest.Wait()

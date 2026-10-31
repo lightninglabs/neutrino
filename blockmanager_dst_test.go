@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"container/list"
 	"errors"
 	"testing"
 	"testing/synctest"
@@ -144,6 +145,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		time.Sleep(time.Duration(latency%8) * time.Millisecond)
 		deliver(fast, second, headers[2:])
 		require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+		settleHeaderCommit(t, bm, list.New())
 		_, height, err := store.ChainTip()
 		require.NoError(t, err)
 		require.Zero(t, height, "out-of-order staging advanced the tip")
@@ -198,12 +200,16 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 				BlockHeaderStore: store, writeErr: writeErr,
 			}
 			bm.cfg.BlockHeaders = failing
-			require.ErrorIs(t,
-				bm.commitReadyHeaderSyncRanges(ctx), writeErr)
+			require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+			settleHeaderCommit(t, bm, list.New())
+			_, failedHeight, err := store.ChainTip()
+			require.NoError(t, err)
+			require.Zero(t, failedHeight)
 			result.Events = append(result.Events, "write_failed")
 			failing.writeErr = nil
 		}
 		require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+		settleHeaderCommit(t, bm, list.New())
 		if flags&8 == 0 {
 			late()
 		}
@@ -250,6 +256,23 @@ func TestHeaderSyncDSTExhaustive(t *testing.T) {
 						"script=%x", script)
 				}
 			}
+		}
+	}
+}
+
+// settleHeaderCommit completes the chain store commit that blockHandler would
+// otherwise handle, for tests that drive the handlers directly. It follows a
+// failed commit through its reconciliation snapshot, as the handler does.
+func settleHeaderCommit(t *testing.T, bm *blockManager, peers *list.List) {
+	t.Helper()
+
+	for bm.pendingHeaderCommit != nil {
+		select {
+		case result := <-bm.chainStoreResult:
+			bm.finishAsyncHeaderCommit(peers, result)
+
+		case <-time.After(time.Minute):
+			t.Fatal("chain store commit did not complete")
 		}
 	}
 }

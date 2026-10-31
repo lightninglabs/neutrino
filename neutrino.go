@@ -1896,6 +1896,7 @@ func (s *ChainService) Stop() error {
 	}
 
 	var returnErr error
+	storeJoined := true
 	s.connManager.Stop()
 	s.broadcaster.Stop()
 	if err := s.utxoScanner.Stop(); err != nil {
@@ -1908,6 +1909,7 @@ func (s *ChainService) Stop() error {
 	}
 	s.blockSubscriptionMgr.Stop()
 	if err := s.blockManager.Stop(); err != nil {
+		storeJoined = false
 		log.Errorf("error stopping block manager: %v", err)
 		returnErr = err
 	}
@@ -1927,7 +1929,7 @@ func (s *ChainService) Stop() error {
 	// Release the SQL backend connection if one was opened. This must
 	// happen after all background goroutines exit so no one is using
 	// the backend mid-shutdown.
-	if s.sqlBackend != nil {
+	if s.sqlBackend != nil && storeJoined {
 		if err := s.sqlBackend.Close(); err != nil {
 			log.Errorf("error closing sql backend: %v", err)
 			if returnErr == nil {
