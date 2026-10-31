@@ -240,14 +240,16 @@ func TestControllerAnchorConflictFlagsConflict(t *testing.T) {
 
 	// A structurally invalid reply is not a conflict.
 	session.TrackAnchor("bad", request)
+	broken := makeTestHeaders(start, 2)
+	broken[1].PrevBlock = testHash(200)
 	result, ok, err = controller.FinishAnchorHeaders(
-		ctx, "bad", nil, DefaultMaxRangeHeaders,
+		ctx, "bad", broken, DefaultMaxRangeHeaders,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.True(t, result.Rejected)
 	require.False(t, result.Conflict)
-	require.ErrorIs(t, result.Err, ErrNoHeaders)
+	require.ErrorIs(t, result.Err, ErrRangeDisconnected)
 }
 
 // TestControllerStopAnchorContradicted checks that a reply refuting a stop

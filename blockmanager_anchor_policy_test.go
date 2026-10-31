@@ -271,3 +271,29 @@ func TestHeaderConflictWithTrustedAnchorReplansNothing(t *testing.T) {
 		require.False(t, anchor.Rejected)
 	})
 }
+
+// TestHeaderEmptyDiscoveryReplyCarriesNoClaim checks that an empty reply is
+// never judged against a discovery request. It may answer an earlier request
+// to the peer, so the reply itself punishes nobody and leaves the request
+// tracked. The DST marks the empty replier faulted, and the later timeout
+// quarantines it as a peer that never answers. The work then moves to the
+// other peers, and the sync finishes.
+func TestHeaderEmptyDiscoveryReplyCarriesNoClaim(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d := newDSTRun(t, dstConfig{mode: dstModeFrontier1})
+		peer := d.current[0]
+		session := d.bm.headerSync.Session()
+		require.True(t, session.AnchorActive(peer.Addr()))
+
+		require.True(t, d.reply(0, dstReplyEmpty))
+		require.Empty(t, d.punished, "an empty reply was punished")
+		require.True(t, session.AnchorActive(peer.Addr()),
+			"an empty reply finished the discovery request")
+
+		// The peer never sends anything else. Its request times out
+		// and the other peers finish the sync.
+		d.heal()
+		require.NoError(t, d.quiescent())
+		require.EqualValues(t, dstChainHeight, d.inv.lastTip)
+	})
+}
