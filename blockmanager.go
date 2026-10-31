@@ -4507,10 +4507,81 @@ func (b *blockManager) rejectHeaderSyncAnchor(peers *list.List,
 	b.quarantineHeaderSyncPeer(peer)
 	removeSyncCandidate(peers, peer)
 
-	if b.startHeaderAnchorDiscoveryFrom(
-		peers, request, peer.Addr(),
+	b.replanHeaderSyncAnchor(peers, request, peer.Addr())
+}
+
+// conflictHeaderSyncAnchor handles a well formed discovery reply that names a
+// different boundary than the anchor already recorded at its height. Nothing
+// proves which reporter lied, and the earlier one may well be the liar, so
+// neither is punished: the reporter is neither quarantined nor held back. The
+// recorded anchor is rejected along with the unstaged work built on it, and
+// the span is discovered again. Commit-time contextual validation of any
+// staged payload finds the liar.
+//
+// A conflict against a trusted anchor, say a committed boundary after a short
+// reorg in frontier mode, rejects nothing and so replans nothing. It is not
+// punished either.
+//
+// A fast liar that always answers first can repeat this under a policy that
+// needs two observations, since each round rejects the honest anchor again.
+// The production policy needs one, so the first reply for a span is staged
+// and committed whatever a later conflict does to the anchor, and the loop
+// cannot stall it. We accept the loop for the stricter test-only policy.
+func (b *blockManager) conflictHeaderSyncAnchor(ctx context.Context,
+	peers *list.List, peer *ServerPeer, request headersync.AnchorRequest,
+	anchor headersync.Anchor) {
+
+	log.Warnf("headersync anchor_conflict peer=%s start_height=%d "+
+		"stop_height=%d anchor_height=%d recorded_hash=%s",
+		peer.Addr(), request.StartHeight, request.StopHeight,
+		anchor.Height, anchor.Hash)
+
+	if !b.rejectUntrustedHeaderSyncAnchor(
+		ctx, "anchor_rejected_by_conflict", anchor.Height, anchor.Hash,
 	) {
 
+		if !b.headerSync.Session().HasActiveWork() {
+			b.continueHeaderSync(peers)
+		}
+
+		return
+	}
+
+	b.replanHeaderSyncAnchor(peers, request)
+}
+
+// rejectUntrustedHeaderSyncAnchor rejects an untrusted anchor and the unstaged
+// work built on it, and logs the outcome under tag. It reports false only when
+// the anchor was trusted, replaced or unknown, so nothing changed. A failed ask
+// reports true, since the anchor may have been rejected.
+func (b *blockManager) rejectUntrustedHeaderSyncAnchor(ctx context.Context,
+	tag string, height uint32, hash chainhash.Hash) bool {
+
+	result, err := b.headerSync.Controller().RejectAnchor(
+		ctx, height, hash, time.Now().Add(b.headerSyncTimeout),
+	)
+	if err != nil {
+		log.Warnf("headersync unable to reject anchor height=%d: %v",
+			height, err)
+		return true
+	}
+	if len(result.Anchors) == 0 {
+		return false
+	}
+
+	log.Infof("headersync %s height=%d invalidated_ranges=%v", tag,
+		height, result.Ranges)
+
+	return true
+}
+
+// replanHeaderSyncAnchor discovers the span of a rejected anchor reply again,
+// leaving the excluded peers out of the new round, and falls back to the
+// regular sync start when no other peer can answer.
+func (b *blockManager) replanHeaderSyncAnchor(peers *list.List,
+	request headersync.AnchorRequest, excluded ...string) {
+
+	if b.startHeaderAnchorDiscoveryFrom(peers, request, excluded...) {
 		return
 	}
 
@@ -4604,6 +4675,13 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 				request.StartHash, "",
 			)
 
+			return true
+		}
+
+		if result.Conflict {
+			b.conflictHeaderSyncAnchor(
+				ctx, peers, hmsg.peer, request, result.Anchor,
+			)
 			return true
 		}
 

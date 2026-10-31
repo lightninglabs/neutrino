@@ -1156,6 +1156,79 @@ func (h *HeaderSyncFSM) InvalidateRange(id RangeID) (
 	return result, nil
 }
 
+// RejectAnchor rejects the untrusted anchor at height when it still carries
+// hash. It stales the queued, owned and active ranges that use the anchor as a
+// boundary, and the staged ranges that start at it. A discovered boundary has
+// no proof behind it until a range that ends there commits, so a peer's
+// disagreement with it is evidence against the anchor and not against the
+// peer. Staged ranges that stop at the anchor are kept, because ordered commit
+// validates their headers and decides which reporter was wrong. A trusted
+// anchor, an anchor with a different hash, and a missing anchor are left alone
+// and report no work.
+//
+// Rejection costs the caller nothing, so a fast liar can reject each honest
+// anchor in turn when two observations are required to confirm one. One
+// observation, the production policy, is immune: the first reply is staged
+// and committed whatever happens to the anchor afterwards.
+func (h *HeaderSyncFSM) RejectAnchor(height uint32,
+	hash Hash) InvalidationResult {
+
+	anchor, ok := h.anchors[height]
+	if !ok || anchor.Trusted || anchor.Hash != hash {
+		return InvalidationResult{}
+	}
+
+	if !anchor.Rejected {
+		anchor.Rejected = true
+		h.anchors[height] = anchor
+		h.metrics.AnchorsRejected++
+	}
+
+	result := InvalidationResult{
+		Anchors: []ChainPoint{{Height: height, Hash: hash}},
+	}
+	for _, rng := range h.Ranges() {
+		startsHere := rng.StartHeight == height && rng.StartHash == hash
+		stopsHere := rng.StopHeight == height && rng.StopHash == hash
+		if !startsHere && !stopsHere {
+			continue
+		}
+
+		switch rng.State {
+		case RangeQueued, RangeOwned, RangeActive:
+
+		// A staged range that stops at the anchor stays: its headers
+		// are validated at commit, and that decides who lied. One that
+		// starts at the anchor is built on a boundary that lost its
+		// standing and can never connect to the committed tip once
+		// another hash commits there. It would also block planning
+		// the span, as existing work, so it goes.
+		case RangeStaged:
+			if !startsHere {
+				continue
+			}
+
+		default:
+			continue
+		}
+
+		if rng.State == RangeActive {
+			result.Revoked = append(result.Revoked,
+				assignmentFromRange(rng))
+		}
+		h.detachRangeFromPeers(rng.ID)
+		rng.LeaseEpoch++
+		rng.OwnerPeer = NoPeer
+		rng.Valid = false
+		rng.StagedAt = time.Time{}
+		rng.State = RangeStale
+		h.ranges[rng.ID] = rng
+		result.Ranges = append(result.Ranges, rng.ID)
+	}
+
+	return result
+}
+
 // RequeueStagedRange returns a staged range to the queue under a new lease
 // epoch. The FSM stages a range before the caller stores its headers, so an ask
 // that applies but reports an error to the caller (an lnd actor runs a request
