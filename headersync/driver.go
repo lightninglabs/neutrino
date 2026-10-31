@@ -64,6 +64,9 @@ func (a Activity) HasWork() bool {
 type DriverResult struct {
 	// Effects are the side effects to perform, in order.
 	Effects []DriverEffect
+
+	// HadWork is set by PeerDone when the peer had a request in flight.
+	HadWork bool
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -131,6 +134,21 @@ func (d *Driver) Handle(ctx context.Context,
 		err    error
 	)
 	switch event := event.(type) {
+	case PeerStateChanged:
+		d.handlePeerStateChanged(ctx, event, &result)
+
+	case PeerRegistered:
+		d.handlePeerRegistered(ctx, event, &result)
+
+	case CooldownWakeDue:
+		d.handleCooldownWakeDue(&result)
+
+	case RecoverPeers:
+		d.handleRecoverPeers(ctx, event, &result)
+
+	case PeerDone:
+		d.handlePeerDone(ctx, event, &result)
+
 	default:
 		err = fmt.Errorf("unknown header sync driver event %T", event)
 	}
