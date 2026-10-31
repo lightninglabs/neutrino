@@ -2,8 +2,6 @@ package headersync
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 )
 
@@ -24,10 +22,6 @@ const (
 	// reply arrives.
 	DriverAskCompleteRange
 )
-
-// ErrUnknownDriverEvent is returned by Handle for an event type it does not
-// know.
-var ErrUnknownDriverEvent = errors.New("unknown header sync driver event")
 
 // DriverEvent is an input to the driver. Events carry everything the driver
 // needs to know about the world that it does not own: peer snapshots, chain
@@ -229,9 +223,6 @@ func (d *Driver) Handle(ctx context.Context,
 
 	case PruneAnchors:
 		d.handlePruneAnchors(event, &result)
-
-	default:
-		err = fmt.Errorf("%w: %T", ErrUnknownDriverEvent, event)
 	}
 
 	return result, err

@@ -219,14 +219,14 @@ func TestControllerPlansAfterAskAppliedThenFailed(t *testing.T) {
 	// The first plan applies in the FSM but reports an error.
 	_, err := controller.PlanFrontierRanges(ctx, tip, 10)
 	require.ErrorIs(t, err, ErrAskFault)
-	require.EqualValues(t, 1, controller.Session().NextRangeID())
+	require.EqualValues(t, 1, controller.session.NextRangeID())
 
 	// The next plan reuses the stale ID and must still succeed.
 	result, err := controller.PlanFrontierRanges(ctx, tip, 20)
 	require.NoError(t, err)
 	require.Len(t, result.Ranges, 1)
 	require.NotEqual(t, RangeID(1), result.Ranges[0].ID)
-	require.Greater(t, controller.Session().NextRangeID(),
+	require.Greater(t, controller.session.NextRangeID(),
 		result.Ranges[0].ID)
 }
 

@@ -98,7 +98,7 @@ func (d *dstRun) poisonAnchor() (int, headersync.Anchor) {
 	require.True(d.t, d.reply(0, dstReplyHonest))
 	require.EqualValues(d.t, 4, d.inv.lastTip)
 
-	session := d.bm.headerSync.Session()
+	session := d.bm.sessionForTest()
 	for _, peer := range d.current {
 		session.FinishAnchor(peer.Addr())
 		for d.transport.queuedFor(peer) {
@@ -164,13 +164,13 @@ func TestHeaderStopContradictionRejectsUnvalidatedAnchor(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, headersync.PeerBlocked, snapshot.State)
-		until, cooling := d.bm.headerSync.Session().CooldownUntil(
+		until, cooling := d.bm.sessionForTest().CooldownUntil(
 			peer.Addr(), time.Now(),
 		)
 		require.True(t, cooling)
 		require.Equal(t, defaultHeaderPeerCooldown,
 			time.Until(until).Round(time.Second))
-		require.False(t, d.bm.headerSync.Session().RangeActive(
+		require.False(t, d.bm.sessionForTest().RangeActive(
 			peer.Addr(),
 		))
 
@@ -241,7 +241,7 @@ func TestHeaderConflictWithTrustedAnchorReplansNothing(t *testing.T) {
 		// and the peer answers with another chain. The commit pruned
 		// the real one, so track it again.
 		peer := d.current[1]
-		session := d.bm.headerSync.Session()
+		session := d.bm.sessionForTest()
 		session.FinishAnchor(peer.Addr())
 		for d.transport.queuedFor(peer) {
 			d.transport.take(peer)
@@ -282,7 +282,7 @@ func TestHeaderEmptyDiscoveryReplyCarriesNoClaim(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeFrontier1})
 		peer := d.current[0]
-		session := d.bm.headerSync.Session()
+		session := d.bm.sessionForTest()
 		require.True(t, session.AnchorActive(peer.Addr()))
 
 		require.True(t, d.reply(0, dstReplyEmpty))
@@ -307,7 +307,7 @@ func TestHeaderCooldownWakeRestartsDiscoveryDuringSerialRequest(
 
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeFrontier1})
-		session := d.bm.headerSync.Session()
+		session := d.bm.sessionForTest()
 
 		// Every peer's discovery request is gone and every peer is
 		// blocked, as after a run of send failures.

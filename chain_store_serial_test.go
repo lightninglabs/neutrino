@@ -60,7 +60,7 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 					dstConfig{mode: dstModeCheckpointAll},
 				)
 				d.inv.skipLeases = true
-				d.bm.headerSync.Session().StopAll()
+				d.bm.sessionForTest().StopAll()
 				d.store.mode = tc.mode
 				message := wire.NewMsgHeaders()
 				for _, header := range dstChains().honest[1:3] {

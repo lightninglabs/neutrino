@@ -58,14 +58,14 @@ func stageDiscovery(t *testing.T, bm *blockManager, peerID string,
 	headers []*wire.BlockHeader) headersync.HeaderRange {
 
 	t.Helper()
-	bm.headerSync.Session().TrackAnchor(peerID, request)
+	bm.sessionForTest().TrackAnchor(peerID, request)
 	result, ok, err := bm.headerSync.Controller().FinishAnchorHeaders(
 		t.Context(), peerID, headers, headersync.DefaultMaxRangeHeaders,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.True(t, result.Staged)
-	bm.headerSync.Session().StageRange(result.Range.ID, headers, peerID)
+	bm.sessionForTest().StageRange(result.Range.ID, headers, peerID)
 	return result.Range
 }
 
@@ -93,7 +93,7 @@ func TestInvalidDiscoveryRecovers(t *testing.T) {
 	_, height, err := store.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
-	_, staged := bm.headerSync.Session().StagedRange(rng.ID)
+	_, staged := bm.sessionForTest().StagedRange(rng.ID)
 	require.False(t, staged)
 	failed, ok, err := bm.headerSync.Manager().SnapshotRange(
 		t.Context(), rng.ID,
@@ -147,7 +147,7 @@ func TestHeaderCommitStorageFailurePreservesStaging(t *testing.T) {
 	bm.cfg.BlockHeaders = failing
 	require.NoError(t, bm.commitReadyHeaderSyncRanges(t.Context()))
 	settleHeaderCommit(t, bm, list.New())
-	_, staged := bm.headerSync.Session().StagedRange(rng.ID)
+	_, staged := bm.sessionForTest().StagedRange(rng.ID)
 	require.True(t, staged)
 	ready, err := bm.headerSync.Manager().ReadyRanges(t.Context())
 	require.NoError(t, err)
@@ -237,7 +237,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 	require.ErrorIs(t, err, readErr)
 	var invalid *headerSyncValidationError
 	require.False(t, errors.As(err, &invalid))
-	_, staged := bm.headerSync.Session().StagedRange(rng.ID)
+	_, staged := bm.sessionForTest().StagedRange(rng.ID)
 	require.True(t, staged)
 	ready, err := manager.ReadyRanges(ctx)
 	require.NoError(t, err)

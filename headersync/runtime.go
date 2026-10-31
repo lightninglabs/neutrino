@@ -34,7 +34,9 @@ type RuntimeConfig struct {
 
 // Runtime owns the headersync actor graph and production request bookkeeping.
 // Blockmanager remains responsible for peer I/O and header storage, while this
-// type owns the manager actor, peer actors, controller, and session state.
+// type owns the manager actor, peer actors, controller, driver, and session
+// state. The session is private to the package: the driver is its only user
+// outside of it.
 type Runtime struct {
 	cfg         Config
 	mailboxSize int
@@ -156,15 +158,6 @@ func (r *Runtime) Driver() *Driver {
 	}
 
 	return r.driver
-}
-
-// Session returns the request/session bookkeeping state.
-func (r *Runtime) Session() *Session {
-	if r == nil {
-		return nil
-	}
-
-	return r.session
 }
 
 // Peer returns a peer actor by ID.

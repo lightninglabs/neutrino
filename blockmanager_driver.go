@@ -2,7 +2,6 @@ package neutrino
 
 import (
 	"container/list"
-	"errors"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -39,9 +38,6 @@ func (b *blockManager) handleDriverEvent(peers *list.List,
 
 	var outcome driverOutcome
 	outcome.result, outcome.err = b.headerSync.Driver().Handle(ctx, event)
-	if errors.Is(outcome.err, headersync.ErrUnknownDriverEvent) {
-		log.Errorf("headersync driver rejected event: %v", outcome.err)
-	}
 
 	for _, effect := range outcome.result.Effects {
 		if b.executeDriverEffect(peers, known, effect) {
