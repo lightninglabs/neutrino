@@ -383,7 +383,7 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 		)
 		require.NoError(t, err)
 		require.Len(t, plan.Ranges, dstChainHeight/2)
-		d.bm.headerSync.Session().SetNextRangeID(plan.NextID)
+		d.bm.sessionForTest().SetNextRangeID(plan.NextID)
 	}
 	for slot := range d.current {
 		d.connect(slot)
@@ -493,6 +493,7 @@ func (d *dstRun) build() {
 			AskFault:      d.controllerFault,
 		},
 	)
+	bm.headerSync.Driver().SetAskHook(bm.driverAsk)
 	d.recorder = &headersync.EventRecorder{}
 	bm.headerSync.Manager().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
@@ -1060,7 +1061,7 @@ func (d *dstRun) shutdown() {
 	synctest.Wait()
 	require.Equal(d.t, pending, queued(),
 		"request/retry callback survived shutdown")
-	require.Zero(d.t, d.bm.headerSync.Session().ActiveRangeCount())
+	require.Zero(d.t, d.bm.sessionForTest().ActiveRangeCount())
 	require.Nil(d.t, d.bm.headerCommitRetryTimer)
 	d.bm.QueueHeaders(wire.NewMsgHeaders(), d.current[0])
 	require.Len(d.t, d.bm.peerChan, pending)
@@ -1485,7 +1486,7 @@ func TestHeaderTransportDuplicatePreservesRequest(t *testing.T) {
 		require.Equal(t, before, after,
 			"duplicate changed ownership or peer quality")
 		require.Equal(t, events, d.recorder.Events())
-		require.True(t, d.bm.headerSync.Session().RangeActive(peerID))
+		require.True(t, d.bm.sessionForTest().RangeActive(peerID))
 	})
 }
 
@@ -1495,7 +1496,7 @@ func TestHeaderTransportFailedCompatibilityWrite(t *testing.T) {
 		// Remove request matching to exercise the compatibility writer.
 		// The original failing seed entered this path with a duplicate.
 		d.inv.skipLeases = true
-		d.bm.headerSync.Session().StopAll()
+		d.bm.sessionForTest().StopAll()
 		d.store.mode = dstStoreDown
 		message := wire.NewMsgHeaders()
 		for _, header := range dstChains().honest[1:3] {
@@ -1511,7 +1512,7 @@ func TestHeaderTransportFailedCompatibilityWrite(t *testing.T) {
 func TestHeaderTransportDSTShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
-		require.NotZero(t, d.bm.headerSync.Session().ActiveRangeCount())
+		require.NotZero(t, d.bm.sessionForTest().ActiveRangeCount())
 		d.bm.scheduleHeaderCommitRetry()
 		d.shutdown()
 	})
@@ -1580,7 +1581,7 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 		// Expire the peer's cooldown and run the recovery pass at once,
 		// before any timeout or serial batch can retire the lease.
 		peerID := d.current[0].Addr()
-		session := d.bm.headerSync.Session()
+		session := d.bm.sessionForTest()
 		session.TrackPeerCooldown(
 			peerID, headersync.PeerBlocked,
 			time.Now().Add(-time.Second), 0,

@@ -191,7 +191,7 @@ func (v *dstInvariants) rangeTable(event string) {
 	d := v.d
 	ctx := d.t.Context()
 	manager := d.bm.headerSync.Manager()
-	session := d.bm.headerSync.Session()
+	session := d.bm.sessionForTest()
 
 	owners := make(map[headersync.RangeID]string)
 	for _, peer := range d.current {
@@ -289,7 +289,7 @@ func (v *dstInvariants) commitOnce(event string) {
 func (v *dstInvariants) leases(event string) {
 	d := v.d
 	ctx := d.t.Context()
-	session := d.bm.headerSync.Session()
+	session := d.bm.sessionForTest()
 	manager := d.bm.headerSync.Manager()
 	for _, peer := range d.current {
 		if peer == nil {
@@ -357,7 +357,7 @@ func (v *dstInvariants) honestImmunity(event string) {
 // left: nothing active, staged, retrying, or non-terminal.
 func (d *dstRun) quiescent() error {
 	ctx := d.t.Context()
-	session := d.bm.headerSync.Session()
+	session := d.bm.sessionForTest()
 	switch {
 	case d.inv.lastTip < d.target:
 		return fmt.Errorf("durable tip %d, want %d", d.inv.lastTip,
@@ -407,7 +407,7 @@ func (d *dstRun) quiescent() error {
 // scan a margin past it.
 func (d *dstRun) rangeIDLimit() headersync.RangeID {
 	const margin = 32
-	return d.bm.headerSync.Session().NextRangeID() + margin
+	return d.bm.sessionForTest().NextRangeID() + margin
 }
 
 // dstMatchesChain reports whether headers continue chain after start.

@@ -538,7 +538,7 @@ func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
 	peers.PushBack(sp)
 
 	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3001))
-	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	request, ok := bm.sessionForTest().FinishAnchor(sp.Addr())
 	require.True(t, ok)
 	require.Equal(t, uint32(1), request.StartHeight)
 	require.Equal(t, header.BlockHash(), request.StartHash)
@@ -578,13 +578,13 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 	peers := list.New()
 	peers.PushBack(sp)
 
-	bm.headerSync.Session().TrackAnchor(sp.Addr(), headersync.AnchorRequest{
+	bm.sessionForTest().TrackAnchor(sp.Addr(), headersync.AnchorRequest{
 		StartHeight: 0,
 		StartHash:   genesis.BlockHash(),
 		StopHeight:  1,
 		StopHash:    first.BlockHash(),
 	})
-	require.Equal(t, 1, bm.headerSync.Session().PruneAnchorsAtOrBefore(2))
+	require.Equal(t, 1, bm.sessionForTest().PruneAnchorsAtOrBefore(2))
 	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
 		peer: sp,
 		headers: &wire.MsgHeaders{
@@ -600,7 +600,7 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 	require.Equal(t, second.BlockHash(), tip.BlockHash())
 
 	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3002))
-	request, ok := bm.headerSync.Session().FinishAnchor(sp.Addr())
+	request, ok := bm.sessionForTest().FinishAnchor(sp.Addr())
 	require.True(t, ok)
 	require.Equal(t, height, request.StartHeight)
 	require.Equal(t, tip.BlockHash(), request.StartHash)
@@ -672,9 +672,13 @@ func TestSerialTimeoutSurvivesDiscoveryRequest(t *testing.T) {
 	serialID := bm.serialRequestID
 
 	// A discovery request to another peer arms its own deadline.
-	bm.armHeaderSyncAnchorTimeout(
-		fastPeer, 0, chainhash.Hash{}, 10, chainhash.Hash{},
-	)
+	bm.handleDriverEvent(nil, headersync.RequestSent{
+		Request: headersync.SendGetHeaders{
+			PeerID:     fastPeer.Addr(),
+			Kind:       headersync.RequestAnchor,
+			StopHeight: 10,
+		},
+	}, fastPeer)
 
 	peers.PushBack(fastPeer)
 	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
