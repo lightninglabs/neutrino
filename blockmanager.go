@@ -342,8 +342,14 @@ type blockManager struct { // nolint:maligned
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
-	headerSyncTimeout      time.Duration
-	headerRequestID        uint64
+	headerSyncTimeout time.Duration
+	headerRequestID   uint64
+
+	// serialRequestID identifies the serial getheaders deadline. It is
+	// separate from headerRequestID so that arming a range or discovery
+	// deadline does not void a serial timeout that is still pending.
+	serialRequestID uint64
+
 	headerSyncTimer        *time.Timer
 	headerCommitRetryTimer *time.Timer
 	headerCommitRetryID    uint64
@@ -3023,10 +3029,13 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 
 		// Dispatch recovers every peer whose cooldown expired; arm
 		// the next wakeup for any still cooling down. While a serial
-		// request is in flight only dispatch: continuing sync could
-		// reselect the sync peer under that request.
+		// request is in flight, resume the planned work and discovery
+		// but do not start the serial path: continuing sync could
+		// reselect the sync peer under that request. Dispatch alone
+		// would leave a span that waited on the cooling peers without
+		// any discovery to restart it.
 		if b.headerSyncTimer != nil {
-			b.dispatchHeaderSyncWork(peers)
+			b.resumeHeaderSyncWork(peers)
 		} else {
 			b.continueHeaderSync(peers)
 		}
@@ -3200,8 +3209,8 @@ func (b *blockManager) headerTimeoutForPeer(peer *ServerPeer) time.Duration {
 func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 	startHeight uint32) {
 
-	b.headerRequestID++
-	requestID := b.headerRequestID
+	b.serialRequestID++
+	requestID := b.serialRequestID
 	timeout := b.headerTimeoutForPeer(peer)
 
 	if b.headerSyncTimer != nil {
@@ -3282,7 +3291,7 @@ func (b *blockManager) disarmHeaderSyncTimeout() {
 		b.headerSyncTimer.Stop()
 		b.headerSyncTimer = nil
 	}
-	b.headerRequestID++
+	b.serialRequestID++
 }
 
 func (b *blockManager) requestHeaders(peer *ServerPeer,
@@ -3905,9 +3914,27 @@ func headerSyncPeerCandidates(peers *list.List) ([]headersync.PeerCandidate,
 }
 
 func (b *blockManager) continueHeaderSync(peers *list.List) {
-	if b.pendingHeaderCommit != nil {
+	if b.resumeHeaderSyncWork(peers) {
 		return
 	}
+
+	b.syncPeerMutex.Lock()
+	b.syncPeer = nil
+	b.syncPeerMutex.Unlock()
+
+	b.startSync(peers)
+}
+
+// resumeHeaderSyncWork plans ranges, dispatches queued work and restarts
+// anchor discovery, and reports whether any work is in flight. It never starts
+// the serial path, so it is safe to run while a serial request is in flight.
+func (b *blockManager) resumeHeaderSyncWork(peers *list.List) bool {
+	// The asynchronous commit in flight owns the header tip, and planning
+	// before it settles would build on a stale tip.
+	if b.pendingHeaderCommit != nil {
+		return true
+	}
+
 	bestHeight := bestHeaderSyncHeight(peers)
 	_, err := b.planHeaderSyncRanges(bestHeight)
 	if err != nil {
@@ -3927,17 +3954,9 @@ func (b *blockManager) continueHeaderSync(peers *list.List) {
 			bestHeight,
 		)
 	}
-	if started || discoveryActive ||
-		b.headerSync.Session().HasActiveWork() {
 
-		return
-	}
-
-	b.syncPeerMutex.Lock()
-	b.syncPeer = nil
-	b.syncPeerMutex.Unlock()
-
-	b.startSync(peers)
+	return started || discoveryActive ||
+		b.headerSync.Session().HasActiveWork()
 }
 
 func (b *blockManager) allowSerialHeaderFallback() bool {
@@ -3981,7 +4000,7 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 		return
 	}
 
-	if msg.requestID != b.headerRequestID {
+	if msg.requestID != b.serialRequestID {
 		return
 	}
 
