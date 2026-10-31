@@ -47,6 +47,30 @@ Each campaign's generator seed is `run_number * 16 + n` for `n` in 1 to 4, so
 consecutive nights explore different seeds and any failure is reproducible
 from the run number. The same workflow runs the P checker.
 
+## Chain-store DST
+
+`chain_store_dst_test.go` runs the real chain-store actor, `blockHandler` and
+`cfHandler` through `blockManager.Start` in a synctest bubble. Unlike the
+header-sync DST, no handler is driven by the runner. The harness supplies a
+scripted header peer, a scripted cfheaders responder, a notification consumer
+that can stall, and fault wrappers on both stores. Every store operation takes
+virtual time, so a rollback and a filter batch commit can overlap.
+
+After every event the oracle checks, against the durable stores, that the
+block chain links, that each stored filter header is bound to the block the
+block header store holds at that height, and that the delivered notifications
+replay into a consistent chain. Where no actor turn can be in progress, it also
+checks the published filter tip. The heal phase clears every fault, resumes the
+consumer, and redelivers the heaviest chain until block tip, filter tip,
+published tip and notified tip agree.
+
+```sh
+go test . -run '^TestChainStoreDST$' -count=1
+go test . -run '^TestChainStoreDSTSwarm$' -dst.swarm=2000 -dst.seed=3
+go test . -run '^TestChainStoreDSTReplay$' -dst.replay=<hex>
+go test . -run '^$' -fuzz '^FuzzChainStoreDST$' -fuzztime=5m
+```
+
 ## Harness components
 
 The DST runs inside one `testing/synctest` bubble. Production code that
