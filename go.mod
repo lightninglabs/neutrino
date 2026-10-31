@@ -15,7 +15,7 @@ require (
 	github.com/btcsuite/btcwallet/wtxmgr v1.6.0
 	github.com/davecgh/go-spew v1.1.1
 	github.com/lightninglabs/neutrino/cache v1.1.4
-	github.com/lightningnetwork/lnd/queue v1.0.1
+	github.com/lightningnetwork/lnd/queue v1.2.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.41.0
 	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50
@@ -89,7 +89,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.0
 	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
-	github.com/lightningnetwork/lnd/actor v0.0.5
+	github.com/lightningnetwork/lnd/actor v0.0.7
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/lightningnetwork/lnd/sqldb/v2 v2.0.0-20260504151100-6fd5b7bb27d7
@@ -102,6 +102,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.25.11
+go 1.26.10
 
 replace github.com/golang-migrate/migrate/v4 => github.com/lightninglabs/migrate/v4 v4.18.2-9023d66a-fork-pr-2.0.20251211093704-71c1eef09789
