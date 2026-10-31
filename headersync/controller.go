@@ -610,6 +610,38 @@ func (c *Controller) RejectAnchor(ctx context.Context, height uint32,
 	return result, c.applyInvalidation(ctx, result, err, staleUntil)
 }
 
+// StopAnchorContradicted reports whether headers refute the stop hash of rng
+// and no trusted anchor vouches for that hash. Such a reply is evidence against
+// the stop boundary, not against the replier, because nothing but one peer's
+// discovery reply backs the hash. That covers an anchor still held as an
+// untrusted discovery, and one since rejected or replaced by another hash,
+// which can leave a requeued range behind. A checkpoint or an anchor that
+// already committed is trusted, and a reply that contradicts it is the
+// replier's fault.
+func (c *Controller) StopAnchorContradicted(ctx context.Context,
+	rng HeaderRange, headers []*wire.BlockHeader) (bool, error) {
+
+	if c == nil || c.manager == nil ||
+		!contradictsRangeStop(rng, headers) {
+
+		return false, nil
+	}
+
+	anchors, err := c.manager.Anchors(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, anchor := range anchors {
+		if anchor.Height == rng.StopHeight &&
+			anchor.Hash == rng.StopHash && anchor.Trusted {
+
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 // applyInvalidation drops the session state for result and tells the owners
 // of revoked leases. It returns err joined with any notification failure.
 func (c *Controller) applyInvalidation(ctx context.Context,
