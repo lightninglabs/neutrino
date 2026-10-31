@@ -74,9 +74,15 @@ type AnchorHeadersResult struct {
 
 	Confirmed bool
 	Rejected  bool
-	Staged    bool
-	Reason    string
-	Err       error
+
+	// Conflict is set when the response is well formed but names a
+	// different hash than the anchor already recorded at its height. It
+	// equals Rejected with no structural error. Nothing proves which
+	// reporter is wrong, so the caller must not punish either of them.
+	Conflict bool
+	Staged   bool
+	Reason   string
+	Err      error
 }
 
 // Controller owns production header-sync orchestration policy that is
@@ -545,6 +551,7 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	result.Anchor = anchor
 	if !ok || anchor.Rejected {
 		result.Rejected = true
+		result.Conflict = true
 		result.Reason = fmt.Sprintf(
 			"conflicting anchor height=%d hash=%s",
 			response.Height, response.Hash,
@@ -589,6 +596,25 @@ func (c *Controller) InvalidateRange(ctx context.Context, id RangeID,
 	staleUntil time.Time) (InvalidationResult, error) {
 
 	result, err := c.manager.InvalidateRange(ctx, id)
+	return result, c.applyInvalidation(ctx, result, err, staleUntil)
+}
+
+// RejectAnchor rejects an untrusted discovered anchor that peers contradict,
+// and removes the unstaged work and in-flight discovery that depend on it. No
+// peer is judged here: the caller decides whether any reporter is to blame.
+// Ordered commit validates whatever was staged and finds the liar.
+func (c *Controller) RejectAnchor(ctx context.Context, height uint32,
+	hash Hash, staleUntil time.Time) (InvalidationResult, error) {
+
+	result, err := c.manager.RejectAnchor(ctx, height, hash)
+	return result, c.applyInvalidation(ctx, result, err, staleUntil)
+}
+
+// applyInvalidation drops the session state for result and tells the owners
+// of revoked leases. It returns err joined with any notification failure.
+func (c *Controller) applyInvalidation(ctx context.Context,
+	result InvalidationResult, err error, staleUntil time.Time) error {
+
 	c.session.discardInvalidated(result, staleUntil)
 	if c.peerLookup != nil {
 		for _, revoked := range result.Revoked {
@@ -603,7 +629,7 @@ func (c *Controller) InvalidateRange(ctx context.Context, id RangeID,
 			err = errors.Join(err, notifyErr)
 		}
 	}
-	return result, err
+	return err
 }
 
 // AssignQueuedRanges mirrors queued ranges into the shared dispatch scheduler
