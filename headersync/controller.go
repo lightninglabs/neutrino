@@ -169,11 +169,6 @@ func NewController(manager *ManagerActor, session *Session,
 	}
 }
 
-// Session returns the request bookkeeping state owned by the controller.
-func (c *Controller) Session() *Session {
-	return c.session
-}
-
 // PlanCheckpointRanges seeds the current tip and stop checkpoint as trusted
 // anchors, then plans all adjacent confirmed ranges between them. It does not
 // invent missing boundary hashes; callers should start anchor discovery when
