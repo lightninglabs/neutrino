@@ -81,6 +81,16 @@ type DriverResult struct {
 
 	// Timeout is the outcome of RequestTimedOut.
 	Timeout TimeoutOutcome
+
+	// Handled is set by RangeReply when the driver took the reply. A reply
+	// that is not handled is not for the driver, and belongs to the
+	// serial path.
+	Handled bool
+
+	// AnchorRejected is the outcome of RejectUntrustedAnchor: false only
+	// when the anchor was trusted, replaced or unknown, so that nothing
+	// changed.
+	AnchorRejected bool
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -195,6 +205,12 @@ func (d *Driver) Handle(ctx context.Context,
 
 	case RequestTimedOut:
 		d.handleRequestTimedOut(ctx, event, &result)
+
+	case RangeReply:
+		d.handleRangeReply(ctx, event, &result)
+
+	case RejectUntrustedAnchor:
+		d.handleRejectUntrustedAnchor(ctx, event, &result)
 
 	default:
 		err = fmt.Errorf("%w: %T", ErrUnknownDriverEvent, event)
