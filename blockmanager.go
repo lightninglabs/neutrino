@@ -342,8 +342,14 @@ type blockManager struct { // nolint:maligned
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
-	headerSyncTimeout      time.Duration
-	headerRequestID        uint64
+	headerSyncTimeout time.Duration
+	headerRequestID   uint64
+
+	// serialRequestID identifies the serial getheaders deadline. It is
+	// separate from headerRequestID so that arming a range or discovery
+	// deadline does not void a serial timeout that is still pending.
+	serialRequestID uint64
+
 	headerSyncTimer        *time.Timer
 	headerCommitRetryTimer *time.Timer
 	headerCommitRetryID    uint64
@@ -3023,10 +3029,13 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 
 		// Dispatch recovers every peer whose cooldown expired; arm
 		// the next wakeup for any still cooling down. While a serial
-		// request is in flight only dispatch: continuing sync could
-		// reselect the sync peer under that request.
+		// request is in flight, resume the planned work and discovery
+		// but do not start the serial path: continuing sync could
+		// reselect the sync peer under that request. Dispatch alone
+		// would leave a span that waited on the cooling peers without
+		// any discovery to restart it.
 		if b.headerSyncTimer != nil {
-			b.dispatchHeaderSyncWork(peers)
+			b.resumeHeaderSyncWork(peers)
 		} else {
 			b.continueHeaderSync(peers)
 		}
@@ -3200,8 +3209,8 @@ func (b *blockManager) headerTimeoutForPeer(peer *ServerPeer) time.Duration {
 func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 	startHeight uint32) {
 
-	b.headerRequestID++
-	requestID := b.headerRequestID
+	b.serialRequestID++
+	requestID := b.serialRequestID
 	timeout := b.headerTimeoutForPeer(peer)
 
 	if b.headerSyncTimer != nil {
@@ -3282,7 +3291,7 @@ func (b *blockManager) disarmHeaderSyncTimeout() {
 		b.headerSyncTimer.Stop()
 		b.headerSyncTimer = nil
 	}
-	b.headerRequestID++
+	b.serialRequestID++
 }
 
 func (b *blockManager) requestHeaders(peer *ServerPeer,
@@ -3905,9 +3914,27 @@ func headerSyncPeerCandidates(peers *list.List) ([]headersync.PeerCandidate,
 }
 
 func (b *blockManager) continueHeaderSync(peers *list.List) {
-	if b.pendingHeaderCommit != nil {
+	if b.resumeHeaderSyncWork(peers) {
 		return
 	}
+
+	b.syncPeerMutex.Lock()
+	b.syncPeer = nil
+	b.syncPeerMutex.Unlock()
+
+	b.startSync(peers)
+}
+
+// resumeHeaderSyncWork plans ranges, dispatches queued work and restarts
+// anchor discovery, and reports whether any work is in flight. It never starts
+// the serial path, so it is safe to run while a serial request is in flight.
+func (b *blockManager) resumeHeaderSyncWork(peers *list.List) bool {
+	// The asynchronous commit in flight owns the header tip, and planning
+	// before it settles would build on a stale tip.
+	if b.pendingHeaderCommit != nil {
+		return true
+	}
+
 	bestHeight := bestHeaderSyncHeight(peers)
 	_, err := b.planHeaderSyncRanges(bestHeight)
 	if err != nil {
@@ -3927,17 +3954,9 @@ func (b *blockManager) continueHeaderSync(peers *list.List) {
 			bestHeight,
 		)
 	}
-	if started || discoveryActive ||
-		b.headerSync.Session().HasActiveWork() {
 
-		return
-	}
-
-	b.syncPeerMutex.Lock()
-	b.syncPeer = nil
-	b.syncPeerMutex.Unlock()
-
-	b.startSync(peers)
+	return started || discoveryActive ||
+		b.headerSync.Session().HasActiveWork()
 }
 
 func (b *blockManager) allowSerialHeaderFallback() bool {
@@ -3981,7 +4000,7 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 		return
 	}
 
-	if msg.requestID != b.headerRequestID {
+	if msg.requestID != b.serialRequestID {
 		return
 	}
 
@@ -4507,10 +4526,81 @@ func (b *blockManager) rejectHeaderSyncAnchor(peers *list.List,
 	b.quarantineHeaderSyncPeer(peer)
 	removeSyncCandidate(peers, peer)
 
-	if b.startHeaderAnchorDiscoveryFrom(
-		peers, request, peer.Addr(),
+	b.replanHeaderSyncAnchor(peers, request, peer.Addr())
+}
+
+// conflictHeaderSyncAnchor handles a well formed discovery reply that names a
+// different boundary than the anchor already recorded at its height. Nothing
+// proves which reporter lied, and the earlier one may well be the liar, so
+// neither is punished: the reporter is neither quarantined nor held back. The
+// recorded anchor is rejected along with the unstaged work built on it, and
+// the span is discovered again. Commit-time contextual validation of any
+// staged payload finds the liar.
+//
+// A conflict against a trusted anchor, say a committed boundary after a short
+// reorg in frontier mode, rejects nothing and so replans nothing. It is not
+// punished either.
+//
+// A fast liar that always answers first can repeat this under a policy that
+// needs two observations, since each round rejects the honest anchor again.
+// The production policy needs one, so the first reply for a span is staged
+// and committed whatever a later conflict does to the anchor, and the loop
+// cannot stall it. We accept the loop for the stricter test-only policy.
+func (b *blockManager) conflictHeaderSyncAnchor(ctx context.Context,
+	peers *list.List, peer *ServerPeer, request headersync.AnchorRequest,
+	anchor headersync.Anchor) {
+
+	log.Warnf("headersync anchor_conflict peer=%s start_height=%d "+
+		"stop_height=%d anchor_height=%d recorded_hash=%s",
+		peer.Addr(), request.StartHeight, request.StopHeight,
+		anchor.Height, anchor.Hash)
+
+	if !b.rejectUntrustedHeaderSyncAnchor(
+		ctx, "anchor_rejected_by_conflict", anchor.Height, anchor.Hash,
 	) {
 
+		if !b.headerSync.Session().HasActiveWork() {
+			b.continueHeaderSync(peers)
+		}
+
+		return
+	}
+
+	b.replanHeaderSyncAnchor(peers, request)
+}
+
+// rejectUntrustedHeaderSyncAnchor rejects an untrusted anchor and the unstaged
+// work built on it, and logs the outcome under tag. It reports false only when
+// the anchor was trusted, replaced or unknown, so nothing changed. A failed ask
+// reports true, since the anchor may have been rejected.
+func (b *blockManager) rejectUntrustedHeaderSyncAnchor(ctx context.Context,
+	tag string, height uint32, hash chainhash.Hash) bool {
+
+	result, err := b.headerSync.Controller().RejectAnchor(
+		ctx, height, hash, time.Now().Add(b.headerSyncTimeout),
+	)
+	if err != nil {
+		log.Warnf("headersync unable to reject anchor height=%d: %v",
+			height, err)
+		return true
+	}
+	if len(result.Anchors) == 0 {
+		return false
+	}
+
+	log.Infof("headersync %s height=%d invalidated_ranges=%v", tag,
+		height, result.Ranges)
+
+	return true
+}
+
+// replanHeaderSyncAnchor discovers the span of a rejected anchor reply again,
+// leaving the excluded peers out of the new round, and falls back to the
+// regular sync start when no other peer can answer.
+func (b *blockManager) replanHeaderSyncAnchor(peers *list.List,
+	request headersync.AnchorRequest, excluded ...string) {
+
+	if b.startHeaderAnchorDiscoveryFrom(peers, request, excluded...) {
 		return
 	}
 
@@ -4604,6 +4694,13 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 				request.StartHash, "",
 			)
 
+			return true
+		}
+
+		if result.Conflict {
+			b.conflictHeaderSyncAnchor(
+				ctx, peers, hmsg.peer, request, result.Anchor,
+			)
 			return true
 		}
 
@@ -4811,12 +4908,47 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	// way.
 	lagging := len(hmsg.headers.Headers) == 0 &&
 		hmsg.peer.LastBlock() < int32(rng.StopHeight)
+
+	// A well formed reply that holds a different header at the range's
+	// stop height refutes the stop hash. When only an unvalidated
+	// discovery reply vouches for that hash, the reply is evidence against
+	// the anchor: the peer may be the honest one. Block it for the
+	// cooldown, during which it is leased no range, and reject the anchor
+	// below instead of quarantining the peer. A liar can contradict an
+	// anchor only with a range reply, so the cooldown bounds how often it
+	// forces a replan.
+	//
+	// The cost falls on honest peers when a persistent liar acts as a
+	// discovery reporter: its reply arrives after the first honest one,
+	// extends a longer fork, and is never staged, so commit-time
+	// validation never convicts it. Each round an honest lessee then
+	// contradicts the liar's anchor and is blocked for the cooldown.
+	// Liveness holds, since discovery planning ignores peer state, so
+	// blocked honest peers still answer discovery and commit. Recording
+	// the reporter per anchor would let us block the liar instead, and is
+	// the follow-up if this cost matters.
+	var contradicted bool
+	if !valid && !lagging {
+		contradicted, err = b.headerSync.Controller().
+			StopAnchorContradicted(ctx, rng, hmsg.headers.Headers)
+		if err != nil {
+			log.Warnf("headersync unable to check stop anchor "+
+				"range_id=%d: %v", assignment.RangeID, err)
+			contradicted = false
+		}
+	}
 	switch {
 	case !valid && lagging:
 		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
 			"peer_height=%d stop_height=%d", peerID,
 			assignment.RangeID, hmsg.peer.LastBlock(),
 			rng.StopHeight)
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+
+	case contradicted:
+		log.Warnf("headersync stop_anchor_contradicted peer=%s "+
+			"range_id=%d stop_height=%d stop_hash=%s", peerID,
+			assignment.RangeID, rng.StopHeight, rng.StopHash)
 		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
 
 	case !valid:
@@ -4871,7 +5003,14 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 	if !result.Accepted || !valid {
-		if !valid {
+		switch {
+		case contradicted:
+			b.rejectUntrustedHeaderSyncAnchor(
+				ctx, "anchor_rejected_by_replies",
+				rng.StopHeight, rng.StopHash,
+			)
+
+		case !valid:
 			b.replanHeaderSyncRange(ctx, rng)
 		}
 		b.continueHeaderSync(peers)

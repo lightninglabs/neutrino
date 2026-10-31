@@ -62,6 +62,13 @@ func TestSessionResponseMatching(t *testing.T) {
 			require.False(t, timer.Stop(),
 				"matching reply left deadline armed")
 			track()
+			if discovery {
+				// An empty discovery reply has no identity, so
+				// it leaves the request and its deadline alone.
+				require.False(t, finish(nil))
+				require.True(t, session.HasActiveWork())
+				return
+			}
 			require.True(t, finish(nil),
 				"empty reply must reach validation")
 			require.False(t, session.HasActiveWork())

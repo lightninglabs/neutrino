@@ -228,12 +228,18 @@ func (s *Session) FinishAnchor(peerID string) (AnchorRequest, bool) {
 }
 
 // FinishAnchorHeaders applies the same locator matching as FinishRangeHeaders
-// to discovery replies without consuming a newer request on a duplicate.
+// to discovery replies without consuming a newer request on a duplicate. An
+// empty reply never matches. It carries no claim and no identity, since it may
+// answer an earlier request to the peer that a newer discovery request has
+// overtaken. The request it might answer stays tracked, and its timeout moves
+// the work to another peer if the peer only ever answers with nothing.
 func (s *Session) FinishAnchorHeaders(peerID string,
 	headers []*wire.BlockHeader) (AnchorRequest, bool) {
 
 	request, ok := s.anchorRequests[peerID]
-	if !ok || !matchesHeaderStart(headers, request.StartHash) {
+	if !ok || len(headers) == 0 ||
+		!matchesHeaderStart(headers, request.StartHash) {
+
 		return AnchorRequest{}, false
 	}
 

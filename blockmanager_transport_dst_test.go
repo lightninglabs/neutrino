@@ -277,25 +277,9 @@ type dstRun struct {
 	// controller makes itself.
 	controllerFaults map[headersync.AskOp]headersync.AskFault
 
-	// anchorLiar is set once a peer served a PoW-valid but dishonest
-	// chain, which can win anchor discovery.
-	anchorLiar bool
-
-	// conflictPunishments counts honest peers punished for reporting an
-	// anchor that conflicted with a liar's (known policy gap F12).
-	conflictPunishments int
-
-	// anchorConflicts records peers that sent an honest reply ending at a
-	// height where a liar's anchor was already known.
-	anchorConflicts map[string]bool
-
 	// ntfns records every block notification in delivery order.
 	ntfns   []string
 	ntfnMtx sync.Mutex
-
-	// poisoned is set when a run ended stuck behind a liar's confirmed
-	// anchor (known gap F13) instead of reaching the honest tip.
-	poisoned bool
 
 	// restarts counts block manager rebuilds over the same stores.
 	restarts int
@@ -324,9 +308,6 @@ type dstSnapshot struct {
 	Sent     int
 	Restarts int
 	Ntfns    []string
-
-	ConflictPunishments int
-	Poisoned            bool
 }
 
 // setupDSTBlockManager builds a block manager over in-memory header stores.
@@ -369,11 +350,10 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 				&chaincfg.SimNetParams,
 			),
 		},
-		peers:           list.New(),
-		faulted:         make(map[string]string),
-		anchorConflicts: make(map[string]bool),
-		punished:        make(map[string]string),
-		askFaults:       make(map[headerSyncAskOp]headerSyncAskFault),
+		peers:     list.New(),
+		faulted:   make(map[string]string),
+		punished:  make(map[string]string),
+		askFaults: make(map[headerSyncAskOp]headerSyncAskFault),
 		controllerFaults: make(
 			map[headersync.AskOp]headersync.AskFault,
 		),
@@ -821,22 +801,6 @@ func (d *dstRun) reply(slot int, kind dstReplyKind) bool {
 	if kind != dstReplyHonest {
 		d.fault(peer, kind.String())
 	}
-	// Any reply whose last header is not honest can win discovery with a
-	// boundary of its own.
-	switch kind {
-	case dstReplyFork, dstReplyBadTime, dstReplyBadBits,
-		dstReplyCorrupt:
-
-		d.anchorLiar = true
-
-	case dstReplyHonest:
-		// Remember an honest reply that conflicts with a liar's
-		// anchor already known at its final height: production
-		// quarantines its sender (known gap F12).
-		if d.conflictsWithAnchor(peer, request.start, request.stop) {
-			d.anchorConflicts[peer.Addr()] = true
-		}
-	}
 	log.Debugf("dst reply slot=%d %d..%d %s", slot, request.start,
 		request.stop, kind)
 	d.steps = append(d.steps, fmt.Sprintf("reply slot=%d %d..%d %s",
@@ -1229,9 +1193,6 @@ func (d *dstRun) snapshot() dstSnapshot {
 		Timeouts: d.timeouts, Sent: d.transport.sent,
 		Restarts: d.restarts,
 		Ntfns:    d.ntfns,
-
-		ConflictPunishments: d.conflictPunishments,
-		Poisoned:            d.poisoned,
 	}
 	if d.stopped {
 		return snapshot
@@ -1309,12 +1270,6 @@ func runHeaderTransportDST(t *testing.T, script []byte) dstSnapshot {
 				d.tipPhase()
 			}
 			err := d.quiescent()
-			if err != nil && d.poisonedAnchor() {
-				// Known gap F13: a liar's confirmed but
-				// never-validated anchor blocks its span.
-				d.poisoned = true
-				err = nil
-			}
 			require.NoError(t, err,
 				"recovery did not complete; seed=%x\n%s",
 				script, d.describe())
@@ -1401,6 +1356,33 @@ var dstRegressionSeeds = []string{
 	// Serial mode: a sync peer answering empty kept the role with no
 	// request and no deadline.
 	"ff6240a6106ae838014c714ad54cff39b6ba0afdbaf2842424993232d5",
+	// F12: honest reporters quarantined for conflicting with a liar's
+	// anchor. The policy now punishes neither side of a conflict.
+	"365df8fb129240283bd86bb9d9bd236a2a07925a7de7fb63f43bc24ea5d3f3156f",
+	"186451560b6e4831835530ec47fd115e2bf62f633452a7d0b5b732df4b9841",
+	"81ebd091c01b17af6d3e0c72789cd1ce752241dcbece886bc42072",
+	"d6ecb0470bbf211a18da94056b57d4a729007a21f848",
+	// F13: honest repliers quarantined for failing the stop hash of a
+	// liar's unvalidated anchor.
+	"a7f3544afd06eb171b32511aa021d493a12ee6d5e92aa4ced9ef1e",
+	"897c3d6193c399491bca7305ac2e994a47f0c52108ff434870",
+	"1275b4c81d77a6058ebb494bc4054ffdb9042c850787e3539057ab50a5a67fba8cfa",
+	"d0e1a09ffbe8d1b8b5c3faf3304ab6b2bc3ac87e74",
+	"8e7e6ccdcb27cc79c96a4d3e4da0e8957b82c4e527b0b91bfe81acbc8609e8",
+	"4ef1c21e83fb1beaea63",
+	"494d49b6faa77c5a69166c43d7c4f9a95b492cce8c09e5",
+	// An empty reply to an earlier request, judged against a newer
+	// discovery request, quarantined an honest peer. The first of these
+	// failed on master too.
+	"5cc8047d4520b80a59bb255aab27",
+	"526ae4b9301b9ce31be95ec8c1",
+	"635cc7d19e3960ab1c58bf30ec24079684280b2005c6715b36a25804f03ec980",
+	// A cooldown wake during a serial request did not restart discovery,
+	// leaving the run at the start of a span. Both failed on master too.
+	"3b99a35246439b97826bf25fb7599ff9771bd7f35346",
+	"aecab34c59bb103ea898c7c357d9aa5baff19fc3e6356ab43b37",
+	"95fa5afe7fd958e24d1739244c793b813bdb8e99335f",
+	"0e4ff9ec33eef329041c7327304be653c92991f37e6ef9",
 }
 
 // dstSeeds returns the fixed corpus plus every regression seed.

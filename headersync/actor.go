@@ -159,6 +159,22 @@ type InvalidateRangeResp struct {
 	Err    error
 }
 
+// RejectAnchorMsg reports that peers contradict an untrusted discovered anchor.
+type RejectAnchorMsg struct {
+	managerMessage
+
+	Height uint32
+	Hash   Hash
+}
+
+// RejectAnchorResp retains the rejected work if dispatch mirroring fails.
+type RejectAnchorResp struct {
+	managerResponse
+
+	Result InvalidationResult
+	Err    error
+}
+
 // PlanAnchorRangesMsg asks the manager to plan all bounded adjacent ranges
 // between confirmed anchors.
 type PlanAnchorRangesMsg struct {
@@ -357,6 +373,23 @@ type managerEnv struct {
 	dispatch DispatchController
 }
 
+// syncPeers mirrors every peer's FSM state into the dispatch scheduler and
+// returns the last error, so one failing peer does not skip the rest.
+func (e *managerEnv) syncPeers(ctx context.Context) error {
+	if e.dispatch == nil {
+		return nil
+	}
+
+	var syncErr error
+	for _, peer := range e.fsm.Peers() {
+		if err := e.dispatch.SyncPeer(ctx, peer); err != nil {
+			syncErr = err
+		}
+	}
+
+	return syncErr
+}
+
 type managerState struct{}
 
 func (managerState) String() string {
@@ -443,16 +476,15 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 		if err != nil {
 			return nil, err
 		}
-		var syncErr error
-		if env.dispatch != nil {
-			for _, peer := range env.fsm.Peers() {
-				err := env.dispatch.SyncPeer(ctx, peer)
-				if err != nil {
-					syncErr = err
-				}
-			}
-		}
+		syncErr := env.syncPeers(ctx)
 		return respond(&InvalidateRangeResp{
+			Result: result, Err: syncErr,
+		})
+
+	case *RejectAnchorMsg:
+		result := env.fsm.RejectAnchor(m.Height, m.Hash)
+		syncErr := env.syncPeers(ctx)
+		return respond(&RejectAnchorResp{
 			Result: result, Err: syncErr,
 		})
 
@@ -1041,6 +1073,22 @@ func (m *ManagerActor) InvalidateRange(ctx context.Context,
 		return InvalidationResult{}, err
 	}
 	result, ok := resp.(*InvalidateRangeResp)
+	if !ok {
+		return InvalidationResult{}, unexpectedManagerResp(resp)
+	}
+	return result.Result, result.Err
+}
+
+// RejectAnchor asks the FSM to reject an untrusted discovered anchor and the
+// unstaged work that uses it as a boundary.
+func (m *ManagerActor) RejectAnchor(ctx context.Context, height uint32,
+	hash Hash) (InvalidationResult, error) {
+
+	resp, err := m.ask(ctx, &RejectAnchorMsg{Height: height, Hash: hash})
+	if err != nil {
+		return InvalidationResult{}, err
+	}
+	result, ok := resp.(*RejectAnchorResp)
 	if !ok {
 		return InvalidationResult{}, unexpectedManagerResp(resp)
 	}
