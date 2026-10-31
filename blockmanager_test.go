@@ -635,13 +635,57 @@ func TestHeaderSyncTimeoutFailsOverToNextCandidate(t *testing.T) {
 	peers.PushBack(fastPeer)
 	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
 		peer:        slowPeer,
-		requestID:   bm.headerRequestID,
+		requestID:   bm.serialRequestID,
 		startHeight: 0,
 		timeout:     bm.headerSyncTimeout,
 	})
 
 	require.Empty(t, banned)
 	require.Equal(t, []string{slowPeer.Addr()}, quarantined)
+	require.Equal(t, fastPeer, bm.SyncPeer())
+}
+
+// TestSerialTimeoutSurvivesDiscoveryRequest checks that arming an anchor
+// discovery deadline does not void a pending serial timeout. The two shared
+// one request counter, so the serial timeout failed its identity check and
+// returned without disarming, leaving the serial timer armed for good.
+func TestSerialTimeoutSurvivesDiscoveryRequest(t *testing.T) {
+	t.Parallel()
+
+	bm, _, _, err := setupBlockManager(t)
+	require.NoError(t, err)
+	bm.headerSyncTimeout = time.Hour
+
+	var quarantined []string
+	bm.cfg.QuarantinePeer = func(addr string, _ time.Duration) {
+		quarantined = append(quarantined, addr)
+	}
+
+	slowPeer := newTestServerPeer(t, "127.0.0.1:8333", 100)
+	fastPeer := newTestServerPeer(t, "127.0.0.2:8333", 200)
+	peers := list.New()
+	peers.PushBack(slowPeer)
+
+	bm.startSync(peers)
+	require.Equal(t, slowPeer, bm.SyncPeer())
+	require.NotNil(t, bm.headerSyncTimer)
+	serialID := bm.serialRequestID
+
+	// A discovery request to another peer arms its own deadline.
+	bm.armHeaderSyncAnchorTimeout(
+		fastPeer, 0, chainhash.Hash{}, 10, chainhash.Hash{},
+	)
+
+	peers.PushBack(fastPeer)
+	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
+		peer:        slowPeer,
+		requestID:   serialID,
+		startHeight: 0,
+		timeout:     bm.headerSyncTimeout,
+	})
+
+	require.Equal(t, []string{slowPeer.Addr()}, quarantined,
+		"the serial timeout was voided by the discovery request")
 	require.Equal(t, fastPeer, bm.SyncPeer())
 }
 

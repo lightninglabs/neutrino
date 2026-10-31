@@ -297,3 +297,46 @@ func TestHeaderEmptyDiscoveryReplyCarriesNoClaim(t *testing.T) {
 		require.EqualValues(t, dstChainHeight, d.inv.lastTip)
 	})
 }
+
+// TestHeaderCooldownWakeRestartsDiscoveryDuringSerialRequest checks that the
+// cooldown wakeup restarts anchor discovery even while a serial request timer
+// is armed. The wakeup used to dispatch queued ranges only, so a span whose
+// discovery had stopped for lack of ready peers was never asked for again.
+func TestHeaderCooldownWakeRestartsDiscoveryDuringSerialRequest(
+	t *testing.T) {
+
+	synctest.Test(t, func(t *testing.T) {
+		d := newDSTRun(t, dstConfig{mode: dstModeFrontier1})
+		session := d.bm.headerSync.Session()
+
+		// Every peer's discovery request is gone and every peer is
+		// blocked, as after a run of send failures.
+		for _, peer := range d.current {
+			session.FinishAnchor(peer.Addr())
+			for d.transport.queuedFor(peer) {
+				d.transport.take(peer)
+			}
+			d.bm.updateHeaderSyncPeerState(
+				peer, headersync.PeerBlocked,
+			)
+		}
+		require.Zero(t, session.ActiveAnchorCount())
+
+		// A serial request is in flight, and the cooldowns expire.
+		d.bm.headerSyncTimer = time.NewTimer(time.Hour)
+		t.Cleanup(func() { d.bm.headerSyncTimer.Stop() })
+		for _, peer := range d.current {
+			session.TrackPeerCooldown(
+				peer.Addr(), headersync.PeerBlocked,
+				time.Now().Add(-time.Second), 0,
+			)
+		}
+
+		d.bm.handlePeerMessage(d.peers, &headerSyncCooldownMsg{
+			generation: d.bm.headerCooldownID,
+		})
+		synctest.Wait()
+		require.Positive(t, session.ActiveAnchorCount(),
+			"the wakeup did not restart discovery")
+	})
+}
