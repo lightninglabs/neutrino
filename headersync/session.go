@@ -125,6 +125,22 @@ func (s *Session) TrackRange(peerID string, request RangeRequest) {
 	s.rangeRequests[peerID] = request
 }
 
+// AttachRangeTimer hands the deadline timer to the in-flight range request
+// with the given ID. It reports false when that request is no longer tracked.
+func (s *Session) AttachRangeTimer(peerID string, requestID uint64,
+	timer *time.Timer) bool {
+
+	request, ok := s.rangeRequests[peerID]
+	if !ok || request.RequestID != requestID {
+		return false
+	}
+
+	request.Timer = timer
+	s.rangeRequests[peerID] = request
+
+	return true
+}
+
 // FinishRange removes and stops an in-flight range request.
 func (s *Session) FinishRange(peerID string) (RangeRequest, bool) {
 	request, ok := s.rangeRequests[peerID]
@@ -212,6 +228,22 @@ func (s *Session) TrackAnchor(peerID string, request AnchorRequest) {
 	}
 
 	s.anchorRequests[peerID] = request
+}
+
+// AttachAnchorTimer hands the deadline timer to the in-flight anchor request
+// with the given ID. It reports false when that request is no longer tracked.
+func (s *Session) AttachAnchorTimer(peerID string, requestID uint64,
+	timer *time.Timer) bool {
+
+	request, ok := s.anchorRequests[peerID]
+	if !ok || request.RequestID != requestID {
+		return false
+	}
+
+	request.Timer = timer
+	s.anchorRequests[peerID] = request
+
+	return true
 }
 
 // FinishAnchor removes and stops an in-flight anchor request.

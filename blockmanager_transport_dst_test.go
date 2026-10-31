@@ -493,6 +493,7 @@ func (d *dstRun) build() {
 			AskFault:      d.controllerFault,
 		},
 	)
+	bm.headerSync.Driver().SetAskHook(bm.driverAsk)
 	d.recorder = &headersync.EventRecorder{}
 	bm.headerSync.Manager().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
