@@ -134,6 +134,25 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		removeSyncCandidate(peers, sp)
 		sp.Disconnect()
 
+	case headersync.ScheduleCommitRetry:
+		b.scheduleHeaderCommitRetry()
+
+	case headersync.ContinueSync:
+		b.continueHeaderSync(peers)
+
+	case headersync.CommitReadyRanges:
+		ctx, cancel := b.headerSyncOpCtx()
+		defer cancel()
+
+		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+			log.Warnf("headersync failed to commit ready ranges: "+
+				"%v", err)
+			if b.rejectInvalidHeaderCommit(peers, err) {
+				return false
+			}
+		}
+		b.continueHeaderSync(peers)
+
 	default:
 		log.Warnf("headersync driver emitted unknown effect %T", effect)
 	}
