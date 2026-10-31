@@ -2,6 +2,7 @@ package headersync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -23,6 +24,10 @@ const (
 	// reply arrives.
 	DriverAskCompleteRange
 )
+
+// ErrUnknownDriverEvent is returned by Handle for an event type it does not
+// know.
+var ErrUnknownDriverEvent = errors.New("unknown header sync driver event")
 
 // DriverEvent is an input to the driver. Events carry everything the driver
 // needs to know about the world that it does not own: peer snapshots, chain
@@ -67,6 +72,15 @@ type DriverResult struct {
 
 	// HadWork is set by PeerDone when the peer had a request in flight.
 	HadWork bool
+
+	// Planned is the number of ranges PlanRanges planned.
+	Planned int
+
+	// Discovery is the outcome of the events that plan anchor discovery.
+	Discovery DiscoveryOutcome
+
+	// Timeout is the outcome of RequestTimedOut.
+	Timeout TimeoutOutcome
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -149,8 +163,41 @@ func (d *Driver) Handle(ctx context.Context,
 	case PeerDone:
 		d.handlePeerDone(ctx, event, &result)
 
+	case PlanRanges:
+		err = d.handlePlanRanges(ctx, event, &result)
+
+	case AssignRanges:
+		d.handleAssignRanges(ctx, event)
+
+	case DispatchPeer:
+		d.handleDispatchPeer(ctx, event, &result)
+
+	case RequestSent:
+		d.handleRequestSent(event, &result)
+
+	case RequestFailed:
+		d.handleRequestFailed(ctx, event, &result)
+
+	case TimerArmed:
+		d.handleTimerArmed(event)
+
+	case DiscoverAnchors:
+		d.handleDiscoverAnchors(ctx, event, &result)
+
+	case DiscoverFrontier:
+		d.handleDiscoverFrontier(ctx, event, &result)
+
+	case PipelineFrontier:
+		d.handlePipelineFrontier(event, &result)
+
+	case DiscoverFrom:
+		d.discoverFrom(event.Span, event.Peers, event.Excluded, &result)
+
+	case RequestTimedOut:
+		d.handleRequestTimedOut(ctx, event, &result)
+
 	default:
-		err = fmt.Errorf("unknown header sync driver event %T", event)
+		err = fmt.Errorf("%w: %T", ErrUnknownDriverEvent, event)
 	}
 
 	return result, err

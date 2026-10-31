@@ -343,11 +343,11 @@ type blockManager struct { // nolint:maligned
 	lastRequested  chainhash.Hash
 
 	headerSyncTimeout time.Duration
-	headerRequestID   uint64
 
 	// serialRequestID identifies the serial getheaders deadline. It is
-	// separate from headerRequestID so that arming a range or discovery
-	// deadline does not void a serial timeout that is still pending.
+	// separate from the driver's request IDs so that arming a range or
+	// discovery deadline does not void a serial timeout that is still
+	// pending.
 	serialRequestID uint64
 
 	headerSyncTimer        *time.Timer
@@ -485,6 +485,7 @@ func (b *blockManager) initHeaderSyncManager(height uint32,
 		b.cfg.ChainParams.Checkpoints,
 		headerSyncActorMailboxSize,
 	)
+	runtime.Driver().SetAskHook(b.driverAsk)
 	b.headerSync = runtime
 
 	log.Infof("Initialized headersync manager at tip height=%d "+
@@ -757,7 +758,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 		return
 	}
 
-	b.handleDriverEvent(headersync.PeerRegistered{PeerID: peerID})
+	b.handleDriverEvent(nil, headersync.PeerRegistered{PeerID: peerID})
 
 	log.Debugf("Registered headersync peer actor peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
@@ -801,7 +802,7 @@ func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {
 func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
 	state headersync.PeerState) {
 
-	b.handleDriverEvent(headersync.PeerStateChanged{
+	b.handleDriverEvent(nil, headersync.PeerStateChanged{
 		PeerID: sp.Addr(),
 		State:  state,
 	})
@@ -809,10 +810,14 @@ func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
 
 func (b *blockManager) quarantineHeaderSyncPeer(sp *ServerPeer) {
 	b.updateHeaderSyncPeerState(sp, headersync.PeerQuarantined)
+	b.quarantineHeaderSyncAddress(sp.Addr())
+}
+
+// quarantineHeaderSyncAddress asks the node to stop using a peer's address for
+// a short time.
+func (b *blockManager) quarantineHeaderSyncAddress(peerID string) {
 	if b.cfg.QuarantinePeer != nil {
-		b.cfg.QuarantinePeer(
-			sp.Addr(), defaultHeaderPeerQueryQuarantine,
-		)
+		b.cfg.QuarantinePeer(peerID, defaultHeaderPeerQueryQuarantine)
 	}
 }
 
@@ -844,8 +849,8 @@ func (b *blockManager) cancelHeaderCooldownWakeup() {
 }
 
 func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
-	candidates, _ := headerSyncPeerCandidates(peers)
-	b.handleDriverEvent(headersync.RecoverPeers{Peers: candidates})
+	candidates := headerSyncPeerCandidates(peers)
+	b.handleDriverEvent(nil, headersync.RecoverPeers{Peers: candidates})
 }
 
 func headerSyncPeerRank(sp *ServerPeer) int {
@@ -866,8 +871,10 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
-	done := b.handleDriverEvent(headersync.PeerDone{PeerID: sp.Addr()})
-	hadHeaderSyncWork := done.HadWork
+	done := b.handleDriverEvent(
+		nil, headersync.PeerDone{PeerID: sp.Addr()},
+	)
+	hadHeaderSyncWork := done.result.HadWork
 	b.unregisterHeaderSyncPeer(sp)
 
 	// Attempt to find a new peer to sync from if the quitting peer is the
@@ -2932,7 +2939,7 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 		} else {
 			b.continueHeaderSync(peers)
 		}
-		b.handleDriverEvent(headersync.CooldownWakeDue{})
+		b.handleDriverEvent(nil, headersync.CooldownWakeDue{})
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
 			return
@@ -3199,98 +3206,6 @@ func (b *blockManager) requestHeaders(peer *ServerPeer,
 	return nil
 }
 
-func (b *blockManager) requestHeaderSyncRange(peer *ServerPeer,
-	assignment headersync.RangeAssignment) error {
-
-	startHash := assignment.StartHash
-	stopHash := assignment.StopHash
-	locator := blockchain.BlockLocator([]*chainhash.Hash{&startHash})
-	if err := b.sendHeaderRequest(peer, locator, &stopHash); err != nil {
-		return err
-	}
-
-	b.armHeaderSyncRangeTimeout(peer, assignment)
-	log.Infof("headersync range_started peer=%s range_id=%d epoch=%d "+
-		"start_height=%d stop_height=%d stop_hash=%s", peer.Addr(),
-		assignment.RangeID, assignment.LeaseEpoch,
-		assignment.StartHeight, assignment.StopHeight, stopHash)
-
-	return nil
-}
-
-func (b *blockManager) armHeaderSyncRangeTimeout(peer *ServerPeer,
-	assignment headersync.RangeAssignment) {
-
-	b.headerRequestID++
-	requestID := b.headerRequestID
-	timeout := b.headerTimeoutForPeer(peer)
-	peerID := peer.Addr()
-
-	timer := time.AfterFunc(timeout, func() {
-		b.sendHeaderTimeout(&headerSyncTimeoutMsg{
-			peer:        peer,
-			requestID:   requestID,
-			startHeight: assignment.StartHeight,
-			timeout:     timeout,
-			rangeID:     assignment.RangeID,
-			leaseEpoch:  assignment.LeaseEpoch,
-		})
-	})
-
-	b.headerSync.Session().TrackRange(peerID, headersync.RangeRequest{
-		Assignment: assignment,
-		RequestID:  requestID,
-		Timer:      timer,
-	})
-}
-
-func (b *blockManager) requestHeaderSyncAnchor(peer *ServerPeer,
-	startHeight uint32, startHash, stopHash chainhash.Hash,
-	stopHeight uint32) error {
-
-	locator := blockchain.BlockLocator([]*chainhash.Hash{&startHash})
-	if err := b.sendHeaderRequest(peer, locator, &stopHash); err != nil {
-		return err
-	}
-
-	b.armHeaderSyncAnchorTimeout(peer, startHeight, startHash, stopHeight,
-		stopHash)
-	log.Debugf("headersync anchor_request peer=%s start_height=%d "+
-		"stop_height=%d stop_hash=%s", peer.Addr(), startHeight,
-		stopHeight, stopHash)
-
-	return nil
-}
-
-func (b *blockManager) armHeaderSyncAnchorTimeout(peer *ServerPeer,
-	startHeight uint32, startHash chainhash.Hash, stopHeight uint32,
-	stopHash chainhash.Hash) {
-
-	b.headerRequestID++
-	requestID := b.headerRequestID
-	timeout := b.headerTimeoutForPeer(peer)
-	peerID := peer.Addr()
-
-	timer := time.AfterFunc(timeout, func() {
-		b.sendHeaderTimeout(&headerSyncTimeoutMsg{
-			peer:        peer,
-			requestID:   requestID,
-			startHeight: startHeight,
-			timeout:     timeout,
-			anchor:      true,
-		})
-	})
-
-	b.headerSync.Session().TrackAnchor(peerID, headersync.AnchorRequest{
-		StartHeight: startHeight,
-		StartHash:   startHash,
-		StopHeight:  stopHeight,
-		StopHash:    stopHash,
-		RequestID:   requestID,
-		Timer:       timer,
-	})
-}
-
 func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 	if b.headerSync.Controller() == nil {
 		return 0, nil
@@ -3307,84 +3222,34 @@ func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	tip := headersync.ChainPoint{
-		Height: height,
-		Hash:   header.BlockHash(),
+	event := headersync.PlanRanges{
+		Tip: headersync.ChainPoint{
+			Height: height,
+			Hash:   header.BlockHash(),
+		},
+		Checkpoint: b.nextCheckpointPoint(),
+		BestHeight: bestHeight,
 	}
 
-	var (
-		ranges     []headersync.HeaderRange
-		span       uint32
-		maxHeaders uint32
-		wait       bool
-	)
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
+	outcome := b.handleDriverEvent(nil, event)
+	if outcome.err != nil {
+		return 0, outcome.err
+	}
 
+	return outcome.result.Planned, nil
+}
+
+// nextCheckpointPoint returns the next checkpoint as a chain point, or nil
+// when the chain is past its last checkpoint.
+func (b *blockManager) nextCheckpointPoint() *headersync.ChainPoint {
 	if b.nextCheckpoint == nil {
-		if height >= bestHeight {
-			return 0, nil
-		}
-
-		plan, err := b.headerSync.Controller().PlanFrontierRanges(
-			ctx, tip, bestHeight,
-		)
-		if err != nil {
-			return 0, err
-		}
-		ranges = plan.Ranges
-	} else {
-		stopHeight := uint32(b.nextCheckpoint.Height)
-		if height >= stopHeight || bestHeight < stopHeight {
-			return 0, nil
-		}
-
-		plan, err := b.headerSync.Controller().PlanCheckpointRanges(
-			ctx, tip,
-			headersync.ChainPoint{
-				Height: stopHeight,
-				Hash:   *b.nextCheckpoint.Hash,
-			},
-			bestHeight,
-		)
-		if err != nil {
-			return 0, err
-		}
-
-		ranges = plan.Ranges
-		span = plan.Span
-		maxHeaders = plan.MaxRangeHeaders
-		wait = plan.WaitingForAnchors
+		return nil
 	}
 
-	if len(ranges) == 0 {
-		if wait {
-			log.Debugf(
-				"headersync waiting for confirmed anchors "+
-					"height=%d checkpoint=%d span=%d "+
-					"max_headers=%d",
-				height,
-				b.nextCheckpoint.Height,
-				span,
-				maxHeaders,
-			)
-		}
-		return 0, nil
+	return &headersync.ChainPoint{
+		Height: uint32(b.nextCheckpoint.Height),
+		Hash:   *b.nextCheckpoint.Hash,
 	}
-
-	for _, rng := range ranges {
-		log.Infof(
-			"headersync range_planned range_id=%d "+
-				"start_height=%d "+
-				"stop_height=%d stop_hash=%s",
-			rng.ID,
-			rng.StartHeight,
-			rng.StopHeight,
-			rng.StopHash,
-		)
-	}
-
-	return len(ranges), nil
 }
 
 func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
@@ -3394,118 +3259,22 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 
 	b.recoverHeaderSyncPeers(peers)
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	assignments, err := b.headerSync.Controller().
-		AssignQueuedRanges(ctx, peers.Len())
-	if err != nil {
-		log.Warnf("headersync range assignment failed: %v", err)
-	}
-	for _, assignment := range assignments {
-		log.Debugf("headersync range_assigned peer=%s range_id=%d "+
-			"epoch=%d start_height=%d stop_height=%d",
-			assignment.PeerID, assignment.RangeID,
-			assignment.LeaseEpoch, assignment.StartHeight,
-			assignment.StopHeight)
-	}
+	b.handleDriverEvent(nil, headersync.AssignRanges{
+		PeerCount: peers.Len(),
+	})
 
 	var started bool
 	for e := peers.Front(); e != nil; e = e.Next() {
 		sp := e.Value.(*ServerPeer)
-		peerID := sp.Addr()
-		if b.headerSync.Session().RangeActive(peerID) {
-			continue
+		outcome := b.handleDriverEvent(
+			peers, headersync.DispatchPeer{PeerID: sp.Addr()},
+		)
+		if outcome.sent > 0 {
+			started = true
 		}
-		if b.headerSync.Session().AnchorActive(peerID) {
-			continue
-		}
-
-		peerActor, ok := b.headerSync.Peer(peerID)
-		if !ok {
-			continue
-		}
-
-		assignment, ok, err := b.requestPeerRange(ctx, sp, peerActor)
-		if err != nil {
-			log.Warnf(
-				"headersync peer %s failed to request range: "+
-					"%v",
-				peerID,
-				err,
-			)
-			continue
-		}
-		if !ok {
-			steal, stealOK, err := peerActor.RequestStolenRange(ctx)
-			if err != nil {
-				log.Warnf(
-					"headersync peer %s failed to steal "+
-						"range: %v",
-					peerID,
-					err,
-				)
-			} else if stealOK {
-				log.Infof("headersync range_stolen donor=%s "+
-					"thief=%s "+
-					"range_id=%d old_epoch=%d "+
-					"new_epoch=%d "+
-					"reason=%s", steal.DonorID, peerID,
-					steal.RangeID, steal.OldLeaseEpoch,
-					steal.LeaseEpoch, steal.Reason)
-				b.markHeaderSyncRangeStolen(ctx, steal)
-
-				assignment, ok, err = b.requestPeerRange(
-					ctx, sp, peerActor,
-				)
-				if err != nil {
-					log.Warnf("headersync peer %s failed "+
-						"to start "+
-						"stolen range: %v", peerID, err)
-					continue
-				}
-			}
-		}
-		if !ok {
-			continue
-		}
-
-		if err := b.requestHeaderSyncRange(sp, assignment); err != nil {
-			log.Warnf("headersync failed to request range_id=%d "+
-				"from peer=%s: %v",
-				assignment.RangeID, peerID, err)
-			b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
-			continue
-		}
-		started = true
 	}
 
 	return started
-}
-
-// requestPeerRange asks a peer actor to start its next range. The ask may
-// have started a range in the actor even though it reported an error, which
-// leaves an active lease with no request behind it. On an error the peer is
-// blocked, so the steal of blocked owners or the release on cooldown recovery
-// takes the range back.
-func (b *blockManager) requestPeerRange(ctx context.Context, sp *ServerPeer,
-	peerActor *headersync.PeerActor) (headersync.RangeAssignment, bool,
-	error) {
-
-	var (
-		assignment headersync.RangeAssignment
-		ok         bool
-	)
-	err := b.headerSyncAsk(headerSyncAskRequestRange, func() error {
-		var err error
-		assignment, ok, err = peerActor.RequestRange(ctx)
-		return err
-	})
-	if err != nil {
-		b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
-	}
-
-	return assignment, ok, err
 }
 
 func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
@@ -3523,31 +3292,18 @@ func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
 		return false
 	}
 
-	stopHeight := uint32(b.nextCheckpoint.Height)
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	span, ok, err := b.headerSync.Controller().AnchorDiscoverySpan(
-		ctx,
-		headersync.ChainPoint{
+	candidates := headerSyncPeerCandidates(peers)
+	outcome := b.handleDriverEvent(peers, headersync.DiscoverAnchors{
+		Tip: headersync.ChainPoint{
 			Height: height,
 			Hash:   header.BlockHash(),
 		},
-		headersync.ChainPoint{
-			Height: stopHeight,
-			Hash:   *b.nextCheckpoint.Hash,
-		},
-		bestHeight,
-	)
-	if err != nil {
-		log.Warnf("headersync unable to plan anchor discovery: %v", err)
-		return false
-	}
-	if !ok {
-		return false
-	}
+		Stop:       *b.nextCheckpointPoint(),
+		BestHeight: bestHeight,
+		Peers:      candidates,
+	})
 
-	return b.startHeaderAnchorDiscoveryFrom(peers, span)
+	return b.finishHeaderAnchorDiscovery(outcome)
 }
 
 func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
@@ -3565,33 +3321,17 @@ func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 		return false
 	}
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	span, ok, err := b.headerSync.Controller().FrontierDiscoverySpan(
-		ctx,
-		headersync.ChainPoint{
+	candidates := headerSyncPeerCandidates(peers)
+	outcome := b.handleDriverEvent(peers, headersync.DiscoverFrontier{
+		Tip: headersync.ChainPoint{
 			Height: height,
 			Hash:   header.BlockHash(),
 		},
-		bestHeight,
-	)
-	if err != nil {
-		log.Warnf(
-			"headersync unable to plan frontier discovery: %v",
-			err,
-		)
-		return false
-	}
-	if !ok {
-		return false
-	}
+		BestHeight: bestHeight,
+		Peers:      candidates,
+	})
 
-	log.Debugf("headersync frontier_discovery_needed height=%d "+
-		"target_height=%d start_height=%d stop_height=%d", height,
-		bestHeight, span.StartHeight, span.StopHeight)
-
-	return b.startHeaderAnchorDiscoveryFrom(peers, span)
+	return b.finishHeaderAnchorDiscovery(outcome)
 }
 
 func (b *blockManager) pipelineHeaderFrontierDiscovery(peers *list.List,
@@ -3602,109 +3342,51 @@ func (b *blockManager) pipelineHeaderFrontierDiscovery(peers *list.List,
 	}
 
 	bestHeight := bestHeaderSyncHeight(peers)
-	span, ok := b.headerSync.Controller().FrontierLookaheadSpan(
-		headersync.ChainPoint{
+	candidates := headerSyncPeerCandidates(peers)
+	outcome := b.handleDriverEvent(peers, headersync.PipelineFrontier{
+		After: headersync.ChainPoint{
 			Height: response.Height,
 			Hash:   response.Hash,
 		},
-		bestHeight,
-	)
-	if !ok {
-		return false
-	}
+		BestHeight: bestHeight,
+		Peers:      candidates,
+	})
 
-	log.Debugf("headersync frontier_discovery_pipelined "+
-		"start_height=%d stop_height=%d target_height=%d",
-		span.StartHeight, span.StopHeight, bestHeight)
-
-	return b.startHeaderAnchorDiscoveryFrom(peers, span)
+	return b.finishHeaderAnchorDiscovery(outcome)
 }
 
 func (b *blockManager) startHeaderAnchorDiscoveryFrom(peers *list.List,
 	span headersync.AnchorRequest, excludedPeers ...string) bool {
 
-	candidates, peerByID := headerSyncPeerCandidates(peers)
-	plan := b.headerSync.Controller().PlanAnchorRequests(
-		span, candidates, excludedPeers...,
-	)
-	if plan.Deferred && len(plan.Peers) == 0 {
-		log.Debugf(
-			"headersync anchor_discovery_deferred "+
-				"eligible_peers=%d "+
-				"active_peers=%d required_peers=%d "+
-				"start_height=%d "+
-				"stop_height=%d",
-			plan.EligiblePeers,
-			plan.ActivePeers,
-			plan.RequiredPeers,
-			span.StartHeight,
-			span.StopHeight,
-		)
+	candidates := headerSyncPeerCandidates(peers)
+	outcome := b.handleDriverEvent(peers, headersync.DiscoverFrom{
+		Span:     span,
+		Peers:    candidates,
+		Excluded: excludedPeers,
+	})
 
-		return plan.Active()
+	return b.finishHeaderAnchorDiscovery(outcome)
+}
+
+// finishHeaderAnchorDiscovery reports whether anchor discovery is running
+// after an event that planned it and the executor sent its requests.
+func (b *blockManager) finishHeaderAnchorDiscovery(
+	outcome driverOutcome) bool {
+
+	discovery := outcome.result.Discovery
+	if discovery.Settled {
+		return discovery.Active
 	}
 
-	var started int
-	for _, peer := range plan.Peers {
-		sp, ok := peerByID[peer.ID]
-		if !ok {
-			continue
-		}
-
-		peerID := sp.Addr()
-		if err := b.requestHeaderSyncAnchor(
-			sp, span.StartHeight, span.StartHash, span.StopHash,
-			span.StopHeight,
-		); err != nil {
-			log.Warnf(
-				"headersync unable to request anchor "+
-					"discovery "+
-					"from peer=%s: %v",
-				peerID,
-				err,
-			)
-			b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
-			continue
-		}
-
-		started++
-	}
-
+	started := outcome.sent
 	if started > 0 {
 		log.Infof("headersync anchor_discovery_started peers=%d "+
 			"active_peers=%d start_height=%d stop_height=%d",
-			started, plan.ActivePeers, span.StartHeight,
-			span.StopHeight)
+			started, discovery.ActivePeers,
+			discovery.Span.StartHeight, discovery.Span.StopHeight)
 	}
 
-	return plan.ActivePeers+started > 0
-}
-
-func (b *blockManager) markHeaderSyncRangeStolen(ctx context.Context,
-	steal headersync.StealResult) {
-
-	switch steal.Reason {
-	case headersync.StealReasonActiveBlocked,
-		headersync.StealReasonActiveQuarantined:
-
-	default:
-		return
-	}
-
-	donorActor, ok := b.headerSync.Peer(steal.DonorID)
-	if !ok {
-		return
-	}
-
-	err := donorActor.Send(ctx, headersync.PeerRangeStolenEvent{
-		RangeID:       steal.RangeID,
-		OldLeaseEpoch: steal.OldLeaseEpoch,
-	})
-	if err != nil {
-		log.Warnf("headersync failed to notify donor=%s of stolen "+
-			"range_id=%d old_epoch=%d: %v", steal.DonorID,
-			steal.RangeID, steal.OldLeaseEpoch, err)
-	}
+	return discovery.ActivePeers+started > 0
 }
 
 func (b *blockManager) startHeaderSync(peers *list.List,
@@ -3785,11 +3467,8 @@ func bestHeaderSyncHeight(peers *list.List) uint32 {
 	return bestHeight
 }
 
-func headerSyncPeerCandidates(peers *list.List) ([]headersync.PeerCandidate,
-	map[string]*ServerPeer) {
-
+func headerSyncPeerCandidates(peers *list.List) []headersync.PeerCandidate {
 	candidates := make([]headersync.PeerCandidate, 0, peers.Len())
-	peerByID := make(map[string]*ServerPeer, peers.Len())
 	for e := peers.Front(); e != nil; e = e.Next() {
 		sp := e.Value.(*ServerPeer)
 		peerID := sp.Addr()
@@ -3800,10 +3479,9 @@ func headerSyncPeerCandidates(peers *list.List) ([]headersync.PeerCandidate,
 			Rank:   headerSyncPeerRank(sp),
 			RTT:    rtt,
 		})
-		peerByID[peerID] = sp
 	}
 
-	return candidates, peerByID
+	return candidates
 }
 
 func (b *blockManager) continueHeaderSync(peers *list.List) {
@@ -3957,24 +3635,19 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
 	msg *headerSyncTimeoutMsg) {
 
-	peerID := msg.peer.Addr()
-	request, ok := b.headerSync.Session().TimeoutAnchor(
-		peerID, msg.requestID, msg.startHeight,
-	)
-	if !ok {
+	outcome := b.handleDriverEvent(peers, headersync.RequestTimedOut{
+		PeerID:      msg.peer.Addr(),
+		Kind:        headersync.RequestAnchor,
+		RequestID:   msg.requestID,
+		StartHeight: msg.startHeight,
+		Timeout:     msg.timeout,
+	}, msg.peer)
+	if !outcome.result.Timeout.Matched {
 		return
 	}
 
-	log.Warnf("headersync anchor_timeout peer=%s start_height=%d "+
-		"stop_height=%d timeout=%v", peerID, request.StartHeight,
-		request.StopHeight, msg.timeout)
-
-	b.quarantineHeaderSyncPeer(msg.peer)
-	removeSyncCandidate(peers, msg.peer)
-	msg.peer.Disconnect()
-
 	if b.startHeaderAnchorDiscoveryFrom(
-		peers, request,
+		peers, outcome.result.Timeout.Anchor,
 	) {
 
 		return
@@ -3982,7 +3655,7 @@ func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
 
 	b.syncPeerMutex.Lock()
 	if b.syncPeer == msg.peer ||
-		b.headerSync.Session().ActiveAnchorCount() == 0 {
+		b.headerSync.Driver().Activity().Anchors == 0 {
 
 		b.syncPeer = nil
 	}
@@ -3994,25 +3667,19 @@ func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
 func (b *blockManager) handleHeaderSyncRangeTimeoutMsg(peers *list.List,
 	msg *headerSyncTimeoutMsg) {
 
-	peerID := msg.peer.Addr()
-	request, ok := b.headerSync.Session().TimeoutRange(
-		peerID, msg.requestID, msg.rangeID, msg.leaseEpoch,
-	)
-	if !ok {
+	outcome := b.handleDriverEvent(peers, headersync.RequestTimedOut{
+		PeerID:      msg.peer.Addr(),
+		Kind:        headersync.RequestRange,
+		RequestID:   msg.requestID,
+		StartHeight: msg.startHeight,
+		RangeID:     msg.rangeID,
+		LeaseEpoch:  msg.leaseEpoch,
+		Timeout:     msg.timeout,
+		StaleFor:    b.headerTimeoutForPeer(msg.peer),
+	}, msg.peer)
+	if !outcome.result.Timeout.Matched {
 		return
 	}
-
-	b.headerSync.Session().MarkStale(peerID, headersync.StaleRequest{
-		Assignment: request.Assignment,
-		ExpiresAt:  time.Now().Add(b.headerTimeoutForPeer(msg.peer)),
-	})
-	log.Warnf("headersync range_timeout peer=%s range_id=%d epoch=%d "+
-		"start_height=%d timeout=%v", peerID, msg.rangeID,
-		msg.leaseEpoch, msg.startHeight, msg.timeout)
-
-	b.quarantineHeaderSyncPeer(msg.peer)
-	removeSyncCandidate(peers, msg.peer)
-	msg.peer.Disconnect()
 
 	b.dispatchHeaderSyncWork(peers)
 }

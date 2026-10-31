@@ -672,9 +672,13 @@ func TestSerialTimeoutSurvivesDiscoveryRequest(t *testing.T) {
 	serialID := bm.serialRequestID
 
 	// A discovery request to another peer arms its own deadline.
-	bm.armHeaderSyncAnchorTimeout(
-		fastPeer, 0, chainhash.Hash{}, 10, chainhash.Hash{},
-	)
+	bm.handleDriverEvent(nil, headersync.RequestSent{
+		Request: headersync.SendGetHeaders{
+			PeerID:     fastPeer.Addr(),
+			Kind:       headersync.RequestAnchor,
+			StopHeight: 10,
+		},
+	}, fastPeer)
 
 	peers.PushBack(fastPeer)
 	bm.handleHeaderSyncTimeoutMsg(peers, &headerSyncTimeoutMsg{
