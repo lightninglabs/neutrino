@@ -65,7 +65,7 @@ const (
 	// defaultHeaderPeerCooldown is the minimum decay interval before a
 	// blocked or quarantined header peer can be considered schedulable
 	// again if it remains connected.
-	defaultHeaderPeerCooldown = 2 * time.Minute
+	defaultHeaderPeerCooldown = headersync.DefaultPeerCooldown
 
 	// defaultHeaderPeerQueryQuarantine is the short exact-address
 	// exclusion used to keep a rejected header peer out of query dispatch
@@ -757,13 +757,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 		return
 	}
 
-	if until, ok := b.headerSync.Session().CooldownUntil(
-		peerID, time.Now(),
-	); ok {
-		b.updateHeaderSyncPeerState(sp, headersync.PeerBlocked)
-		log.Debugf("Registered headersync peer actor peer=%s in "+
-			"cooldown_until=%s", peerID, until.Format(time.RFC3339))
-	}
+	b.handleDriverEvent(headersync.PeerRegistered{PeerID: peerID})
 
 	log.Debugf("Registered headersync peer actor peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
@@ -807,19 +801,10 @@ func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {
 func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
 	state headersync.PeerState) {
 
-	b.trackHeaderSyncPeerCooldown(sp.Addr(), state)
-
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	if err := b.headerSync.UpdatePeerState(
-		ctx,
-		sp.Addr(),
-		state,
-	); err != nil {
-		log.Warnf("Unable to update headersync peer state for %s: %v",
-			sp.Addr(), err)
-	}
+	b.handleDriverEvent(headersync.PeerStateChanged{
+		PeerID: sp.Addr(),
+		State:  state,
+	})
 }
 
 func (b *blockManager) quarantineHeaderSyncPeer(sp *ServerPeer) {
@@ -831,26 +816,10 @@ func (b *blockManager) quarantineHeaderSyncPeer(sp *ServerPeer) {
 	}
 }
 
-func (b *blockManager) trackHeaderSyncPeerCooldown(peerID string,
-	state headersync.PeerState) {
-
-	b.headerSync.Session().TrackPeerCooldown(
-		peerID, state, time.Now(), defaultHeaderPeerCooldown,
-	)
-	b.scheduleHeaderCooldownWakeup()
-}
-
-// scheduleHeaderCooldownWakeup arms one wakeup for the earliest peer cooldown
-// expiry. Cooled-down peers are only recovered while dispatching. Without a
-// wakeup, a sync waiting on a blocked peer (for example the second anchor
-// observation under a two-peer policy) has no request or timer outstanding
-// and never dispatches again.
-func (b *blockManager) scheduleHeaderCooldownWakeup() {
+// armHeaderCooldownWake arms one wakeup for the earliest peer cooldown expiry,
+// unless one is already armed.
+func (b *blockManager) armHeaderCooldownWake(until time.Time) {
 	if b.headerCooldownTimer != nil {
-		return
-	}
-	until, ok := b.headerSync.Session().NextCooldownExpiry(time.Now())
-	if !ok {
 		return
 	}
 
@@ -875,76 +844,8 @@ func (b *blockManager) cancelHeaderCooldownWakeup() {
 }
 
 func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
-	session := b.headerSync.Session()
-	if session.CooldownCount() == 0 {
-		return
-	}
-
-	now := time.Now()
-	for e := peers.Front(); e != nil; e = e.Next() {
-		sp := e.Value.(*ServerPeer)
-		peerID := sp.Addr()
-		until, ok := session.CooldownExpired(peerID, now)
-		if !ok {
-			continue
-		}
-		if session.RangeActive(peerID) {
-			continue
-		}
-		if session.AnchorActive(peerID) {
-			continue
-		}
-
-		log.Infof("headersync peer_recovered peer=%s "+
-			"cooldown_until=%s",
-			peerID, until.Format(time.RFC3339))
-		b.releaseOrphanedHeaderSyncRange(sp)
-		b.updateHeaderSyncPeerState(sp, headersync.PeerReady)
-	}
-}
-
-// releaseOrphanedHeaderSyncRange returns the active range of a peer that has
-// no request outstanding to the queue. An ask that applied but reported an
-// error can leave such a lease behind. While the peer was blocked, another
-// peer could steal it; with no other peer, recovering the peer to ready
-// would otherwise leave the range active forever with nothing running it.
-func (b *blockManager) releaseOrphanedHeaderSyncRange(sp *ServerPeer) {
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	peerID := sp.Addr()
-	manager := b.headerSync.Manager()
-	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
-	if err != nil || !ok || peer.ActiveRange == headersync.NoRange {
-		return
-	}
-	rng, ok, err := manager.SnapshotRange(ctx, peer.ActiveRange)
-	if err != nil || !ok || rng.State != headersync.RangeActive ||
-		rng.OwnerPeer != peerID {
-
-		return
-	}
-
-	// Fail the lease under its current epoch, then plan the span again.
-	// Go through the peer actor when there is one: it still holds the
-	// range as active, and failing it only in the manager would leave the
-	// actor busy forever, answering every later request with nothing.
-	var result headersync.CompleteResult
-	if peerActor, ok := b.headerSync.Peer(peerID); ok {
-		result, err = peerActor.CompleteRange(
-			ctx, rng.ID, rng.LeaseEpoch, false, time.Now(),
-		)
-	} else {
-		result, err = manager.CompleteRange(
-			ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
-		)
-	}
-	if err != nil || !result.Accepted {
-		return
-	}
-	log.Infof("headersync orphaned_range_released peer=%s range_id=%d",
-		peerID, rng.ID)
-	b.replanHeaderSyncRange(ctx, rng)
+	candidates, _ := headerSyncPeerCandidates(peers)
+	b.handleDriverEvent(headersync.RecoverPeers{Peers: candidates})
 }
 
 func headerSyncPeerRank(sp *ServerPeer) int {
@@ -965,16 +866,8 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
-	hadHeaderSyncWork := false
-	if _, ok := b.headerSync.Session().FinishRange(sp.Addr()); ok {
-		b.headerSync.Session().ClearStale(sp.Addr())
-		b.updateHeaderSyncPeerState(sp, headersync.PeerQuarantined)
-		hadHeaderSyncWork = true
-	}
-	if _, ok := b.headerSync.Session().FinishAnchor(sp.Addr()); ok {
-		b.updateHeaderSyncPeerState(sp, headersync.PeerQuarantined)
-		hadHeaderSyncWork = true
-	}
+	done := b.handleDriverEvent(headersync.PeerDone{PeerID: sp.Addr()})
+	hadHeaderSyncWork := done.HadWork
 	b.unregisterHeaderSyncPeer(sp)
 
 	// Attempt to find a new peer to sync from if the quitting peer is the
@@ -3039,7 +2932,7 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 		} else {
 			b.continueHeaderSync(peers)
 		}
-		b.scheduleHeaderCooldownWakeup()
+		b.handleDriverEvent(headersync.CooldownWakeDue{})
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
 			return
