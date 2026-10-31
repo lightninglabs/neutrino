@@ -75,6 +75,31 @@ func ValidateHeaderRange(rng HeaderRange, headers []*wire.BlockHeader) error {
 	return nil
 }
 
+// contradictsRangeStop reports whether headers refute the stop hash of rng
+// without any other fault. The reply must connect to the range start, be
+// internally connected, and reach the stop height, where it holds a different
+// header than the range expects. A reply that is short, disconnected or
+// anchored elsewhere proves nothing about the stop hash and reports false.
+// Such a reply is consistent with an honest peer on a chain that does not
+// contain the stop hash, so the fault may lie with whoever supplied the hash.
+func contradictsRangeStop(rng HeaderRange, headers []*wire.BlockHeader) bool {
+	if rng.StopHeight <= rng.StartHeight {
+		return false
+	}
+	expected := int(rng.StopHeight - rng.StartHeight)
+	if len(headers) < expected || headers[0].PrevBlock != rng.StartHash {
+		return false
+	}
+
+	for i := 1; i < expected; i++ {
+		if headers[i].PrevBlock != headers[i-1].BlockHash() {
+			return false
+		}
+	}
+
+	return headers[expected-1].BlockHash() != rng.StopHash
+}
+
 // ValidateAnchorResponse checks the structural properties of an anchor
 // discovery response. It verifies that the response starts at the requested
 // locator hash, is internally connected, stays within the requested span, and

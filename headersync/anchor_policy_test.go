@@ -156,6 +156,45 @@ func TestRejectedAnchorIsTrustedOnceCommitted(t *testing.T) {
 	require.False(t, anchor.Rejected)
 }
 
+// TestContradictsRangeStopEvidence checks which replies refute a range's stop
+// hash. Only a connected reply from the right start that reaches the stop
+// height with another header does.
+func TestContradictsRangeStopEvidence(t *testing.T) {
+	start := testHash(100)
+	honest := makeTestHeaders(start, 6)
+	rng := HeaderRange{
+		StartHeight: 2, StartHash: start, StopHeight: 5,
+		StopHash: honest[2].BlockHash(),
+	}
+
+	// Different chain from the same start: the stop hash is refuted.
+	other := makeTestHeaders(start, 6)
+	other[2].Nonce++
+	require.True(t, contradictsRangeStop(rng, other))
+
+	// An overlong reply with a different header at the stop height.
+	other = makeTestHeaders(start, 3)
+	other[2].Nonce++
+	require.True(t, contradictsRangeStop(rng, other))
+
+	// A reply holding the expected stop header, even overlong, is fine.
+	require.False(t, contradictsRangeStop(rng, honest))
+	require.False(t, contradictsRangeStop(rng, honest[:3]))
+
+	// A short reply never reaches the stop height.
+	require.False(t, contradictsRangeStop(rng, honest[:2]))
+	require.False(t, contradictsRangeStop(rng, nil))
+
+	// A reply from another start or with a gap proves nothing.
+	require.False(t, contradictsRangeStop(
+		rng, makeTestHeaders(testHash(101), 3),
+	))
+	gap := makeTestHeaders(start, 3)
+	gap[1].PrevBlock = testHash(200)
+	gap[2].Nonce++
+	require.False(t, contradictsRangeStop(rng, gap))
+}
+
 // TestControllerAnchorConflictFlagsConflict checks that a well formed reply
 // naming another hash than the recorded anchor is reported as a conflict, not
 // as an invalid response. The caller punishes the latter and neither side of
@@ -209,4 +248,95 @@ func TestControllerAnchorConflictFlagsConflict(t *testing.T) {
 	require.True(t, result.Rejected)
 	require.False(t, result.Conflict)
 	require.ErrorIs(t, result.Err, ErrNoHeaders)
+}
+
+// TestControllerStopAnchorContradicted checks that a reply refuting a stop
+// hash counts against the anchor only while the hash is untrusted, and that
+// RejectAnchor then clears the session state that depended on it.
+func TestControllerStopAnchorContradicted(t *testing.T) {
+	ctx := t.Context()
+	cfg := ProductionConfig()
+	start := testHash(100)
+	manager := NewManagerActor(NewHeaderSyncFSM(0, start, cfg), 8)
+	manager.Start(ctx)
+	defer manager.Stop()
+	_, _, err := manager.AddAnchor(ctx, 0, start, true)
+	require.NoError(t, err)
+
+	honest := makeTestHeaders(start, 4)
+	stop := honest[3].BlockHash()
+	_, _, err = manager.AddAnchor(ctx, 4, stop, false)
+	require.NoError(t, err)
+
+	session := NewSession()
+	controller := NewController(manager, session, cfg)
+	rng := HeaderRange{
+		ID: 1, StartHeight: 0, StartHash: start, StopHeight: 4,
+		StopHash: stop,
+	}
+
+	// A reply from a chain that disagrees at the stop height.
+	other := makeTestHeaders(start, 4)
+	other[3].Nonce++
+	contradicted, err := controller.StopAnchorContradicted(ctx, rng, other)
+	require.NoError(t, err)
+	require.True(t, contradicted)
+
+	// A reply that agrees, or that proves nothing, does not.
+	contradicted, err = controller.StopAnchorContradicted(ctx, rng, honest)
+	require.NoError(t, err)
+	require.False(t, contradicted)
+	contradicted, err = controller.StopAnchorContradicted(
+		ctx, rng, other[:2],
+	)
+	require.NoError(t, err)
+	require.False(t, contradicted)
+
+	// Rejecting drops the range planned on the anchor and its request.
+	_, ok, err := manager.PlanRange(ctx, 1, 0, 4)
+	require.NoError(t, err)
+	require.True(t, ok)
+	_, err = controller.RejectAnchor(
+		ctx, 4, stop, time.Now().Add(time.Hour),
+	)
+	require.NoError(t, err)
+	planned, ok, err := manager.SnapshotRange(ctx, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, RangeStale, planned.State)
+	anchors, err := manager.Anchors(ctx)
+	require.NoError(t, err)
+	var rejected bool
+	for _, anchor := range anchors {
+		if anchor.Height == 4 {
+			rejected = anchor.Rejected
+		}
+	}
+	require.True(t, rejected)
+
+	// A range left behind by a replaced anchor has no backing either: the
+	// anchor at its stop height now holds another hash.
+	replaced := HeaderRange{
+		ID: 3, StartHeight: 0, StartHash: start, StopHeight: 4,
+		StopHash: testHash(77),
+	}
+	contradicted, err = controller.StopAnchorContradicted(
+		ctx, replaced, honest,
+	)
+	require.NoError(t, err)
+	require.True(t, contradicted)
+
+	// The same contradiction against a trusted anchor is the replier's
+	// fault: a checkpoint, or a boundary that already committed.
+	_, _, err = manager.AddAnchor(ctx, 8, testHash(108), true)
+	require.NoError(t, err)
+	trustedRng := HeaderRange{
+		ID: 2, StartHeight: 4, StartHash: stop, StopHeight: 8,
+		StopHash: testHash(108),
+	}
+	contradicted, err = controller.StopAnchorContradicted(
+		ctx, trustedRng, makeTestHeaders(stop, 4),
+	)
+	require.NoError(t, err)
+	require.False(t, contradicted)
 }

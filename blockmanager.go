@@ -4889,12 +4889,47 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	// way.
 	lagging := len(hmsg.headers.Headers) == 0 &&
 		hmsg.peer.LastBlock() < int32(rng.StopHeight)
+
+	// A well formed reply that holds a different header at the range's
+	// stop height refutes the stop hash. When only an unvalidated
+	// discovery reply vouches for that hash, the reply is evidence against
+	// the anchor: the peer may be the honest one. Block it for the
+	// cooldown, during which it is leased no range, and reject the anchor
+	// below instead of quarantining the peer. A liar can contradict an
+	// anchor only with a range reply, so the cooldown bounds how often it
+	// forces a replan.
+	//
+	// The cost falls on honest peers when a persistent liar acts as a
+	// discovery reporter: its reply arrives after the first honest one,
+	// extends a longer fork, and is never staged, so commit-time
+	// validation never convicts it. Each round an honest lessee then
+	// contradicts the liar's anchor and is blocked for the cooldown.
+	// Liveness holds, since discovery planning ignores peer state, so
+	// blocked honest peers still answer discovery and commit. Recording
+	// the reporter per anchor would let us block the liar instead, and is
+	// the follow-up if this cost matters.
+	var contradicted bool
+	if !valid && !lagging {
+		contradicted, err = b.headerSync.Controller().
+			StopAnchorContradicted(ctx, rng, hmsg.headers.Headers)
+		if err != nil {
+			log.Warnf("headersync unable to check stop anchor "+
+				"range_id=%d: %v", assignment.RangeID, err)
+			contradicted = false
+		}
+	}
 	switch {
 	case !valid && lagging:
 		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
 			"peer_height=%d stop_height=%d", peerID,
 			assignment.RangeID, hmsg.peer.LastBlock(),
 			rng.StopHeight)
+		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
+
+	case contradicted:
+		log.Warnf("headersync stop_anchor_contradicted peer=%s "+
+			"range_id=%d stop_height=%d stop_hash=%s", peerID,
+			assignment.RangeID, rng.StopHeight, rng.StopHash)
 		b.updateHeaderSyncPeerState(hmsg.peer, headersync.PeerBlocked)
 
 	case !valid:
@@ -4949,7 +4984,14 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 		return true
 	}
 	if !result.Accepted || !valid {
-		if !valid {
+		switch {
+		case contradicted:
+			b.rejectUntrustedHeaderSyncAnchor(
+				ctx, "anchor_rejected_by_replies",
+				rng.StopHeight, rng.StopHash,
+			)
+
+		case !valid:
 			b.replanHeaderSyncRange(ctx, rng)
 		}
 		b.continueHeaderSync(peers)
