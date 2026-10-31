@@ -164,7 +164,6 @@ flowchart TB
     heal["heal(): restore store and asks,<br/>refill empty slots, honest replies"]
     tip["tipPhase(): extend tip,<br/>reorg in frontier modes"]
     quiet{"quiescent()"}
-    poisoned{"poisonedAnchor()<br/>known gap F13"}
     snap["snapshot()<br/>compared across two runs"]
     fail["FAIL: seed and describe()"]
 
@@ -174,9 +173,7 @@ flowchart TB
     check -- "ops exhausted" --> heal --> tip --> quiet
     step -- "op 13 shutdown" --> snap
     quiet -- "ok" --> snap
-    quiet -- "error" --> poisoned
-    poisoned -- "yes" --> snap
-    poisoned -- "no" --> fail
+    quiet -- "error" --> fail
 ```
 
 1. **Decode.** `decodeDSTScript` reads the mode from byte 0, the fault mask
@@ -274,13 +271,11 @@ stateDiagram-v2
     TipExtended --> Settle: other modes
     Reorged --> Settle
     Settle --> Passed: quiescent() == nil
-    Settle --> Excused: poisonedAnchor() (F13)
     Settle --> Failed: liveness error
     Scripted --> Failed: invariant violated
     Heal --> Failed: invariant violated
     Stopped --> Passed: shutdown checks hold
     Passed --> [*]
-    Excused --> [*]
     Failed --> [*]
 ```
 
@@ -391,20 +386,47 @@ anchor request may be active, no commit retry armed, and nothing staged.
 Every range must be committed, failed or stale, or start at or above the
 target.
 
-Two known gaps are counted rather than failed, so the swarm keeps finding
-other bugs. Both are policy decisions, tracked in
-[#417](https://github.com/lightninglabs/neutrino/issues/417). Each excuse is
-narrow, and anything outside it still fails:
+No invariant has an excuse. Two policy decisions, tracked in
+[#417](https://github.com/lightninglabs/neutrino/issues/417), used to be
+counted instead of failed, and the checker now enforces both:
 
-- **F12.** When a peer answers anchor discovery with a lie first, the honest
-  peer reporting the conflicting anchor is quarantined. Only a peer whose
-  honest reply covered a liar's anchor or range stop is excused. Which
-  reporter to punish is a policy decision.
+- **F12.** When two peers report different boundaries for one height, neither
+  is punished, because nothing shows which one lied. The block manager rejects
+  the recorded anchor and the unstaged work built on it, and discovers the
+  span again. Commit-time contextual validation punishes whoever staged a bad
+  payload.
 - **F13.** Under the one-observation policy, a liar's discovery reply
-  confirms its own boundary. If its payload is never staged, commit-time
-  validation never runs, the anchor is never rejected, and honest replies for
-  the span fail its stop hash. Only a run stuck exactly at the start of a
-  range that ends at such an anchor is excused.
+  confirms its own boundary. When honest replies for the span fail the stop
+  hash of such an anchor, which no staged range has validated, the block
+  manager rejects the anchor and replans instead of quarantining the replier,
+  and blocks the replier for the peer cooldown. A stop hash that is a
+  checkpoint or a committed boundary is trusted, and a reply that contradicts
+  it is still punished.
+
+One case stays unbounded. Under a policy that needs two observations, which
+only the `frontier2` mode uses, a fast liar that always answers first can
+reject each honest anchor in turn and loop the span: rejecting costs it
+nothing, and each round a different honest peer conflicts with it. The
+production policy needs one observation, so the first reply for a span is
+staged and committed whatever a later conflict does to the anchor, and the
+loop cannot stall it. The DST's liars are one-shot, so it does not show this.
+
+Another cost is accepted. A persistent liar that acts as a discovery
+reporter is never punished when its reply arrives after the first honest one,
+extends a longer fork, and is never staged, because commit-time validation
+never runs on it. Each round an honest lessee then contradicts the liar's
+anchor and is blocked for the peer cooldown. Liveness holds: discovery
+planning ignores peer state, so blocked honest peers still answer discovery
+and commit. `honestImmunity` tracks quarantine, ban and disconnect but not
+`PeerBlocked`, so the DST cannot see this cost, and its liars are one-shot.
+Recording the reporter per anchor would let the block fall on the liar
+instead, and is the follow-up if the cost matters.
+
+Both rulings limit the free rejection a liar gets. A liar can contradict an
+anchor with a range reply only while it holds a range lease, and a blocked
+peer is leased none, so it forces one replan per cooldown. A liar whose
+payload is staged is quarantined at commit. An anchor that is correct becomes
+trusted once its span commits, and nothing rejects it after that.
 
 ## Replay and recall
 
