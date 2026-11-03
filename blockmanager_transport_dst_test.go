@@ -1574,8 +1574,9 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 			MedianTimeSource: bm.cfg.TimeSource,
 			offset:           time.Until(genesis.Timestamp),
 		}
-		// The first read is the synced check in the wait loop; fail
-		// the second, the loop's own tip read.
+		// The first read is the loop's own tip read. Fail the second,
+		// the chain store snapshot that the checkpointed fetch takes,
+		// so the loop retries from its wait.
 		flaky := &flakyTipStore{memBlockHeaderStore: store, failAt: 2}
 		bm.cfg.BlockHeaders = flaky
 

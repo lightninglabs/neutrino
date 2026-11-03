@@ -128,7 +128,6 @@ func startedAtTip(height uint32) []step {
 				FetchCheckpoints{
 					FilterType: wire.GCSFilterRegular,
 					StopHash:   tipHash,
-					Height:     height,
 				},
 			},
 			phase: PhaseFetchingCheckpoints,
@@ -217,7 +216,6 @@ func TestSyncerStartAndTipRead(t *testing.T) {
 			FetchCheckpoints{
 				FilterType: wire.GCSFilterRegular,
 				StopHash:   *cpHash,
-				Height:     5 * interval,
 			},
 		}
 		runSteps(t, s, steps)
@@ -234,7 +232,6 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 	fetch := FetchCheckpoints{
 		FilterType: wire.GCSFilterRegular,
 		StopHash:   tipHash,
-		Height:     height,
 	}
 
 	t.Run("no checkpoints retries the fetch", func(t *testing.T) {

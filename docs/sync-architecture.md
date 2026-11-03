@@ -445,13 +445,14 @@ flowchart TB
 ### Notifications
 
 `chainstore.Store` sends every block notification, on the chain store actor's
-goroutine. `writeFilterHeaders` advances `filterHeaderTip` after each
+goroutine. `writeFilterHeaders` advances the tip feed's filter tip after each
 filter-header write and sends one `BlockConnected` per header, so a block is
 reported as connected only once its filter header is durable. `rollBackBlocks`,
 or `settleInterruptedStep` when it resumes an interrupted removal, sends one
-`BlockDisconnected` per removed block, only after that block has left the store. `blockntfns.SubscriptionManager` fans both out to subscribers and
-uses `NotificationsSinceHeight` to replay a backlog, bounded by
-`filterHeaderTip`.
+`BlockDisconnected` per removed block, only after that block has left the store.
+`blockntfns.SubscriptionManager` fans both out to subscribers and uses
+`NotificationsSinceHeight` to replay a backlog, bounded by the tip feed's filter
+tip.
 
 ## Storage
 
