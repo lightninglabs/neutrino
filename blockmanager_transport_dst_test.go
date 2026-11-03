@@ -1480,7 +1480,7 @@ func TestHeaderTransportFailedCompatibilityWrite(t *testing.T) {
 		d.deliver(&headersMsg{peer: d.current[0], headers: message})
 		require.Zero(t, d.inv.lastTip)
 		require.Empty(t, d.store.writes)
-		require.Zero(t, d.bm.headerList.Back().Height)
+		require.Zero(t, d.bm.tip.Tip().Height)
 	})
 }
 

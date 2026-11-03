@@ -78,7 +78,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 				StartHash:  genesis.BlockHash(),
 				StopHeight: 2000,
 			}, []*wire.BlockHeader{bad})
-			var invalid *headerSyncValidationError
+			var invalid *headersync.ValidationError
 			require.ErrorAs(t,
 				bm.commitReadyHeaderSyncRanges(), &invalid)
 			result.Events = append(result.Events, "invalidated")

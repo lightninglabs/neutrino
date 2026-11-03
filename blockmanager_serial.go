@@ -7,7 +7,6 @@ package neutrino
 import (
 	"container/list"
 	"errors"
-	"fmt"
 	"math/big"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -74,7 +73,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	if lastBlock != -1 &&
 		(imsg.peer == b.SyncPeer() || b.BlockHeadersSynced()) {
 
-		lastEl := b.headerList.Back()
+		lastEl := b.tip.Tip()
 		var lastHash chainhash.Hash
 		if lastEl != nil {
 			lastHash = lastEl.Header.BlockHash()
@@ -178,7 +177,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		blockHash := blockHeader.BlockHash()
 
 		// Ensure there is a previous header to compare against.
-		prevNode := b.headerList.Back()
+		prevNode := b.tip.Tip()
 		if prevNode == nil {
 			log.Warnf("Header list does not contain a previous" +
 				"element as expected -- disconnecting peer")
@@ -241,7 +240,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		// branch is earlier than the latest synchronized
 		// checkpoint, it's invalid and we need to disconnect
 		// the reporting peer.
-		prevCheckpoint := b.findPreviousHeaderCheckpoint(
+		prevCheckpoint := b.tip.FindPreviousCheckpoint(
 			prevNode.Height,
 		)
 		if backHeight < uint32(prevCheckpoint.Height) {
@@ -259,7 +258,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		// peer. We also keep track of the work represented by
 		// these headers so we can compare it to the work in
 		// the known good chain.
-		b.reorgList.ResetHeaderState(headerlist.Node{
+		b.tip.ResetReorg(headerlist.Node{
 			Header: *backHead,
 			Height: int32(backHeight),
 		})
@@ -282,11 +281,9 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				prevNodeHeader = msg.Headers[i+j-1]
 			}
 
-			err = b.checkHeaderSanity(
-				reorgHeader, true,
-				int32(
-					prevNodeHeight,
-				), prevNodeHeader, nil,
+			err = b.tip.CheckReorgHeader(
+				reorgHeader, int32(prevNodeHeight),
+				prevNodeHeader,
 			)
 			if err != nil {
 				log.Warnf("Header doesn't pass sanity"+
@@ -297,7 +294,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 			}
 			totalWork.Add(totalWork,
 				blockchain.CalcWork(reorgHeader.Bits))
-			b.reorgList.PushBack(headerlist.Node{
+			b.tip.AppendReorg(headerlist.Node{
 				Header: *reorgHeader,
 				Height: int32(backHeight+1) + int32(j),
 			})
@@ -311,7 +308,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 
 		// This should NEVER be nil because the most recent
 		// block is always pushed back by resetHeaderState
-		knownEl := b.headerList.Back()
+		knownEl := b.tip.Tip()
 		var knownHead *wire.BlockHeader
 		for j := uint32(prevNode.Height); j > backHeight; j-- {
 			if knownEl != nil {
@@ -385,8 +382,8 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 		!b.BlockHeadersSynced() {
 
 		nextHash := zeroHash
-		if b.nextCheckpoint != nil {
-			nextHash = *b.nextCheckpoint.Hash
+		if next := b.tip.NextCheckpoint(); next != nil {
+			nextHash = *next.Hash
 		}
 
 		// Ask the sync peer, not whoever sent this batch. There is a
@@ -489,12 +486,12 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 	var (
 		batch []headerfs.BlockHeader
 		nodes []headerlist.Node
+		next  = b.tip.NextCheckpoint()
 	)
 	for i, header := range headers {
 		height := prepared.fork.Height + int32(i) + 1
-		if b.nextCheckpoint != nil &&
-			height == b.nextCheckpoint.Height &&
-			header.BlockHash() != *b.nextCheckpoint.Hash {
+		if next != nil && height == next.Height &&
+			header.BlockHash() != *next.Hash {
 
 			log.Warnf(
 				"Reorg header does not match checkpoint at %d",
@@ -512,9 +509,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 			nodes,
 			headerlist.Node{Header: copyHeader, Height: height},
 		)
-		if b.nextCheckpoint != nil &&
-			height == b.nextCheckpoint.Height {
-
+		if next != nil && height == next.Height {
 			break
 		}
 	}
@@ -550,7 +545,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
 	height int32) {
 
-	checkpoint := b.findPreviousHeaderCheckpoint(height)
+	checkpoint := b.tip.FindPreviousCheckpoint(height)
 	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
 		uint32(checkpoint.Height),
 	)
@@ -559,7 +554,7 @@ func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
 		b.scheduleHeaderCommitRetry()
 		return
 	}
-	tip := b.headerList.Back()
+	tip := b.tip.Tip()
 	if tip == nil {
 		return
 	}
@@ -575,80 +570,6 @@ func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
 	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
-// serialHeaderExtension is a batch of headers validated against the handler's
-// validation cache, ready for the durable write. It holds its own copies, since
-// the write completes on another goroutine.
-type serialHeaderExtension struct {
-	// parent is the tip the batch was validated against.
-	parent headerfs.BlockStamp
-
-	// headers is the batch for the store.
-	headers []headerfs.BlockHeader
-
-	// nodes is the same batch for the validation cache.
-	nodes []headerlist.Node
-}
-
-// serialCheckpointMismatch requests rollback to the last verified checkpoint.
-type serialCheckpointMismatch struct{ height int32 }
-
-// Error returns the height of the failed checkpoint.
-func (e *serialCheckpointMismatch) Error() string {
-	return fmt.Sprintf("header does not match checkpoint at %d", e.height)
-}
-
-// prepareSerialHeaderExtension validates an extending batch on scratch state.
-// Reorganizations and checkpoint rejection remain on the legacy path.
-func (b *blockManager) prepareSerialHeaderExtension(
-	headers []*wire.BlockHeader) (serialHeaderExtension, bool, error) {
-
-	var prepared serialHeaderExtension
-	back := b.headerList.Back()
-	if back == nil || headers[0].PrevBlock != back.Header.BlockHash() {
-		return prepared, false, nil
-	}
-	prepared.parent = headerfs.BlockStamp{Height: back.Height,
-		Hash: back.Header.BlockHash(), Timestamp: back.Header.Timestamp}
-	validation := newHeaderSyncValidationChain(b.headerList, *back)
-	previous := back.Header
-	height := back.Height
-	for _, header := range headers {
-		if err := b.checkHeaderSanity(
-			header, false, height, &previous, validation,
-		); err != nil {
-			return serialHeaderExtension{}, true, err
-		}
-		height++
-		if b.nextCheckpoint != nil &&
-			height == b.nextCheckpoint.Height &&
-			header.BlockHash() != *b.nextCheckpoint.Hash {
-
-			return serialHeaderExtension{}, true,
-				&serialCheckpointMismatch{
-					height: height,
-				}
-		}
-		copyHeader := *header
-		node := headerlist.Node{Header: copyHeader, Height: height}
-		prepared.headers = append(
-			prepared.headers,
-			headerfs.BlockHeader{
-				BlockHeader: &copyHeader,
-				Height:      uint32(height),
-			},
-		)
-		prepared.nodes = append(prepared.nodes, node)
-		validation.PushBack(node)
-		previous = copyHeader
-		if b.nextCheckpoint != nil &&
-			height == b.nextCheckpoint.Height {
-
-			break
-		}
-	}
-	return prepared, true, nil
-}
-
 // handleSerialHeaderExtension commits a batch that extends the validation
 // chain through the chain store actor, without waiting for the write. It
 // returns false when the batch does not extend the tip, so the caller can
@@ -657,7 +578,7 @@ func (b *blockManager) handleSerialHeaderExtension(
 	hmsg *headersMsg) bool {
 
 	headers := hmsg.headers.Headers
-	back := b.headerList.Back()
+	back := b.tip.Tip()
 	if back == nil {
 		return false
 	}
@@ -677,14 +598,14 @@ func (b *blockManager) handleSerialHeaderExtension(
 			return false
 		}
 	}
-	prepared, handled, err := b.prepareSerialHeaderExtension(headers)
+	prepared, handled, err := b.tip.PrepareSerialExtension(headers)
 	if !handled {
 		return false
 	}
 	if err != nil {
-		var mismatch *serialCheckpointMismatch
+		var mismatch *headersync.SerialCheckpointMismatch
 		if errors.As(err, &mismatch) {
-			b.submitCheckpointRollback(hmsg, mismatch.height)
+			b.submitCheckpointRollback(hmsg, mismatch.Height)
 			return true
 		}
 		log.Warnf("Header doesn't pass sanity check: %s -- "+
@@ -693,7 +614,7 @@ func (b *blockManager) handleSerialHeaderExtension(
 		return true
 	}
 	hmsg.peer.UpdateLastBlockHeight(
-		prepared.nodes[len(prepared.nodes)-1].Height,
+		prepared.Nodes[len(prepared.Nodes)-1].Height,
 	)
 	if hmsg.peer == b.SyncPeer() {
 		b.disarmHeaderSyncTimeout()
@@ -702,8 +623,8 @@ func (b *blockManager) handleSerialHeaderExtension(
 		serial: &prepared, message: hmsg,
 	}
 	b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
-		ExpectedParent: prepared.parent,
-		Headers:        prepared.headers,
+		ExpectedParent: prepared.Parent,
+		Headers:        prepared.Headers,
 	}, b.chainStoreResult)
 
 	return true
@@ -712,18 +633,17 @@ func (b *blockManager) handleSerialHeaderExtension(
 // finishSerialHeaderExtension updates validation and peer state only after
 // the prepared headers have been durably written.
 func (b *blockManager) finishSerialHeaderExtension(peers *list.List,
-	hmsg *headersMsg, prepared serialHeaderExtension) {
+	hmsg *headersMsg, prepared headersync.SerialExtension) {
 
-	for _, node := range prepared.nodes {
+	for _, node := range prepared.Nodes {
 		b.blkHeaderProgressLogger.LogBlockHeight(
 			node.Header.Timestamp,
 			node.Height,
 		)
-		b.headerList.PushBack(node)
 	}
-	last := prepared.nodes[len(prepared.nodes)-1]
+	b.tip.Extend(prepared.Nodes)
+	last := prepared.Nodes[len(prepared.Nodes)-1]
 	hash := last.Header.BlockHash()
 	b.advanceHeaderSyncTip(uint32(last.Height), hash)
-	b.updateNextCheckpoint(uint32(last.Height))
 	b.finishSerialHeaderFollowup(peers, hmsg, &hash, last.Height)
 }
