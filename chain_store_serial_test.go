@@ -119,30 +119,6 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 	}
 }
 
-// TestSerialReorgPreparationCopiesHeaders binds the fork and replacement to
-// the observed tip without retaining the caller's mutable headers. The bound
-// tip lets the store owner reject a reorg that was prepared against a stale
-// chain, and the copies keep a later mutation of the peer's message from
-// changing what is written.
-func TestSerialReorgPreparationCopiesHeaders(t *testing.T) {
-	fixture := dstChains()
-	tip := headerlist.Node{Header: *fixture.honest[3], Height: 3}
-	fork := *fixture.honest[1]
-	replacement := *fixture.fork[1][0]
-	forkHash, replacementHash := fork.BlockHash(), replacement.BlockHash()
-	prepared := prepareSerialHeaderReorg(tip, fork, 1, replacement)
-
-	// The request is bound to the observed tip.
-	require.Equal(t, tip.Header.BlockHash(), prepared.expectedTip.Hash)
-	require.Equal(t, int32(3), prepared.expectedTip.Height)
-
-	// Mutating the inputs leaves the prepared copies intact.
-	fork.Nonce++
-	replacement.Nonce++
-	require.Equal(t, forkHash, prepared.fork.Header.BlockHash())
-	require.Equal(t, replacementHash, prepared.replacement.BlockHash())
-}
-
 // chainStoreGatedWrite blocks the first block header write until release is
 // closed, and closes entered when that write begins. A test uses it to hold
 // the chain store mid-mutation while it drives the rest of the manager.
@@ -733,9 +709,7 @@ func TestCheckpointRollbackSnapshotDisconnectsPeer(t *testing.T) {
 				bm.pendingHeaderCommit =
 					&pendingChainHeaderCommit{
 						checkpoint: &node,
-						message: &headersMsg{
-							peer: peer,
-						},
+						peer:       peer,
 					}
 				failed := chainstore.Result{
 					Reply: chainstore.Reply{

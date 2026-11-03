@@ -1016,7 +1016,7 @@ type pendingChainHeaderCommit struct {
 
 	// reorg is set for a serial reorg, with reorgNodes holding the headers
 	// of the new branch for the validation cache.
-	reorg      *serialHeaderReorg
+	reorg      *headersync.SerialReorg
 	reorgNodes []headerlist.Node
 
 	// reorgMismatch is the height of a checkpoint the reorg's branch
@@ -1031,9 +1031,9 @@ type pendingChainHeaderCommit struct {
 	// from then on, so we're waiting on a snapshot instead of its reply.
 	snapshot bool
 
-	// message is the headers message that caused a serial, reorg or
-	// checkpoint mutation.
-	message *headersMsg
+	// peer is the peer whose headers caused a serial, reorg or checkpoint
+	// mutation.
+	peer *ServerPeer
 }
 
 // requestChainStoreSnapshot asks the actor to finish any retained rollback and
@@ -1099,7 +1099,7 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 
 	case prepared.serial != nil:
 		b.finishSerialHeaderExtension(
-			peers, prepared.message, *prepared.serial,
+			peers, prepared.peer, *prepared.serial,
 		)
 
 	default:
@@ -1152,7 +1152,7 @@ func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
 	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
 
 	if prepared.checkpoint != nil {
-		b.rejectCheckpointPeer(peers, prepared.message.peer)
+		b.rejectCheckpointPeer(peers, prepared.peer)
 	}
 
 	b.scheduleHeaderCommitRetry()
@@ -1167,7 +1167,7 @@ func (b *blockManager) finishCheckpointRollback(peers *list.List,
 	b.resetTip(node)
 	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
 
-	b.rejectCheckpointPeer(peers, prepared.message.peer)
+	b.rejectCheckpointPeer(peers, prepared.peer)
 }
 
 // finishSerialHeaderReorg rebuilds the validation cache on the new branch, then
@@ -1175,7 +1175,7 @@ func (b *blockManager) finishCheckpointRollback(peers *list.List,
 func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	prepared *pendingChainHeaderCommit, verdict chainstore.ReorgVerdict) {
 
-	peer := prepared.message.peer
+	peer := prepared.peer
 
 	switch {
 	// A branch with less work is an invalid claim, and so is a tie that
@@ -1200,9 +1200,10 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 
 	// The branch would win, but it failed a checkpoint.
 	case prepared.reorgMismatch != 0:
-		b.submitCheckpointRollback(
-			prepared.message, prepared.reorgMismatch,
-		)
+		b.handleDriverEvent(peers, headersync.RollbackToCheckpoint{
+			PeerID: peer.Addr(),
+			Height: prepared.reorgMismatch,
+		}, peer)
 
 		return
 	}
@@ -1220,7 +1221,7 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 		b.syncPeerMutex.Unlock()
 	}
 
-	b.resetTip(prepared.reorg.fork)
+	b.resetTip(prepared.reorg.Fork)
 	b.extendTip(prepared.reorgNodes)
 	for _, node := range prepared.reorgNodes {
 		b.blkHeaderProgressLogger.LogBlockHeight(
@@ -1232,7 +1233,7 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	b.advanceHeaderSyncTip(uint32(last.Height), hash)
 
 	b.finishSerialHeaderFollowup(
-		peers, prepared.message, &hash, last.Height,
+		peers, peer, &hash, last.Height,
 	)
 }
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
@@ -87,6 +88,22 @@ func (t *TipState) Tip() *headerlist.Node {
 // the tip is past the last checkpoint.
 func (t *TipState) NextCheckpoint() *chaincfg.Checkpoint {
 	return t.nextCheckpoint
+}
+
+// FetchHeader returns a header and its height from the block header store. The
+// store holds the durable chain, which can be ahead of the validation cache.
+func (t *TipState) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
+	uint32, error) {
+
+	return t.cfg.BlockHeaders().FetchHeader(hash)
+}
+
+// FetchHeaderByHeight returns the header at a height of the block header
+// store.
+func (t *TipState) FetchHeaderByHeight(height uint32) (*wire.BlockHeader,
+	error) {
+
+	return t.cfg.BlockHeaders().FetchHeaderByHeight(height)
 }
 
 // Reset replaces the validation cache with the single node and moves the

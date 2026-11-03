@@ -135,6 +135,44 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		removeSyncCandidate(peers, sp)
 		sp.Disconnect()
 
+	case headersync.DisconnectTipPeer:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		sp.Disconnect()
+
+	case headersync.UpdatePeerHeight:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		sp.UpdateLastBlockHeight(effect.Height)
+
+	case headersync.DisarmSerialTimeout:
+		b.disarmHeaderSyncTimeout()
+
+	case headersync.CommitExtension:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.submitSerialExtension(sp, effect)
+
+	case headersync.CommitReorg:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.submitSerialHeaderReorg(sp, effect)
+
+	case headersync.CheckpointRollback:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.submitCheckpointRollback(sp, effect)
+
 	case headersync.ScheduleCommitRetry:
 		b.scheduleHeaderCommitRetry()
 

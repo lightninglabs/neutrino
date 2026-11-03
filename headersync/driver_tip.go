@@ -2,7 +2,6 @@ package headersync
 
 import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerlist"
 )
 
@@ -70,36 +69,4 @@ func (d *Driver) Tip() *headerlist.Node {
 // the tip is past the last checkpoint.
 func (d *Driver) NextCheckpoint() *chaincfg.Checkpoint {
 	return d.tip.NextCheckpoint()
-}
-
-// FindPreviousCheckpoint returns the last checkpoint before the height, or a
-// checkpoint matching genesis when there is none.
-func (d *Driver) FindPreviousCheckpoint(height int32) *chaincfg.Checkpoint {
-	return d.tip.FindPreviousCheckpoint(height)
-}
-
-// PrepareSerialExtension validates an extending batch of the serial path on
-// scratch state. The bool reports whether the batch extends the tip.
-func (d *Driver) PrepareSerialExtension(headers []*wire.BlockHeader) (
-	SerialExtension, bool, error) {
-
-	return d.tip.PrepareSerialExtension(headers)
-}
-
-// ResetReorg starts a competing branch of the serial path at the fork point.
-func (d *Driver) ResetReorg(fork headerlist.Node) {
-	d.tip.ResetReorg(fork)
-}
-
-// AppendReorg adds a header that passed validation to the competing branch.
-func (d *Driver) AppendReorg(node headerlist.Node) {
-	d.tip.AppendReorg(node)
-}
-
-// CheckReorgHeader validates a header of the competing branch against the
-// scratch chain. Its parent is prevHeader at prevHeight.
-func (d *Driver) CheckReorgHeader(header *wire.BlockHeader, prevHeight int32,
-	prevHeader *wire.BlockHeader) error {
-
-	return d.tip.CheckReorgHeader(header, prevHeight, prevHeader)
 }
