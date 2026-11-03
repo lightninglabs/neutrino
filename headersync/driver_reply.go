@@ -192,21 +192,17 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 	}
 
 	var complete CompleteResult
-	err = d.ask(DriverAskCompleteRange, func() error {
-		var err error
-		if peerActor, ok := d.runtime.Peer(peerID); ok {
-			complete, err = peerActor.CompleteRange(
-				ctx, assignment.RangeID, assignment.LeaseEpoch,
-				valid, time.Now(),
-			)
-			return err
-		}
+	if peerActor, ok := d.runtime.Peer(peerID); ok {
+		complete, err = peerActor.CompleteRange(
+			ctx, assignment.RangeID, assignment.LeaseEpoch,
+			valid, time.Now(),
+		)
+	} else {
 		complete, err = manager.CompleteRange(
 			ctx, peerID, assignment.RangeID, assignment.LeaseEpoch,
 			valid, time.Now(),
 		)
-		return err
-	})
+	}
 	if err != nil {
 		log.Warnf(
 			"headersync failed to complete range_id=%d peer=%s: "+

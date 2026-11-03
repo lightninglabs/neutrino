@@ -94,63 +94,6 @@ type Controller struct {
 	cfg     Config
 
 	peerLookup func(string) (*PeerActor, bool)
-
-	// askFault is the test-only fault seam from RuntimeConfig.AskFault.
-	askFault func(AskOp) AskFault
-}
-
-// AskOp names a controller ask that deterministic tests can fault.
-type AskOp uint8
-
-const (
-	// AskPlanRanges is the ask that plans confirmed anchor ranges.
-	AskPlanRanges AskOp = iota
-
-	// AskStageDiscovered is the ask that stages a discovered range.
-	AskStageDiscovered
-
-	// AskAddAnchor is the ask that records a discovered anchor.
-	AskAddAnchor
-
-	// AskOps is the number of faultable controller asks.
-	AskOps
-)
-
-// AskFault selects how a faulted controller ask reports its outcome.
-type AskFault uint8
-
-const (
-	// AskOK runs the ask normally.
-	AskOK AskFault = iota
-
-	// AskFailBefore reports a caller deadline without sending the ask.
-	AskFailBefore
-
-	// AskFailAfter runs the ask, then reports a caller deadline. An lnd
-	// actor applies a request on its own context, so this happens in
-	// production when the caller's deadline fires after the send.
-	AskFailAfter
-)
-
-// ErrAskFault is the error a faulted controller ask reports.
-var ErrAskFault = errors.New("simulated headersync ask deadline")
-
-// ask runs one manager ask through the test fault seam.
-func (c *Controller) ask(op AskOp, fn func() error) error {
-	fault := AskOK
-	if c.askFault != nil {
-		fault = c.askFault(op)
-	}
-	if fault == AskFailBefore {
-		return ErrAskFault
-	}
-	if err := fn(); err != nil {
-		return err
-	}
-	if fault == AskFailAfter {
-		return ErrAskFault
-	}
-	return nil
 }
 
 // NewController creates a production controller around the manager actor and
@@ -194,14 +137,9 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	var result PlanRangesResult
-	err := c.ask(AskPlanRanges, func() error {
-		var err error
-		result, err = c.manager.PlanConfirmedAnchorRanges(
-			ctx, c.session.NextRangeID(), tip.Height, stop.Height,
-		)
-		return err
-	})
+	result, err := c.manager.PlanConfirmedAnchorRanges(
+		ctx, c.session.NextRangeID(), tip.Height, stop.Height,
+	)
 	if err != nil {
 		return CheckpointRangePlan{}, err
 	}
@@ -280,14 +218,9 @@ func (c *Controller) PlanFrontierRanges(ctx context.Context,
 		return PlanRangesResult{}, err
 	}
 
-	var result PlanRangesResult
-	err := c.ask(AskPlanRanges, func() error {
-		var err error
-		result, err = c.manager.PlanConfirmedAnchorRanges(
-			ctx, c.session.NextRangeID(), tip.Height, bestHeight,
-		)
-		return err
-	})
+	result, err := c.manager.PlanConfirmedAnchorRanges(
+		ctx, c.session.NextRangeID(), tip.Height, bestHeight,
+	)
 	if err != nil {
 		return result, err
 	}
@@ -531,14 +464,9 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	}
 	result.Response = response
 
-	var anchor Anchor
-	err = c.ask(AskAddAnchor, func() error {
-		var err error
-		anchor, ok, err = c.manager.AddAnchor(
-			ctx, response.Height, response.Hash, response.Trusted,
-		)
-		return err
-	})
+	anchor, ok, err := c.manager.AddAnchor(
+		ctx, response.Height, response.Hash, response.Trusted,
+	)
 	if err != nil {
 		return result, true, err
 	}
@@ -557,19 +485,10 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 
 	result.Confirmed = c.AnchorConfirmed(anchor)
 	if result.Confirmed {
-		var (
-			rng    HeaderRange
-			staged bool
+		rng, staged, err := c.manager.StageDiscoveredRange(
+			ctx, c.session.NextRangeID(), peerID,
+			request.StartHeight, response.Height, time.Now(),
 		)
-		err := c.ask(AskStageDiscovered, func() error {
-			var err error
-			rng, staged, err = c.manager.StageDiscoveredRange(
-				ctx, c.session.NextRangeID(), peerID,
-				request.StartHeight, response.Height,
-				time.Now(),
-			)
-			return err
-		})
 		if err != nil {
 			return result, true, err
 		}

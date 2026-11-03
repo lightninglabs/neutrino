@@ -142,10 +142,8 @@ func (d *Driver) handleInvalidateRange(ctx context.Context,
 func (d *Driver) handleCommitDurableRanges(ctx context.Context,
 	result *DriverResult) error {
 
-	return d.ask(DriverAskCommitReady, func() error {
-		var err error
-		result.Commit, err = d.runtime.controller.CommitReadyRanges(ctx)
+	var err error
+	result.Commit, err = d.runtime.controller.CommitReadyRanges(ctx)
 
-		return err
-	})
+	return err
 }

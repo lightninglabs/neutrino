@@ -221,11 +221,6 @@ type blockManagerCfg struct {
 	// collects their responses. It backs the all-peer checks used to
 	// sanity check compact filter headers and checkpoints.
 	Broadcaster querysyncwm.Broadcaster
-
-	// headerSyncAskFault lets deterministic tests report a caller-side
-	// deadline before or after selected headersync actor asks apply.
-	// Production leaves it nil.
-	headerSyncAskFault func(headerSyncAskOp) headerSyncAskFault
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -480,7 +475,6 @@ func (b *blockManager) initHeaderSyncManager(height uint32,
 		b.cfg.ChainParams.Checkpoints,
 		headerSyncActorMailboxSize,
 	)
-	runtime.Driver().SetAskHook(b.driverAsk)
 	b.headerSync = runtime
 
 	log.Infof("Initialized headersync manager at tip height=%d "+

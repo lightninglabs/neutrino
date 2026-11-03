@@ -285,15 +285,7 @@ func (d *Driver) requestPeerRange(ctx context.Context, peerID string,
 	peerActor *PeerActor, result *DriverResult) (RangeAssignment, bool,
 	error) {
 
-	var (
-		assignment RangeAssignment
-		ok         bool
-	)
-	err := d.ask(DriverAskRequestRange, func() error {
-		var err error
-		assignment, ok, err = peerActor.RequestRange(ctx)
-		return err
-	})
+	assignment, ok, err := peerActor.RequestRange(ctx)
 	if err != nil {
 		d.setPeerState(ctx, peerID, PeerBlocked, result)
 	}

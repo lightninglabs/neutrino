@@ -9,23 +9,6 @@ import (
 // held out of assignment before the driver recovers it.
 const DefaultPeerCooldown = 2 * time.Minute
 
-// DriverAskOp names a peer actor ask the driver makes on the caller's behalf.
-// A test can fault the outcome of each one through the hook set with
-// SetAskHook.
-type DriverAskOp uint8
-
-const (
-	// DriverAskRequestRange is the ask that starts a peer's next range.
-	DriverAskRequestRange DriverAskOp = iota
-
-	// DriverAskCompleteRange is the range completion ask made when a
-	// reply arrives.
-	DriverAskCompleteRange
-
-	// DriverAskCommitReady is the ask that commits durable ranges.
-	DriverAskCommitReady
-)
-
 // DriverEvent is an input to the driver. Events carry everything the driver
 // needs to know about the world that it does not own: peer snapshots, chain
 // tips and the checkpoint cursor. The driver never reads them from anywhere
@@ -121,11 +104,6 @@ type Driver struct {
 	runtime *Runtime
 	session *Session
 
-	// askHook wraps the peer actor asks the driver makes. Production wires
-	// a passthrough, and only tests inject faults that make an ask apply
-	// and then report a deadline.
-	askHook func(DriverAskOp, func() error) error
-
 	// requestID numbers the range and anchor requests the driver tracks.
 	requestID uint64
 }
@@ -136,22 +114,6 @@ func newDriver(runtime *Runtime, session *Session) *Driver {
 		runtime: runtime,
 		session: session,
 	}
-}
-
-// SetAskHook sets the test-only seam that wraps the driver's peer actor asks.
-// The hook must run fn exactly as the driver would, except for the fault it
-// injects.
-func (d *Driver) SetAskHook(hook func(DriverAskOp, func() error) error) {
-	d.askHook = hook
-}
-
-// ask runs one peer actor ask through the test hook.
-func (d *Driver) ask(op DriverAskOp, fn func() error) error {
-	if d.askHook == nil {
-		return fn()
-	}
-
-	return d.askHook(op, fn)
 }
 
 // Activity returns the driver's in-flight request counts.
