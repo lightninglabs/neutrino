@@ -92,6 +92,9 @@ type DriverResult struct {
 
 	// Commit is the outcome of CommitDurableRanges.
 	Commit CommitReadyResult
+
+	// Prepared is the outcome of PrepareRanges.
+	Prepared PreparedCommit
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -106,15 +109,22 @@ type Driver struct {
 	runtime *Runtime
 	session *Session
 
+	// tip is the header validation cache and checkpoint cursor. Only the
+	// driver touches it, which keeps it on the same serialization as the
+	// request bookkeeping. Readers go through Tip, NextCheckpoint and
+	// FindPreviousCheckpoint, and writers through events.
+	tip *TipState
+
 	// requestID numbers the range and anchor requests the driver tracks.
 	requestID uint64
 }
 
-// newDriver creates a driver over the runtime's session.
-func newDriver(runtime *Runtime, session *Session) *Driver {
+// newDriver creates a driver over the runtime's session and validation cache.
+func newDriver(runtime *Runtime, session *Session, tip *TipState) *Driver {
 	return &Driver{
 		runtime: runtime,
 		session: session,
+		tip:     tip,
 	}
 }
 
@@ -224,6 +234,21 @@ func (d *Driver) Handle(ctx context.Context,
 
 	case CommitDurableRanges:
 		err = d.handleCommitDurableRanges(ctx, &result)
+
+	case ResetTip:
+		d.ResetTip(event.Node)
+
+	case ExtendTip:
+		d.tip.Extend(event.Nodes)
+
+	case ReconcileTip:
+		err = d.tip.ReconcileWithStore()
+
+	case PrepareRanges:
+		result.Prepared, err = d.tip.PrepareRangeHeaders(event.Ranges)
+
+	case FinishRange:
+		d.tip.FinishRange(event.Prepared)
 	}
 
 	return result, err

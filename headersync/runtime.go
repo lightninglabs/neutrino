@@ -14,6 +14,11 @@ type RuntimeConfig struct {
 	Config Config
 
 	Dispatch DispatchController
+
+	// Tip configures the validation cache the runtime's driver owns. The
+	// block header handler reads and writes the cache only through the
+	// driver.
+	Tip TipConfig
 }
 
 // Runtime owns the headersync manager, its peers and production request
@@ -67,7 +72,7 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 		peers: make(map[string]*Peer),
 	}
 	runtime.controller.peerLookup = runtime.Peer
-	runtime.driver = newDriver(runtime, session)
+	runtime.driver = newDriver(runtime, session, NewTipState(cfg.Tip))
 	return runtime, seeded
 }
 

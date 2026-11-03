@@ -316,10 +316,6 @@ type blockManager struct { // nolint:maligned
 	quitCtx    context.Context
 	quitCancel context.CancelFunc
 
-	// tip owns the header validation cache, the reorg scratch chain and
-	// the checkpoint cursor.
-	tip *headersync.TipState
-
 	lastRequested chainhash.Hash
 
 	headerSyncTimeout time.Duration
@@ -369,21 +365,6 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		fltrHeaderProgessLogger: newBlockProgressLogger(
 			"Verified", "filter header", log,
 		),
-		tip: headersync.NewTipState(headersync.TipConfig{
-			Params:              &cfg.ChainParams,
-			BlocksPerRetarget:   retarget.BlocksPerRetarget,
-			MinRetargetTimespan: retarget.MinRetargetTimespan,
-			MaxRetargetTimespan: retarget.MaxRetargetTimespan,
-
-			// The stores and the time source can be replaced after
-			// construction, so validation reads them on each use.
-			TimeSource: func() blockchain.MedianTimeSource {
-				return cfg.TimeSource
-			},
-			BlockHeaders: func() headerfs.BlockHeaderStore {
-				return cfg.BlockHeaders
-			},
-		}),
 		headerSyncTimeout:   cfg.HeaderSyncTimeout,
 		quit:                make(chan struct{}),
 		blocksPerRetarget:   retarget.BlocksPerRetarget,
@@ -415,20 +396,17 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	bm.tip.Reset(headerlist.Node{
+	tipNode := headerlist.Node{
 		Header: *header,
 		Height: int32(height),
-	})
+	}
 	bm.headerTip = height
 	bm.headerTipHash = header.BlockHash()
 	bm.publishedBlockTip.Store(&headerfs.BlockStamp{
 		Height: int32(height), Hash: bm.headerTipHash,
 		Timestamp: header.Timestamp,
 	})
-	if err := bm.initHeaderSyncManager(
-		height,
-		bm.headerTipHash,
-	); err != nil {
+	if err := bm.initHeaderSyncManager(tipNode); err != nil {
 		return nil, err
 	}
 
@@ -458,20 +436,46 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	return &bm, nil
 }
 
-func (b *blockManager) initHeaderSyncManager(height uint32,
-	hash chainhash.Hash) error {
+// tipConfig returns what the driver's validation cache needs from the block
+// manager.
+func (b *blockManager) tipConfig() headersync.TipConfig {
+	return headersync.TipConfig{
+		Params:              &b.cfg.ChainParams,
+		BlocksPerRetarget:   b.blocksPerRetarget,
+		MinRetargetTimespan: b.minRetargetTimespan,
+		MaxRetargetTimespan: b.maxRetargetTimespan,
 
+		// The stores and the time source can be replaced after
+		// construction, so validation reads them on each use.
+		TimeSource: func() blockchain.MedianTimeSource {
+			return b.cfg.TimeSource
+		},
+		BlockHeaders: func() headerfs.BlockHeaderStore {
+			return b.cfg.BlockHeaders
+		},
+	}
+}
+
+// initHeaderSyncManager replaces the headersync runtime with one at the node,
+// and resets the validation cache that the runtime's driver owns to the same
+// node. The cache is reset through the plain method rather than an event,
+// since the runtime is not yet installed when the reset has to happen.
+func (b *blockManager) initHeaderSyncManager(node headerlist.Node) error {
 	if b.headerSync != nil {
 		b.headerSync.Stop()
 	}
 
+	height := uint32(node.Height)
+	hash := node.Header.BlockHash()
 	runtime, seededCheckpoints := querydispatch.NewRuntime(
 		headersync.ChainPoint{
 			Height: height,
 			Hash:   hash,
 		},
 		b.cfg.ChainParams.Checkpoints,
+		b.tipConfig(),
 	)
+	runtime.Driver().ResetTip(node)
 	b.headerSync = runtime
 
 	log.Infof("Initialized headersync manager at tip height=%d "+
@@ -494,17 +498,17 @@ func (b *blockManager) ResetHeaderState() error {
 		return fmt.Errorf("failed to read block header chain "+
 			"tip: %w", err)
 	}
-	b.tip.Reset(headerlist.Node{
-		Header: *header,
-		Height: int32(height),
-	})
 	b.headerTip = height
 	b.headerTipHash = header.BlockHash()
 	b.publishedBlockTip.Store(&headerfs.BlockStamp{
 		Height: int32(height), Hash: b.headerTipHash,
 		Timestamp: header.Timestamp,
 	})
-	if err := b.initHeaderSyncManager(height, b.headerTipHash); err != nil {
+	tipNode := headerlist.Node{
+		Header: *header,
+		Height: int32(height),
+	}
+	if err := b.initHeaderSyncManager(tipNode); err != nil {
 		return err
 	}
 
@@ -1062,7 +1066,7 @@ func (b *blockManager) requestHeaders(peer *ServerPeer,
 func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync == nil || b.tip.NextCheckpoint() == nil ||
+	if b.headerSync == nil || b.driver().NextCheckpoint() == nil ||
 		b.headerSync.Driver().Activity().HasWork() || bestHeight == 0 {
 
 		return false
@@ -1202,7 +1206,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		// If we're still within the range of the set checkpoints, then
 		// we'll use the next checkpoint to guide the set of headers we
 		// fetch, setting our stop hash to the next checkpoint hash.
-		next := b.tip.NextCheckpoint()
+		next := b.driver().NextCheckpoint()
 		if next != nil && int32(bestHeight) < next.Height {
 			log.Infof("Downloading headers for blocks %d to "+
 				"%d from peer %s", bestHeight+1,

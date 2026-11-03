@@ -30,7 +30,7 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	bm := newCFHeaderTestManager(t, blocks, filters)
 	fixture := dstChains()
 	header := *fixture.honest[1]
-	prepared, handled, err := bm.tip.PrepareSerialExtension(
+	prepared, handled, err := bm.tipForTest().PrepareSerialExtension(
 		[]*wire.BlockHeader{&header},
 	)
 	require.True(t, handled)
@@ -40,7 +40,7 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	require.Len(t, prepared.Nodes, 1)
 
 	// Neither the in-memory list nor the store has changed.
-	require.Equal(t, int32(0), bm.tip.Tip().Height)
+	require.Equal(t, int32(0), bm.tipForTest().Tip().Height)
 	_, height, err := blocks.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
@@ -98,12 +98,12 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 				require.Equal(
 					t,
 					tc.height,
-					d.bm.tip.Tip().Height,
+					d.bm.tipForTest().Tip().Height,
 				)
 				require.Equal(
 					t,
 					header.BlockHash(),
-					d.bm.tip.Tip().Header.
+					d.bm.tipForTest().Tip().Header.
 						BlockHash(),
 				)
 				visible := d.bm.publishedBlockTip.Load()
@@ -251,7 +251,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		bm.cfg.ChainParams.Checkpoints = []chaincfg.Checkpoint{{
 			Height: 2, Hash: &wrong,
 		}}
-		bm.tip.SetNextCheckpointForTest(
+		bm.tipForTest().SetNextCheckpointForTest(
 			&bm.cfg.ChainParams.Checkpoints[0],
 		)
 		bm.cfg.TimeSource = dstMedianTime{
@@ -288,7 +288,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Zero(t, height)
-		require.Equal(t, int32(0), bm.tip.Tip().Height)
+		require.Equal(t, int32(0), bm.tipForTest().Tip().Height)
 		require.True(t, peerDisconnected(peer))
 		require.Len(t, notifications, 1)
 		event := <-notifications
@@ -427,7 +427,7 @@ func TestChainStoreSerialLostWriteAckReconciles(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), height)
-		require.Equal(t, int32(1), bm.tip.Tip().Height)
+		require.Equal(t, int32(1), bm.tipForTest().Tip().Height)
 		require.Equal(t, int32(1), bm.publishedBlockTip.Load().Height)
 		require.Nil(t, bm.pendingHeaderCommit)
 		require.NotNil(t, bm.headerCommitRetryTimer)
@@ -781,7 +781,7 @@ func TestSnapshotFilterFailureKeepsHeaderIntake(t *testing.T) {
 		bm.finishAsyncHeaderCommit(peers, result)
 		require.Nil(t, bm.pendingHeaderCommit,
 			"header intake stayed frozen")
-		require.EqualValues(t, 3, bm.tip.Tip().Height)
+		require.EqualValues(t, 3, bm.tipForTest().Tip().Height)
 	})
 }
 

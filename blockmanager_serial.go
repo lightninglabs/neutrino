@@ -73,7 +73,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	if lastBlock != -1 &&
 		(imsg.peer == b.SyncPeer() || b.BlockHeadersSynced()) {
 
-		lastEl := b.tip.Tip()
+		lastEl := b.driver().Tip()
 		var lastHash chainhash.Hash
 		if lastEl != nil {
 			lastHash = lastEl.Header.BlockHash()
@@ -177,7 +177,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		blockHash := blockHeader.BlockHash()
 
 		// Ensure there is a previous header to compare against.
-		prevNode := b.tip.Tip()
+		prevNode := b.driver().Tip()
 		if prevNode == nil {
 			log.Warnf("Header list does not contain a previous" +
 				"element as expected -- disconnecting peer")
@@ -240,7 +240,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		// branch is earlier than the latest synchronized
 		// checkpoint, it's invalid and we need to disconnect
 		// the reporting peer.
-		prevCheckpoint := b.tip.FindPreviousCheckpoint(
+		prevCheckpoint := b.driver().FindPreviousCheckpoint(
 			prevNode.Height,
 		)
 		if backHeight < uint32(prevCheckpoint.Height) {
@@ -258,7 +258,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 		// peer. We also keep track of the work represented by
 		// these headers so we can compare it to the work in
 		// the known good chain.
-		b.tip.ResetReorg(headerlist.Node{
+		b.driver().ResetReorg(headerlist.Node{
 			Header: *backHead,
 			Height: int32(backHeight),
 		})
@@ -281,7 +281,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				prevNodeHeader = msg.Headers[i+j-1]
 			}
 
-			err = b.tip.CheckReorgHeader(
+			err = b.driver().CheckReorgHeader(
 				reorgHeader, int32(prevNodeHeight),
 				prevNodeHeader,
 			)
@@ -294,7 +294,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 			}
 			totalWork.Add(totalWork,
 				blockchain.CalcWork(reorgHeader.Bits))
-			b.tip.AppendReorg(headerlist.Node{
+			b.driver().AppendReorg(headerlist.Node{
 				Header: *reorgHeader,
 				Height: int32(backHeight+1) + int32(j),
 			})
@@ -328,7 +328,7 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 		!b.BlockHeadersSynced() {
 
 		nextHash := zeroHash
-		if next := b.tip.NextCheckpoint(); next != nil {
+		if next := b.driver().NextCheckpoint(); next != nil {
 			nextHash = *next.Hash
 		}
 
@@ -435,7 +435,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 	var (
 		batch []headerfs.BlockHeader
 		nodes []headerlist.Node
-		next  = b.tip.NextCheckpoint()
+		next  = b.driver().NextCheckpoint()
 	)
 	for i, header := range headers {
 		height := prepared.fork.Height + int32(i) + 1
@@ -495,7 +495,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
 	height int32) {
 
-	checkpoint := b.tip.FindPreviousCheckpoint(height)
+	checkpoint := b.driver().FindPreviousCheckpoint(height)
 	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
 		uint32(checkpoint.Height),
 	)
@@ -504,7 +504,7 @@ func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
 		b.scheduleHeaderCommitRetry()
 		return
 	}
-	tip := b.tip.Tip()
+	tip := b.driver().Tip()
 	if tip == nil {
 		return
 	}
@@ -528,7 +528,7 @@ func (b *blockManager) handleSerialHeaderExtension(
 	hmsg *headersMsg) bool {
 
 	headers := hmsg.headers.Headers
-	back := b.tip.Tip()
+	back := b.driver().Tip()
 	if back == nil {
 		return false
 	}
@@ -548,7 +548,7 @@ func (b *blockManager) handleSerialHeaderExtension(
 			return false
 		}
 	}
-	prepared, handled, err := b.tip.PrepareSerialExtension(headers)
+	prepared, handled, err := b.driver().PrepareSerialExtension(headers)
 	if !handled {
 		return false
 	}
@@ -591,7 +591,7 @@ func (b *blockManager) finishSerialHeaderExtension(peers *list.List,
 			node.Height,
 		)
 	}
-	b.tip.Extend(prepared.Nodes)
+	b.extendTip(prepared.Nodes)
 	last := prepared.Nodes[len(prepared.Nodes)-1]
 	hash := last.Header.BlockHash()
 	b.advanceHeaderSyncTip(uint32(last.Height), hash)

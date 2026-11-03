@@ -28,6 +28,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/headersync/querydispatch"
 	"github.com/lightninglabs/neutrino/querysync"
@@ -478,8 +479,12 @@ func (d *dstRun) build() {
 		headersync.RuntimeConfig{
 			Config:   d.headerConfig(),
 			Dispatch: querydispatch.New(scheduler),
+			Tip:      bm.tipConfig(),
 		},
 	)
+	bm.headerSync.Driver().ResetTip(headerlist.Node{
+		Header: *tipHeader, Height: int32(tip),
+	})
 	d.recorder = &headersync.EventRecorder{}
 	bm.headerSync.ManagerForTest().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
@@ -1480,7 +1485,7 @@ func TestHeaderTransportFailedCompatibilityWrite(t *testing.T) {
 		d.deliver(&headersMsg{peer: d.current[0], headers: message})
 		require.Zero(t, d.inv.lastTip)
 		require.Empty(t, d.store.writes)
-		require.Zero(t, d.bm.tip.Tip().Height)
+		require.Zero(t, d.bm.tipForTest().Tip().Height)
 	})
 }
 
