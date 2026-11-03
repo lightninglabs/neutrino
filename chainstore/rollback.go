@@ -174,9 +174,9 @@ func (s *Store) resumePendingRollback() error {
 }
 
 // settleInterruptedStep works out how far a failed block removal got, by
-// reading only the durable stores. A removal touches the filter store first, if the
-// block has a filter header, and the block store second, so there are three
-// possible states:
+// reading only the durable stores. A removal touches the filter store first,
+// if the block has a filter header, and the block store second, so there are
+// three possible states:
 //
 //  1. Neither store changed. We clear the step, and rollBackBlocks repeats the
 //     removal from the start.
