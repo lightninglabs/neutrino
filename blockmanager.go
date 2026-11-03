@@ -4765,18 +4765,48 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 	return nil
 }
 
-// pendingChainHeaderCommit is the single actor mutation awaiting completion.
+// pendingChainHeaderCommit is the one chain store mutation the block handler
+// has in flight. The handler submits it without waiting and keeps serving
+// peers, so this holds what it needs to finish the work when the reply arrives.
+// Exactly one of ranges, serial, reorg and checkpoint is set, which says what
+// the mutation was.
 type pendingChainHeaderCommit struct {
-	ranges     *headerSyncPreparedCommit
-	serial     *serialHeaderExtension
+	// ranges is set for a commit of ready parallel header sync ranges.
+	ranges *headerSyncPreparedCommit
+
+	// serial is set for a serial extension of the tip.
+	serial *serialHeaderExtension
+
+	// reorg is set for a serial reorg, with reorgNodes holding the headers
+	// of the new branch for the validation cache.
 	reorg      *serialHeaderReorg
 	reorgNodes []headerlist.Node
+
+	// checkpoint is set for a rollback to the last verified checkpoint
+	// after a peer's header failed a checkpoint. It's the new tip.
 	checkpoint *headerlist.Node
-	snapshot   bool
-	message    *headersMsg
+
+	// snapshot is set once the mutation has failed. Its outcome is unknown
+	// from then on, so we're waiting on a snapshot instead of its reply.
+	snapshot bool
+
+	// message is the headers message that caused a serial, reorg or
+	// checkpoint mutation.
+	message *headersMsg
 }
 
-// finishAsyncHeaderCommit applies handler-owned state after actor completion.
+// requestChainStoreSnapshot asks the actor to finish any retained rollback and
+// report the durable tip. The reply arrives on chainStoreResult.
+func (b *blockManager) requestChainStoreSnapshot() {
+	b.chainStore.TryAsk(
+		b.quitCtx, chainstore.SnapshotRequest{}, b.chainStoreResult,
+	)
+}
+
+// finishAsyncHeaderCommit applies the outcome of the pending chain store
+// mutation to the state the block handler owns: the validation cache, the
+// checkpoint cursor and the FSM's committed tip. The actor has already updated
+// the durable and published state by the time we get here.
 func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 	result chainstore.Result) {
 
@@ -4784,113 +4814,145 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 	if prepared == nil {
 		return
 	}
-	if result.Retry {
-		b.chainStore.TryAsk(
-			b.quitCtx, chainstore.SnapshotRequest{},
-			b.chainStoreResult,
-		)
+
+	switch {
+	// The timer from a failed snapshot fired, so we try it again.
+	case result.Retry:
+		b.requestChainStoreSnapshot()
+
 		return
-	}
-	if prepared.snapshot {
-		// BlockTipValid certifies that the actor completed any
-		// admitted rollback and read the durable block tip. A failure
-		// of the filter side of the snapshot leaves Err set but does
-		// not stop the handler from adopting the block tip.
-		if result.Err != nil || !result.Reply.BlockTipValid {
-			// The handler's view of the chain is unknown until a
-			// snapshot succeeds, so only the snapshot is retried.
-			// Every other failure is reconciled through it.
-			log.Warnf("chain store snapshot failed: %v %v",
-				result.Err, result.Reply.Err)
-			time.AfterFunc(time.Second, func() {
-				select {
-				case b.chainStoreResult <- chainstore.Result{
-					Retry: true,
-				}:
-				case <-b.quit:
-				}
-			})
-			return
-		}
-		b.pendingHeaderCommit = nil
-		node := headerlist.Node{Header: result.Reply.BlockHeader,
-			Height: result.Reply.BlockTip.Height}
-		b.headerList.ResetHeaderState(node)
-		b.nextCheckpoint = b.findNextHeaderCheckpoint(node.Height)
-		b.advanceHeaderSyncTip(
-			uint32(node.Height),
-			node.Header.BlockHash(),
-		)
-		if prepared.checkpoint != nil {
-			b.rejectCheckpointPeer(peers, prepared.message.peer)
-		}
-		b.scheduleHeaderCommitRetry()
+
+	case prepared.snapshot:
+		b.finishChainStoreSnapshot(peers, prepared, result)
+
 		return
-	}
-	if result.Reply.Err != nil {
-		// The mutation may have applied, fully or in part. Reconcile on
-		// the store actor before the handler reads or publishes any
-		// durable state. This covers range, serial, reorg and
-		// checkpoint rollback commits alike.
+
+	// The mutation may have applied, fully or in part. We reconcile on the
+	// actor before reading or publishing any durable state. This covers
+	// range, serial, reorg and checkpoint rollback commits alike.
+	case result.Reply.Err != nil:
 		prepared.snapshot = true
-		b.chainStore.TryAsk(
-			b.quitCtx, chainstore.SnapshotRequest{},
-			b.chainStoreResult,
-		)
+		b.requestChainStoreSnapshot()
+
 		return
 	}
+
 	b.pendingHeaderCommit = nil
+
+	// The command never ran, so nothing changed and the staged work is
+	// still there for the retry.
 	if result.Err != nil {
 		log.Warnf("headersync actor admission failed: %v", result.Err)
 		b.scheduleHeaderCommitRetry()
+
 		return
 	}
-	if prepared.checkpoint != nil {
-		node := *prepared.checkpoint
-		b.headerList.ResetHeaderState(node)
-		hash := node.Header.BlockHash()
-		b.updateNextCheckpoint(uint32(node.Height))
-		b.advanceHeaderSyncTip(uint32(node.Height), hash)
-		b.rejectCheckpointPeer(peers, prepared.message.peer)
-		return
-	}
-	if prepared.reorg != nil {
-		b.headerList.ResetHeaderState(prepared.reorg.fork)
-		for _, node := range prepared.reorgNodes {
-			b.headerList.PushBack(node)
-		}
-		for _, node := range prepared.reorgNodes {
-			b.blkHeaderProgressLogger.LogBlockHeight(
-				node.Header.Timestamp, node.Height,
-			)
-		}
-		last := prepared.reorgNodes[len(prepared.reorgNodes)-1]
-		hash := last.Header.BlockHash()
-		b.advanceHeaderSyncTip(uint32(last.Height), hash)
-		b.updateNextCheckpoint(uint32(last.Height))
-		b.finishSerialHeaderFollowup(
-			peers,
-			prepared.message,
-			&hash,
-			last.Height,
-		)
-		return
-	}
-	if prepared.serial != nil {
+
+	switch {
+	case prepared.checkpoint != nil:
+		b.finishCheckpointRollback(peers, prepared)
+
+	case prepared.reorg != nil:
+		b.finishSerialHeaderReorg(peers, prepared)
+
+	case prepared.serial != nil:
 		b.finishSerialHeaderExtension(
-			peers,
-			prepared.message,
-			*prepared.serial,
+			peers, prepared.message, *prepared.serial,
 		)
+
+	default:
+		b.finishHeaderSyncRangeHeaders(*prepared.ranges)
+
+		err := b.finishReadyHeaderSyncRanges()
+		if err != nil {
+			log.Warnf("headersync completion failed: %v", err)
+			b.scheduleHeaderCommitRetry()
+
+			return
+		}
+		b.continueHeaderSync(peers)
+	}
+}
+
+// finishChainStoreSnapshot adopts the durable tip after a failed mutation. Our
+// view of the chain is unknown until a snapshot succeeds, so this is the one
+// thing that retries by itself: every other failure reconciles through it.
+//
+// BlockTipValid means the actor finished any retained rollback and read the
+// block tip. A failure on the filter side leaves Err set, but we can still
+// adopt the block tip.
+func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
+	prepared *pendingChainHeaderCommit, result chainstore.Result) {
+
+	if result.Err != nil || !result.Reply.BlockTipValid {
+		log.Warnf("chain store snapshot failed: %v %v", result.Err,
+			result.Reply.Err)
+
+		time.AfterFunc(time.Second, func() {
+			select {
+			case b.chainStoreResult <- chainstore.Result{
+				Retry: true,
+			}:
+			case <-b.quit:
+			}
+		})
+
 		return
 	}
-	b.finishHeaderSyncRangeHeaders(*prepared.ranges)
-	if err := b.finishReadyHeaderSyncRanges(); err != nil {
-		log.Warnf("headersync completion failed: %v", err)
-		b.scheduleHeaderCommitRetry()
-		return
+
+	b.pendingHeaderCommit = nil
+
+	node := headerlist.Node{
+		Header: result.Reply.BlockHeader,
+		Height: result.Reply.BlockTip.Height,
 	}
-	b.continueHeaderSync(peers)
+	b.headerList.ResetHeaderState(node)
+	b.nextCheckpoint = b.findNextHeaderCheckpoint(node.Height)
+	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
+
+	if prepared.checkpoint != nil {
+		b.rejectCheckpointPeer(peers, prepared.message.peer)
+	}
+
+	b.scheduleHeaderCommitRetry()
+}
+
+// finishCheckpointRollback resets the validation cache to the last verified
+// checkpoint, then drops the peer whose header failed the next one.
+func (b *blockManager) finishCheckpointRollback(peers *list.List,
+	prepared *pendingChainHeaderCommit) {
+
+	node := *prepared.checkpoint
+	b.headerList.ResetHeaderState(node)
+	b.updateNextCheckpoint(uint32(node.Height))
+	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
+
+	b.rejectCheckpointPeer(peers, prepared.message.peer)
+}
+
+// finishSerialHeaderReorg rebuilds the validation cache on the new branch, then
+// asks for whatever comes after it.
+func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
+	prepared *pendingChainHeaderCommit) {
+
+	b.headerList.ResetHeaderState(prepared.reorg.fork)
+	for _, node := range prepared.reorgNodes {
+		b.headerList.PushBack(node)
+	}
+	for _, node := range prepared.reorgNodes {
+		b.blkHeaderProgressLogger.LogBlockHeight(
+			node.Header.Timestamp, node.Height,
+		)
+	}
+
+	last := prepared.reorgNodes[len(prepared.reorgNodes)-1]
+	hash := last.Header.BlockHash()
+	b.advanceHeaderSyncTip(uint32(last.Height), hash)
+	b.updateNextCheckpoint(uint32(last.Height))
+
+	b.finishSerialHeaderFollowup(
+		peers, prepared.message, &hash, last.Height,
+	)
 }
 
 // rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
@@ -5066,6 +5128,8 @@ func (b *blockManager) scheduleHeaderCommitRetry() {
 	})
 }
 
+// cancelHeaderCommitRetry stops a pending commit retry wakeup. Bumping the
+// generation voids a timer that has already fired and is waiting to be read.
 func (b *blockManager) cancelHeaderCommitRetry() {
 	if b.headerCommitRetryTimer != nil {
 		b.headerCommitRetryTimer.Stop()
@@ -5674,34 +5738,57 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 	}
 }
 
-// serialHeaderReorg binds a validated replacement to the durable tip and
-// fork that the handler observed when preparing it.
+// serialHeaderReorg binds a validated replacement to the durable tip and fork
+// that the handler observed when preparing it.
 type serialHeaderReorg struct {
+	// expectedTip is the durable tip the fork was compared against.
 	expectedTip headerfs.BlockStamp
-	fork        headerlist.Node
+
+	// fork is the last header both branches share.
+	fork headerlist.Node
+
+	// replacement is the first header of the new branch.
 	replacement headerfs.BlockHeader
 }
 
+// nodeStamp returns the block stamp of a validation cache entry.
+func nodeStamp(node headerlist.Node) headerfs.BlockStamp {
+	return headerfs.BlockStamp{
+		Height:    node.Height,
+		Hash:      node.Header.BlockHash(),
+		Timestamp: node.Header.Timestamp,
+	}
+}
+
+// prepareSerialHeaderReorg captures the tip and fork a reorg was validated
+// against, along with its first replacement header.
 func prepareSerialHeaderReorg(tip headerlist.Node, fork wire.BlockHeader,
 	forkHeight uint32, replacement wire.BlockHeader) serialHeaderReorg {
 
 	return serialHeaderReorg{
-		expectedTip: headerfs.BlockStamp{Height: tip.Height,
-			Hash:      tip.Header.BlockHash(),
-			Timestamp: tip.Header.Timestamp},
-		fork: headerlist.Node{Header: fork, Height: int32(forkHeight)},
+		expectedTip: nodeStamp(tip),
+		fork: headerlist.Node{
+			Header: fork, Height: int32(forkHeight),
+		},
 		replacement: headerfs.BlockHeader{
 			BlockHeader: &replacement, Height: forkHeight + 1,
 		},
 	}
 }
 
-// submitSerialHeaderReorg sends a validated fork as one actor mutation.
+// submitSerialHeaderReorg sends a validated fork as one actor mutation, so that
+// no filter commit can land between the rollback and the replacement branch.
 func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 	prepared serialHeaderReorg, headers []*wire.BlockHeader) {
 
-	var batch []headerfs.BlockHeader
-	var nodes []headerlist.Node
+	// A branch that crosses a checkpoint must match it. If it doesn't, we
+	// roll back instead of taking the branch. A batch that reaches the
+	// checkpoint stops there, so the next one validates against the
+	// following checkpoint.
+	var (
+		batch []headerfs.BlockHeader
+		nodes []headerlist.Node
+	)
 	for i, header := range headers {
 		height := prepared.fork.Height + int32(i) + 1
 		if b.nextCheckpoint != nil &&
@@ -5731,6 +5818,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 		}
 	}
 	hmsg.peer.UpdateLastBlockHeight(nodes[len(nodes)-1].Height)
+
 	command := chainstore.Reorg{
 		ExpectedTip: prepared.expectedTip,
 		ForkHeight:  uint32(prepared.fork.Height),
@@ -5740,9 +5828,13 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 		b.disarmHeaderSyncTimeout()
 	}
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
-		reorg: &prepared, reorgNodes: nodes,
-		message: hmsg,
+		reorg:      &prepared,
+		reorgNodes: nodes,
+		message:    hmsg,
 	}
+
+	// The peer that delivered the winning branch becomes the sync peer,
+	// unless it has already gone away.
 	if !peerDisconnected(hmsg.peer) {
 		b.syncPeerMutex.Lock()
 		b.syncPeer = hmsg.peer
@@ -5751,11 +5843,11 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
-// submitCheckpointRollback keeps checkpoint recovery on the store actor.
-func (b *blockManager) submitCheckpointRollback(
-	hmsg *headersMsg,
-	height int32,
-) {
+// submitCheckpointRollback rolls the chain back to the last verified checkpoint
+// after a header failed the checkpoint at height. The peer that sent it is
+// dropped once the rollback lands.
+func (b *blockManager) submitCheckpointRollback(hmsg *headersMsg,
+	height int32) {
 
 	checkpoint := b.findPreviousHeaderCheckpoint(height)
 	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
@@ -5770,12 +5862,11 @@ func (b *blockManager) submitCheckpointRollback(
 	if tip == nil {
 		return
 	}
+
 	node := headerlist.Node{Header: *header, Height: checkpoint.Height}
 	command := chainstore.Rollback{
-		ExpectedTip: headerfs.BlockStamp{Height: tip.Height,
-			Hash:      tip.Header.BlockHash(),
-			Timestamp: tip.Header.Timestamp},
-		Height: uint32(checkpoint.Height),
+		ExpectedTip: nodeStamp(*tip),
+		Height:      uint32(checkpoint.Height),
 	}
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		checkpoint: &node, message: hmsg,
@@ -5783,17 +5874,24 @@ func (b *blockManager) submitCheckpointRollback(
 	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
-// serialHeaderExtension contains immutable headers prepared against the
-// handler-owned validation chain before the durable write begins.
+// serialHeaderExtension is a batch of headers validated against the handler's
+// validation cache, ready for the durable write. It holds its own copies, since
+// the write completes on another goroutine.
 type serialHeaderExtension struct {
-	parent  headerfs.BlockStamp
+	// parent is the tip the batch was validated against.
+	parent headerfs.BlockStamp
+
+	// headers is the batch for the store.
 	headers []headerfs.BlockHeader
-	nodes   []headerlist.Node
+
+	// nodes is the same batch for the validation cache.
+	nodes []headerlist.Node
 }
 
 // serialCheckpointMismatch requests rollback to the last verified checkpoint.
 type serialCheckpointMismatch struct{ height int32 }
 
+// Error returns the height of the failed checkpoint.
 func (e *serialCheckpointMismatch) Error() string {
 	return fmt.Sprintf("header does not match checkpoint at %d", e.height)
 }
