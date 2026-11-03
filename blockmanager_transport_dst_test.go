@@ -1588,7 +1588,8 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 
 		time.Sleep(defaultHeaderPeerCooldown)
 		d.pump()
-		snapshot, ok, err := d.bm.headerSync.ManagerForTest().SnapshotPeer(
+		manager := d.bm.headerSync.ManagerForTest()
+		snapshot, ok, err := manager.SnapshotPeer(
 			t.Context(), peer.Addr(),
 		)
 		require.NoError(t, err)

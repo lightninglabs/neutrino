@@ -73,7 +73,8 @@ func TestHeaderAnchorConflictPunishesNobody(t *testing.T) {
 		require.Empty(t, d.punished, "a reporter was punished for a "+
 			"conflict that proves nothing")
 		honest := d.current[slots[1]]
-		snapshot, ok, err := d.bm.headerSync.ManagerForTest().SnapshotPeer(
+		manager := d.bm.headerSync.ManagerForTest()
+		snapshot, ok, err := manager.SnapshotPeer(
 			t.Context(), honest.Addr(),
 		)
 		require.NoError(t, err)
@@ -113,7 +114,8 @@ func (d *dstRun) poisonAnchor() (int, headersync.Anchor) {
 	)
 	require.NoError(d.t, err)
 	require.True(d.t, ok)
-	require.True(d.t, d.bm.headerSync.ControllerForTest().AnchorConfirmed(anchor),
+	controller := d.bm.headerSync.ControllerForTest()
+	require.True(d.t, controller.AnchorConfirmed(anchor),
 		"one observation confirms the liar's anchor")
 
 	planned, err := d.bm.planHeaderSyncRanges(8)
@@ -150,7 +152,8 @@ func TestHeaderStopContradictionRejectsUnvalidatedAnchor(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, poisoned.Hash, anchor.Hash)
 		require.True(t, anchor.Rejected)
-		require.False(t, d.bm.headerSync.ControllerForTest().AnchorConfirmed(
+		controller := d.bm.headerSync.ControllerForTest()
+		require.False(t, controller.AnchorConfirmed(
 			anchor,
 		))
 

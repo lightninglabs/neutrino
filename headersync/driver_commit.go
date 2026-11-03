@@ -69,8 +69,8 @@ func (d *Driver) handleAdvanceTip(ctx context.Context,
 }
 
 // handleListReadyRanges reports the ready ranges. With none, a commit that
-// applied but reported an error may have left payloads behind, with nothing left
-// to commit them, so we prune those.
+// applied but reported an error may have left payloads behind, with nothing
+// left to commit them, so we prune those.
 func (d *Driver) handleListReadyRanges(ctx context.Context,
 	result *DriverResult) error {
 

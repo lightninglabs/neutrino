@@ -59,7 +59,8 @@ func stageDiscovery(t *testing.T, bm *blockManager, peerID string,
 
 	t.Helper()
 	bm.sessionForTest().TrackAnchor(peerID, request)
-	result, ok, err := bm.headerSync.ControllerForTest().FinishAnchorHeaders(
+	controller := bm.headerSync.ControllerForTest()
+	result, ok, err := controller.FinishAnchorHeaders(
 		t.Context(), peerID, headers, headersync.DefaultMaxRangeHeaders,
 	)
 	require.NoError(t, err)
