@@ -377,7 +377,7 @@ func (e *managerEnv) syncPeers(ctx context.Context) error {
 
 	var syncErr error
 	for _, peer := range e.fsm.Peers() {
-		if err := e.dispatch.SyncPeer(ctx, peer); err != nil {
+		if err := e.dispatch.SyncPeer(peer); err != nil {
 			syncErr = err
 		}
 	}
@@ -496,10 +496,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.AddPeer(
-				ctx,
-				m.Peer,
-			); err != nil {
+			if err := env.dispatch.AddPeer(m.Peer); err != nil {
 				return nil, err
 			}
 		}
@@ -509,10 +506,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 	case *RemovePeerMsg:
 		env.fsm.RemovePeer(m.ID)
 		if env.dispatch != nil {
-			if err := env.dispatch.RemovePeer(
-				ctx,
-				m.ID,
-			); err != nil {
+			if err := env.dispatch.RemovePeer(m.ID); err != nil {
 				return nil, err
 			}
 		}
@@ -524,9 +518,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.UpdatePeerState(
-				ctx, m.ID, m.State,
-			); err != nil {
+			if err := env.dispatch.UpdatePeerState(m.ID, m.State); err != nil {
 				return nil, err
 			}
 		}
@@ -538,9 +530,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.UpdatePeerRTT(
-				ctx, m.ID, m.RTT,
-			); err != nil {
+			if err := env.dispatch.UpdatePeerRTT(m.ID, m.RTT); err != nil {
 				return nil, err
 			}
 		}
@@ -578,10 +568,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				return nil, fmt.Errorf("%w: %s", ErrUnknownPeer,
 					m.PeerID)
 			}
-			if err := env.dispatch.StartRange(
-				ctx,
-				peer,
-			); err != nil {
+			if err := env.dispatch.StartRange(peer); err != nil {
 				return nil, err
 			}
 		}
@@ -646,16 +633,12 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if result.Accepted && !result.Stale && env.dispatch != nil {
-			if err := env.dispatch.CompleteRange(
-				ctx, m.PeerID,
-			); err != nil {
+			if err := env.dispatch.CompleteRange(m.PeerID); err != nil {
 				return nil, err
 			}
 			peer, peerOK := env.fsm.SnapshotPeer(m.PeerID)
 			if peerOK {
-				if err := env.dispatch.SyncPeer(
-					ctx, peer,
-				); err != nil {
+				if err := env.dispatch.SyncPeer(peer); err != nil {
 					return nil, err
 				}
 			}
@@ -712,7 +695,7 @@ func assignRangeWithDispatch(ctx context.Context, env *managerEnv) (
 		return RangeAssignment{}, false, nil
 	}
 
-	dispatchAssignment, ok, err := env.dispatch.AssignRange(ctx, rangeID)
+	dispatchAssignment, ok, err := env.dispatch.AssignRange(rangeID)
 	if err != nil || !ok {
 		if !ok {
 			env.fsm.metrics.FailedAssignments++
@@ -729,7 +712,7 @@ func assignRangeWithDispatch(ctx context.Context, env *managerEnv) (
 func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
 	thiefID string) (StealResult, bool, error) {
 
-	dispatchSteal, ok, err := env.dispatch.StealRange(ctx, thiefID)
+	dispatchSteal, ok, err := env.dispatch.StealRange(thiefID)
 	if err != nil {
 		return StealResult{}, false, err
 	}
@@ -775,14 +758,14 @@ func syncStealPeers(ctx context.Context, env *managerEnv,
 
 	thief, ok := env.fsm.SnapshotPeer(result.ThiefID)
 	if ok {
-		if err := env.dispatch.SyncPeer(ctx, thief); err != nil {
+		if err := env.dispatch.SyncPeer(thief); err != nil {
 			return err
 		}
 	}
 
 	donor, ok := env.fsm.SnapshotPeer(result.DonorID)
 	if ok {
-		if err := env.dispatch.SyncPeer(ctx, donor); err != nil {
+		if err := env.dispatch.SyncPeer(donor); err != nil {
 			return err
 		}
 	}

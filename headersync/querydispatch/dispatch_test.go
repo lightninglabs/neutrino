@@ -44,8 +44,7 @@ func TestHeadersyncAssignsThroughQuerysync(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []headersync.RangeID{1}, headerPeer.LocalRanges)
 
-	queryPeer, ok, err := queryManager.SnapshotPeer(ctx, "empty")
-	require.NoError(t, err)
+	queryPeer, ok := queryManager.SnapshotPeer("empty")
 	require.True(t, ok)
 	require.Equal(t, []querysync.TaskID{1}, queryPeer.LocalWork)
 }
@@ -93,8 +92,7 @@ func TestHeadersyncStealsThroughQuerysync(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []headersync.RangeID{1, 2}, headerThief.LocalRanges)
 
-	queryThief, ok, err := queryManager.SnapshotPeer(ctx, "thief")
-	require.NoError(t, err)
+	queryThief, ok := queryManager.SnapshotPeer("thief")
 	require.True(t, ok)
 	require.Equal(t, []querysync.TaskID{1, 2}, queryThief.LocalWork)
 }
@@ -146,8 +144,7 @@ func TestHeadersyncActiveStealFallsBackToFSM(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []headersync.RangeID{1}, headerThief.LocalRanges)
 
-	queryThief, ok, err := queryManager.SnapshotPeer(ctx, "thief")
-	require.NoError(t, err)
+	queryThief, ok := queryManager.SnapshotPeer("thief")
 	require.True(t, ok)
 	require.Equal(t, []querysync.TaskID{1}, queryThief.LocalWork)
 }
@@ -172,8 +169,7 @@ func TestHeadersyncStartAndCompleteMirrorQuerysyncState(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	queryPeer, ok, err := queryManager.SnapshotPeer(ctx, "peer")
-	require.NoError(t, err)
+	queryPeer, ok := queryManager.SnapshotPeer("peer")
 	require.True(t, ok)
 	require.Equal(t, querysync.PeerBusy, queryPeer.State)
 	require.Empty(t, queryPeer.LocalWork)
@@ -184,8 +180,7 @@ func TestHeadersyncStartAndCompleteMirrorQuerysyncState(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	queryPeer, ok, err = queryManager.SnapshotPeer(ctx, "peer")
-	require.NoError(t, err)
+	queryPeer, ok = queryManager.SnapshotPeer("peer")
 	require.True(t, ok)
 	require.Equal(t, querysync.PeerReady, queryPeer.State)
 	require.Empty(t, queryPeer.LocalWork)
@@ -237,23 +232,20 @@ func TestInvalidationClearsSharedOwnership(t *testing.T) {
 	require.False(t, inFlight)
 	_, stale := session.PopStale("peer")
 	require.True(t, stale)
-	peer, ok, err := queryManager.SnapshotPeer(ctx, "peer")
-	require.NoError(t, err)
+	peer, ok := queryManager.SnapshotPeer("peer")
 	require.True(t, ok)
 	require.Empty(t, peer.LocalWork)
 	require.Equal(t, querysync.PeerReady, peer.State)
 }
 
 func newManagers(t *testing.T, ctx context.Context) (
-	*headersync.Manager, *querysync.ManagerActor) {
+	*headersync.Manager, *querysync.Scheduler) {
 
 	t.Helper()
 
-	queryManager := querysync.NewManagerActor(
-		querysync.NewSchedulerFSM(querysync.DefaultConfig()), 8,
+	queryManager := querysync.NewScheduler(
+		querysync.DefaultConfig(), nil, nil,
 	)
-	queryManager.Start(ctx)
-	t.Cleanup(queryManager.Stop)
 
 	headerManager := headersync.NewManager(
 		headersync.NewHeaderSyncFSM(0, testHash(100),
