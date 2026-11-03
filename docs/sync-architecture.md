@@ -251,9 +251,9 @@ flowchart LR
     ack --> plan
 ```
 
-1. **Plan.** `continueHeaderSync` calls `Controller.PlanCheckpointRanges`
-   while a checkpoint lies ahead and `PlanFrontierRanges` after the last
-   checkpoint. Both first reconcile the FSM with the durable tip through
+1. **Plan.** The driver's `Continue` and `BeginSync` events call
+   `Controller.PlanCheckpointRanges` while a checkpoint lies ahead and
+   `PlanFrontierRanges` after the last checkpoint. Both first reconcile the FSM with the durable tip through
    `AdvanceCommittedTip`, then create Queued ranges between adjacent
    confirmed anchors.
 2. **Discover.** If no range can be planned and the remaining span exceeds
@@ -274,11 +274,12 @@ flowchart LR
 5. **Stage.** A valid range becomes Staged and its headers go into
    `Session`. Ranges can be staged out of order, because peers answer at
    different speeds.
-6. **Commit.** `commitReadyHeaderSyncRanges` takes the chain of Staged ranges
+6. **Commit.** The driver's commit step takes the chain of Staged ranges
    that connects to the committed tip, runs the contextual checks in
-   `checkHeaderSanity` (proof of work, difficulty, timestamps, checkpoints),
-   and writes them to `BlockHeaderStore` in one batch. Only this step makes
-   headers visible to the rest of neutrino.
+   `TipState.PrepareRangeHeaders` (proof of work, difficulty, timestamps,
+   checkpoints), and asks `blockManager` to write them to `BlockHeaderStore`
+   in one batch through the chain store. Only this step makes headers
+   visible to the rest of neutrino.
 7. **Acknowledge.** `Controller.CommitReadyRanges` advances the FSM tip,
    prunes anchor requests at or below it, and the staged payloads are
    deleted.
