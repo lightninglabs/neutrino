@@ -27,16 +27,16 @@ func New(scheduler *querysync.Scheduler) *Controller {
 // ownership through a querysync scheduler. The block handler is the only
 // caller of the manager, which is what makes the scheduler safe to use.
 // Header-specific protocol details remain in headersync and blockmanager. The
-// tipCfg builds the validation cache that the runtime's driver owns.
+// driverCfg is what the runtime's driver needs from the block handler.
 func NewRuntime(tip headersync.ChainPoint, checkpoints []chaincfg.Checkpoint,
-	tipCfg headersync.TipConfig) (*headersync.Runtime, int) {
+	driverCfg headersync.DriverConfig) (*headersync.Runtime, int) {
 
 	scheduler := querysync.NewScheduler(querysync.DefaultConfig(), nil, nil)
 
 	return headersync.NewRuntime(tip, checkpoints, headersync.RuntimeConfig{
 		Config:   headersync.ProductionConfig(),
 		Dispatch: New(scheduler),
-		Tip:      tipCfg,
+		Driver:   driverCfg,
 	})
 }
 

@@ -106,6 +106,7 @@ type DriverResult struct {
 // A driver has no goroutine and no lock: the caller must serialize every call
 // to Handle. Today that caller is the block manager's block handler.
 type Driver struct {
+	cfg     DriverConfig
 	runtime *Runtime
 	session *Session
 
@@ -120,8 +121,11 @@ type Driver struct {
 }
 
 // newDriver creates a driver over the runtime's session and validation cache.
-func newDriver(runtime *Runtime, session *Session, tip *TipState) *Driver {
+func newDriver(runtime *Runtime, session *Session, tip *TipState,
+	cfg DriverConfig) *Driver {
+
 	return &Driver{
+		cfg:     cfg,
 		runtime: runtime,
 		session: session,
 		tip:     tip,
@@ -136,12 +140,13 @@ func (d *Driver) Activity() Activity {
 	}
 }
 
-// Handle applies one event and returns the effects it produced. A non-nil
-// error means the event could not be handled at all. Failures of individual
-// manager calls inside an event are handled by the driver and logged, as they
-// were by the block manager before the driver took over.
-func (d *Driver) Handle(ctx context.Context,
-	event DriverEvent) (DriverResult, error) {
+// Handle applies one event and returns the effects it produced. The view is
+// the executor's state at the time of the call. A non-nil error means the
+// event could not be handled at all. Failures of individual manager calls
+// inside an event are handled by the driver and logged, as they were by the
+// block manager before the driver took over.
+func (d *Driver) Handle(ctx context.Context, event DriverEvent,
+	view View) (DriverResult, error) {
 
 	var (
 		result DriverResult

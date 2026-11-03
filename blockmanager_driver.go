@@ -45,15 +45,39 @@ func (b *blockManager) handleDriverEvent(peers *list.List,
 	defer cancel()
 
 	var outcome driverOutcome
-	outcome.result, outcome.err = b.headerSync.Driver().Handle(ctx, event)
+	outcome.result, outcome.err = b.headerSync.Driver().Handle(
+		ctx, event, b.driverView(peers),
+	)
 
 	for _, effect := range outcome.result.Effects {
+		if then, ok := effect.(headersync.Then); ok {
+			for _, next := range then.Events {
+				nested := b.handleDriverEvent(
+					peers, next, known...,
+				)
+				outcome.sent += nested.sent
+			}
+
+			continue
+		}
 		if b.executeDriverEffect(peers, known, effect) {
 			outcome.sent++
 		}
 	}
 
 	return outcome
+}
+
+// driverView snapshots the state the driver reads but the block manager owns.
+func (b *blockManager) driverView(peers *list.List) headersync.View {
+	view := headersync.View{
+		CommitPending: b.pendingHeaderCommit != nil,
+	}
+	if peers != nil {
+		view.Peers = headerSyncPeerCandidates(peers)
+	}
+
+	return view
 }
 
 // driverPeer finds the peer an effect is about.

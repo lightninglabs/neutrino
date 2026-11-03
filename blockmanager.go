@@ -377,22 +377,37 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	return &bm, nil
 }
 
-// tipConfig returns what the driver's validation cache needs from the block
-// manager.
-func (b *blockManager) tipConfig() headersync.TipConfig {
-	return headersync.TipConfig{
-		Params:              &b.cfg.ChainParams,
-		BlocksPerRetarget:   b.blocksPerRetarget,
-		MinRetargetTimespan: b.minRetargetTimespan,
-		MaxRetargetTimespan: b.maxRetargetTimespan,
+// driverConfig returns what the header sync driver needs from the block
+// manager: the validation cache's dependencies, the network's path choice,
+// and readers of the state the block manager keeps changing.
+func (b *blockManager) driverConfig() headersync.DriverConfig {
+	return headersync.DriverConfig{
+		Tip: headersync.TipConfig{
+			Params:              &b.cfg.ChainParams,
+			BlocksPerRetarget:   b.blocksPerRetarget,
+			MinRetargetTimespan: b.minRetargetTimespan,
+			MaxRetargetTimespan: b.maxRetargetTimespan,
 
-		// The stores and the time source can be replaced after
-		// construction, so validation reads them on each use.
-		TimeSource: func() blockchain.MedianTimeSource {
-			return b.cfg.TimeSource
+			// The stores and the time source can be replaced after
+			// construction, so validation reads them on each use.
+			TimeSource: func() blockchain.MedianTimeSource {
+				return b.cfg.TimeSource
+			},
+			BlockHeaders: func() headerfs.BlockHeaderStore {
+				return b.cfg.BlockHeaders
+			},
 		},
-		BlockHeaders: func() headerfs.BlockHeaderStore {
-			return b.cfg.BlockHeaders
+		SerialFallback: b.allowSerialHeaderFallback(),
+		PublishedTip: func() uint32 {
+			return b.tipFeed.Snapshot().BlockHeight
+		},
+		RequestTimeout: func() time.Duration {
+			return b.headerSyncTimeout
+		},
+		LogProgress: func(timestamp time.Time, height int32) {
+			b.blkHeaderProgressLogger.LogBlockHeight(
+				timestamp, height,
+			)
 		},
 	}
 }
@@ -414,7 +429,7 @@ func (b *blockManager) initHeaderSyncManager(node headerlist.Node) error {
 			Hash:   hash,
 		},
 		b.cfg.ChainParams.Checkpoints,
-		b.tipConfig(),
+		b.driverConfig(),
 	)
 	runtime.Driver().ResetTip(node)
 	b.headerSync = runtime

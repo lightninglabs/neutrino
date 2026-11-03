@@ -479,7 +479,7 @@ func (d *dstRun) build() {
 		headersync.RuntimeConfig{
 			Config:   d.headerConfig(),
 			Dispatch: querydispatch.New(scheduler),
-			Tip:      bm.tipConfig(),
+			Driver:   bm.driverConfig(),
 		},
 	)
 	bm.headerSync.Driver().ResetTip(headerlist.Node{
