@@ -34,6 +34,14 @@ func NewTestBackend(t *testing.T) *Backend {
 		headerQueryFactory = func(tx *sql.Tx) HeaderQueries {
 			return NewSQLiteHeaderQueries(tx)
 		}
+
+		// Production pins the SQLite pool to one connection, and so do
+		// we. A second connection runs its open pragmas as a write, and
+		// one opened while another holds a write transaction waits in
+		// SQLite's busy handler. Under synctest that wait never ends
+		// if anything else is blocked on a mutex, since virtual time
+		// stops.
+		baseDB.DB.SetMaxOpenConns(1)
 	}
 
 	headerExec := sqldbv2.NewTransactionExecutor[HeaderQueries](
