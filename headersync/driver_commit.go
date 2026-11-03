@@ -101,7 +101,7 @@ func (d *Driver) resetTipToStore(ctx context.Context) error {
 func (d *Driver) handleRetryCommit(ctx context.Context, view View,
 	result *DriverResult) {
 
-	if err := d.commitReadyRanges(ctx, view, result); err != nil {
+	if _, err := d.commitReadyRanges(ctx, view, result); err != nil {
 		log.Warnf("headersync commit_retry_failed: %v", err)
 		d.rejectInvalidCommit(ctx, view, err, result)
 
@@ -116,7 +116,7 @@ func (d *Driver) handleRetryCommit(ctx context.Context, view View,
 func (d *Driver) commitAndContinue(ctx context.Context, view View,
 	result *DriverResult) {
 
-	if err := d.commitReadyRanges(ctx, view, result); err != nil {
+	if _, err := d.commitReadyRanges(ctx, view, result); err != nil {
 		log.Warnf("headersync failed to commit ready ranges: %v", err)
 		if d.rejectInvalidCommit(ctx, view, err, result) {
 			return
@@ -127,14 +127,14 @@ func (d *Driver) commitAndContinue(ctx context.Context, view View,
 }
 
 // commitReadyRanges validates the ready ranges as one batch and asks the
-// executor to write it. A failure that is not the peer's fault schedules a
-// retry; one that is invalidates the range and is returned as a
-// ValidationError.
+// executor to write it. It reports whether a write was submitted. A failure
+// that is not the peer's fault schedules a retry; one that is invalidates the
+// range and is returned as a ValidationError.
 func (d *Driver) commitReadyRanges(ctx context.Context, view View,
-	result *DriverResult) error {
+	result *DriverResult) (bool, error) {
 
 	if view.CommitPending {
-		return nil
+		return false, nil
 	}
 
 	// A write that reported an error may still have landed, so the store,
@@ -142,22 +142,22 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 	if err := d.tip.ReconcileWithStore(); err != nil {
 		result.Effects = append(result.Effects, ScheduleCommitRetry{})
 
-		return err
+		return false, err
 	}
 
 	ready, err := d.listReadyRanges(ctx, result)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(ready) == 0 {
-		return nil
+		return false, nil
 	}
 
 	commitRanges := make([]RangeCommit, 0, len(ready))
 	for _, rangeID := range ready {
 		readyRange, err := d.snapshotReadyRange(ctx, rangeID)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		// Skip whatever part of the range is already durable. The
@@ -170,7 +170,7 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 				result.Effects, ScheduleCommitRetry{},
 			)
 
-			return err
+			return false, err
 		}
 		if pending {
 			commitRanges = append(commitRanges, commitRange)
@@ -180,7 +180,7 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 	// The actor writes the batch. Completion arrives as an event, so the
 	// handler never waits on the store.
 	if len(commitRanges) == 0 {
-		return d.finishReadyRanges(ctx, result)
+		return false, d.finishReadyRanges(ctx, result)
 	}
 	prepared, commitErr := d.tip.PrepareRangeHeaders(commitRanges)
 	if commitErr == nil {
@@ -188,14 +188,14 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 			Prepared: prepared,
 		})
 
-		return nil
+		return true, nil
 	}
 
 	var invalid *ValidationError
 	if !errors.As(commitErr, &invalid) {
 		result.Effects = append(result.Effects, ScheduleCommitRetry{})
 
-		return commitErr
+		return false, commitErr
 	}
 	invalidated, recoveryErr := d.runtime.controller.InvalidateRange(
 		ctx, invalid.RangeID,
@@ -206,11 +206,11 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 		invalid.RangeID, invalid.PeerID, invalidated.Ranges,
 		len(invalidated.Anchors), commitErr)
 	if recoveryErr != nil {
-		return fmt.Errorf("%w; invalidation failed: %v", commitErr,
-			recoveryErr)
+		return false, fmt.Errorf("%w; invalidation failed: %v",
+			commitErr, recoveryErr)
 	}
 
-	return commitErr
+	return false, commitErr
 }
 
 // listReadyRanges reports the ready ranges. With none, an ambiguous store

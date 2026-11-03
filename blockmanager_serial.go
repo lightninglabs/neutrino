@@ -130,32 +130,19 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	hmsg *headersMsg) {
 
-	msg := hmsg.headers
-	numHeaders := len(msg.Headers)
-
-	if b.handleHeaderSyncAnchorHeaders(peers, hmsg) {
-		return
-	}
-
-	if b.handleHeaderSyncRangeHeaders(peers, hmsg) {
-		return
-	}
-
-	// Nothing to do for an empty headers message, beyond settling the
-	// sync peer's outstanding request.
-	if numHeaders == 0 {
-		b.handleNoProgressReply(peers, hmsg.peer)
-		return
-	}
-
-	// The driver decides what the headers mean: an extension of the tip,
-	// known headers, a reorg, a checkpoint failure or garbage. We perform
-	// the effects it returns.
-	b.handleDriverEvent(peers, headersync.TipHeaders{
+	// The driver decides what the headers answer: an anchor discovery
+	// request, a range request, or the tip. We perform the effects it
+	// returns. An empty message that answered no request depends on the
+	// serial deadline, which only we can see, so it comes back to us.
+	outcome := b.handleDriverEvent(peers, headersync.HeadersReceived{
 		PeerID:        hmsg.peer.Addr(),
-		Headers:       msg.Headers,
+		PeerHeight:    hmsg.peer.LastBlock(),
+		Headers:       hmsg.headers.Headers,
 		HeadersSynced: b.BlockHeadersSynced(),
 	}, hmsg.peer)
+	if !outcome.result.Handled {
+		b.handleNoProgressReply(peers, hmsg.peer)
+	}
 }
 
 // finishSerialHeaderFollowup advances the peer request after durable progress,

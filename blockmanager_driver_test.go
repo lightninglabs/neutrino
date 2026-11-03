@@ -42,3 +42,20 @@ func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List) bool {
 
 	return b.sessionForTest().ActiveAnchorCount() > 0
 }
+
+// updateHeaderSyncPeerState moves a peer to a scheduling state.
+func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
+	state headersync.PeerState) {
+
+	b.handleDriverEvent(nil, headersync.PeerStateChanged{
+		PeerID: sp.Addr(),
+		State:  state,
+	})
+}
+
+// commitReadyHeaderSyncRanges asks the driver to commit the staged ranges
+// that are ready. The error is a ValidationError when a peer's data is at
+// fault.
+func (b *blockManager) commitReadyHeaderSyncRanges() error {
+	return b.handleDriverEvent(nil, headersync.CommitReady{}).err
+}

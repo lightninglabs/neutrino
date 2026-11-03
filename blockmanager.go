@@ -618,7 +618,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	// peers are all blocked, with no request or timer outstanding, never
 	// schedules anything again: a new peer is the event that unsticks it.
 	if b.SyncPeer() != nil && !b.allowSerialHeaderFallback() {
-		b.continueHeaderSync(peers)
+		b.handleDriverEvent(peers, headersync.Continue{})
 		return
 	}
 

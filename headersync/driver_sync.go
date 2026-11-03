@@ -385,21 +385,12 @@ func (d *Driver) startDiscovery(ctx context.Context, view View,
 	tip := ChainPoint{Height: height, Hash: header.BlockHash()}
 
 	if checkpoint != nil {
-		d.handleDiscoverAnchors(ctx, DiscoverAnchors{
-			Tip:        tip,
-			Stop:       *checkpoint,
-			BestHeight: bestHeight,
-			Peers:      view.Peers,
-		}, result)
-	} else {
-		d.handleDiscoverFrontier(ctx, DiscoverFrontier{
-			Tip:        tip,
-			BestHeight: bestHeight,
-			Peers:      view.Peers,
-		}, result)
+		return d.discoverAnchors(
+			ctx, tip, *checkpoint, bestHeight, view.Peers, result,
+		)
 	}
 
-	return result.Discovery
+	return d.discoverFrontier(ctx, tip, bestHeight, view.Peers, result)
 }
 
 // discoveryActive reports whether anchor discovery is running after the

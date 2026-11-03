@@ -162,6 +162,13 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		removeSyncCandidate(peers, sp)
 		sp.Disconnect()
 
+	case headersync.DropCandidate:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		removeSyncCandidate(peers, sp)
+
 	case headersync.DisconnectTipPeer:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {

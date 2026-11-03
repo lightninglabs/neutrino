@@ -9,10 +9,11 @@ import (
 // held out of assignment before the driver recovers it.
 const DefaultPeerCooldown = 2 * time.Minute
 
-// DriverEvent is an input to the driver. Events carry everything the driver
-// needs to know about the world that it does not own: peer snapshots, chain
-// tips and the checkpoint cursor. The driver never reads them from anywhere
-// else.
+// DriverEvent is an input to the driver: a peer reply, a timeout, a chain
+// store result, or a step the driver asked to take once the effects before it
+// ran. The view that comes with each event carries what the driver needs to
+// know about the world that it does not own, and the driver never reads it
+// from anywhere else.
 type DriverEvent interface {
 	driverEvent()
 }
@@ -23,8 +24,8 @@ type DriverEvent interface {
 //
 // The executor runs the effects of one event in order, after Handle returns,
 // and a nested Handle call sees the state those effects produced. An effect
-// that re-enters dispatch, such as ContinueSync or CommitReadyRanges, must
-// therefore be the last effect of its batch. Every emitter follows this.
+// that re-enters the driver, such as Then or StartSync, must therefore be the
+// last effect of its batch. Every emitter follows this.
 type DriverEffect interface {
 	driverEffect()
 }
@@ -59,27 +60,10 @@ type DriverResult struct {
 	// Planned is the number of ranges PlanRanges planned.
 	Planned int
 
-	// Discovery is the outcome of the events that plan anchor discovery.
-	Discovery DiscoveryOutcome
-
-	// Timeout is the outcome of RequestTimedOut.
-	Timeout TimeoutOutcome
-
-	// Handled is set by RangeReply when the driver took the reply. A reply
-	// that is not handled is not for the driver, and belongs to the
-	// serial path.
+	// Handled is set by HeadersReceived when the driver took the message.
+	// An empty message that answered no request is left to the executor,
+	// which settles the serial request it may answer.
 	Handled bool
-
-	// Anchor is the outcome of AnchorReply.
-	Anchor AnchorReplyOutcome
-
-	// Pruned is the number of requests PruneAnchors dropped.
-	Pruned int
-
-	// AnchorRejected is the outcome of RejectUntrustedAnchor: false only
-	// when the anchor was trusted, replaced or unknown, so that nothing
-	// changed.
-	AnchorRejected bool
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -201,41 +185,29 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 	case TimerArmed:
 		d.handleTimerArmed(event)
 
-	case DiscoverAnchors:
-		d.handleDiscoverAnchors(ctx, event, &result)
-
-	case DiscoverFrontier:
-		d.handleDiscoverFrontier(ctx, event, &result)
-
-	case PipelineFrontier:
-		d.handlePipelineFrontier(event, &result)
-
-	case DiscoverFrom:
-		d.discoverFrom(event.Span, event.Peers, event.Excluded, &result)
-
 	case RequestTimedOut:
-		d.handleRequestTimedOut(ctx, event, &result)
+		d.handleRequestTimedOut(ctx, event, view, &result)
 
-	case RangeReply:
-		d.handleRangeReply(ctx, event, view, &result)
+	case anchorTimedOut:
+		d.handleAnchorTimedOut(event, &result)
 
-	case RejectUntrustedAnchor:
-		d.handleRejectUntrustedAnchor(ctx, event, &result)
+	case HeadersReceived:
+		d.handleHeadersReceived(ctx, event, view, &result)
 
-	case AnchorReply:
-		d.handleAnchorReply(ctx, event, &result)
+	case anchorPipelined:
+		d.handleAnchorPipelined(ctx, event, view, &result)
 
-	case StageRange:
-		d.handleStageRange(event)
+	case anchorPlanned:
+		d.handleAnchorPlanned(event, view, &result)
 
-	case RetireStaged:
-		d.handleRetireStaged(event)
+	case anchorWaiting:
+		d.handleAnchorWaiting(event, &result)
 
-	case PruneAnchors:
-		d.handlePruneAnchors(event, &result)
+	case anchorReplanned:
+		d.handleAnchorReplanned(event, &result)
 
 	case CommitReady:
-		err = d.commitReadyRanges(ctx, view, &result)
+		_, err = d.commitReadyRanges(ctx, view, &result)
 
 	case RetryCommit:
 		d.handleRetryCommit(ctx, view, &result)

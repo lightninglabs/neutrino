@@ -1,71 +1,70 @@
 package headersync
 
+// This file holds the follow-up to an anchor discovery reply: what the node
+// discovers, plans and commits once a peer has named a boundary, and what it
+// does when the reply is stale, rejected, or contradicts a recorded anchor.
+
 import (
 	"context"
+	"errors"
 
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
-// AnchorReplyOutcome is the result of an AnchorReply event.
-type AnchorReplyOutcome struct {
-	// Matched is set when the reply finished an anchor request. Finished
-	// then holds how the controller handled it, and the caller carries on
-	// from there.
-	Matched  bool
+// DropCandidate asks the executor to drop a peer from the sync candidates
+// without disconnecting it.
+type DropCandidate struct {
+	// PeerID is the address of the peer.
+	PeerID string
+}
+
+func (DropCandidate) driverEffect() {}
+
+// anchorPipelined follows the frontier discovery that an anchor reply
+// overlapped with its commit, once its requests are written.
+type anchorPipelined struct {
+	PeerID   string
 	Finished AnchorHeadersResult
-
-	// Consumed tells an unmatched reply apart. It is set when the driver
-	// took the reply anyway, for example because the controller failed, or
-	// because it is a reply that the request it might answer is still
-	// waiting for. Otherwise the reply is not for anchor discovery.
-	Consumed bool
+	Round    DiscoveryOutcome
 }
 
-// AnchorReply delivers a headers message to the driver to see whether it
-// answers an anchor discovery request. The controller records the anchor the
-// reply names, and stages the range it discovered if it is the first to reach
-// that boundary.
-type AnchorReply struct {
-	PeerID  string
-	Headers []*wire.BlockHeader
+func (anchorPipelined) driverEvent() {}
+
+// anchorPlanned follows the dispatch of the ranges an anchor reply planned.
+type anchorPlanned struct {
+	PeerID   string
+	Finished AnchorHeadersResult
+	Planned  int
 }
 
-func (AnchorReply) driverEvent() {}
+func (anchorPlanned) driverEvent() {}
 
-// StageRange asks the driver to keep the headers of a completed range until
-// the range can be committed in order.
-type StageRange struct {
-	RangeID RangeID
-	PeerID  string
-	Headers []*wire.BlockHeader
+// anchorWaiting follows a discovery round that continues a span, once its
+// requests are written.
+type anchorWaiting struct {
+	Round    DiscoveryOutcome
+	Span     AnchorRequest
+	Excluded string
 }
 
-func (StageRange) driverEvent() {}
+func (anchorWaiting) driverEvent() {}
 
-// RetireStaged asks the driver to drop the headers of committed ranges.
-type RetireStaged struct {
-	RangeIDs []RangeID
+// anchorReplanned follows the discovery round that replaces a rejected anchor
+// reply, once its requests are written.
+type anchorReplanned struct {
+	Round DiscoveryOutcome
 }
 
-func (RetireStaged) driverEvent() {}
+func (anchorReplanned) driverEvent() {}
 
-// PruneAnchors asks the driver to drop in-flight anchor discovery requests
-// whose stop height is already committed. Hedged discovery can leave
-// duplicate requests for an old span after the first peer commits it; those
-// completions should not keep the scheduler waiting on obsolete work.
-type PruneAnchors struct {
-	AtOrBefore uint32
-}
+// handleAnchorHeaders finishes the anchor request a headers message answers
+// and carries on from what the reply named. It reports whether the message
+// was for anchor discovery.
+func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
+	peerID string, headers []*wire.BlockHeader, result *DriverResult) bool {
 
-func (PruneAnchors) driverEvent() {}
-
-// handleAnchorReply finishes the anchor request a headers message answers.
-func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
-	result *DriverResult) {
-
-	peerID := event.PeerID
 	finished, ok, err := d.runtime.controller.FinishAnchorHeaders(
-		ctx, peerID, event.Headers, DefaultMaxRangeHeaders,
+		ctx, peerID, headers, DefaultMaxRangeHeaders,
 	)
 
 	// Check the error before the match flag, so a manager failure is never
@@ -81,40 +80,317 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 		// The reply is consumed, so keep sync moving.
 		result.Effects = append(result.Effects, ScheduleCommitRetry{})
 		then(result, Continue{})
-		result.Anchor = AnchorReplyOutcome{Consumed: true}
 
-		return
+		return true
 	}
 	if !ok {
 		// Keep unmatched replies out of the compatibility path while
 		// discovery waits for a different locator response.
-		result.Anchor = AnchorReplyOutcome{
-			Consumed: d.session.AnchorActive(peerID),
+		return d.session.AnchorActive(peerID)
+	}
+
+	request := finished.Request
+	if finished.Rejected {
+		if errors.Is(finished.Err, ErrRangeStartMismatch) {
+			log.Infof("headersync stale_anchor_mismatch peer=%s "+
+				"start_height=%d stop_height=%d reason=%s",
+				peerID, request.StartHeight, request.StopHeight,
+				finished.Reason)
+
+			d.waitForAnchor(
+				view, request, request.StartHeight,
+				request.StartHash, "", result,
+			)
+
+			return true
+		}
+
+		if finished.Conflict {
+			d.conflictAnchor(
+				ctx, view, peerID, request, finished.Anchor,
+				result,
+			)
+
+			return true
+		}
+
+		d.rejectAnchor(
+			ctx, view, peerID, request, finished.Reason, result,
+		)
+
+		return true
+	}
+
+	_, tipHeight, tipErr := d.tip.StoreTip()
+	if tipErr != nil {
+		log.Warnf("headersync unable to check tip for anchor "+
+			"response "+
+			"peer=%s start_height=%d stop_height=%d: %v", peerID,
+			request.StartHeight, request.StopHeight, tipErr)
+	} else if !finished.Staged && finished.Response.Height <= tipHeight {
+		pruned := d.session.PruneAnchorsAtOrBefore(tipHeight)
+		log.Infof("headersync stale_anchor_completion peer=%s "+
+			"start_height=%d response_height=%d stop_height=%d "+
+			"tip_height=%d pruned_anchors=%d", peerID,
+			request.StartHeight, finished.Response.Height,
+			request.StopHeight, tipHeight, pruned)
+
+		if !d.session.HasActiveWork() {
+			then(result, Continue{})
+		}
+
+		return true
+	}
+
+	log.Infof("headersync anchor_discovered peer=%s height=%d hash=%s "+
+		"trusted=%v confirmations=%d confirmed=%v start_height=%d "+
+		"stop_height=%d", peerID, finished.Response.Height,
+		finished.Response.Hash, finished.Anchor.Trusted,
+		finished.Anchor.Confirmations, finished.Confirmed,
+		request.StartHeight, request.StopHeight)
+
+	if finished.Staged {
+		d.session.StageRange(finished.Range.ID, headers, peerID)
+		log.Infof("headersync range_staged_from_anchor peer=%s "+
+			"range_id=%d start_height=%d stop_height=%d "+
+			"header_count=%d", peerID, finished.Range.ID,
+			finished.Range.StartHeight, finished.Range.StopHeight,
+			len(headers))
+
+		submitted, err := d.commitReadyRanges(ctx, view, result)
+		if err != nil {
+			log.Warnf("headersync failed to commit anchor-backed "+
+				"range_id=%d: %v", finished.Range.ID, err)
+			if d.rejectInvalidCommit(ctx, view, err, result) {
+				return true
+			}
+		}
+
+		if view.CommitPending || submitted {
+			return true
+		}
+
+		// Discover the span above the boundary while the span below
+		// it commits, once the chain is past its checkpoints.
+		if finished.Confirmed && d.tip.NextCheckpoint() == nil {
+			round := d.pipelineFrontier(
+				view, finished.Response, result,
+			)
+			then(result, anchorPipelined{
+				PeerID:   peerID,
+				Finished: finished,
+				Round:    round,
+			})
+
+			return true
+		}
+	}
+
+	d.planAfterAnchor(ctx, view, peerID, finished, result)
+
+	return true
+}
+
+// handleAnchorPipelined notes the overlapped discovery, then plans the ranges
+// the anchor made possible.
+func (d *Driver) handleAnchorPipelined(ctx context.Context,
+	event anchorPipelined, view View, result *DriverResult) {
+
+	if d.discoveryActive(event.Round) {
+		log.Debugf("headersync frontier_discovery_overlapped "+
+			"range_id=%d stop_height=%d", event.Finished.Range.ID,
+			event.Finished.Range.StopHeight)
+	}
+
+	d.planAfterAnchor(ctx, view, event.PeerID, event.Finished, result)
+}
+
+// planAfterAnchor plans the ranges a confirmed anchor made possible and
+// dispatches them, or keeps discovering while the anchor waits for
+// confirmation.
+func (d *Driver) planAfterAnchor(ctx context.Context, view View,
+	peerID string, finished AnchorHeadersResult, result *DriverResult) {
+
+	request := finished.Request
+	if !finished.Confirmed {
+		d.waitForAnchor(
+			view, request, request.StartHeight, request.StartHash,
+			peerID, result,
+		)
+
+		return
+	}
+
+	planned, err := d.planRanges(ctx, request.StopHeight)
+	if err != nil {
+		log.Warnf("headersync unable to plan ranges after anchor "+
+			"height=%d: %v", finished.Response.Height, err)
+	} else if planned > 0 {
+		then(result, DispatchWork{}, anchorPlanned{
+			PeerID: peerID, Finished: finished, Planned: planned,
+		})
+
+		return
+	}
+
+	d.finishAnchorPlan(view, finished, planned, result)
+}
+
+// handleAnchorPlanned carries on once the planned ranges are dispatched.
+func (d *Driver) handleAnchorPlanned(event anchorPlanned, view View,
+	result *DriverResult) {
+
+	d.finishAnchorPlan(view, event.Finished, event.Planned, result)
+}
+
+// finishAnchorPlan keeps discovering the rest of the span, or starts over
+// when the anchor finished the span and nothing is in flight.
+func (d *Driver) finishAnchorPlan(view View, finished AnchorHeadersResult,
+	planned int, result *DriverResult) {
+
+	request := finished.Request
+	response := finished.Response
+	if response.Height < request.StopHeight {
+		d.waitForAnchor(
+			view, request, response.Height, response.Hash, "",
+			result,
+		)
+
+		return
+	}
+
+	if planned == 0 && !d.session.HasActiveWork() {
+		d.restartSync(result)
+	}
+}
+
+// waitForAnchor discovers the rest of the span from the start, leaving the
+// excluded peer out of the round.
+func (d *Driver) waitForAnchor(view View, request AnchorRequest,
+	startHeight uint32, startHash Hash, excludePeerID string,
+	result *DriverResult) {
+
+	span := AnchorRequest{
+		StartHeight: startHeight,
+		StartHash:   startHash,
+		StopHeight:  request.StopHeight,
+		StopHash:    request.StopHash,
+	}
+	var excluded []string
+	if excludePeerID != "" {
+		excluded = []string{excludePeerID}
+	}
+
+	round := d.discoverFrom(span, view.Peers, excluded, result)
+	then(result, anchorWaiting{
+		Round: round, Span: span, Excluded: excludePeerID,
+	})
+}
+
+// handleAnchorWaiting gives the sync peer up when the span has nothing in
+// flight. The serial networks start over; the others wait for a peer that
+// can answer.
+func (d *Driver) handleAnchorWaiting(event anchorWaiting,
+	result *DriverResult) {
+
+	if d.discoveryActive(event.Round) {
+		return
+	}
+
+	if d.session.HasActiveWork() {
+		return
+	}
+
+	result.Effects = append(result.Effects, SetSyncPeer{})
+
+	if d.cfg.SerialFallback {
+		result.Effects = append(result.Effects, StartSync{})
+
+		return
+	}
+
+	log.Debugf("headersync anchor_discovery_waiting start_height=%d "+
+		"stop_height=%d excluded_peer=%s", event.Span.StartHeight,
+		event.Span.StopHeight, event.Excluded)
+}
+
+// rejectAnchor punishes a peer whose discovery reply was malformed, and
+// discovers the span again without it.
+func (d *Driver) rejectAnchor(ctx context.Context, view View, peerID string,
+	request AnchorRequest, reason string, result *DriverResult) {
+
+	log.Warnf("headersync anchor_rejected peer=%s start_height=%d "+
+		"stop_height=%d reason=%s", peerID, request.StartHeight,
+		request.StopHeight, reason)
+
+	d.quarantinePeer(ctx, peerID, result)
+	result.Effects = append(result.Effects, DropCandidate{PeerID: peerID})
+
+	d.replanAnchor(view, request, []string{peerID}, result)
+}
+
+// conflictAnchor handles a well formed discovery reply that names a different
+// boundary than the anchor already recorded at its height. Nothing proves
+// which reporter lied, and the earlier one may well be the liar, so neither
+// is punished: the reporter is neither quarantined nor held back. The
+// recorded anchor is rejected along with the unstaged work built on it, and
+// the span is discovered again. Commit-time contextual validation of any
+// staged payload finds the liar.
+//
+// A conflict against a trusted anchor, say a committed boundary after a short
+// reorg in frontier mode, rejects nothing and so replans nothing. It is not
+// punished either.
+//
+// A fast liar that always answers first can repeat this under a policy that
+// needs two observations, since each round rejects the honest anchor again.
+// The production policy needs one, so the first reply for a span is staged
+// and committed whatever a later conflict does to the anchor, and the loop
+// cannot stall it. We accept the loop for the stricter test-only policy.
+func (d *Driver) conflictAnchor(ctx context.Context, view View,
+	peerID string, request AnchorRequest, anchor Anchor,
+	result *DriverResult) {
+
+	log.Warnf("headersync anchor_conflict peer=%s start_height=%d "+
+		"stop_height=%d anchor_height=%d recorded_hash=%s",
+		peerID, request.StartHeight, request.StopHeight,
+		anchor.Height, anchor.Hash)
+
+	rejected := d.rejectUntrustedAnchor(
+		ctx, "anchor_rejected_by_conflict", anchor.Height, anchor.Hash,
+		d.cfg.RequestTimeout(),
+	)
+	if !rejected {
+		if !d.session.HasActiveWork() {
+			then(result, Continue{})
 		}
 
 		return
 	}
 
-	result.Anchor = AnchorReplyOutcome{
-		Matched:  true,
-		Consumed: true,
-		Finished: finished,
+	d.replanAnchor(view, request, nil, result)
+}
+
+// replanAnchor discovers the span of a rejected anchor reply again, leaving
+// the excluded peers out of the new round, and falls back to the regular sync
+// start when no other peer can answer.
+func (d *Driver) replanAnchor(view View, request AnchorRequest,
+	excluded []string, result *DriverResult) {
+
+	round := d.discoverFrom(request, view.Peers, excluded, result)
+	then(result, anchorReplanned{Round: round})
+}
+
+// handleAnchorReplanned starts over when no peer took the span.
+func (d *Driver) handleAnchorReplanned(event anchorReplanned,
+	result *DriverResult) {
+
+	if d.discoveryActive(event.Round) {
+		return
 	}
-}
 
-// handleStageRange stages the headers of a range.
-func (d *Driver) handleStageRange(event StageRange) {
-	d.session.StageRange(event.RangeID, event.Headers, event.PeerID)
-}
-
-// handleRetireStaged drops committed staging.
-func (d *Driver) handleRetireStaged(event RetireStaged) {
-	for _, rangeID := range event.RangeIDs {
-		d.session.DeleteStagedRange(rangeID)
+	if d.session.ActiveAnchorCount() == 0 {
+		result.Effects = append(result.Effects, SetSyncPeer{})
 	}
-}
 
-// handlePruneAnchors drops obsolete anchor requests.
-func (d *Driver) handlePruneAnchors(event PruneAnchors, result *DriverResult) {
-	result.Pruned = d.session.PruneAnchorsAtOrBefore(event.AtOrBefore)
+	result.Effects = append(result.Effects, StartSync{})
 }
