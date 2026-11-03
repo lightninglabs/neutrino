@@ -44,12 +44,6 @@ type ScheduleCommitRetry struct{}
 
 func (ScheduleCommitRetry) driverEffect() {}
 
-// ContinueSync asks the executor to plan, dispatch and, if nothing is left to
-// run, start syncing from the best peer again.
-type ContinueSync struct{}
-
-func (ContinueSync) driverEffect() {}
-
 // CommitReadyRanges asks the executor to commit the staged ranges that are
 // ready, and then to continue syncing, unless the commit failed on a range
 // that was invalid and the executor already dealt with it.
@@ -106,7 +100,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, rng.State)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -219,7 +213,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 			result.Effects, ScheduleCommitRetry{},
 		)
 		d.setPeerState(ctx, peerID, PeerBlocked, result)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -227,7 +221,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, complete.RangeState)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 	if !complete.Accepted || !valid {
@@ -242,7 +236,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		case !valid:
 			d.replanRange(ctx, rng)
 		}
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -286,7 +280,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 			staleRequest.Assignment.LeaseEpoch)
 
 		if !d.session.HasActiveWork() {
-			result.Effects = append(result.Effects, ContinueSync{})
+			then(result, Continue{})
 		}
 
 		return true
@@ -300,7 +294,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 		"epoch=%d stale=true", peerID, assignment.RangeID,
 		assignment.LeaseEpoch)
 
-	result.Effects = append(result.Effects, ContinueSync{})
+	then(result, Continue{})
 
 	return true
 }

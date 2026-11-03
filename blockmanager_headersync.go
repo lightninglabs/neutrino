@@ -121,142 +121,8 @@ func (b *blockManager) cancelHeaderCooldownWakeup() {
 	}
 }
 
-func (b *blockManager) recoverHeaderSyncPeers(peers *list.List) {
-	candidates := headerSyncPeerCandidates(peers)
-	b.handleDriverEvent(nil, headersync.RecoverPeers{Peers: candidates})
-}
-
 func headerSyncPeerRank(sp *ServerPeer) int {
 	return -int(sp.LastBlock())
-}
-
-func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
-	if b.headerSync == nil {
-		return 0, nil
-	}
-
-	// Planning moves the FSM to the durable tip, so bring the cache and
-	// the next checkpoint along first. Otherwise a write that landed but
-	// reported an error leaves planning aimed at a stale checkpoint.
-	if err := b.reconcileTip(); err != nil {
-		return 0, err
-	}
-
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		return 0, err
-	}
-	event := headersync.PlanRanges{
-		Tip: headersync.ChainPoint{
-			Height: height,
-			Hash:   header.BlockHash(),
-		},
-		Checkpoint: b.nextCheckpointPoint(),
-		BestHeight: bestHeight,
-	}
-
-	outcome := b.handleDriverEvent(nil, event)
-	if outcome.err != nil {
-		return 0, outcome.err
-	}
-
-	return outcome.result.Planned, nil
-}
-
-// nextCheckpointPoint returns the next checkpoint as a chain point, or nil
-// when the chain is past its last checkpoint.
-func (b *blockManager) nextCheckpointPoint() *headersync.ChainPoint {
-	next := b.driver().NextCheckpoint()
-	if next == nil {
-		return nil
-	}
-
-	return &headersync.ChainPoint{
-		Height: uint32(next.Height),
-		Hash:   *next.Hash,
-	}
-}
-
-func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
-	if b.headerSync == nil {
-		return false
-	}
-
-	b.recoverHeaderSyncPeers(peers)
-
-	b.handleDriverEvent(nil, headersync.AssignRanges{
-		PeerCount: peers.Len(),
-	})
-
-	var started bool
-	for e := peers.Front(); e != nil; e = e.Next() {
-		sp := e.Value.(*ServerPeer)
-		outcome := b.handleDriverEvent(
-			peers, headersync.DispatchPeer{PeerID: sp.Addr()},
-		)
-		if outcome.sent > 0 {
-			started = true
-		}
-	}
-
-	return started
-}
-
-func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
-	bestHeight uint32) bool {
-
-	if b.headerSync == nil || b.driver().NextCheckpoint() == nil {
-		return false
-	}
-	b.recoverHeaderSyncPeers(peers)
-
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		log.Warnf("headersync unable to get chain tip for anchor "+
-			"discovery: %v", err)
-		return false
-	}
-
-	candidates := headerSyncPeerCandidates(peers)
-	outcome := b.handleDriverEvent(peers, headersync.DiscoverAnchors{
-		Tip: headersync.ChainPoint{
-			Height: height,
-			Hash:   header.BlockHash(),
-		},
-		Stop:       *b.nextCheckpointPoint(),
-		BestHeight: bestHeight,
-		Peers:      candidates,
-	})
-
-	return b.finishHeaderAnchorDiscovery(outcome)
-}
-
-func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
-	bestHeight uint32) bool {
-
-	if b.headerSync == nil {
-		return false
-	}
-	b.recoverHeaderSyncPeers(peers)
-
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		log.Warnf("headersync unable to get chain tip for frontier "+
-			"discovery: %v", err)
-		return false
-	}
-
-	candidates := headerSyncPeerCandidates(peers)
-	outcome := b.handleDriverEvent(peers, headersync.DiscoverFrontier{
-		Tip: headersync.ChainPoint{
-			Height: height,
-			Hash:   header.BlockHash(),
-		},
-		BestHeight: bestHeight,
-		Peers:      candidates,
-	})
-
-	return b.finishHeaderAnchorDiscovery(outcome)
 }
 
 func (b *blockManager) pipelineHeaderFrontierDiscovery(peers *list.List,
@@ -314,57 +180,6 @@ func (b *blockManager) finishHeaderAnchorDiscovery(
 	return discovery.ActivePeers+started > 0
 }
 
-func (b *blockManager) startHeaderSync(peers *list.List,
-	bestPeer *ServerPeer, bestHeight uint32) bool {
-
-	// The multi-peer scheduler needs multiple independent peers to
-	// confirm discovered anchors. The local sim/reg test harnesses often
-	// run with a single peer, so keep those networks on the serial path.
-	if b.allowSerialHeaderFallback() {
-		return false
-	}
-
-	planned, err := b.planHeaderSyncRanges(bestHeight)
-	if err != nil {
-		log.Warnf(
-			"headersync failed to plan checkpoint ranges: %v",
-			err,
-		)
-		return false
-	}
-	if planned == 0 {
-		var started bool
-		if b.driver().NextCheckpoint() != nil {
-			started = b.startHeaderAnchorDiscovery(
-				peers,
-				bestHeight,
-			)
-		} else {
-			started = b.startHeaderFrontierDiscovery(
-				peers,
-				bestHeight,
-			)
-		}
-		if started {
-			planned = 1
-		}
-	}
-
-	b.setSyncPeer(bestPeer)
-
-	started := b.dispatchHeaderSyncWork(peers)
-	activity := b.headerSync.Driver().Activity()
-	if started || activity.HasWork() || planned > 0 {
-		return true
-	}
-
-	if b.syncPeer.Load() == bestPeer {
-		b.setSyncPeer(nil)
-	}
-
-	return false
-}
-
 func removeSyncCandidate(peers *list.List, peer *ServerPeer) {
 	for e := peers.Front(); e != nil; e = e.Next() {
 		if e.Value == peer {
@@ -406,48 +221,10 @@ func headerSyncPeerCandidates(peers *list.List) []headersync.PeerCandidate {
 	return candidates
 }
 
+// continueHeaderSync asks the driver to carry on: plan, dispatch, restart
+// discovery, and start syncing again if nothing is left in flight.
 func (b *blockManager) continueHeaderSync(peers *list.List) {
-	if b.resumeHeaderSyncWork(peers) {
-		return
-	}
-
-	b.setSyncPeer(nil)
-
-	b.startSync(peers)
-}
-
-// resumeHeaderSyncWork plans ranges, dispatches queued work and restarts
-// anchor discovery, and reports whether any work is in flight. It never starts
-// the serial path, so it is safe to run while a serial request is in flight.
-func (b *blockManager) resumeHeaderSyncWork(peers *list.List) bool {
-	// The asynchronous commit in flight owns the header tip, and planning
-	// before it settles would build on a stale tip.
-	if b.pendingHeaderCommit != nil {
-		return true
-	}
-
-	bestHeight := bestHeaderSyncHeight(peers)
-	_, err := b.planHeaderSyncRanges(bestHeight)
-	if err != nil {
-		log.Warnf("headersync failed to plan follow-up ranges: %v", err)
-	}
-
-	started := b.dispatchHeaderSyncWork(peers)
-	var discoveryActive bool
-	if b.driver().NextCheckpoint() != nil {
-		discoveryActive = b.startHeaderAnchorDiscovery(
-			peers,
-			bestHeight,
-		)
-	} else {
-		discoveryActive = b.startHeaderFrontierDiscovery(
-			peers,
-			bestHeight,
-		)
-	}
-
-	return started || discoveryActive ||
-		b.headerSync.Driver().Activity().HasWork()
+	b.handleDriverEvent(peers, headersync.Continue{})
 }
 
 func (b *blockManager) allowSerialHeaderFallback() bool {
@@ -591,7 +368,7 @@ func (b *blockManager) handleHeaderSyncRangeTimeoutMsg(peers *list.List,
 		return
 	}
 
-	b.dispatchHeaderSyncWork(peers)
+	b.handleDriverEvent(peers, headersync.DispatchWork{})
 }
 
 func (b *blockManager) rejectHeaderSyncAnchor(peers *list.List,
@@ -828,12 +605,15 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 		return true
 	}
 
-	planned, err := b.planHeaderSyncRanges(request.StopHeight)
-	if err != nil {
+	planning := b.handleDriverEvent(nil, headersync.PlanRanges{
+		BestHeight: request.StopHeight,
+	})
+	planned := planning.result.Planned
+	if planning.err != nil {
 		log.Warnf("headersync unable to plan ranges after anchor "+
-			"height=%d: %v", result.Response.Height, err)
+			"height=%d: %v", result.Response.Height, planning.err)
 	} else if planned > 0 {
-		b.dispatchHeaderSyncWork(peers)
+		b.handleDriverEvent(peers, headersync.DispatchWork{})
 	}
 
 	if result.Response.Height < request.StopHeight {

@@ -475,7 +475,7 @@ func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
 	peers := list.New()
 	peers.PushBack(sp)
 
-	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3001))
+	require.True(t, bm.startHeaderAnchorDiscovery(peers))
 	request, ok := bm.sessionForTest().FinishAnchor(sp.Addr())
 	require.True(t, ok)
 	require.Equal(t, uint32(1), request.StartHeight)
@@ -540,7 +540,7 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 	require.Equal(t, uint32(2), height)
 	require.Equal(t, second.BlockHash(), tip.BlockHash())
 
-	require.True(t, bm.startHeaderAnchorDiscovery(peers, 3002))
+	require.True(t, bm.startHeaderAnchorDiscovery(peers))
 	request, ok := bm.sessionForTest().FinishAnchor(sp.Addr())
 	require.True(t, ok)
 	require.Equal(t, height, request.StartHeight)

@@ -50,6 +50,22 @@ type View struct {
 	CommitPending bool
 }
 
+// bestHeight returns the highest height a candidate advertises, or zero when
+// no candidate advertises one.
+func (v View) bestHeight() uint32 {
+	var best uint32
+	for _, peer := range v.Peers {
+		if peer.Height < 0 {
+			continue
+		}
+		if uint32(peer.Height) > best {
+			best = uint32(peer.Height)
+		}
+	}
+
+	return best
+}
+
 // Then asks the executor to handle the events in order, each with a fresh
 // view and with its effects run before the next event. The driver emits it
 // when the rest of a decision depends on the outcome of the effects before

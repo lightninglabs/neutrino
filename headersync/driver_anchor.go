@@ -79,9 +79,8 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 			finished.Response.Height, finished.Response.Hash, err)
 
 		// The reply is consumed, so keep sync moving.
-		result.Effects = append(
-			result.Effects, ScheduleCommitRetry{}, ContinueSync{},
-		)
+		result.Effects = append(result.Effects, ScheduleCommitRetry{})
+		then(result, Continue{})
 		result.Anchor = AnchorReplyOutcome{Consumed: true}
 
 		return

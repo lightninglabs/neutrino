@@ -174,11 +174,35 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 	case PeerDone:
 		d.handlePeerDone(ctx, event, &result)
 
-	case PlanRanges:
-		err = d.handlePlanRanges(ctx, event, &result)
+	case BeginSync:
+		d.handleBeginSync(ctx, event, view, &result)
 
-	case AssignRanges:
-		d.handleAssignRanges(ctx, event)
+	case syncDiscovered:
+		d.handleSyncDiscovered(event, &result)
+
+	case syncDispatched:
+		d.handleSyncDispatched(event, &result)
+
+	case Continue:
+		d.resumeWork(ctx, view, true, &result)
+
+	case ResumeWork:
+		d.resumeWork(ctx, view, false, &result)
+
+	case continueDiscover:
+		d.handleContinueDiscover(ctx, event, view, &result)
+
+	case continueDiscovered:
+		d.handleContinueDiscovered(event, &result)
+
+	case CooldownElapsed:
+		d.handleCooldownElapsed(event, &result)
+
+	case PlanRanges:
+		result.Planned, err = d.planRanges(ctx, event.BestHeight)
+
+	case DispatchWork:
+		d.handleDispatchWork(ctx, view, &result)
 
 	case DispatchPeer:
 		d.handleDispatchPeer(ctx, event, &result)

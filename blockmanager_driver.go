@@ -206,8 +206,33 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.CancelCommitRetry:
 		b.cancelHeaderCommitRetry()
 
-	case headersync.ContinueSync:
-		b.continueHeaderSync(peers)
+	case headersync.SetSyncPeer:
+		if effect.PeerID == "" {
+			b.setSyncPeer(nil)
+			return false
+		}
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			log.Warnf("headersync driver named unknown sync "+
+				"peer %s", effect.PeerID)
+			return false
+		}
+		b.setSyncPeer(sp)
+
+	case headersync.StartSync:
+		b.startSync(peers)
+
+	case headersync.StartSerialSync:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			log.Warnf("headersync driver named unknown serial "+
+				"sync peer %s", effect.PeerID)
+			return false
+		}
+		b.startSerialSync(peers, sp, effect)
+
+	case headersync.ClearBootstrapDelay:
+		b.clearHeaderSyncBootstrapDelay()
 
 	case headersync.CommitReadyRanges:
 		if err := b.commitReadyHeaderSyncRanges(); err != nil {
