@@ -1202,6 +1202,24 @@ func (m *Manager) SnapshotPeer(ctx context.Context,
 	return snapshotResp.Peer, snapshotResp.OK, nil
 }
 
+// SetTipLease moves the tip-following lease to peerID, or releases it when
+// peerID is empty. It works whether or not the manager has started, since the
+// block manager picks a sync peer before and after the manager runs.
+func (m *Manager) SetTipLease(peerID string) TipLease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.fsm.SetTipLease(peerID)
+}
+
+// TipLease returns the tip-following lease.
+func (m *Manager) TipLease() TipLease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.fsm.TipLease()
+}
+
 // SnapshotRange asks the manager for one range snapshot.
 func (m *Manager) SnapshotRange(ctx context.Context,
 	id RangeID) (HeaderRange, bool, error) {

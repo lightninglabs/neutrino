@@ -154,7 +154,6 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	b.handleDriverEvent(peers, headersync.TipHeaders{
 		PeerID:        hmsg.peer.Addr(),
 		Headers:       msg.Headers,
-		IsSyncPeer:    hmsg.peer == b.SyncPeer(),
 		HeadersSynced: b.BlockHeadersSynced(),
 	}, hmsg.peer)
 }
@@ -221,7 +220,7 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 			removeSyncCandidate(peers, target)
 			b.syncPeerMutex.Lock()
 			if b.syncPeer == target {
-				b.syncPeer = nil
+				b.setSyncPeerLocked(nil)
 			}
 			b.syncPeerMutex.Unlock()
 			b.startSync(peers)

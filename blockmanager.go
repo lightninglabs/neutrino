@@ -737,7 +737,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	// sync peer. Also, reset the header state.
 	if b.SyncPeer() != nil && b.SyncPeer() == sp {
 		b.syncPeerMutex.Lock()
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 		b.syncPeerMutex.Unlock()
 		if b.pendingHeaderCommit != nil {
 			return
@@ -894,6 +894,23 @@ func peerDisconnected(sp *ServerPeer) bool {
 	}
 }
 
+// setSyncPeerLocked records a new sync peer, or none, and moves the FSM's
+// tip-following lease with it, so the lease always names the sync peer. The
+// caller holds syncPeerMutex. The driver never reads the sync peer, so it's
+// safe to call into it under the lock.
+func (b *blockManager) setSyncPeerLocked(sp *ServerPeer) {
+	b.syncPeer = sp
+	if b.headerSync == nil {
+		return
+	}
+
+	var peerID string
+	if sp != nil {
+		peerID = sp.Addr()
+	}
+	b.handleDriverEvent(nil, headersync.FollowTip{PeerID: peerID})
+}
+
 // SyncPeer returns the current sync peer.
 func (b *blockManager) SyncPeer() *ServerPeer {
 	b.syncPeerMutex.Lock()
@@ -1035,7 +1052,7 @@ func (b *blockManager) handleNoProgressReply(peers *list.List,
 
 	removeSyncCandidate(peers, peer)
 	b.syncPeerMutex.Lock()
-	b.syncPeer = nil
+	b.setSyncPeerLocked(nil)
 	b.syncPeerMutex.Unlock()
 	b.startSync(peers)
 }
@@ -1195,7 +1212,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		// Now that we know we have a new sync peer, we'll lock it in
 		// within the proper attribute.
 		b.syncPeerMutex.Lock()
-		b.syncPeer = bestPeer
+		b.setSyncPeerLocked(bestPeer)
 		b.syncPeerMutex.Unlock()
 
 		// By default will use the zero hash as our stop hash to query
@@ -1231,7 +1248,7 @@ func (b *blockManager) startSync(peers *list.List) {
 
 			b.syncPeerMutex.Lock()
 			if b.syncPeer == bestPeer {
-				b.syncPeer = nil
+				b.setSyncPeerLocked(nil)
 			}
 			b.syncPeerMutex.Unlock()
 

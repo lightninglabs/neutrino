@@ -542,7 +542,7 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 		&chaincfg.Checkpoint{Height: 3002, Hash: &stopHash},
 	)
 	sp := newTestServerPeer(t, "127.0.0.1:18333", 3002)
-	bm.syncPeer = sp
+	bm.setSyncPeerLocked(sp)
 	peers := list.New()
 	peers.PushBack(sp)
 
@@ -713,7 +713,7 @@ func TestHeaderSyncEmptyReplyFromSyncPeer(t *testing.T) {
 	// A sync peer with nothing past our tip answering empty is done.
 	done := newTestServerPeer(t, "127.0.0.3:8333", 0)
 	peers.PushBack(done)
-	bm.syncPeer = done
+	bm.setSyncPeerLocked(done)
 	bm.handleHeadersMsgWithPeers(peers, &headersMsg{
 		peer: done, headers: wire.NewMsgHeaders(),
 	})

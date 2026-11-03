@@ -27,6 +27,48 @@ type HeaderSyncFSM struct {
 
 	commitLog []RangeID
 	metrics   Metrics
+
+	// tipLease is the tip-following lease, held by the sync peer.
+	tipLease TipLease
+}
+
+// TipLease is the lease on following the chain tip. Its holder is the one peer
+// whose serial headers the node trusts while it isn't synced: they get
+// contextual validation only, with no anchor confirmation from other peers,
+// and a reorg they carry must still win on work in the chain store. Headers
+// from any other peer are only considered once the node is synced. The epoch
+// moves each time the lease changes hands.
+type TipLease struct {
+	// PeerID is the holder, or empty when no peer holds the lease.
+	PeerID string
+
+	// Epoch counts the changes of holder.
+	Epoch uint64
+}
+
+// SetTipLease gives the tip-following lease to peerID, or releases it when
+// peerID is empty. Granting it to the current holder changes nothing.
+func (h *HeaderSyncFSM) SetTipLease(peerID string) TipLease {
+	if h.tipLease.PeerID == peerID {
+		return h.tipLease
+	}
+
+	h.tipLease = TipLease{
+		PeerID: peerID,
+		Epoch:  h.tipLease.Epoch + 1,
+	}
+
+	return h.tipLease
+}
+
+// TipLease returns the tip-following lease.
+func (h *HeaderSyncFSM) TipLease() TipLease {
+	return h.tipLease
+}
+
+// TrustsTipPeer reports whether peerID holds the tip-following lease.
+func (h *HeaderSyncFSM) TrustsTipPeer(peerID string) bool {
+	return peerID != "" && h.tipLease.PeerID == peerID
 }
 
 // NewHeaderSyncFSM creates a header sync FSM from the current committed tip.

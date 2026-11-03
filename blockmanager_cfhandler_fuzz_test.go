@@ -326,7 +326,7 @@ func runCFHandlerProducer(t *testing.T, c producerConfig) {
 		}
 		bm.cfg.HeaderTransport = transport
 		bm.syncPeerMutex.Lock()
-		bm.syncPeer = peer
+		bm.setSyncPeerLocked(peer)
 		bm.syncPeerMutex.Unlock()
 		bm.NewPeer(peer)
 		synctest.Wait()

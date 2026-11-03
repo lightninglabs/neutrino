@@ -448,7 +448,7 @@ func newChainDSTRun(t *testing.T, script []byte,
 	d.peer = newTestServerPeer(
 		t, "127.0.0.1:18444", int32(len(d.fx.reorg)-1),
 	)
-	bm.syncPeer = d.peer
+	bm.setSyncPeerLocked(d.peer)
 	d.active = d.fx.honest
 
 	// The consumer starts from the notification baseline of a fresh
