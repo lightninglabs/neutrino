@@ -539,7 +539,8 @@ func (b *blockManager) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// intervals to fetch, then an additional query will exist that spans
 	// the remaining checkpoint intervals.
 	numCheckpts := uint32(len(checkpoints)) - startingInterval
-	numQueries := (numCheckpts + maxCFCheckptsPerQuery - 1) / maxCFCheckptsPerQuery
+	numQueries := (numCheckpts + maxCFCheckptsPerQuery - 1) /
+		maxCFCheckptsPerQuery
 	queryMsgs := make([]wire.Message, 0, numQueries)
 
 	// We'll also create an additional set of maps that we'll use to
@@ -1153,8 +1154,9 @@ func (b *blockManager) banAndDisconnect(invalidPeers,
 // banned.
 func (b *blockManager) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 	targetHeight, filterIndex uint32,
-	fType wire.FilterType) (invalidPeers, unresponsivePeers []string,
-	err error) {
+	fType wire.FilterType) ([]string, []string, error) {
+
+	var invalidPeers, unresponsivePeers []string
 
 	log.Warnf("Detected cfheader mismatch at height=%v!!!", targetHeight)
 
