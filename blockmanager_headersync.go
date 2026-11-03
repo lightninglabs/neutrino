@@ -33,34 +33,27 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 	}
 
 	peerID := sp.Addr()
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
 	rtt := time.Duration(sp.LastPingMicros()) * time.Microsecond
-	_, created, err := b.headerSync.RegisterPeer(ctx,
-		headersync.PeerSnapshot{
+	outcome := b.handleDriverEvent(nil, headersync.PeerConnected{
+		Peer: headersync.PeerSnapshot{
 			ID:    peerID,
 			Rank:  headerSyncPeerRank(sp),
 			RTT:   rtt,
 			State: headersync.PeerReady,
 		},
-	)
-	if err != nil {
+	})
+	if outcome.err != nil {
 		log.Warnf("Unable to start headersync peer for %s: %v",
-			peerID, err)
+			peerID, outcome.err)
 		return
 	}
-	if !created {
-		b.updateHeaderSyncPeerRTT(sp)
+	if !outcome.result.PeerCreated {
 		return
 	}
-
-	b.handleDriverEvent(nil, headersync.PeerRegistered{PeerID: peerID})
 
 	log.Debugf("Registered headersync peer peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
-		sp.LastBlock(), time.Duration(sp.LastPingMicros())*
-			time.Microsecond)
+		sp.LastBlock(), rtt)
 }
 
 func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
@@ -69,12 +62,12 @@ func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
 		return
 	}
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	if err := b.headerSync.UnregisterPeer(ctx, peerID); err != nil {
+	outcome := b.handleDriverEvent(nil, headersync.PeerDisconnected{
+		PeerID: peerID,
+	})
+	if outcome.err != nil {
 		log.Warnf("Unable to remove headersync peer %s: %v", peerID,
-			err)
+			outcome.err)
 		return
 	}
 
@@ -87,12 +80,13 @@ func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {
 		return
 	}
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	if err := b.headerSync.UpdatePeerRTT(ctx, sp.Addr(), rtt); err != nil {
+	outcome := b.handleDriverEvent(nil, headersync.PeerRTTUpdated{
+		PeerID: sp.Addr(),
+		RTT:    rtt,
+	})
+	if outcome.err != nil {
 		log.Warnf("Unable to update headersync peer RTT for %s: %v",
-			sp.Addr(), err)
+			sp.Addr(), outcome.err)
 	}
 }
 
