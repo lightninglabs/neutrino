@@ -836,11 +836,12 @@ func (m *Manager) ask(ctx context.Context, msg ManagerMsg) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// There's deliberately no deadline check here. A message runs in
+	// memory, and checking between the messages of one event would let a
+	// deadline split it, leaving the first applied and the caller told it
+	// failed.
 	if m.machine == nil || m.stopped {
 		return nil, ErrActorStopped
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 
 	outbox, err := m.machine.ProcessEvent(ctx, msg)
@@ -2018,11 +2019,9 @@ func (p *Peer) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// As in Manager.ask, there's deliberately no deadline check.
 	if p.machine == nil || p.stopped {
 		return nil, ErrActorStopped
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 
 	outbox, err := p.machine.ProcessEvent(ctx, msg)
