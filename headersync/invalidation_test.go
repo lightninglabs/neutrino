@@ -64,7 +64,7 @@ func TestInvalidationReleasesPeerActor(t *testing.T) {
 		RuntimeConfig{Config: ProductionConfig()})
 	runtime.Start(ctx)
 	t.Cleanup(runtime.Stop)
-	manager := runtime.Manager()
+	manager := runtime.ManagerForTest()
 	for height := uint32(1); height <= 2; height++ {
 		_, _, err := manager.AddAnchor(
 			ctx, height, testHash(byte(100+height)), false,
@@ -92,7 +92,7 @@ func TestInvalidationReleasesPeerActor(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	runtime.session.TrackRange("honest", RangeRequest{Assignment: old})
-	_, err = runtime.Controller().InvalidateRange(
+	_, err = runtime.ControllerForTest().InvalidateRange(
 		ctx, 1, time.Now().Add(time.Hour),
 	)
 	require.NoError(t, err)

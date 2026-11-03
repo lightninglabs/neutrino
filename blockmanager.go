@@ -873,9 +873,7 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 			return
 		}
 		b.headerCommitRetryTimer = nil
-		ctx, cancel := b.headerSyncOpCtx()
-		defer cancel()
-		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+		if err := b.commitReadyHeaderSyncRanges(); err != nil {
 			log.Warnf("headersync commit_retry_failed: %v", err)
 			b.rejectInvalidHeaderCommit(peers, err)
 			return
@@ -1060,15 +1058,12 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 func (b *blockManager) advanceHeaderSyncTip(height uint32,
 	hash chainhash.Hash) {
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	err := b.headerSync.Controller().AdvanceCommittedTip(
-		ctx, headersync.ChainPoint{Height: height, Hash: hash},
-	)
-	if err != nil {
+	outcome := b.handleDriverEvent(nil, headersync.AdvanceTip{
+		Tip: headersync.ChainPoint{Height: height, Hash: hash},
+	})
+	if outcome.err != nil {
 		log.Warnf("headersync unable to advance to serial tip "+
-			"height=%d: %v", height, err)
+			"height=%d: %v", height, outcome.err)
 	}
 }
 
@@ -1137,7 +1132,7 @@ func (b *blockManager) requestHeaders(peer *ServerPeer,
 func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync.Controller() == nil || b.nextCheckpoint == nil ||
+	if b.headerSync == nil || b.nextCheckpoint == nil ||
 		b.headerSync.Driver().Activity().HasWork() || bestHeight == 0 {
 
 		return false

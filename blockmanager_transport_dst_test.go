@@ -379,7 +379,7 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 	// The checkpoint-all mode pre-plans every range before peers connect,
 	// so production planning finds the spans already covered.
 	if cfg.mode == dstModeCheckpointAll {
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		plan, err := manager.PlanConfirmedAnchorRanges(
 			t.Context(), 1, 0, dstChainHeight,
 		)
@@ -497,7 +497,7 @@ func (d *dstRun) build() {
 	)
 	bm.headerSync.Driver().SetAskHook(bm.driverAsk)
 	d.recorder = &headersync.EventRecorder{}
-	bm.headerSync.Manager().SetEventSink(d.recorder)
+	bm.headerSync.ManagerForTest().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
 
 	if d.transport == nil {
@@ -1201,7 +1201,7 @@ func (d *dstRun) snapshot() dstSnapshot {
 	if d.stopped {
 		return snapshot
 	}
-	manager := d.bm.headerSync.Manager()
+	manager := d.bm.headerSync.ManagerForTest()
 	nextID := d.rangeIDLimit()
 	for id := headersync.RangeID(1); id < nextID; id++ {
 		rng, ok, err := manager.SnapshotRange(ctx, id)
@@ -1228,7 +1228,7 @@ func (d *dstRun) describe() string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "mode=%s faults=%#x\n", d.cfg.mode, d.cfg.faults)
 	if !d.stopped {
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		nextID := d.rangeIDLimit()
 		for id := headersync.RangeID(1); id < nextID; id++ {
 			rng, _, _ := manager.SnapshotRange(d.t.Context(), id)
@@ -1506,7 +1506,7 @@ func TestHeaderTransportDuplicatePreservesRequest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
 		require.True(t, d.reply(0, dstReplyHonest))
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		peerID := d.current[0].Addr()
 		before, ok, err := manager.SnapshotPeer(t.Context(), peerID)
 		require.NoError(t, err)
@@ -1588,7 +1588,7 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 
 		time.Sleep(defaultHeaderPeerCooldown)
 		d.pump()
-		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
+		snapshot, ok, err := d.bm.headerSync.ManagerForTest().SnapshotPeer(
 			t.Context(), peer.Addr(),
 		)
 		require.NoError(t, err)
@@ -1623,7 +1623,7 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 		d.bm.recoverHeaderSyncPeers(d.peers)
 		synctest.Wait()
 
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		peer, ok, err := manager.SnapshotPeer(t.Context(), peerID)
 		require.NoError(t, err)
 		require.True(t, ok)

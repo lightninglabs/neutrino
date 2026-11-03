@@ -118,7 +118,7 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 		maxHeaders uint32
 		wait       bool
 	)
-	controller := d.runtime.Controller()
+	controller := d.runtime.controller
 	height := event.Tip.Height
 
 	if event.Checkpoint == nil {
@@ -187,7 +187,7 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 func (d *Driver) handleAssignRanges(ctx context.Context,
 	event AssignRanges) {
 
-	assignments, err := d.runtime.Controller().AssignQueuedRanges(
+	assignments, err := d.runtime.controller.AssignQueuedRanges(
 		ctx, event.PeerCount,
 	)
 	if err != nil {

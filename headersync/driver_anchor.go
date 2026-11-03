@@ -64,7 +64,7 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 	result *DriverResult) {
 
 	peerID := event.PeerID
-	finished, ok, err := d.runtime.Controller().FinishAnchorHeaders(
+	finished, ok, err := d.runtime.controller.FinishAnchorHeaders(
 		ctx, peerID, event.Headers, DefaultMaxRangeHeaders,
 	)
 

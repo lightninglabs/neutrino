@@ -30,7 +30,7 @@ func (d *dstRun) queuedDiscovery() []int {
 
 // anchorAt returns the anchor the FSM holds at height.
 func (d *dstRun) anchorAt(height uint32) (headersync.Anchor, bool) {
-	anchors, err := d.bm.headerSync.Manager().Anchors(d.t.Context())
+	anchors, err := d.bm.headerSync.ManagerForTest().Anchors(d.t.Context())
 	require.NoError(d.t, err)
 	for _, anchor := range anchors {
 		if anchor.Height == height {
@@ -73,7 +73,7 @@ func TestHeaderAnchorConflictPunishesNobody(t *testing.T) {
 		require.Empty(t, d.punished, "a reporter was punished for a "+
 			"conflict that proves nothing")
 		honest := d.current[slots[1]]
-		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
+		snapshot, ok, err := d.bm.headerSync.ManagerForTest().SnapshotPeer(
 			t.Context(), honest.Addr(),
 		)
 		require.NoError(t, err)
@@ -108,12 +108,12 @@ func (d *dstRun) poisonAnchor() (int, headersync.Anchor) {
 
 	// The liar's boundary at height 8 never matches the honest chain.
 	hash := dstChains().badTime[4][3].BlockHash()
-	anchor, ok, err := d.bm.headerSync.Manager().AddAnchor(
+	anchor, ok, err := d.bm.headerSync.ManagerForTest().AddAnchor(
 		ctx, 8, hash, false,
 	)
 	require.NoError(d.t, err)
 	require.True(d.t, ok)
-	require.True(d.t, d.bm.headerSync.Controller().AnchorConfirmed(anchor),
+	require.True(d.t, d.bm.headerSync.ControllerForTest().AnchorConfirmed(anchor),
 		"one observation confirms the liar's anchor")
 
 	planned, err := d.bm.planHeaderSyncRanges(8)
@@ -150,14 +150,14 @@ func TestHeaderStopContradictionRejectsUnvalidatedAnchor(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, poisoned.Hash, anchor.Hash)
 		require.True(t, anchor.Rejected)
-		require.False(t, d.bm.headerSync.Controller().AnchorConfirmed(
+		require.False(t, d.bm.headerSync.ControllerForTest().AnchorConfirmed(
 			anchor,
 		))
 
 		// The hold is the existing cooldown, which bounds the loop: a
 		// blocked peer is leased no range, and a range reply is the
 		// only way to contradict an anchor this way.
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		snapshot, ok, err := manager.SnapshotPeer(
 			t.Context(), peer.Addr(),
 		)
