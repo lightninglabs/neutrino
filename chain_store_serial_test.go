@@ -573,6 +573,8 @@ func TestReorgWorkComparisonStoreReadFailure(t *testing.T) {
 		)
 		synctest.Wait()
 
+		settleHeaderCommit(t, bm, peers)
+
 		// The message is abandoned without a penalty, a retry is
 		// scheduled, and the chain is unchanged.
 		require.False(t, dstDisconnected(peer),

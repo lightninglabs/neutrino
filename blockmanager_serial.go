@@ -299,68 +299,14 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 				Height: int32(backHeight+1) + int32(j),
 			})
 		}
-		log.Tracef("Sane reorg attempted. Total work from "+
-			"reorg chain: %v", totalWork)
-
-		// All the headers pass sanity checks. Now we calculate
-		// the total work for the known chain.
-		knownWork := big.NewInt(0)
-
-		// This should NEVER be nil because the most recent
-		// block is always pushed back by resetHeaderState
-		knownEl := b.tip.Tip()
-		var knownHead *wire.BlockHeader
-		for j := uint32(prevNode.Height); j > backHeight; j-- {
-			if knownEl != nil {
-				knownHead = &knownEl.Header
-				knownEl = knownEl.Prev()
-			} else {
-				// The walk left the validation list, so read
-				// the parent from the store. A read error
-				// says nothing about the peer, so we abandon
-				// this message and let the retry request the
-				// headers again.
-				parentHash := knownHead.PrevBlock
-				parent, _, err := b.cfg.BlockHeaders.
-					FetchHeader(&parentHash)
-				if err != nil {
-					log.Errorf("Can't get block header "+
-						"for hash %s while comparing "+
-						"reorg work: %v", parentHash,
-						err)
-					b.scheduleHeaderCommitRetry()
-					return
-				}
-				knownHead = parent
-			}
-			knownWork.Add(knownWork,
-				blockchain.CalcWork(knownHead.Bits))
-		}
-
-		log.Tracef("Total work from known chain: %v", knownWork)
-
-		// Compare the two work totals and reject the new chain
-		// if it doesn't have more work than the previously
-		// known chain. Disconnect if it's actually less than
-		// the known chain.
-		switch knownWork.Cmp(totalWork) {
-		case 1:
-			log.Warnf("Reorg attempt that has less work "+
-				"than known chain from peer %s -- "+
-				"disconnecting", hmsg.peer.Addr())
-			hmsg.peer.Disconnect()
-			fallthrough
-		case 0:
-			return
-		default:
-		}
-
 		// Preserve the validated fork and replacement as an immutable
 		// payload for the chain store.
 		prepared := prepareSerialHeaderReorg(
 			*prevNode, *backHead, backHeight, *blockHeader,
 		)
-		b.submitSerialHeaderReorg(hmsg, prepared, msg.Headers[i:])
+		b.submitSerialHeaderReorg(
+			hmsg, prepared, msg.Headers[i:], totalWork,
+		)
 
 		return
 	}
@@ -476,8 +422,11 @@ func prepareSerialHeaderReorg(tip headerlist.Node, fork wire.BlockHeader,
 
 // submitSerialHeaderReorg sends a validated fork as one actor mutation, so that
 // no filter commit can land between the rollback and the replacement branch.
+// The actor also decides whether the branch has enough work, so nothing here
+// may act on the branch until its verdict arrives.
 func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
-	prepared serialHeaderReorg, headers []*wire.BlockHeader) {
+	prepared serialHeaderReorg, headers []*wire.BlockHeader,
+	work *big.Int) {
 
 	// A branch that crosses a checkpoint must match it. If it doesn't, we
 	// roll back instead of taking the branch. A batch that reaches the
@@ -493,11 +442,25 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 		if next != nil && height == next.Height &&
 			header.BlockHash() != *next.Hash {
 
+			// A checkpoint mismatch only matters for a branch that
+			// would win. Otherwise a low work fork could force a
+			// rollback for free.
 			log.Warnf(
 				"Reorg header does not match checkpoint at %d",
 				height,
 			)
-			b.submitCheckpointRollback(hmsg, height)
+			b.pendingHeaderCommit = &pendingChainHeaderCommit{
+				reorg:         &prepared,
+				reorgMismatch: height,
+				message:       hmsg,
+			}
+			b.chainStore.TryAsk(b.quitCtx, chainstore.Reorg{
+				ExpectedTip: prepared.expectedTip,
+				ForkHeight:  uint32(prepared.fork.Height),
+				Work:        work,
+				CompareOnly: true,
+			}, b.chainStoreResult)
+
 			return
 		}
 		copyHeader := *header
@@ -513,30 +476,17 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 			break
 		}
 	}
-	hmsg.peer.UpdateLastBlockHeight(nodes[len(nodes)-1].Height)
-
-	command := chainstore.Reorg{
-		ExpectedTip: prepared.expectedTip,
-		ForkHeight:  uint32(prepared.fork.Height),
-		Headers:     batch,
-	}
-	if hmsg.peer == b.SyncPeer() {
-		b.disarmHeaderSyncTimeout()
-	}
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		reorg:      &prepared,
 		reorgNodes: nodes,
 		message:    hmsg,
 	}
-
-	// The peer that delivered the winning branch becomes the sync peer,
-	// unless it has already gone away.
-	if !peerDisconnected(hmsg.peer) {
-		b.syncPeerMutex.Lock()
-		b.syncPeer = hmsg.peer
-		b.syncPeerMutex.Unlock()
-	}
-	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
+	b.chainStore.TryAsk(b.quitCtx, chainstore.Reorg{
+		ExpectedTip: prepared.expectedTip,
+		ForkHeight:  uint32(prepared.fork.Height),
+		Headers:     batch,
+		Work:        work,
+	}, b.chainStoreResult)
 }
 
 // submitCheckpointRollback rolls the chain back to the last verified checkpoint
