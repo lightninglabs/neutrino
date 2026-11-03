@@ -75,21 +75,6 @@ type AdvanceCommittedTipResp struct {
 	Advanced bool
 }
 
-// RequeueStagedRangeMsg returns a staged range whose headers were lost to the
-// queue.
-type RequeueStagedRangeMsg struct {
-	managerMessage
-
-	ID RangeID
-}
-
-// RequeueStagedRangeResp reports whether the range was requeued.
-type RequeueStagedRangeResp struct {
-	managerResponse
-
-	OK bool
-}
-
 // AnchorsMsg asks the manager for the currently known anchor set.
 type AnchorsMsg struct {
 	managerMessage
@@ -423,11 +408,6 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 		)
 
 		return respond(&AddAnchorResp{Anchor: anchor, OK: ok})
-
-	case *RequeueStagedRangeMsg:
-		ok := env.fsm.RequeueStagedRange(m.ID)
-
-		return respond(&RequeueStagedRangeResp{OK: ok})
 
 	case *AdvanceCommittedTipMsg:
 		advanced := env.fsm.AdvanceCommittedTip(m.Height, m.Hash)
@@ -930,24 +910,6 @@ func (m *Manager) AdvanceCommittedTip(ctx context.Context, height uint32,
 	}
 
 	return advanceResp.Advanced, nil
-}
-
-// RequeueStagedRange asks the manager to return a staged range whose headers
-// were lost to the queue under a new lease epoch.
-func (m *Manager) RequeueStagedRange(ctx context.Context,
-	id RangeID) (bool, error) {
-
-	resp, err := m.ask(ctx, &RequeueStagedRangeMsg{ID: id})
-	if err != nil {
-		return false, err
-	}
-
-	requeueResp, ok := resp.(*RequeueStagedRangeResp)
-	if !ok {
-		return false, unexpectedManagerResp(resp)
-	}
-
-	return requeueResp.OK, nil
 }
 
 // Anchors asks the manager for the current known anchors.

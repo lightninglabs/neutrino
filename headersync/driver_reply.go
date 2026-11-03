@@ -212,11 +212,9 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 			err,
 		)
 
-		// The dispatch mirror call may have staged the range without
-		// its headers; the commit retry requeues such a range. Or it
-		// may not have applied at all, leaving the range active with
-		// its request already consumed. Blocking the peer lets the
-		// existing steal of blocked owners recover that case.
+		// The completion didn't apply, which leaves the range active
+		// with its request already consumed. Blocking the peer lets the
+		// steal of blocked owners recover it.
 		result.Effects = append(
 			result.Effects, ScheduleCommitRetry{},
 		)

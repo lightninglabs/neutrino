@@ -276,12 +276,9 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 	})
 }
 
-// requestPeerRange asks a peer to start its next range. The dispatch mirror
-// call may have started a range in the manager even though it reported an
-// error, which
-// leaves an active lease with no request behind it. On an error the peer is
-// blocked, so the steal of blocked owners or the release on cooldown recovery
-// takes the range back.
+// requestPeerRange asks a peer to start its next range. On an error, which
+// means the manager is stopped or the event's deadline passed, the peer is
+// blocked until its cooldown ends.
 func (d *Driver) requestPeerRange(ctx context.Context, peerID string,
 	peerActor *Peer, result *DriverResult) (RangeAssignment, bool,
 	error) {

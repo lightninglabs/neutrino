@@ -927,11 +927,6 @@ func (b *blockManager) commitReadyHeaderSyncRanges() error {
 			return fetched.err
 		}
 
-		// The driver requeued a range with no headers, so it stops
-		// the batch here.
-		if fetched.result.ReadyRange == nil {
-			break
-		}
 		rng := fetched.result.ReadyRange.Range
 		staged := fetched.result.ReadyRange.Staged
 

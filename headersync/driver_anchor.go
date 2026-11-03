@@ -78,8 +78,7 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 			"height=%d hash=%s: %v", peerID,
 			finished.Response.Height, finished.Response.Hash, err)
 
-		// The dispatch mirror call may have staged a discovered range
-		// without its headers. The commit retry requeues such a range.
+		// The reply is consumed, so keep sync moving.
 		result.Effects = append(
 			result.Effects, ScheduleCommitRetry{}, ContinueSync{},
 		)

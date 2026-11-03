@@ -84,9 +84,8 @@ type DriverResult struct {
 	// Ready is the outcome of ListReadyRanges.
 	Ready []RangeID
 
-	// ReadyRange is the outcome of SnapshotReadyRange. It's nil when the
-	// range had no staged headers and was requeued.
-	ReadyRange *ReadyRange
+	// ReadyRange is the outcome of SnapshotReadyRange.
+	ReadyRange ReadyRange
 
 	// Invalidated is the outcome of InvalidateRange.
 	Invalidated InvalidationResult
