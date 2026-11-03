@@ -1601,8 +1601,6 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 			"cfHandler never read the tip again")
 
 		require.NoError(t, bm.Stop())
-		bm.newHeadersSignal.Broadcast()
-		bm.newFilterHeadersSignal.Broadcast()
 		<-done
 	})
 }
@@ -1804,10 +1802,9 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 		}
 		synctest.Wait()
 
-		bm.newFilterHeadersMtx.RLock()
-		published := bm.filterHeaderTip
-		publishedHash := bm.filterHeaderTipHash
-		bm.newFilterHeadersMtx.RUnlock()
+		tips := bm.tipFeed.Snapshot()
+		published := tips.FilterHeight
+		publishedHash := tips.FilterHash
 		require.EqualValues(t, durable, published,
 			"retry left the durable prefix unpublished")
 		require.Equal(t, parent.BlockHash(), publishedHash)

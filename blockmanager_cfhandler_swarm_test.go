@@ -491,10 +491,9 @@ func runSwarmPipeline(t *testing.T, seed int64, connected *ServerPeer) {
 			require.NoError(t, err)
 			require.Equal(t, headers[id], *got)
 		}
-		bm.newFilterHeadersMtx.RLock()
-		published := bm.filterHeaderTip
-		publishedHash := bm.filterHeaderTipHash
-		bm.newFilterHeadersMtx.RUnlock()
+		tips := bm.tipFeed.Snapshot()
+		published := tips.FilterHeight
+		publishedHash := tips.FilterHash
 		require.LessOrEqual(t, published, fh)
 		block, err := blocks.FetchHeaderByHeight(published)
 		require.NoError(t, err)

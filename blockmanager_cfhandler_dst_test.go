@@ -214,9 +214,8 @@ func testCFHeaderReadFailure(
 		))
 	}
 	synctest.Wait()
-	bm.newFilterHeadersMtx.RLock()
-	cachedHeight, cachedHash := bm.filterHeaderTip, bm.filterHeaderTipHash
-	bm.newFilterHeadersMtx.RUnlock()
+	tips := bm.tipFeed.Snapshot()
+	cachedHeight, cachedHash := tips.FilterHeight, tips.FilterHash
 	require.Equal(
 		t,
 		uint32(len(headers)),

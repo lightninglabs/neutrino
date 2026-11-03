@@ -158,31 +158,32 @@ func (v *dstInvariants) durableChain(event string) {
 func (v *dstInvariants) memoryMatchesDisk(event string) {
 	d := v.d
 	bm := d.bm
+	tips := bm.tipFeed.Snapshot()
 	if back := bm.tipForTest().Tip(); back == nil ||
-		uint32(back.Height) != bm.headerTip {
+		uint32(back.Height) != tips.BlockHeight {
 
 		v.fail(event, "validation cache %v disagrees with tip %d",
-			back, bm.headerTip)
+			back, tips.BlockHeight)
 	}
 	honest := d.transport.chain
-	if bm.headerTip > v.lastTip {
+	if tips.BlockHeight > v.lastTip {
 		v.fail(event, "visible tip %d ahead of durable tip %d",
-			bm.headerTip, v.lastTip)
+			tips.BlockHeight, v.lastTip)
 	}
-	if bm.headerTipHash != honest[bm.headerTip].BlockHash() {
+	if tips.BlockHash != honest[tips.BlockHeight].BlockHash() {
 		v.fail(event, "visible tip hash off the honest chain")
 	}
 	// The next checkpoint is always above the visible tip, or a serial
 	// batch past it would never be checked against it.
 	if next := bm.tipForTest().NextCheckpoint(); next != nil &&
-		uint32(next.Height) <= bm.headerTip {
+		uint32(next.Height) <= tips.BlockHeight {
 
 		v.fail(event, "next checkpoint %d at or below visible tip %d",
-			next.Height, bm.headerTip)
+			next.Height, tips.BlockHeight)
 	}
-	if bm.headerTip < v.lastTip && bm.headerCommitRetryTimer == nil {
+	if tips.BlockHeight < v.lastTip && bm.headerCommitRetryTimer == nil {
 		v.fail(event, "visible tip %d trails durable tip %d with no "+
-			"commit retry armed", bm.headerTip, v.lastTip)
+			"commit retry armed", tips.BlockHeight, v.lastTip)
 	}
 }
 
@@ -364,9 +365,9 @@ func (d *dstRun) quiescent() error {
 	case d.inv.lastTip < d.target:
 		return fmt.Errorf("durable tip %d, want %d", d.inv.lastTip,
 			d.target)
-	case d.bm.headerTip != d.inv.lastTip:
+	case d.bm.tipFeed.Snapshot().BlockHeight != d.inv.lastTip:
 		return fmt.Errorf("visible tip %d, durable tip %d",
-			d.bm.headerTip, d.inv.lastTip)
+			d.bm.tipFeed.Snapshot().BlockHeight, d.inv.lastTip)
 	case session.ActiveRangeCount() != 0:
 		return fmt.Errorf("%d active ranges",
 			session.ActiveRangeCount())

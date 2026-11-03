@@ -10,8 +10,8 @@ import (
 // chainStoreHost lets the chain store actor publish what became durable. The
 // store decides what happened, and these methods make it visible to the
 // handlers and to block notification subscribers. It runs on the actor's
-// goroutine, and the handlers read the tips it publishes, so every write goes
-// through the header mutexes.
+// goroutine, and the handlers read the tips it publishes through the block
+// manager's tip feed.
 type chainStoreHost struct {
 	manager *blockManager
 }
@@ -34,41 +34,20 @@ func (h *chainStoreHost) FilterHeaders() headerfs.FilterHeaderStore {
 func (h *chainStoreHost) PublishBlockTip(height uint32,
 	header wire.BlockHeader) {
 
-	b := h.manager
-	hash := header.BlockHash()
-
-	b.newHeadersMtx.Lock()
-	b.headerTip = height
-	b.headerTipHash = hash
-	b.publishedBlockTip.Store(&headerfs.BlockStamp{
-		Height: int32(height), Hash: hash, Timestamp: header.Timestamp,
-	})
-	b.newHeadersMtx.Unlock()
-
-	b.newHeadersSignal.Broadcast()
+	h.manager.tipFeed.SetBlockTip(
+		height, header.BlockHash(), header.Timestamp,
+	)
 }
 
 // PublishedFilterHeight returns the height of the visible filter tip.
 func (h *chainStoreHost) PublishedFilterHeight() uint32 {
-	b := h.manager
-
-	b.newFilterHeadersMtx.RLock()
-	defer b.newFilterHeadersMtx.RUnlock()
-
-	return b.filterHeaderTip
+	return h.manager.tipFeed.Snapshot().FilterHeight
 }
 
 // PublishFilterTip makes the block at height the visible filter tip, and wakes
 // anything waiting on it.
 func (h *chainStoreHost) PublishFilterTip(height uint32, hash chainhash.Hash) {
-	b := h.manager
-
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = height
-	b.filterHeaderTipHash = hash
-	b.newFilterHeadersMtx.Unlock()
-
-	b.newFilterHeadersSignal.Broadcast()
+	h.manager.tipFeed.SetFilterTip(height, hash)
 }
 
 // PublishFilterHeaders makes the last of headers, which start at startHeight,
@@ -99,19 +78,7 @@ func (h *chainStoreHost) PublishFilterHeaders(headers []wire.BlockHeader,
 // RewindFilterTip lowers the visible filter tip only if a rollback crossed it.
 // Durable filter headers that were never published must stay unpublished.
 func (h *chainStoreHost) RewindFilterTip(height uint32, hash chainhash.Hash) {
-	b := h.manager
-
-	b.newFilterHeadersMtx.Lock()
-	changed := height < b.filterHeaderTip
-	if changed {
-		b.filterHeaderTip = height
-		b.filterHeaderTipHash = hash
-	}
-	b.newFilterHeadersMtx.Unlock()
-
-	if changed {
-		b.newFilterHeadersSignal.Broadcast()
-	}
+	h.manager.tipFeed.RewindFilterTip(height, hash)
 }
 
 // BlockConnected queues a connected notification.
