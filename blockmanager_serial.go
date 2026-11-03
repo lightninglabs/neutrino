@@ -17,6 +17,7 @@ import (
 	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/lightninglabs/neutrino/headersync"
 )
 
 // handleInvMsg handles inv messages from all peers. We examine the inventory
@@ -155,7 +156,7 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// Explicitly check that each header in msg.Headers builds off of the
 	// previous one. This is a quick sanity check to avoid doing the more
 	// expensive checks below if we know the headers are invalid.
-	if !areHeadersConnected(msg.Headers) {
+	if !headersync.HeadersConnected(msg.Headers) {
 		log.Warnf("Headers received from peer don't connect")
 		hmsg.peer.Disconnect()
 		return

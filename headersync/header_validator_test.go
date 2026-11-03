@@ -1,4 +1,4 @@
-package neutrino
+package headersync
 
 import (
 	"testing"
