@@ -1,8 +1,8 @@
 package neutrino
 
-// This file holds regular filter header sync: the cfHandler goroutine, the
-// checkpointed and uncheckpointed query paths, and the resolution of conflicts
-// between peers.
+// This file holds regular filter header sync: the filter sync loop that runs
+// the filtersync.Syncer, the checkpointed and uncheckpointed query paths, and
+// the resolution of conflicts between peers.
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
@@ -22,235 +21,139 @@ import (
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
 
-// cfHandler is the cfheader download handler for the block manager. It must be
-// run as a goroutine. It requests and processes cfheaders messages in a
-// separate goroutine from the peer handlers.
-func (b *blockManager) cfHandler() {
+// filterSyncLoop runs regular filter header sync. It must be run as a
+// goroutine. It feeds events to a filtersync.Syncer, which decides what to do
+// next, and performs the effects the Syncer returns on this goroutine: the
+// tip feed waits, the retry delays and the network rounds. The network rounds
+// block this goroutine for as long as they take, which is fine because nothing
+// else sends to it and the tip feed is level-triggered, so a tip change that
+// lands during a round is seen by the next wait.
+func (b *blockManager) filterSyncLoop() {
 	defer log.Trace("Committed filter header handler done")
 
-	var (
-		// allCFCheckpoints is a map from our peers to the list of
-		// filter checkpoints they respond to us with. We'll attempt to
-		// get filter checkpoints immediately up to the latest block
-		// checkpoint we've got stored to avoid doing unnecessary
-		// fetches as the block headers are catching up.
-		allCFCheckpoints map[string][]*chainhash.Hash
-
-		// lastCp will point to the latest block checkpoint we have for
-		// the active chain, if any.
-		lastCp chaincfg.Checkpoint
-
-		// blockCheckpoints is the list of block checkpoints for the
-		// active chain.
-		blockCheckpoints = b.cfg.ChainParams.Checkpoints
-	)
-
-	// Set the variable to the latest block checkpoint if we have any for
-	// this chain. Otherwise this block checkpoint will just stay at height
-	// 0, which will prompt us to look at the block headers to fetch
-	// checkpoints below.
-	if len(blockCheckpoints) > 0 {
-		lastCp = blockCheckpoints[len(blockCheckpoints)-1]
-	}
-
-waitForHeaders:
-	filterTip := b.tipFeed.Snapshot().FilterHeight
-
-	// We'll wait until the main header sync is either finished or the
-	// filter headers are lagging at least a checkpoint interval behind the
-	// block headers, before we actually start to sync the set of
-	// cfheaders.
-	log.Infof("Waiting for more block headers, then will start "+
-		"cfheaders sync from height %v...", filterTip)
-
-	_, ok := b.tipFeed.Wait(b.quit, func(tips chainstore.Tips) bool {
-		return tips.FilterHeight+wire.CFCheckptInterval <=
-			tips.BlockHeight || b.BlockHeadersSynced()
+	syncer := filtersync.NewSyncer(filtersync.Config{
+		BlockCheckpoints: b.cfg.ChainParams.Checkpoints,
+		RetryDelay:       retryTimeout,
 	})
-	if !ok {
-		return
-	}
 
-	// Now that the block headers are finished or ahead of the filter
-	// headers, we'll grab the current chain tip so we can base our filter
-	// header sync off of that.
-	// A store read can fail transiently with the SQL backends. Retry
-	// rather than end filter header sync until restart.
-	lastHeader, lastHeight, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		log.Errorf("Unable to read block header tip for cfheaders "+
-			"sync, retrying: %v", err)
-
-		select {
-		case <-time.After(retryTimeout):
-		case <-b.quit:
-			return
-		}
-		goto waitForHeaders
-	}
-	lastHash := lastHeader.BlockHash()
-
-	tips := b.tipFeed.Snapshot()
-	log.Infof("Starting cfheaders sync from (block_height=%v, "+
-		"block_hash=%v) to (block_height=%v, block_hash=%v)",
-		tips.FilterHeight, tips.FilterHash, lastHeight,
-		lastHeader.BlockHash())
-
-	fType := wire.GCSFilterRegular
-	store := b.cfg.RegFilterHeaders
-
-	log.Infof("Starting cfheaders sync for filter_type=%v", fType)
-
-	// If we have less than a full checkpoint's worth of blocks, such as on
-	// simnet, we don't really need to request checkpoints as we'll get 0
-	// from all peers. We can go on and just request the cfheaders.
-	var goodCheckpoints []*chainhash.Hash
-	for len(goodCheckpoints) == 0 && lastHeight >= wire.CFCheckptInterval {
-		// Quit if requested.
-		select {
-		case <-b.quit:
-			return
-		default:
-		}
-
-		// If the height now exceeds the height at which we fetched the
-		// checkpoints last time, we must query our peers again.
-		minHeight := filtersync.MinCheckpointHeight(allCFCheckpoints)
-		if minHeight < lastHeight {
-			// Start by getting the filter checkpoints up to the
-			// height of our block header chain. If we have a chain
-			// checkpoint that is past this height, we use that
-			// instead. We do this so we don't have to fetch all
-			// filter checkpoints each time our block header chain
-			// advances.
-			// TODO(halseth): fetch filter checkpoints up to the
-			// best block of the connected peers.
-			bestHeight := lastHeight
-			bestHash := lastHash
-			if bestHeight < uint32(lastCp.Height) {
-				bestHeight = uint32(lastCp.Height)
-				bestHash = *lastCp.Hash
-			}
-
-			log.Debugf("Getting filter checkpoints up to "+
-				"height=%v, hash=%v", bestHeight, bestHash)
-			allCFCheckpoints = b.getCheckpts(&bestHash, fType)
-			if len(allCFCheckpoints) == 0 {
-				log.Warnf("Unable to fetch set of " +
-					"candidate checkpoints, trying " +
-					"again...")
-
-				select {
-				case <-time.After(retryTimeout):
-				case <-b.quit:
-					return
-				}
+	// Each batch of effects ends with one that yields an event, and the
+	// Syncer returns no effects once it has stopped, so the loop ends when
+	// a batch is empty.
+	effects := syncer.Handle(filtersync.Start{Tips: b.tipFeed.Snapshot()})
+	for len(effects) > 0 {
+		var next []filtersync.Effect
+		for _, effect := range effects {
+			event := b.runFilterSyncEffect(effect)
+			if event == nil {
 				continue
 			}
+
+			next = syncer.Handle(event)
+			break
 		}
 
-		// Cap the received checkpoints at the current height, as we
-		// can only verify checkpoints up to the height we have block
-		// headers for.
-		checkpoints := make(map[string][]*chainhash.Hash)
-		for p, cps := range allCFCheckpoints {
-			for i, cp := range cps {
-				height := uint32(i+1) * wire.CFCheckptInterval
-				if height > lastHeight {
-					break
-				}
-				checkpoints[p] = append(checkpoints[p], cp)
-			}
-		}
-
-		// See if we can detect which checkpoint list is correct. If
-		// not, we will cycle again.
-		goodCheckpoints, err = b.resolveConflict(
-			checkpoints, store, fType,
-		)
-		if err != nil {
-			log.Warnf("got error attempting to determine correct "+
-				"cfheader checkpoints: %v, trying again", err)
-		}
-		if len(goodCheckpoints) == 0 {
-			select {
-			case <-time.After(retryTimeout):
-			case <-b.quit:
-				return
-			}
-		}
+		effects = next
 	}
+}
 
-	// Get all the headers up to the last known good checkpoint. A store
-	// failure is retried from the top rather than crashing the process.
-	err = b.getCheckpointedCFHeaders(
-		goodCheckpoints, store, fType,
-	)
-	if err != nil {
-		log.Errorf("Unable to fetch checkpointed cfheaders, "+
-			"retrying: %v", err)
+// runFilterSyncEffect performs one effect of the filter sync loop and returns
+// the event it yields, or nil for a PollQuit that found the quit channel open.
+func (b *blockManager) runFilterSyncEffect(
+	effect filtersync.Effect) filtersync.Event {
 
-		select {
-		case <-time.After(retryTimeout):
-		case <-b.quit:
-			return
-		}
-		goto waitForHeaders
-	}
+	store := b.cfg.RegFilterHeaders
 
-	// Now we check the headers again. If the block headers are not yet
-	// current, then we go back to the loop waiting for them to finish.
-	if !b.BlockHeadersSynced() {
-		goto waitForHeaders
-	}
-
-	// If block headers are current, but the filter header tip is still
-	// lagging more than a checkpoint interval behind the block header tip,
-	// we also go back to the loop to utilize the faster check pointed
-	// fetching.
-	tips = b.tipFeed.Snapshot()
-	if tips.FilterHeight+wire.CFCheckptInterval <= tips.BlockHeight {
-		goto waitForHeaders
-	}
-
-	log.Infof("Fully caught up with cfheaders at height "+
-		"%v, waiting at tip for new blocks", lastHeight)
-
-	// Now that we've been fully caught up to the tip of the current header
-	// chain, we'll wait here for a signal that more blocks have been
-	// connected. If this happens then we'll do another round to fetch the
-	// new set of filter new set of filter headers
-	for {
-		// We'll wait until the filter header tip and the header tip
-		// are mismatched.
-		_, ok := b.tipFeed.Wait(
-			b.quit, func(tips chainstore.Tips) bool {
-				return tips.FilterHash != tips.BlockHash
-			},
+	switch e := effect.(type) {
+	case filtersync.WaitForTips:
+		tips, ok := b.tipFeed.Wait(
+			b.quit, b.filterSyncReady(e.Condition),
 		)
 		if !ok {
-			return
+			return filtersync.Quit{}
 		}
 
-		// At this point, we know that there're a set of new filter
-		// headers to fetch, so we'll grab them now.
-		if err = b.getUncheckpointedCFHeaders(fType); err != nil {
-			log.Debugf("couldn't get uncheckpointed headers for "+
-				"%v: %v", fType, err)
+		return filtersync.TipsChanged{Tips: tips}
 
-			select {
-			case <-time.After(retryTimeout):
-			case <-b.quit:
-				return
+	case filtersync.ReadBlockTip:
+		lastHeader, lastHeight, err := b.cfg.BlockHeaders.ChainTip()
+		if err != nil {
+			return filtersync.BlockTipRead{Err: err}
+		}
+
+		return filtersync.BlockTipRead{
+			Hash:   lastHeader.BlockHash(),
+			Height: lastHeight,
+			Tips:   b.tipFeed.Snapshot(),
+		}
+
+	case filtersync.FetchCheckpoints:
+		return filtersync.CheckpointsFetched{
+			ByPeer: b.getCheckpts(&e.StopHash, e.FilterType),
+		}
+
+	case filtersync.ResolveConflict:
+		good, err := b.resolveConflict(
+			e.Checkpoints, store, e.FilterType,
+		)
+
+		return filtersync.ConflictResolved{Good: good, Err: err}
+
+	case filtersync.FetchCheckpointed:
+		err := b.getCheckpointedCFHeaders(
+			e.Checkpoints, store, e.FilterType,
+		)
+		if err != nil {
+			return filtersync.CheckpointedFetched{Err: err}
+		}
+
+		return filtersync.CheckpointedFetched{
+			HeadersSynced: b.BlockHeadersSynced(),
+			Tips:          b.tipFeed.Snapshot(),
+		}
+
+	case filtersync.FetchUncheckpointed:
+		return filtersync.UncheckpointedFetched{
+			Err: b.getUncheckpointedCFHeaders(e.FilterType),
+		}
+
+	case filtersync.RetryAfter:
+		select {
+		case <-time.After(e.Delay):
+			return filtersync.RetryElapsed{
+				Tips: b.tipFeed.Snapshot(),
 			}
+
+		case <-b.quit:
+			return filtersync.Quit{}
 		}
 
-		// Quit if requested.
+	case filtersync.PollQuit:
 		select {
 		case <-b.quit:
-			return
+			return filtersync.Quit{}
 		default:
+			return nil
 		}
+	}
+
+	log.Errorf("Filter sync got unknown effect %T", effect)
+
+	return filtersync.Quit{}
+}
+
+// filterSyncReady returns the tip feed predicate for a wait condition.
+func (b *blockManager) filterSyncReady(
+	cond filtersync.WaitCondition) func(chainstore.Tips) bool {
+
+	if cond == filtersync.WaitTipMismatch {
+		return func(tips chainstore.Tips) bool {
+			return tips.FilterHash != tips.BlockHash
+		}
+	}
+
+	return func(tips chainstore.Tips) bool {
+		return tips.FilterHeight+wire.CFCheckptInterval <=
+			tips.BlockHeight || b.BlockHeadersSynced()
 	}
 }
 

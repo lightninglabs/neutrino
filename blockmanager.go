@@ -471,16 +471,16 @@ func (b *blockManager) Start() {
 
 		log.Debug("Waiting for peer connection...")
 
-		// Before starting the cfHandler we want to make sure we are
-		// connected with at least one peer.
+		// Before starting the filter sync loop we want to make sure we
+		// are connected with at least one peer.
 		select {
 		case <-b.cfg.firstPeerSignal:
 		case <-b.quit:
 			return
 		}
 
-		log.Debug("Peer connected, starting cfHandler.")
-		b.cfHandler()
+		log.Debug("Peer connected, starting filter sync.")
+		b.filterSyncLoop()
 	}()
 }
 

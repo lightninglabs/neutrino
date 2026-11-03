@@ -28,7 +28,7 @@ flowchart TB
     subgraph BM["blockManager (blockmanager.go)"]
         direction TB
         bh["blockHandler goroutine<br/>header sync driver"]
-        cfh["cfHandler goroutine<br/>filter header sync"]
+        cfh["filterSyncLoop goroutine<br/>filtersync.Syncer"]
     end
 
     subgraph HS["headersync.Runtime"]
@@ -137,7 +137,7 @@ sequenceDiagram
     end
     CS->>BM: Start()
     BM->>RT: Start() manager, peers, dispatch
-    Note over BM: blockHandler starts, cfHandler waits for first peer
+    Note over BM: blockHandler starts, filterSyncLoop waits for first peer
     CS->>WM: Start()
     Note over CS: connection manager and peerHandler start last
 ```
@@ -382,9 +382,14 @@ Transaction broadcast and the all-peer filter-header checks still use
 
 ## Filter header sync
 
-The `cfHandler` goroutine syncs regular filter headers behind the block
-header tip. Block header commits wake it: the chain store actor sets
-`headerTip` under `newHeadersMtx` and broadcasts `newHeadersSignal`.
+The `filterSyncLoop` goroutine syncs regular filter headers behind the block
+header tip. A `filtersync.Syncer` decides what to do next: it takes one event
+(tips changed, tip read, checkpoints fetched, conflict resolved, a fetch
+finished, a retry elapsed, quit) and returns the effects to perform (wait on
+the tip feed, read the tip, fetch, resolve, sleep, poll quit). The loop
+performs them on its own goroutine, the network rounds included, and feeds
+each outcome back as the next event. Block header commits wake it through the
+chain store's tip feed.
 
 ```mermaid
 flowchart TB
@@ -546,7 +551,7 @@ Each piece of mutable sync state has one owner goroutine.
 | `blockHandler` | The driver, `TipState`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers, which take no lock |
 | headersync manager | `HeaderSyncFSM` and the private dispatch `querysync.Scheduler` |
 | headersync peer, one per peer | That peer's scheduling state |
-| `cfHandler` | Filter-header sync progress |
+| `filterSyncLoop` | The `filtersync.Syncer`: filter-header sync progress and phase |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |
 
