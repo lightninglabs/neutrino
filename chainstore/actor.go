@@ -17,8 +17,7 @@ var ErrShuttingDown = errors.New("neutrino shutting down")
 // clients: the block handler submits with TryAsk and the filter handler
 // submits with Ask, and each has at most one command outstanding. The mailbox
 // therefore never holds more than two, and TryAsk can never find it full. This
-// matters because the block handler has already disarmed its header deadline
-// when it submits, so a refused command would lose the headers it carries.
+// matters because a refused command would lose the headers it carries.
 const MailboxCapacity = 2
 
 // Operations is what the actor executes, one command at a time. Store is the

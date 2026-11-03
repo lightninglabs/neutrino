@@ -1160,16 +1160,24 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	peer := prepared.message.peer
 
 	switch {
-	// A branch with less work is an invalid claim, so we drop the peer.
-	case verdict == chainstore.ReorgLessWork:
+	// A branch with less work is an invalid claim, and so is a tie that
+	// also failed a checkpoint, so we drop the peer.
+	case verdict == chainstore.ReorgLessWork,
+		verdict == chainstore.ReorgEqualWork &&
+			prepared.reorgMismatch != 0:
+
 		log.Warnf("Reorg attempt that has less work than known chain "+
-			"from peer %s -- disconnecting", peer.Addr())
+			"or fails a checkpoint, from peer %s -- disconnecting",
+			peer.Addr())
 		peer.Disconnect()
+		b.restartSyncIfIdle(peers)
 
 		return
 
 	// A tie changes nothing, and says nothing bad about the peer.
 	case verdict == chainstore.ReorgEqualWork:
+		b.restartSyncIfIdle(peers)
+
 		return
 
 	// The branch would win, but it failed a checkpoint.
@@ -1208,6 +1216,15 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	b.finishSerialHeaderFollowup(
 		peers, prepared.message, &hash, last.Height,
 	)
+}
+
+// restartSyncIfIdle restarts sync when the sync peer went away while a reorg's
+// verdict was pending. The peer-done handling skips the restart while a commit
+// is pending, so nothing else would.
+func (b *blockManager) restartSyncIfIdle(peers *list.List) {
+	if b.SyncPeer() == nil {
+		b.startSync(peers)
+	}
 }
 
 // rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
