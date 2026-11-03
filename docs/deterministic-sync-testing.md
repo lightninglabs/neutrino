@@ -50,9 +50,9 @@ from the run number. The same workflow runs the P checker.
 ## Chain-store DST
 
 `chain_store_dst_test.go` runs the real chain-store actor, `blockHandler` and
-`cfHandler` through `blockManager.Start` in a synctest bubble. Unlike the
-header-sync DST, no handler is driven by the runner. The harness supplies a
-scripted header peer, a scripted cfheaders responder, a notification consumer
+the `cfHeaderSync` loop through `blockManager.Start` in a synctest bubble.
+Unlike the header-sync DST, no handler is driven by the runner. The harness
+supplies a scripted header peer, a scripted cfheaders responder, a notification consumer
 that can stall, and fault wrappers on both stores. Every store operation takes
 virtual time, so a rollback and a filter batch commit can overlap.
 
@@ -469,11 +469,11 @@ than a millisecond. Those are Go scheduler traces, not P checker schedules.
 
 ## Known gaps
 
-- **No cfheader DST.** The filter-header path, `cfHandler` and the query work
-  manager are not driven. So the producer-side invariant is unchecked: after
-  a reorg, every stored filter header's block hash must equal the block-header
+- **No cfheader DST.** The filter-header path, `cfHeaderSync` and the query
+  work manager are not driven. So the producer-side invariant is unchecked:
+  after a reorg, every stored filter header's block hash must equal the block-header
   store's hash at that height. the chain store rollback on `blockHandler` and
-  `cfHandler` both write the filter-header store today. Tracked in
+  `cfHeaderSync` both write the filter-header store today. Tracked in
   [#416](https://github.com/lightninglabs/neutrino/issues/416).
 - **Notification order is recorded, not asserted.** A connected notification
   for an old-fork block can reach subscribers after its disconnected

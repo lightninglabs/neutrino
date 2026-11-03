@@ -1,8 +1,8 @@
 package neutrino
 
-// This file holds serial header sync: the path a node uses to follow the tip
-// from inv and headers messages, including reorgs, and the only path on regtest
-// and simnet.
+// This file holds the header executor's serial header sync: the path a node
+// uses to follow the tip from inv and headers messages, including reorgs, and
+// the only path on regtest and simnet.
 
 import (
 	"container/list"

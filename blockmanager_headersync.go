@@ -1,8 +1,8 @@
 package neutrino
 
-// This file holds the block manager's side of parallel header sync: it runs the
-// driver's events, keeps peers registered, and turns ready ranges into chain
-// store commits.
+// This file holds the header executor's side of parallel header sync: it runs
+// the driver's events, keeps peers registered, and turns ready ranges into
+// chain store commits.
 
 import (
 	"container/list"

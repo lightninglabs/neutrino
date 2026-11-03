@@ -427,11 +427,11 @@ func TestCFHeadersCollectsHonestConflict(t *testing.T) {
 		}
 	}
 
-	bm := &blockManager{cfg: &blockManagerCfg{
+	cf := &cfHeaderSync{cfg: &blockManagerCfg{
 		BlockHeaders: store,
 		Broadcaster:  newScriptedBroadcaster(scripts),
 	}}
-	headers, count := bm.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
+	headers, count := cf.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
 	require.Equal(t, 1, count)
 	require.Len(t, headers, 4)
 	require.NotEqual(t,
@@ -1027,7 +1027,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		bm.wg.Add(1)
 		go bm.blockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
-		bm.getCheckpointedCFHeaders(
+		bm.cfSync.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 
@@ -1258,7 +1258,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		bm.wg.Add(1)
 		go bm.blockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
-		bm.getCheckpointedCFHeaders(
+		bm.cfSync.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 	}
@@ -1415,7 +1415,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 			headers[p] = msg
 		}
 
-		bm := &blockManager{
+		cf := &cfHeaderSync{
 			cfg: &blockManagerCfg{
 				BlockHeaders: mBlockHeaderStore,
 				Broadcaster:  broadcaster,
@@ -1424,7 +1424,7 @@ func TestBlockManagerDetectBadPeers(t *testing.T) {
 
 		// Now trying to detect which peers are bad, we should split
 		// them into the verified-invalid set and the unresponsive set.
-		invalidPeers, unresponsivePeers, err := bm.detectBadPeers(
+		invalidPeers, unresponsivePeers, err := cf.detectBadPeers(
 			headers, targetIndex, badIndex, fType,
 		)
 		require.NoError(t, err, test.name)
@@ -1525,7 +1525,7 @@ func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
 	t.Parallel()
 
 	var timeouts []time.Duration
-	bm := &blockManager{cfg: &blockManagerCfg{
+	cf := &cfHeaderSync{cfg: &blockManagerCfg{
 		Broadcaster: broadcastFunc(func(_ *querysyncwm.Broadcast,
 			opts ...querysyncwm.QueryOption) error {
 
@@ -1539,8 +1539,8 @@ func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
 	}}
 
 	hash := chainhash.Hash{1}
-	bm.fetchFilterFromAllPeers(1, hash, wire.GCSFilterRegular)
-	bm.getCheckpts(&hash, wire.GCSFilterRegular)
+	cf.fetchFilterFromAllPeers(1, hash, wire.GCSFilterRegular)
+	cf.getCheckpts(&hash, wire.GCSFilterRegular)
 
 	require.Equal(t, []time.Duration{QueryTimeout, QueryTimeout}, timeouts)
 }
@@ -1548,7 +1548,7 @@ func TestAllPeerBroadcastsUseQueryTimeout(t *testing.T) {
 // TestBanAndDisconnect distinguishes invalid data from missing responses.
 func TestBanAndDisconnect(t *testing.T) {
 	var banned, disconnected []string
-	bm := &blockManager{cfg: &blockManagerCfg{
+	cf := &cfHeaderSync{cfg: &blockManagerCfg{
 		BanPeer: func(peer string, reason banman.Reason) error {
 			require.Equal(t, banman.InvalidFilterHeader, reason)
 			banned = append(banned, peer)
@@ -1560,7 +1560,7 @@ func TestBanAndDisconnect(t *testing.T) {
 		},
 	}}
 
-	acted := bm.banAndDisconnect(
+	acted := cf.banAndDisconnect(
 		[]string{"invalid"}, []string{"unresponsive"},
 		banman.InvalidFilterHeader,
 	)
@@ -1600,7 +1600,7 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 		[]wire.BlockHeader{block.Header}, uint32(100), nil,
 	)
 	var banned, disconnected []string
-	bm := &blockManager{cfg: &blockManagerCfg{
+	cf := &cfHeaderSync{cfg: &blockManagerCfg{
 		BlockHeaders: store,
 		GetBlock: func(chainhash.Hash, ...QueryOption) (
 			*btcutil.Block, error) {
@@ -1616,7 +1616,7 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 			return nil
 		},
 	}}
-	bm.cfg.Broadcaster = broadcastFunc(func(b *querysyncwm.Broadcast,
+	cf.cfg.Broadcaster = broadcastFunc(func(b *querysyncwm.Broadcast,
 		opts ...querysyncwm.QueryOption) error {
 
 		scripts := make(map[string][]wire.Message)
@@ -1632,7 +1632,7 @@ func TestResolveCFHeaderMixedResponders(t *testing.T) {
 		}
 		return newScriptedBroadcaster(scripts).Broadcast(b, opts...)
 	})
-	err = bm.resolveCFHeaderMismatches(
+	err = cf.resolveCFHeaderMismatches(
 		headers, checkpoints, 100, 1, wire.GCSFilterRegular,
 	)
 	require.NoError(t, err)

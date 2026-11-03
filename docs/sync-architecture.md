@@ -14,8 +14,10 @@ For how the sync code is tested, see
 
 `ChainService` in `neutrino.go` is the public entry point. It owns the peer
 set, the persistent stores, and two schedulers: the `blockManager`, which
-drives header and filter-header sync, and the query work manager, which
-serves on-demand filter and block requests.
+holds the header executor and starts the filter-header executor
+(`cfHeaderSync`), and the query work manager, which serves on-demand filter
+and block requests. The two executors share only the config, the chain store
+client, the tip feed and the quit signals.
 
 ```mermaid
 flowchart TB
@@ -25,9 +27,13 @@ flowchart TB
         api["Public API<br/>GetCFilter, GetBlock,<br/>SendTransaction, Rescan"]
     end
 
-    subgraph BM["blockManager (blockmanager.go)"]
+    subgraph BM["blockManager (blockmanager*.go)"]
         direction TB
         bh["blockHandler goroutine<br/>header sync driver"]
+    end
+
+    subgraph CF["cfHeaderSync (filter_sync.go)"]
+        direction TB
         cfh["filterSyncLoop goroutine<br/>filtersync.Syncer"]
     end
 
@@ -84,7 +90,8 @@ interfaces is the same for both.
 
 | Package or type | Owns | Does not own |
 | --- | --- | --- |
-| `blockManager` | Peer I/O for headers, the in-memory `headerList`, contextual header validation, filter-header sync | Store writes and block notifications (in `chainstore`), range planning, lease ownership, peer scheduling policy |
+| `blockManager` | Peer I/O for headers, the in-memory `headerList`, contextual header validation, and starting both executors | Filter-header sync, which `cfHeaderSync` owns; store writes and block notifications (in `chainstore`), range planning, lease ownership, peer scheduling policy |
+| `cfHeaderSync` | The `filtersync.Syncer` loop and its effects: tip feed waits, retries, the checkpointed and uncheckpointed cfheader rounds, conflict resolution, and banning peers that send bad filter headers | Header sync, block notifications, store writes (submitted to `chainstore`) |
 | `headersync.HeaderSyncFSM` | Anchors, header ranges and their lease epochs, per-peer range queues, the committed tip known to the scheduler | Goroutines, timers, I/O, header payloads |
 | `headersync.Manager` | Serialized access to the FSM; mirrors peer and range changes into the dispatch controller | Policy decisions, which live in the FSM and `Controller` |
 | `headersync.Peer` | One peer's scheduling state (ready, busy, blocked, quarantined, down), RTT, rank, and active range | The wire request itself, which `blockManager` sends |
@@ -137,7 +144,7 @@ sequenceDiagram
     end
     CS->>BM: Start()
     BM->>RT: Start() manager, peers, dispatch
-    Note over BM: blockHandler starts, filterSyncLoop waits for first peer
+    Note over BM: blockHandler starts, cfHeaderSync's filterSyncLoop waits for first peer
     CS->>WM: Start()
     Note over CS: connection manager and peerHandler start last
 ```
@@ -382,14 +389,18 @@ Transaction broadcast and the all-peer filter-header checks still use
 
 ## Filter header sync
 
-The `filterSyncLoop` goroutine syncs regular filter headers behind the block
-header tip. A `filtersync.Syncer` decides what to do next: it takes one event
-(tips changed, tip read, checkpoints fetched, conflict resolved, a fetch
-finished, a retry elapsed, quit) and returns the effects to perform (wait on
-the tip feed, read the tip, fetch, resolve, sleep, poll quit). The loop
-performs them on its own goroutine, the network rounds included, and feeds
-each outcome back as the next event. Block header commits wake it through the
-chain store's tip feed.
+The `cfHeaderSync` executor (`filter_sync.go`) runs the `filterSyncLoop`
+goroutine, which syncs regular filter headers behind the block header tip. It
+holds the shared config, the chain store client, a pointer to the block
+manager's tip feed, `BlockHeadersSynced` as a function, the filter genesis
+header and the quit signals, and no reference to the `blockManager`.
+
+A `filtersync.Syncer` decides what to do next: it takes one event (tips
+changed, tip read, checkpoints fetched, conflict resolved, a fetch finished, a
+retry elapsed, quit) and returns the effects to perform (wait on the tip feed,
+read the tip, fetch, resolve, sleep, poll quit). The loop performs them on its
+own goroutine, the network rounds included, and feeds each outcome back as the
+next event. Block header commits wake it through the chain store's tip feed.
 
 ```mermaid
 flowchart TB
@@ -551,7 +562,7 @@ Each piece of mutable sync state has one owner goroutine.
 | `blockHandler` | The driver, `TipState`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers, which take no lock |
 | headersync manager | `HeaderSyncFSM` and the private dispatch `querysync.Scheduler` |
 | headersync peer, one per peer | That peer's scheduling state |
-| `filterSyncLoop` | The `filtersync.Syncer`: filter-header sync progress and phase |
+| `cfHeaderSync.filterSyncLoop` | The `filtersync.Syncer`: filter-header sync progress and phase |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |
 

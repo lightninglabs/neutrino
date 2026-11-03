@@ -2,6 +2,10 @@
 
 package neutrino
 
+// This file holds the block manager: the header executor's state and block
+// handler loop, plus the wiring that constructs and starts both executors. The
+// filter header executor, cfHeaderSync, lives in filter_sync.go.
+
 import (
 	"container/list"
 	"context"
@@ -214,8 +218,10 @@ type blockManager struct { // nolint:maligned
 	// headers that we've verified in the past 10 seconds.
 	fltrHeaderProgessLogger *headerProgressLogger
 
-	// genesisHeader is the filter header of the genesis block.
-	genesisHeader chainhash.Hash
+	// cfSync is the filter header executor. It shares the config, the chain
+	// store client, the tip feed and the quit signals with the block
+	// handler, and nothing else.
+	cfSync *cfHeaderSync
 
 	// tipFeed holds the block header tip and the filter header tip that
 	// the chain store has made visible. The chain store publishes to it,
@@ -319,7 +325,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	bm.genesisHeader = *genesisHeader
+	cfGenesis := *genesisHeader
 
 	// Initialize the next checkpoint based on the current height.
 	header, height, err := cfg.BlockHeaders.ChainTip()
@@ -356,6 +362,16 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	bm.chainStore, err = chainstore.NewClient(bm.storeOps)
 	if err != nil {
 		return nil, err
+	}
+
+	bm.cfSync = &cfHeaderSync{
+		cfg:           cfg,
+		chainStore:    bm.chainStore,
+		tipFeed:       &bm.tipFeed,
+		headersSynced: bm.BlockHeadersSynced,
+		genesisHeader: cfGenesis,
+		quit:          bm.quit,
+		quitCtx:       bm.quitCtx,
 	}
 
 	return &bm, nil
@@ -480,7 +496,7 @@ func (b *blockManager) Start() {
 		}
 
 		log.Debug("Peer connected, starting filter sync.")
-		b.filterSyncLoop()
+		b.cfSync.filterSyncLoop()
 	}()
 }
 

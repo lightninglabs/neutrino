@@ -196,7 +196,7 @@ func testCFHeaderWriteRollback(
 	}
 	writeDone := make(chan error, 1)
 	write := func() {
-		_, _, err := bm.submitCFHeaders(
+		_, _, err := bm.cfSync.submitCFHeaders(
 			[]*wire.MsgCFHeaders{msg},
 		)
 		writeDone <- err
@@ -218,7 +218,7 @@ func testCFHeaderWriteRollback(
 	}
 	writeErr := <-writeDone
 	// A second owner request is a FIFO barrier after the queued reorg.
-	_, _, err = bm.submitCFHeaders(nil)
+	_, _, err = bm.cfSync.submitCFHeaders(nil)
 	require.ErrorContains(t, err, "no cfheaders")
 	synctest.Wait()
 	blockTip, blockHeight, err := blocks.ChainTip()
@@ -408,7 +408,7 @@ func TestCFHeaderMutationErrors(t *testing.T) {
 				}()
 				defer func() { close(stop); <-done }()
 				store.writeFault = test.writeFault
-				_, _, err = bm.submitCFHeaders(
+				_, _, err = bm.cfSync.submitCFHeaders(
 					[]*wire.MsgCFHeaders{msg},
 				)
 				if test.writeFault != 0 {
@@ -559,7 +559,7 @@ func TestCFHeaderSubscriptionWhilePublishing(t *testing.T) {
 		<-source.entered
 		writerDone := make(chan error, 1)
 		go func() {
-			_, _, err := bm.submitCFHeaders(
+			_, _, err := bm.cfSync.submitCFHeaders(
 				[]*wire.MsgCFHeaders{msg},
 			)
 			writerDone <- err
@@ -609,8 +609,8 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 		client, err := chainstore.NewClient(ops)
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
-		bm := &blockManager{
-			chainStore: client, quitCtx: ctx, quitCancel: cancel,
+		cf := &cfHeaderSync{
+			chainStore: client, quitCtx: ctx,
 		}
 
 		// Hold the actor inside a block commit so the filter commit
@@ -620,7 +620,7 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 		<-ops.entered
 		done := make(chan error, 1)
 		go func() {
-			_, _, err := bm.submitCFHeaders(nil)
+			_, _, err := cf.submitCFHeaders(nil)
 			done <- err
 		}()
 		synctest.Wait()
@@ -630,7 +630,7 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 		close(ops.release)
 		<-held
 		require.NoError(t, client.Stop())
-		_, _, err = bm.submitCFHeaders(nil)
+		_, _, err = cf.submitCFHeaders(nil)
 		require.ErrorIs(t, err, ErrShuttingDown)
 	})
 }
@@ -767,7 +767,7 @@ func testCFHeaderWatermark(t *testing.T, published bool, target uint32,
 	bm.wg.Add(1)
 	go bm.blockHandler()
 	defer func() { require.NoError(t, bm.Stop()) }()
-	_, err = bm.submitCFHeaderReconciliation()
+	_, err = bm.cfSync.submitCFHeaderReconciliation()
 	require.NoError(t, err)
 	synctest.Wait()
 	require.Len(
@@ -819,7 +819,7 @@ func TestCFHeaderConflictRejectsOrphanedStop(t *testing.T) {
 		}))
 	}
 	broadcasts := 0
-	bm := &blockManager{cfg: &blockManagerCfg{
+	cf := &cfHeaderSync{cfg: &blockManagerCfg{
 		BlockHeaders: blocks,
 		Broadcaster: broadcastFunc(func(_ *querysyncwm.Broadcast,
 			_ ...querysyncwm.QueryOption) error {
@@ -833,7 +833,7 @@ func TestCFHeaderConflictRejectsOrphanedStop(t *testing.T) {
 		StopHash:     oldStop,
 		FilterHashes: []*chainhash.Hash{&hash, &hash},
 	}
-	_, _, err = bm.detectBadPeers(
+	_, _, err = cf.detectBadPeers(
 		map[string]*wire.MsgCFHeaders{"honest": msg},
 		2, 0, wire.GCSFilterRegular,
 	)

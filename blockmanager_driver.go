@@ -1,5 +1,8 @@
 package neutrino
 
+// This file holds the header executor's glue to the headersync driver: it runs
+// one driver event and reports its outcome to the block handler.
+
 import (
 	"container/list"
 	"time"

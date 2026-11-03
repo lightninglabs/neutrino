@@ -1582,7 +1582,7 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			bm.filterSyncLoop()
+			bm.cfSync.filterSyncLoop()
 		}()
 		synctest.Wait()
 		calls := flaky.calls.Load()
@@ -1782,7 +1782,7 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 			<-done
 		})
 
-		_, _, err = bm.submitCFHeaders([]*wire.MsgCFHeaders{msg})
+		_, _, err = bm.cfSync.submitCFHeaders([]*wire.MsgCFHeaders{msg})
 		require.ErrorIs(t, err, errDSTWrite)
 		checkpoint, durable, err := filters.ChainTip()
 		require.NoError(t, err)
@@ -1791,12 +1791,12 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 		// Retry through the path under test: nothing is left to
 		// fetch, so it must still publish what is on disk.
 		if checkpointed {
-			require.NoError(t, bm.getCheckpointedCFHeaders(
+			require.NoError(t, bm.cfSync.getCheckpointedCFHeaders(
 				[]*chainhash.Hash{checkpoint}, store,
 				dstFilterType,
 			))
 		} else {
-			require.NoError(t, bm.getUncheckpointedCFHeaders(
+			require.NoError(t, bm.cfSync.getUncheckpointedCFHeaders(
 				dstFilterType,
 			))
 		}
