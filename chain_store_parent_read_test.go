@@ -10,13 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type reviewRollbackParentRead struct {
+type rollbackParentReadFault struct {
 	headerfs.BlockHeaderStore
 	failHash chainhash.Hash
 	failed   bool
 }
 
-func (s *reviewRollbackParentRead) FetchHeader(
+func (s *rollbackParentReadFault) FetchHeader(
 	hash *chainhash.Hash,
 ) (*wire.BlockHeader, uint32, error) {
 
@@ -27,10 +27,10 @@ func (s *reviewRollbackParentRead) FetchHeader(
 	return s.BlockHeaderStore.FetchHeader(hash)
 }
 
-func TestReviewRollbackParentReadRetainsTarget(t *testing.T) {
+func TestRollbackParentReadRetainsTarget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &reviewRollbackParentRead{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &rollbackParentReadFault{
 			BlockHeaderStore: blocks,
 			failHash:         dstChains().honest[1].BlockHash(),
 		}

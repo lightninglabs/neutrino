@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type reviewBlockFault struct {
+type blockStoreFault struct {
 	headerfs.BlockHeaderStore
 	failWrite, failRollback bool
 	failRollbackBefore      bool
@@ -22,7 +22,7 @@ type reviewBlockFault struct {
 	failNextRead            bool
 }
 
-func (s *reviewBlockFault) WriteHeaders(h ...headerfs.BlockHeader) error {
+func (s *blockStoreFault) WriteHeaders(h ...headerfs.BlockHeader) error {
 	if err := s.BlockHeaderStore.WriteHeaders(h...); err != nil {
 		return err
 	}
@@ -32,7 +32,7 @@ func (s *reviewBlockFault) WriteHeaders(h ...headerfs.BlockHeader) error {
 	}
 	return nil
 }
-func (s *reviewBlockFault) RollbackLastBlock() (*headerfs.BlockStamp, error) {
+func (s *blockStoreFault) RollbackLastBlock() (*headerfs.BlockStamp, error) {
 	if s.failRollbackBefore {
 		s.failRollbackBefore = false
 		return nil, errDSTWrite
@@ -48,7 +48,7 @@ func (s *reviewBlockFault) RollbackLastBlock() (*headerfs.BlockStamp, error) {
 	}
 	return tip, err
 }
-func (s *reviewBlockFault) ChainTip() (*wire.BlockHeader, uint32, error) {
+func (s *blockStoreFault) ChainTip() (*wire.BlockHeader, uint32, error) {
 	if s.failNextRead {
 		s.failNextRead = false
 		return nil, 0, errCFHeaderRead
@@ -56,7 +56,7 @@ func (s *reviewBlockFault) ChainTip() (*wire.BlockHeader, uint32, error) {
 	return s.BlockHeaderStore.ChainTip()
 }
 
-func reviewStoreFixture(
+func chainStoreFixture(
 	t *testing.T,
 	n, fn int,
 ) (
@@ -113,7 +113,7 @@ func reviewStoreFixture(
 	return bm, blocks, filters, events
 }
 
-func reviewFilterMessage(
+func filterCommitMessage(
 	t *testing.T,
 	s headerfs.FilterHeaderStore,
 	start, end int,
@@ -133,9 +133,9 @@ func reviewFilterMessage(
 	}
 	return m
 }
-func TestReviewBackendFilterSuffixRecovers(t *testing.T) {
+func TestFilterSuffixRecovers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, _, filters, events := reviewStoreFixture(t, 5, 0)
+		bm, _, filters, events := chainStoreFixture(t, 5, 0)
 		fault := &cfHeaderLostAckStore{
 			FilterHeaderStore: filters,
 			failWrite:         true,
@@ -145,7 +145,7 @@ func TestReviewBackendFilterSuffixRecovers(t *testing.T) {
 		_, err := backend.commitFilters(
 			chainStoreFilterCommit{
 				Messages: []*wire.MsgCFHeaders{
-					reviewFilterMessage(t, filters, 1, 3),
+					filterCommitMessage(t, filters, 1, 3),
 				},
 			},
 		)
@@ -154,7 +154,7 @@ func TestReviewBackendFilterSuffixRecovers(t *testing.T) {
 		_, err = backend.commitFilters(
 			chainStoreFilterCommit{
 				Messages: []*wire.MsgCFHeaders{
-					reviewFilterMessage(t, filters, 4, 5),
+					filterCommitMessage(t, filters, 4, 5),
 				},
 			},
 		)
@@ -174,10 +174,10 @@ func TestReviewBackendFilterSuffixRecovers(t *testing.T) {
 		)
 	})
 }
-func TestReviewBackendRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
+func TestRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &reviewBlockFault{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks,
 			failRollback:     true,
 		}
@@ -221,10 +221,10 @@ func TestReviewBackendRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 		)
 	})
 }
-func TestReviewBackendSnapshotHealsBlockWrite(t *testing.T) {
+func TestSnapshotHealsBlockWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, _ := reviewStoreFixture(t, 0, 0)
-		bm.cfg.BlockHeaders = &reviewBlockFault{
+		bm, blocks, _, _ := chainStoreFixture(t, 0, 0)
+		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks,
 			failWrite:        true,
 		}
@@ -257,8 +257,8 @@ func TestReviewBackendSnapshotHealsBlockWrite(t *testing.T) {
 
 func TestChainStoreRollbackLostAckAndReadback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &reviewBlockFault{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks, failRollback: true,
 			failReadAfterRollback: true,
 		}
@@ -318,7 +318,7 @@ func TestChainStoreReorgWriteOutcomes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				bm, blocks, _, events := reviewStoreFixture(
+				bm, blocks, _, events := chainStoreFixture(
 					t,
 					3,
 					0,
@@ -405,8 +405,8 @@ func TestChainStoreReorgWriteOutcomes(t *testing.T) {
 // when the failed mutation leaves the child at the durable tip.
 func TestChainStoreRollbackFailureBeforeWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &reviewBlockFault{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks, failRollbackBefore: true,
 		}
 		backend := &blockManagerChainStore{manager: bm}
@@ -481,7 +481,7 @@ func TestChainStorePairedRollbackRetry(t *testing.T) {
 		t.Run(fmt.Sprintf("applied=%t", applied), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				bm, blocks, filters, events :=
-					reviewStoreFixture(
+					chainStoreFixture(
 						t,
 						3,
 						3,
@@ -559,7 +559,7 @@ func TestChainStorePairedRollbackRetry(t *testing.T) {
 func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		bm, blocks, filters, events :=
-			reviewStoreFixture(t, 3, 3)
+			chainStoreFixture(t, 3, 3)
 		bm.setFilterHeaderTip(3, dstChains().honest[3].BlockHash())
 		fault := &chainStoreFilterRollbackFault{
 			FilterHeaderStore: filters,
@@ -616,8 +616,8 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 // even when recovery itself encounters another ambiguous rollback.
 func TestChainStoreRollbackRepeatedLostAcks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &reviewBlockFault{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks, failRollbackCount: 2,
 		}
 		backend := &blockManagerChainStore{manager: bm}
@@ -665,7 +665,7 @@ func TestChainStoreRollbackRepeatedLostAcks(t *testing.T) {
 // overtaking a replacement batch after a partial rollback or failed write.
 func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 0)
+		bm, blocks, _, events := chainStoreFixture(t, 3, 0)
 		fault := &dstHeaderStore{
 			BlockHeaderStore: blocks,
 			mode:             dstStoreDown,
@@ -719,7 +719,7 @@ func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 // prefix and writes only the remaining suffix after a lost acknowledgement.
 func TestChainStoreReorgResumesReplacementPrefix(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 0)
+		bm, blocks, _, events := chainStoreFixture(t, 3, 0)
 		fault := &dstHeaderStore{
 			BlockHeaderStore: blocks,
 			mode:             dstStoreTorn,
@@ -783,7 +783,7 @@ func (s *chainStoreTipReadLimit) ChainTip() (*wire.BlockHeader, uint32, error) {
 // leaves no intent behind, so later snapshots do not re-read its prefix.
 func TestChainStoreCompletedIntentDoesNotReplay(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, _ := reviewStoreFixture(t, 3, 0)
+		bm, blocks, _, _ := chainStoreFixture(t, 3, 0)
 		writer := &dstHeaderStore{
 			BlockHeaderStore: blocks,
 			mode:             dstStoreTorn,

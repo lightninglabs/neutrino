@@ -18,7 +18,7 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				bm, blocks, _, events := reviewStoreFixture(
+				bm, blocks, _, events := chainStoreFixture(
 					t,
 					3,
 					3,

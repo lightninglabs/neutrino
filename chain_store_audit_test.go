@@ -27,7 +27,7 @@ func TestKnownPrefixDoesNotReadStoreBeforeActorWrite(t *testing.T) {
 				}),
 			)
 		}
-		readFault := &reviewRollbackParentRead{
+		readFault := &rollbackParentReadFault{
 			BlockHeaderStore: blocks,
 			failHash:         fixture.honest[1].BlockHash(),
 		}

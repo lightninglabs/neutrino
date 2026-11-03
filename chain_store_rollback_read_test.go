@@ -9,15 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// astraRecoveryBoundaryFault fails the second tip read after a lost rollback
+// lostRollbackReadFault fails the second tip read after a lost rollback
 // acknowledgement.
-type astraRecoveryBoundaryFault struct {
+type lostRollbackReadFault struct {
 	headerfs.BlockHeaderStore
 	armed bool
 	reads int
 }
 
-func (s *astraRecoveryBoundaryFault) RollbackLastBlock() (
+func (s *lostRollbackReadFault) RollbackLastBlock() (
 	*headerfs.BlockStamp, error) {
 
 	tip, err := s.BlockHeaderStore.RollbackLastBlock()
@@ -28,7 +28,7 @@ func (s *astraRecoveryBoundaryFault) RollbackLastBlock() (
 	return tip, err
 }
 
-func (s *astraRecoveryBoundaryFault) ChainTip() (
+func (s *lostRollbackReadFault) ChainTip() (
 	*wire.BlockHeader, uint32, error) {
 
 	if s.armed {
@@ -40,10 +40,10 @@ func (s *astraRecoveryBoundaryFault) ChainTip() (
 	return s.BlockHeaderStore.ChainTip()
 }
 
-func TestAstraRollbackRecoveryReadRetainsWholeTarget(t *testing.T) {
+func TestRollbackRecoveryReadRetainsWholeTarget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		bm, blocks, _, events := reviewStoreFixture(t, 3, 3)
-		bm.cfg.BlockHeaders = &astraRecoveryBoundaryFault{
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		bm.cfg.BlockHeaders = &lostRollbackReadFault{
 			BlockHeaderStore: blocks,
 		}
 		backend := &blockManagerChainStore{manager: bm}
