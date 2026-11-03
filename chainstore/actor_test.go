@@ -1,4 +1,4 @@
-package neutrino
+package chainstore
 
 import (
 	"context"
@@ -16,34 +16,34 @@ type blockedChainStoreOps struct {
 	release chan struct{}
 }
 
-func (s *blockedChainStoreOps) commitBlocks(
-	chainStoreBlockCommit) (chainStoreReply, error) {
+func (s *blockedChainStoreOps) CommitBlocks(
+	BlockCommit) (Reply, error) {
 
 	close(s.entered)
 	<-s.release
-	return chainStoreReply{}, nil
+	return Reply{}, nil
 }
 
-func (*blockedChainStoreOps) rollback(
-	chainStoreRollback) (chainStoreReply, error) {
+func (*blockedChainStoreOps) Rollback(
+	Rollback) (Reply, error) {
 
-	return chainStoreReply{}, nil
+	return Reply{}, nil
 }
 
-func (*blockedChainStoreOps) reorg(
-	chainStoreReorg) (chainStoreReply, error) {
+func (*blockedChainStoreOps) Reorg(
+	Reorg) (Reply, error) {
 
-	return chainStoreReply{}, nil
+	return Reply{}, nil
 }
 
-func (*blockedChainStoreOps) commitFilters(
-	chainStoreFilterCommit) (chainStoreReply, error) {
+func (*blockedChainStoreOps) CommitFilters(
+	FilterCommit) (Reply, error) {
 
-	return chainStoreReply{}, nil
+	return Reply{}, nil
 }
 
-func (*blockedChainStoreOps) snapshot() (chainStoreReply, error) {
-	return chainStoreReply{}, nil
+func (*blockedChainStoreOps) Snapshot() (Reply, error) {
+	return Reply{}, nil
 }
 
 // TestChainStoreShutdownWaitsForAdmittedMutation verifies that canceling an
@@ -54,19 +54,19 @@ func TestChainStoreShutdownWaitsForAdmittedMutation(t *testing.T) {
 			entered: make(chan struct{}),
 			release: make(chan struct{}),
 		}
-		client, err := newChainStoreClient(ops)
+		client, err := NewClient(ops)
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
 		askDone := make(chan error, 1)
 		go func() {
-			result := client.ask(ctx, chainStoreBlockCommit{})
+			result := client.Ask(ctx, BlockCommit{})
 			askDone <- result.Err()
 		}()
 		<-ops.entered
 		cancel()
 		require.ErrorIs(t, <-askDone, context.Canceled)
 		stopDone := make(chan error, 1)
-		go func() { stopDone <- client.stop() }()
+		go func() { stopDone <- client.Stop() }()
 		synctest.Wait()
 		select {
 		case err := <-stopDone:
@@ -76,8 +76,8 @@ func TestChainStoreShutdownWaitsForAdmittedMutation(t *testing.T) {
 		}
 		close(ops.release)
 		require.NoError(t, <-stopDone)
-		result := client.ask(
-			t.Context(), chainStoreSnapshotRequest{},
+		result := client.Ask(
+			t.Context(), SnapshotRequest{},
 		)
 		require.ErrorIs(t, result.Err(), ErrShuttingDown)
 	})
@@ -91,31 +91,31 @@ func TestChainStoreAdmissionNonblocking(t *testing.T) {
 			entered: make(chan struct{}),
 			release: make(chan struct{}),
 		}
-		client, err := newChainStoreClient(ops)
+		client, err := NewClient(ops)
 		require.NoError(t, err)
-		first := make(chan chainStoreResult, 1)
-		client.tryAsk(t.Context(), chainStoreBlockCommit{}, first)
+		first := make(chan Result, 1)
+		client.TryAsk(t.Context(), BlockCommit{}, first)
 		<-ops.entered
 
 		// Fill the mailbox behind the running turn.
 		queued := make(
-			[]chan chainStoreResult, chainStoreMailboxCapacity,
+			[]chan Result, MailboxCapacity,
 		)
 		for i := range queued {
-			queued[i] = make(chan chainStoreResult, 1)
-			client.tryAsk(
-				t.Context(), chainStoreSnapshotRequest{},
+			queued[i] = make(chan Result, 1)
+			client.TryAsk(
+				t.Context(), SnapshotRequest{},
 				queued[i],
 			)
 		}
-		full := make(chan chainStoreResult, 1)
-		client.tryAsk(t.Context(), chainStoreSnapshotRequest{}, full)
-		require.ErrorIs(t, (<-full).err, actor.ErrMailboxFull)
+		full := make(chan Result, 1)
+		client.TryAsk(t.Context(), SnapshotRequest{}, full)
+		require.ErrorIs(t, (<-full).Err, actor.ErrMailboxFull)
 		control := make(chan struct{}, 1)
 		control <- struct{}{}
 		<-control
 		stopDone := make(chan error, 1)
-		go func() { stopDone <- client.stop() }()
+		go func() { stopDone <- client.Stop() }()
 		synctest.Wait()
 		select {
 		case err := <-stopDone:
@@ -126,9 +126,9 @@ func TestChainStoreAdmissionNonblocking(t *testing.T) {
 		default:
 		}
 		close(ops.release)
-		require.NoError(t, (<-first).err)
+		require.NoError(t, (<-first).Err)
 		for _, result := range queued {
-			require.NoError(t, (<-result).err)
+			require.NoError(t, (<-result).Err)
 		}
 		require.NoError(t, <-stopDone)
 	})
@@ -146,53 +146,53 @@ func TestChainStoreTryAskBesideBlockingAsk(t *testing.T) {
 			entered: make(chan struct{}),
 			release: make(chan struct{}),
 		}
-		client, err := newChainStoreClient(ops)
+		client, err := NewClient(ops)
 		require.NoError(t, err)
 
 		// A turn is running, as when blockHandler's last commit is
 		// still executing.
-		running := make(chan chainStoreResult, 1)
-		client.tryAsk(t.Context(), chainStoreBlockCommit{}, running)
+		running := make(chan Result, 1)
+		client.TryAsk(t.Context(), BlockCommit{}, running)
 		<-ops.entered
 
 		// cfHandler's blocking ask occupies a mailbox slot.
 		cf := make(chan error, 1)
 		go func() {
-			cf <- client.ask(
-				t.Context(), chainStoreSnapshotRequest{},
+			cf <- client.Ask(
+				t.Context(), SnapshotRequest{},
 			).Err()
 		}()
 		synctest.Wait()
 
 		// blockHandler's next TryAsk must be admitted beside it.
-		next := make(chan chainStoreResult, 1)
-		client.tryAsk(t.Context(), chainStoreSnapshotRequest{}, next)
+		next := make(chan Result, 1)
+		client.TryAsk(t.Context(), SnapshotRequest{}, next)
 		synctest.Wait()
 		select {
 		case result := <-next:
-			t.Fatalf("TryAsk was not admitted: %v", result.err)
+			t.Fatalf("TryAsk was not admitted: %v", result.Err)
 		default:
 		}
 
 		close(ops.release)
-		require.NoError(t, (<-running).err)
+		require.NoError(t, (<-running).Err)
 		require.NoError(t, <-cf)
-		require.NoError(t, (<-next).err)
-		require.NoError(t, client.stop())
+		require.NoError(t, (<-next).Err)
+		require.NoError(t, client.Stop())
 	})
 }
 
 // TestChainStoreAdmissionReleasesSlot checks completed messages make the
 // bounded mailbox available for another nonblocking request.
 func TestChainStoreAdmissionReleasesSlot(t *testing.T) {
-	client, err := newChainStoreClient(&blockedChainStoreOps{})
+	client, err := NewClient(&blockedChainStoreOps{})
 	require.NoError(t, err)
-	results := make(chan chainStoreResult, 1)
-	client.tryAsk(t.Context(), chainStoreSnapshotRequest{}, results)
-	require.NoError(t, (<-results).err)
-	client.tryAsk(t.Context(), chainStoreSnapshotRequest{}, results)
-	require.NoError(t, (<-results).err)
-	require.NoError(t, client.stop())
+	results := make(chan Result, 1)
+	client.TryAsk(t.Context(), SnapshotRequest{}, results)
+	require.NoError(t, (<-results).Err)
+	client.TryAsk(t.Context(), SnapshotRequest{}, results)
+	require.NoError(t, (<-results).Err)
+	require.NoError(t, client.Stop())
 }
 
 // orderedChainStoreOps records when a snapshot begins after a blocked write.
@@ -201,9 +201,9 @@ type orderedChainStoreOps struct {
 	snapshotStarted chan struct{}
 }
 
-func (s *orderedChainStoreOps) snapshot() (chainStoreReply, error) {
+func (s *orderedChainStoreOps) Snapshot() (Reply, error) {
 	close(s.snapshotStarted)
-	return chainStoreReply{}, nil
+	return Reply{}, nil
 }
 
 // TestChainStoreSerializesMutationAndSnapshot checks that a snapshot cannot
@@ -217,20 +217,20 @@ func TestChainStoreSerializesMutationAndSnapshot(t *testing.T) {
 			},
 			snapshotStarted: make(chan struct{}),
 		}
-		client, err := newChainStoreClient(ops)
+		client, err := NewClient(ops)
 		require.NoError(t, err)
 		mutation := make(chan error, 1)
 		go func() {
-			result := client.ask(
-				t.Context(), chainStoreBlockCommit{},
+			result := client.Ask(
+				t.Context(), BlockCommit{},
 			)
 			mutation <- result.Err()
 		}()
 		<-ops.entered
 		snapshot := make(chan error, 1)
 		go func() {
-			result := client.ask(
-				t.Context(), chainStoreSnapshotRequest{},
+			result := client.Ask(
+				t.Context(), SnapshotRequest{},
 			)
 			snapshot <- result.Err()
 		}()
@@ -244,7 +244,7 @@ func TestChainStoreSerializesMutationAndSnapshot(t *testing.T) {
 		require.NoError(t, <-mutation)
 		require.NoError(t, <-snapshot)
 		<-ops.snapshotStarted
-		require.NoError(t, client.stop())
+		require.NoError(t, client.Stop())
 	})
 }
 
@@ -253,16 +253,16 @@ func TestChainStoreSerializesMutationAndSnapshot(t *testing.T) {
 func TestChainStoreReplyPreservesProgress(t *testing.T) {
 	storeErr := errors.New("lost acknowledgement")
 	ops := &progressChainStoreOps{err: storeErr}
-	client, err := newChainStoreClient(ops)
+	client, err := NewClient(ops)
 	require.NoError(t, err)
-	result := client.ask(
-		t.Context(), chainStoreSnapshotRequest{},
+	result := client.Ask(
+		t.Context(), SnapshotRequest{},
 	)
 	require.False(t, result.IsErr())
-	reply := result.UnwrapOr(chainStoreReply{})
+	reply := result.UnwrapOr(Reply{})
 	require.Equal(t, int32(7), reply.BlockTip.Height)
 	require.ErrorIs(t, reply.Err, storeErr)
-	require.NoError(t, client.stop())
+	require.NoError(t, client.Stop())
 }
 
 // progressChainStoreOps returns a known tip together with an operation error.
@@ -271,8 +271,8 @@ type progressChainStoreOps struct {
 	err error
 }
 
-func (s *progressChainStoreOps) snapshot() (chainStoreReply, error) {
-	var reply chainStoreReply
+func (s *progressChainStoreOps) Snapshot() (Reply, error) {
+	var reply Reply
 	reply.BlockTip.Height = 7
 	return reply, s.err
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +37,7 @@ func TestChainStoreBackendBlockMutation(t *testing.T) {
 			PrevBlock: genesis.BlockHash(),
 			Timestamp: genesis.Timestamp.Add(time.Minute),
 		}
-		request := chainStoreBlockCommit{
+		request := chainstore.BlockCommit{
 			ExpectedParent: headerfs.BlockStamp{
 				Height: 0, Hash: genesis.BlockHash(),
 			},
@@ -44,9 +45,9 @@ func TestChainStoreBackendBlockMutation(t *testing.T) {
 				BlockHeader: &header, Height: 1,
 			}},
 		}
-		result := client.ask(t.Context(), request)
+		result := client.Ask(t.Context(), request)
 		require.False(t, result.IsErr())
-		reply := result.UnwrapOr(chainStoreReply{})
+		reply := result.UnwrapOr(chainstore.Reply{})
 		require.NoError(t, reply.Err)
 		require.Equal(t, header.BlockHash(), reply.BlockTip.Hash)
 		require.Equal(t, int32(1), reply.BlockTip.Height)
@@ -54,18 +55,18 @@ func TestChainStoreBackendBlockMutation(t *testing.T) {
 		require.Equal(t, reply.BlockTip, *visible)
 
 		// A second command prepared on the old parent is rejected.
-		result = client.ask(t.Context(), request)
+		result = client.Ask(t.Context(), request)
 		require.False(t, result.IsErr())
-		require.Error(t, result.UnwrapOr(chainStoreReply{}).Err)
+		require.Error(t, result.UnwrapOr(chainstore.Reply{}).Err)
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), height)
 
-		result = client.ask(t.Context(), chainStoreRollback{
+		result = client.Ask(t.Context(), chainstore.Rollback{
 			ExpectedTip: reply.BlockTip, Height: 0,
 		})
 		require.False(t, result.IsErr())
-		rolledBack := result.UnwrapOr(chainStoreReply{})
+		rolledBack := result.UnwrapOr(chainstore.Reply{})
 		require.NoError(t, rolledBack.Err)
 		require.Equal(t, genesis.BlockHash(), rolledBack.BlockTip.Hash)
 		visible = bm.publishedBlockTip.Load()

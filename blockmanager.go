@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
@@ -317,9 +318,9 @@ type blockManager struct { // nolint:maligned
 	peerChan chan interface{}
 
 	// chainStore owns runtime header store mutations once integrated.
-	chainStore          *chainStoreClient
-	storeOps            *blockManagerChainStore
-	chainStoreResult    chan chainStoreResult
+	chainStore          *chainstore.Client
+	storeOps            *chainstore.Store
+	chainStoreResult    chan chainstore.Result
 	pendingHeaderCommit *pendingChainHeaderCommit
 	donePeerChan        chan *ServerPeer
 	timerChan           chan interface{}
@@ -375,7 +376,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		donePeerChan:     make(chan *ServerPeer, MaxPeers),
 		timerChan:        make(chan interface{}, MaxPeers*3),
 		timeoutChan:      make(chan *headerSyncTimeoutMsg, MaxPeers*3),
-		chainStoreResult: make(chan chainStoreResult, 1),
+		chainStoreResult: make(chan chainstore.Result, 1),
 		blockNtfnChan:    make(chan blockntfns.BlockNtfn),
 		blkHeaderProgressLogger: newBlockProgressLogger(
 			"Processed", "block", log,
@@ -395,7 +396,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		minRetargetTimespan: retarget.MinRetargetTimespan,
 		maxRetargetTimespan: retarget.MaxRetargetTimespan,
 	}
-	bm.storeOps = &blockManagerChainStore{manager: &bm}
+	bm.storeOps = chainstore.NewStore(&chainStoreHost{manager: &bm})
 	if bm.headerSyncTimeout == 0 {
 		bm.headerSyncTimeout = defaultHeaderSyncTimeout
 	}
@@ -456,7 +457,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	// The chain store actor exists from construction so that every
 	// header and filter header write goes through it, whether or not
 	// the handlers run. Stop joins it.
-	bm.chainStore, err = newChainStoreClient(bm.storeOps)
+	bm.chainStore, err = chainstore.NewClient(bm.storeOps)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +611,7 @@ func (b *blockManager) Stop() error {
 	b.cancelHeaderCooldownWakeup()
 	b.stopHeaderSyncActors()
 
-	if err := b.chainStore.stop(); err != nil {
+	if err := b.chainStore.Stop(); err != nil {
 		close(done)
 		return err
 	}
@@ -1274,9 +1275,9 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	if err != nil {
 		return err
 	}
-	filterTip := snapshot.filterTip
-	filtHeight := snapshot.filterHeight
-	blockHeight := snapshot.blockHeight
+	filterTip := snapshot.FilterTip
+	filtHeight := snapshot.FilterHeight
+	blockHeight := snapshot.BlockHeight
 
 	// If the block height is somehow before the filter height, then this
 	// means that we may still be handling a re-org, so we'll bail our so
@@ -1297,12 +1298,12 @@ func (b *blockManager) getUncheckpointedCFHeaders(
 	}
 
 	log.Infof("Attempting to fetch set of un-checkpointed filters "+
-		"at height=%v, hash=%v", blockHeight, snapshot.blockHash)
+		"at height=%v, hash=%v", blockHeight, snapshot.BlockHash)
 
 	// Query all peers for the responses.
 	startHeight := filtHeight + 1
 	headers, numHeaders := b.getCFHeadersForAllPeersAt(
-		startHeight, fType, snapshot.stopHash, snapshot.stopHeight,
+		startHeight, fType, snapshot.StopHash, snapshot.StopHeight,
 	)
 
 	// Ban any peer that responds with the wrong prev filter header.
@@ -1810,26 +1811,16 @@ func checkpointedCFHeadersBatchTimeout(batches int) time.Duration {
 	return timeout
 }
 
-// cfHeaderSnapshot is an owner-consistent filter query plan.
-type cfHeaderSnapshot struct {
-	filterTip    chainhash.Hash
-	filterHeight uint32
-	blockHash    chainhash.Hash
-	blockHeight  uint32
-	stopHash     chainhash.Hash
-	stopHeight   uint32
-}
-
 // submitCFHeaderReconciliation asks the chain store actor to reconcile
 // publication and returns a filter query snapshot.
-func (b *blockManager) submitCFHeaderReconciliation() (cfHeaderSnapshot,
-	error) {
+func (b *blockManager) submitCFHeaderReconciliation() (
+	chainstore.FilterSnapshot, error) {
 
-	result := b.chainStore.ask(b.quitCtx, chainStoreSnapshotRequest{})
+	result := b.chainStore.Ask(b.quitCtx, chainstore.SnapshotRequest{})
 	if result.IsErr() {
-		return cfHeaderSnapshot{}, result.Err()
+		return chainstore.FilterSnapshot{}, result.Err()
 	}
-	reply := result.UnwrapOr(chainStoreReply{})
+	reply := result.UnwrapOr(chainstore.Reply{})
 
 	return reply.Filter, reply.Err
 }
@@ -1839,320 +1830,19 @@ func (b *blockManager) submitCFHeaderReconciliation() (cfHeaderSnapshot,
 func (b *blockManager) submitCFHeaders(
 	msgs []*wire.MsgCFHeaders) (*chainhash.Hash, uint32, error) {
 
-	result := b.chainStore.ask(
-		b.quitCtx, chainStoreFilterCommit{Messages: msgs},
+	result := b.chainStore.Ask(
+		b.quitCtx, chainstore.FilterCommit{Messages: msgs},
 	)
 	if result.IsErr() {
 		return nil, 0, result.Err()
 	}
-	reply := result.UnwrapOr(chainStoreReply{})
+	reply := result.UnwrapOr(chainstore.Reply{})
 	if reply.Err != nil {
 		return nil, 0, reply.Err
 	}
-	hash := reply.Filter.filterTip
+	hash := reply.Filter.FilterTip
 
-	return &hash, reply.Filter.filterHeight, nil
-}
-
-func (b *blockManager) writeCFHeadersMsgs(msgs []*wire.MsgCFHeaders,
-	store headerfs.FilterHeaderStore) (*chainhash.Hash, uint32, error) {
-
-	if len(msgs) == 0 {
-		return nil, 0, fmt.Errorf("no cfheaders messages to write")
-	}
-
-	// Check that the PrevFilterHeader is the same as the last stored so we
-	// can prevent misalignment.
-	tip, tipHeight, err := store.ChainTip()
-	if err != nil {
-		return nil, 0, err
-	}
-	if *tip != msgs[0].PrevFilterHeader {
-		return nil, 0, fmt.Errorf("attempt to write cfheaders out of "+
-			"order, tip=%v (height=%v), prev_hash=%v", *tip,
-			tipHeight, msgs[0].PrevFilterHeader)
-	}
-
-	totalHeaders := 0
-	for _, msg := range msgs {
-		totalHeaders += len(msg.FilterHashes)
-	}
-
-	// Cycle through the headers and compute each header based on the prev
-	// header and the filter hash from the cfheaders response entries.
-	lastHeader := msgs[0].PrevFilterHeader
-	headerBatch := make([]headerfs.FilterHeader, 0, totalHeaders)
-	var stopHash chainhash.Hash
-	for i, msg := range msgs {
-		if msg.PrevFilterHeader != lastHeader {
-			return nil, 0, fmt.Errorf("attempt to batch "+
-				"disconnected cfheaders at msg_index=%d, "+
-				"prev=%v, want=%v", i, msg.PrevFilterHeader,
-				lastHeader)
-		}
-		stopHash = msg.StopHash
-
-		for _, hash := range msg.FilterHashes {
-			// header = dsha256(filterHash || prevHeader)
-			lastHeader = chainhash.DoubleHashH(
-				append(hash[:], lastHeader[:]...),
-			)
-
-			headerBatch = append(headerBatch, headerfs.FilterHeader{
-				FilterHash: lastHeader,
-			})
-		}
-	}
-
-	numHeaders := len(headerBatch)
-	if numHeaders == 0 {
-		return tip, tipHeight, nil
-	}
-
-	// We'll now query for the set of block headers which match each of
-	// these filters headers in their corresponding chains. Our query will
-	// return the headers for the entire checkpoint interval ending at the
-	// designated stop hash.
-	blockHeaders := b.cfg.BlockHeaders
-	matchingBlockHeaders, startHeight, err := blockHeaders.FetchHeaderAncestors(
-		uint32(numHeaders-1),
-		&stopHash,
-	)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// The final height in our range will be offset to the end of this
-	// particular checkpoint interval.
-	lastHeight := startHeight + uint32(numHeaders) - 1
-	lastBlockHeader := matchingBlockHeaders[numHeaders-1]
-	lastHash := lastBlockHeader.BlockHash()
-
-	// Fill in the block height and hash for every filter header. The
-	// legacy flat-file store only needs the last entry to update its tip
-	// index, but the SQL store persists each filter header as an
-	// individual row keyed by height and block hash.
-	for i := range headerBatch {
-		blockHash := matchingBlockHeaders[i].BlockHash()
-		headerBatch[i].HeaderHash = blockHash
-		headerBatch[i].Height = startHeight + uint32(i)
-	}
-
-	log.Debugf("Writing filter headers up to height=%v, hash=%v, "+
-		"new_tip=%v", lastHeight, lastHash, lastHeader)
-
-	// A store may commit before reporting an error. Verify the durable
-	// prefix before publishing its notifications.
-	writeErr := store.WriteHeaders(headerBatch...)
-	committed := numHeaders
-	if writeErr != nil {
-		durableTip, durableHeight, err := store.ChainTip()
-		if err != nil {
-			return nil, 0, errors.Join(writeErr, err)
-		}
-		if startHeight != tipHeight+1 || durableHeight < tipHeight ||
-			durableHeight > lastHeight {
-
-			return nil, 0, errors.Join(writeErr, fmt.Errorf(
-				"unexpected filter tip height %d after write",
-				durableHeight,
-			))
-		}
-		committed = int(durableHeight - tipHeight)
-		if committed == 0 && *durableTip != *tip {
-			return nil, 0, errors.Join(writeErr, fmt.Errorf(
-				"filter tip changed at height %d", tipHeight,
-			))
-		}
-		for i := 0; i < committed; i++ {
-			entry := headerBatch[i]
-			byHeight, err := store.FetchHeaderByHeight(entry.Height)
-			if err != nil {
-				return nil, 0, errors.Join(writeErr, err)
-			}
-			byBlock, err := store.FetchHeader(&entry.HeaderHash)
-			if err != nil {
-				return nil, 0, errors.Join(writeErr, err)
-			}
-			if *byHeight != entry.FilterHash ||
-				*byBlock != entry.FilterHash {
-
-				return nil, 0, errors.Join(writeErr, fmt.Errorf(
-					"filter header mismatch at height %d",
-					entry.Height,
-				))
-			}
-		}
-		if committed > 0 &&
-			*durableTip != headerBatch[committed-1].FilterHash {
-
-			return nil, 0, errors.Join(writeErr, fmt.Errorf(
-				"filter tip mismatch at height %d",
-				durableHeight,
-			))
-		}
-	}
-	b.publishFilterHeaders(matchingBlockHeaders[:committed], startHeight)
-
-	if writeErr != nil {
-		return nil, 0, writeErr
-	}
-
-	return &lastHeader, lastHeight, nil
-}
-
-// publishFilterHeaders makes the last of headers, which start at startHeight,
-// the published filter header tip, wakes waiters, and sends a connected
-// notification for each header in order.
-func (b *blockManager) publishFilterHeaders(headers []wire.BlockHeader,
-	startHeight uint32) {
-
-	if len(headers) == 0 {
-		return
-	}
-	lastHeight := startHeight + uint32(len(headers)) - 1
-
-	// We'll also set the new header tip and notify any peers that the tip
-	// has changed as well. Unlike the set of notifications below, this is
-	// for sub-system that only need to know the height has changed rather
-	// than know each new header that's been added to the tip.
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = lastHeight
-	b.filterHeaderTipHash = headers[len(headers)-1].BlockHash()
-	b.newFilterHeadersMtx.Unlock()
-	b.newFilterHeadersSignal.Broadcast()
-
-	// Notify subscribers, and also update the filter header progress
-	// logger at the same time.
-	for i, header := range headers {
-		headerHeight := startHeight + uint32(i)
-		b.fltrHeaderProgessLogger.LogBlockHeight(
-			header.Timestamp, int32(headerHeight),
-		)
-
-		b.onBlockConnected(header, headerHeight)
-	}
-}
-
-// setFilterHeaderTip publishes the block identity at the filter tip.
-func (b *blockManager) setFilterHeaderTip(height uint32, hash chainhash.Hash) {
-	b.newFilterHeadersMtx.Lock()
-	b.filterHeaderTip = height
-	b.filterHeaderTipHash = hash
-	b.newFilterHeadersMtx.Unlock()
-	b.newFilterHeadersSignal.Broadcast()
-}
-
-// rewindPublishedFilterTip moves the publication watermark down only when
-// rollback crosses it. Unpublished durable headers must remain unpublished.
-func (b *blockManager) rewindPublishedFilterTip(
-	height uint32, hash chainhash.Hash) {
-
-	b.newFilterHeadersMtx.Lock()
-	changed := height < b.filterHeaderTip
-	if changed {
-		b.filterHeaderTip = height
-		b.filterHeaderTipHash = hash
-	}
-	b.newFilterHeadersMtx.Unlock()
-	if changed {
-		b.newFilterHeadersSignal.Broadcast()
-	}
-}
-
-// refreshFilterHeaderTip reconciles a possible rollback with the store.
-func (b *blockManager) refreshFilterHeaderTip(
-	store headerfs.FilterHeaderStore) error {
-
-	_, height, err := store.ChainTip()
-	if err != nil {
-		return err
-	}
-	header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(height)
-	if err != nil {
-		return err
-	}
-	b.rewindPublishedFilterTip(height, header.BlockHash())
-	return nil
-}
-
-// reconcileFilterHeaderTip publishes durable headers that were not
-// previously confirmed to the block owner after a failed write readback.
-func (b *blockManager) reconcileFilterHeaderTip(
-	store headerfs.FilterHeaderStore) error {
-
-	_, durableHeight, err := store.ChainTip()
-	if err != nil {
-		return err
-	}
-	b.newFilterHeadersMtx.RLock()
-	publishedHeight := b.filterHeaderTip
-	b.newFilterHeadersMtx.RUnlock()
-	if durableHeight < publishedHeight {
-		return fmt.Errorf("filter tip %d below published height %d",
-			durableHeight, publishedHeight)
-	}
-	for height := publishedHeight + 1; height <= durableHeight; height++ {
-		header, err := b.cfg.BlockHeaders.FetchHeaderByHeight(height)
-		if err != nil {
-			return err
-		}
-		byHeight, err := store.FetchHeaderByHeight(height)
-		if err != nil {
-			return err
-		}
-		hash := header.BlockHash()
-		byBlock, err := store.FetchHeader(&hash)
-		if err != nil {
-			return err
-		}
-		if *byHeight != *byBlock {
-			return fmt.Errorf(
-				"filter header mismatch at height %d", height,
-			)
-		}
-		b.setFilterHeaderTip(height, hash)
-		b.onBlockConnected(*header, height)
-	}
-	return nil
-}
-
-// cfHeaderQuerySnapshot captures the filter predecessor and block stop on the
-// block owner, after publishing any committed but unreported filter headers.
-func (b *blockManager) cfHeaderQuerySnapshot(
-	store headerfs.FilterHeaderStore) (cfHeaderSnapshot, error) {
-
-	var snapshot cfHeaderSnapshot
-	if err := b.reconcileFilterHeaderTip(store); err != nil {
-		return snapshot, err
-	}
-	filterTip, filterHeight, err := store.ChainTip()
-	if err != nil {
-		return snapshot, err
-	}
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		return snapshot, err
-	}
-	snapshot.filterTip = *filterTip
-	snapshot.filterHeight = filterHeight
-	snapshot.blockHash = header.BlockHash()
-	snapshot.blockHeight = height
-	snapshot.stopHash = snapshot.blockHash
-	snapshot.stopHeight = height
-	if height > filterHeight &&
-		height-filterHeight > wire.MaxCFHeadersPerMsg {
-
-		snapshot.stopHeight = filterHeight + wire.MaxCFHeadersPerMsg
-		header, err = b.cfg.BlockHeaders.FetchHeaderByHeight(
-			snapshot.stopHeight,
-		)
-		if err != nil {
-			return cfHeaderSnapshot{}, err
-		}
-		snapshot.stopHash = header.BlockHash()
-	}
-	return snapshot, nil
+	return &hash, reply.Filter.FilterHeight, nil
 }
 
 // minCheckpointHeight returns the height of the last filter checkpoint for the
@@ -5040,7 +4730,7 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 		b.pendingHeaderCommit = &pendingChainHeaderCommit{
 			ranges: &prepared,
 		}
-		b.chainStore.tryAsk(b.quitCtx, chainStoreBlockCommit{
+		b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
 			ExpectedParent: prepared.ExpectedParent,
 			Headers:        prepared.Headers,
 		}, b.chainStoreResult)
@@ -5088,15 +4778,15 @@ type pendingChainHeaderCommit struct {
 
 // finishAsyncHeaderCommit applies handler-owned state after actor completion.
 func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
-	result chainStoreResult) {
+	result chainstore.Result) {
 
 	prepared := b.pendingHeaderCommit
 	if prepared == nil {
 		return
 	}
-	if result.retry {
-		b.chainStore.tryAsk(
-			b.quitCtx, chainStoreSnapshotRequest{},
+	if result.Retry {
+		b.chainStore.TryAsk(
+			b.quitCtx, chainstore.SnapshotRequest{},
 			b.chainStoreResult,
 		)
 		return
@@ -5106,16 +4796,16 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 		// admitted rollback and read the durable block tip. A failure
 		// of the filter side of the snapshot leaves Err set but does
 		// not stop the handler from adopting the block tip.
-		if result.err != nil || !result.reply.BlockTipValid {
+		if result.Err != nil || !result.Reply.BlockTipValid {
 			// The handler's view of the chain is unknown until a
 			// snapshot succeeds, so only the snapshot is retried.
 			// Every other failure is reconciled through it.
 			log.Warnf("chain store snapshot failed: %v %v",
-				result.err, result.reply.Err)
+				result.Err, result.Reply.Err)
 			time.AfterFunc(time.Second, func() {
 				select {
-				case b.chainStoreResult <- chainStoreResult{
-					retry: true,
+				case b.chainStoreResult <- chainstore.Result{
+					Retry: true,
 				}:
 				case <-b.quit:
 				}
@@ -5123,8 +4813,8 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 			return
 		}
 		b.pendingHeaderCommit = nil
-		node := headerlist.Node{Header: result.reply.BlockHeader,
-			Height: result.reply.BlockTip.Height}
+		node := headerlist.Node{Header: result.Reply.BlockHeader,
+			Height: result.Reply.BlockTip.Height}
 		b.headerList.ResetHeaderState(node)
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(node.Height)
 		b.advanceHeaderSyncTip(
@@ -5137,21 +4827,21 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 		b.scheduleHeaderCommitRetry()
 		return
 	}
-	if result.reply.Err != nil {
+	if result.Reply.Err != nil {
 		// The mutation may have applied, fully or in part. Reconcile on
 		// the store actor before the handler reads or publishes any
 		// durable state. This covers range, serial, reorg and
 		// checkpoint rollback commits alike.
 		prepared.snapshot = true
-		b.chainStore.tryAsk(
-			b.quitCtx, chainStoreSnapshotRequest{},
+		b.chainStore.TryAsk(
+			b.quitCtx, chainstore.SnapshotRequest{},
 			b.chainStoreResult,
 		)
 		return
 	}
 	b.pendingHeaderCommit = nil
-	if result.err != nil {
-		log.Warnf("headersync actor admission failed: %v", result.err)
+	if result.Err != nil {
+		log.Warnf("headersync actor admission failed: %v", result.Err)
 		b.scheduleHeaderCommitRetry()
 		return
 	}
@@ -5314,22 +5004,6 @@ func (b *blockManager) reconcileHeaderTipWithStore() error {
 // The chain store actor publishes the visible tip when it commits headers.
 func (b *blockManager) updateNextCheckpoint(height uint32) {
 	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
-}
-
-// publishStoredBlockTip makes a durable header visible without modifying the
-// handler-owned checkpoint and validation state.
-func (b *blockManager) publishStoredBlockTip(height uint32,
-	header wire.BlockHeader) {
-
-	hash := header.BlockHash()
-	b.newHeadersMtx.Lock()
-	b.headerTip = height
-	b.headerTipHash = hash
-	b.publishedBlockTip.Store(&headerfs.BlockStamp{
-		Height: int32(height), Hash: hash, Timestamp: header.Timestamp,
-	})
-	b.newHeadersMtx.Unlock()
-	b.newHeadersSignal.Broadcast()
 }
 
 // trimDurableHeaderSyncRange drops the prefix of a ready range that is already
@@ -6057,7 +5731,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 		}
 	}
 	hmsg.peer.UpdateLastBlockHeight(nodes[len(nodes)-1].Height)
-	command := chainStoreReorg{
+	command := chainstore.Reorg{
 		ExpectedTip: prepared.expectedTip,
 		ForkHeight:  uint32(prepared.fork.Height),
 		Headers:     batch,
@@ -6074,7 +5748,7 @@ func (b *blockManager) submitSerialHeaderReorg(hmsg *headersMsg,
 		b.syncPeer = hmsg.peer
 		b.syncPeerMutex.Unlock()
 	}
-	b.chainStore.tryAsk(b.quitCtx, command, b.chainStoreResult)
+	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
 // submitCheckpointRollback keeps checkpoint recovery on the store actor.
@@ -6097,7 +5771,7 @@ func (b *blockManager) submitCheckpointRollback(
 		return
 	}
 	node := headerlist.Node{Header: *header, Height: checkpoint.Height}
-	command := chainStoreRollback{
+	command := chainstore.Rollback{
 		ExpectedTip: headerfs.BlockStamp{Height: tip.Height,
 			Hash:      tip.Header.BlockHash(),
 			Timestamp: tip.Header.Timestamp},
@@ -6106,7 +5780,7 @@ func (b *blockManager) submitCheckpointRollback(
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		checkpoint: &node, message: hmsg,
 	}
-	b.chainStore.tryAsk(b.quitCtx, command, b.chainStoreResult)
+	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
 // serialHeaderExtension contains immutable headers prepared against the
@@ -6228,7 +5902,7 @@ func (b *blockManager) handleSerialHeaderExtension(
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		serial: &prepared, message: hmsg,
 	}
-	b.chainStore.tryAsk(b.quitCtx, chainStoreBlockCommit{
+	b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
 		ExpectedParent: prepared.parent,
 		Headers:        prepared.headers,
 	}, b.chainStoreResult)

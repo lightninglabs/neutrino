@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
@@ -308,8 +309,8 @@ func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 	}
 
 	stopHash := blockHeaders[len(blockHeaders)-1].BlockHash()
-	tip, tipHeight, err := bm.writeCFHeadersMsgs(
-		[]*wire.MsgCFHeaders{{
+	reply, err := bm.storeOps.CommitFilters(chainstore.FilterCommit{
+		Messages: []*wire.MsgCFHeaders{{
 			FilterType:       wire.GCSFilterRegular,
 			StopHash:         blockHeaders[1].BlockHash(),
 			PrevFilterHeader: *prevFilterHeader,
@@ -320,14 +321,13 @@ func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
 			PrevFilterHeader: expectedFilterHeaders[1],
 			FilterHashes:     filterHashes[2:],
 		}},
-		filterStore,
-	)
+	})
 	require.NoError(t, err)
-	require.Equal(t, uint32(numHeaders), tipHeight)
+	require.Equal(t, uint32(numHeaders), reply.Filter.FilterHeight)
 	require.Equal(
 		t,
 		expectedFilterHeaders[len(expectedFilterHeaders)-1],
-		*tip,
+		reply.Filter.FilterTip,
 	)
 
 	for i, expected := range expectedFilterHeaders {

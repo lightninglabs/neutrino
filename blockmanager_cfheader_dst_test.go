@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightninglabs/neutrino/sqldb"
@@ -572,6 +573,31 @@ func TestCFHeaderSubscriptionWhilePublishing(t *testing.T) {
 	})
 }
 
+// blockedChainStoreOps holds a block commit after it enters the actor.
+type blockedChainStoreOps struct {
+	chainstore.Operations
+
+	entered chan struct{}
+	release chan struct{}
+}
+
+// CommitBlocks signals entry and waits for the test to release it.
+func (s *blockedChainStoreOps) CommitBlocks(
+	chainstore.BlockCommit) (chainstore.Reply, error) {
+
+	close(s.entered)
+	<-s.release
+
+	return chainstore.Reply{}, nil
+}
+
+// CommitFilters reports success, since this test only cares about admission.
+func (*blockedChainStoreOps) CommitFilters(
+	chainstore.FilterCommit) (chainstore.Reply, error) {
+
+	return chainstore.Reply{}, nil
+}
+
 // TestCFHeaderSubmitShutdown checks that a filter commit submitted to the
 // chain store actor returns once shutdown cancels the manager's context while
 // the actor is mid-mutation, and that a commit submitted after the actor has
@@ -582,7 +608,7 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 			entered: make(chan struct{}),
 			release: make(chan struct{}),
 		}
-		client, err := newChainStoreClient(ops)
+		client, err := chainstore.NewClient(ops)
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
 		bm := &blockManager{
@@ -591,8 +617,8 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 
 		// Hold the actor inside a block commit so the filter commit
 		// waits in its mailbox.
-		held := make(chan chainStoreResult, 1)
-		client.tryAsk(t.Context(), chainStoreBlockCommit{}, held)
+		held := make(chan chainstore.Result, 1)
+		client.TryAsk(t.Context(), chainstore.BlockCommit{}, held)
 		<-ops.entered
 		done := make(chan error, 1)
 		go func() {
@@ -605,7 +631,7 @@ func TestCFHeaderSubmitShutdown(t *testing.T) {
 
 		close(ops.release)
 		<-held
-		require.NoError(t, client.stop())
+		require.NoError(t, client.Stop())
 		_, _, err = bm.submitCFHeaders(nil)
 		require.ErrorIs(t, err, ErrShuttingDown)
 	})
@@ -826,7 +852,7 @@ func rollbackToHeight(t *testing.T, bm *blockManager, height uint32) error {
 	header, tip, err := bm.cfg.BlockHeaders.ChainTip()
 	require.NoError(t, err)
 
-	result := bm.chainStore.ask(t.Context(), chainStoreRollback{
+	result := bm.chainStore.Ask(t.Context(), chainstore.Rollback{
 		ExpectedTip: headerfs.BlockStamp{
 			Height: int32(tip), Hash: header.BlockHash(),
 			Timestamp: header.Timestamp,
@@ -837,5 +863,5 @@ func rollbackToHeight(t *testing.T, bm *blockManager, height uint32) error {
 		return result.Err()
 	}
 
-	return result.UnwrapOr(chainStoreReply{}).Err
+	return result.UnwrapOr(chainstore.Reply{}).Err
 }

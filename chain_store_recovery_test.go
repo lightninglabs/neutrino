@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -141,9 +142,9 @@ func TestFilterSuffixRecovers(t *testing.T) {
 			failWrite:         true,
 		}
 		bm.cfg.RegFilterHeaders = fault
-		backend := &blockManagerChainStore{manager: bm}
-		_, err := backend.commitFilters(
-			chainStoreFilterCommit{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		_, err := backend.CommitFilters(
+			chainstore.FilterCommit{
 				Messages: []*wire.MsgCFHeaders{
 					filterCommitMessage(t, filters, 1, 3),
 				},
@@ -151,8 +152,8 @@ func TestFilterSuffixRecovers(t *testing.T) {
 		)
 		require.ErrorIs(t, err, errDSTWrite)
 		require.ErrorIs(t, err, errCFHeaderRead)
-		_, err = backend.commitFilters(
-			chainStoreFilterCommit{
+		_, err = backend.CommitFilters(
+			chainstore.FilterCommit{
 				Messages: []*wire.MsgCFHeaders{
 					filterCommitMessage(t, filters, 4, 5),
 				},
@@ -181,14 +182,14 @@ func TestRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 			BlockHeaderStore: blocks,
 			failRollback:     true,
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			Height:      0,
 		}
-		reply, err := backend.rollback(request)
+		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
-		snapshot, err := backend.snapshot()
+		snapshot, err := backend.Snapshot()
 		require.NoError(t, err)
 		t.Logf(
 			"after applied rollback error: replyHeight=%d "+
@@ -196,7 +197,7 @@ func TestRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 				"visibleHeight=%d events=%d",
 			reply.BlockTip.Height,
 			snapshot.BlockTip.Height,
-			snapshot.Filter.blockHeight,
+			snapshot.Filter.BlockHeight,
 			bm.publishedBlockTip.Load().Height,
 			len(events),
 		)
@@ -209,7 +210,7 @@ func TestRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 			Hash:      tip.BlockHash(),
 			Timestamp: tip.Timestamp,
 		}
-		_, err = backend.rollback(request)
+		_, err = backend.Rollback(request)
 		require.NoError(t, err)
 		synctest.Wait()
 		require.Len(
@@ -228,10 +229,10 @@ func TestSnapshotHealsBlockWrite(t *testing.T) {
 			BlockHeaderStore: blocks,
 			failWrite:        true,
 		}
-		backend := &blockManagerChainStore{manager: bm}
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
 		fixture := dstChains()
-		_, err := backend.commitBlocks(
-			chainStoreBlockCommit{
+		_, err := backend.CommitBlocks(
+			chainstore.BlockCommit{
 				ExpectedParent: *bm.publishedBlockTip.Load(),
 				Headers: []headerfs.BlockHeader{
 					{
@@ -242,9 +243,9 @@ func TestSnapshotHealsBlockWrite(t *testing.T) {
 			},
 		)
 		require.ErrorIs(t, err, errDSTWrite)
-		snapshot, err := backend.snapshot()
+		snapshot, err := backend.Snapshot()
 		require.NoError(t, err)
-		require.Equal(t, uint32(1), snapshot.Filter.blockHeight)
+		require.Equal(t, uint32(1), snapshot.Filter.BlockHeight)
 		require.Equal(
 			t,
 			int32(1),
@@ -262,8 +263,8 @@ func TestChainStoreRollbackLostAckAndReadback(t *testing.T) {
 			BlockHeaderStore: blocks, failRollback: true,
 			failReadAfterRollback: true,
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		reply, err := backend.rollback(chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		reply, err := backend.Rollback(chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 2,
 		})
 		require.ErrorIs(t, err, errDSTWrite)
@@ -271,10 +272,10 @@ func TestChainStoreRollbackLostAckAndReadback(t *testing.T) {
 		synctest.Wait()
 		require.Empty(t, events)
 
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.ErrorIs(t, err, errCFHeaderRead)
 		require.False(t, reply.BlockTipValid)
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(2), reply.BlockTip.Height)
@@ -294,7 +295,7 @@ func TestChainStoreRollbackLostAckAndReadback(t *testing.T) {
 		tip := disconnected.ChainTip()
 		require.Equal(t, fixture.honest[2].BlockHash(), tip.BlockHash())
 
-		_, err = backend.snapshot()
+		_, err = backend.Snapshot()
 		require.NoError(t, err)
 		synctest.Wait()
 		require.Empty(t, events)
@@ -329,9 +330,9 @@ func TestChainStoreReorgWriteOutcomes(t *testing.T) {
 				}
 				bm.cfg.BlockHeaders = fault
 				fixture := dstChains()
-				backend := &blockManagerChainStore{manager: bm}
+				backend := chainstore.NewStore(&chainStoreHost{manager: bm})
 				tip := *bm.publishedBlockTip.Load()
-				reply, err := backend.reorg(chainStoreReorg{
+				reply, err := backend.Reorg(chainstore.Reorg{
 					ExpectedTip: tip,
 					ForkHeight:  1,
 					Headers: []headerfs.BlockHeader{
@@ -409,11 +410,11 @@ func TestChainStoreRollbackFailureBeforeWrite(t *testing.T) {
 		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks, failRollbackBefore: true,
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 2,
 		}
-		reply, err := backend.rollback(request)
+		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
 		require.False(t, reply.BlockTipValid)
 		synctest.Wait()
@@ -421,7 +422,7 @@ func TestChainStoreRollbackFailureBeforeWrite(t *testing.T) {
 
 		// The handler reconciles through a snapshot, which
 		// completes the admitted rollback.
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.Equal(t, int32(2), reply.BlockTip.Height)
 		synctest.Wait()
@@ -492,13 +493,13 @@ func TestChainStorePairedRollbackRetry(t *testing.T) {
 					armed:             true,
 				}
 				bm.cfg.RegFilterHeaders = fault
-				backend := &blockManagerChainStore{manager: bm}
+				backend := chainstore.NewStore(&chainStoreHost{manager: bm})
 				tip := *bm.publishedBlockTip.Load()
-				request := chainStoreRollback{
+				request := chainstore.Rollback{
 					ExpectedTip: tip,
 					Height:      1,
 				}
-				reply, err := backend.rollback(request)
+				reply, err := backend.Rollback(request)
 				require.ErrorIs(t, err, errDSTWrite)
 				require.False(t, reply.BlockTipValid)
 				_, blockHeight, err := blocks.ChainTip()
@@ -516,7 +517,7 @@ func TestChainStorePairedRollbackRetry(t *testing.T) {
 
 				// The handler reconciles through a snapshot,
 				// which completes the admitted rollback.
-				reply, err = backend.snapshot()
+				reply, err = backend.Snapshot()
 				require.NoError(t, err)
 				require.Equal(
 					t,
@@ -560,7 +561,7 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		bm, blocks, filters, events :=
 			chainStoreFixture(t, 3, 3)
-		bm.setFilterHeaderTip(3, dstChains().honest[3].BlockHash())
+		(&chainStoreHost{manager: bm}).PublishFilterTip(3, dstChains().honest[3].BlockHash())
 		fault := &chainStoreFilterRollbackFault{
 			FilterHeaderStore: filters,
 			applied:           true,
@@ -568,12 +569,12 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 			failRead:          true,
 		}
 		bm.cfg.RegFilterHeaders = fault
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			Height:      1,
 		}
-		reply, err := backend.rollback(request)
+		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
 		require.ErrorIs(t, err, errCFHeaderRead)
 		require.False(t, reply.BlockTipValid)
@@ -582,7 +583,7 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 		require.Equal(t, uint32(3), height)
 		synctest.Wait()
 		require.Empty(t, events)
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(1), reply.BlockTip.Height)
@@ -620,19 +621,19 @@ func TestChainStoreRollbackRepeatedLostAcks(t *testing.T) {
 		bm.cfg.BlockHeaders = &blockStoreFault{
 			BlockHeaderStore: blocks, failRollbackCount: 2,
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 0,
 		}
-		reply, err := backend.rollback(request)
+		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
 		require.False(t, reply.BlockTipValid)
 
 		// Recovery hits a second ambiguous rollback, then completes.
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.ErrorIs(t, err, errDSTWrite)
 		require.False(t, reply.BlockTipValid)
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.True(t, reply.BlockTipValid)
 		require.Zero(t, reply.BlockTip.Height)
@@ -672,8 +673,8 @@ func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 		}
 		bm.cfg.BlockHeaders = fault
 		fixture := dstChains()
-		backend := &blockManagerChainStore{manager: bm}
-		reply, err := backend.reorg(chainStoreReorg{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		reply, err := backend.Reorg(chainstore.Reorg{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -686,10 +687,10 @@ func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 		require.ErrorIs(t, err, errDSTWrite)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(1), reply.BlockTip.Height)
-		_, err = backend.commitFilters(chainStoreFilterCommit{})
+		_, err = backend.CommitFilters(chainstore.FilterCommit{})
 		require.ErrorIs(t, err, errDSTWrite)
 		fault.mode = dstStoreOK
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(3), reply.BlockTip.Height)
@@ -726,8 +727,8 @@ func TestChainStoreReorgResumesReplacementPrefix(t *testing.T) {
 		}
 		bm.cfg.BlockHeaders = fault
 		fixture := dstChains()
-		backend := &blockManagerChainStore{manager: bm}
-		reply, err := backend.reorg(chainStoreReorg{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		reply, err := backend.Reorg(chainstore.Reorg{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -740,7 +741,7 @@ func TestChainStoreReorgResumesReplacementPrefix(t *testing.T) {
 		require.ErrorIs(t, err, errDSTWrite)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(2), reply.BlockTip.Height)
-		reply, err = backend.snapshot()
+		reply, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.Equal(
 			t,
@@ -791,8 +792,8 @@ func TestChainStoreCompletedIntentDoesNotReplay(t *testing.T) {
 		reads := &chainStoreTipReadLimit{BlockHeaderStore: writer}
 		bm.cfg.BlockHeaders = reads
 		fixture := dstChains()
-		backend := &blockManagerChainStore{manager: bm}
-		_, err := backend.reorg(chainStoreReorg{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		_, err := backend.Reorg(chainstore.Reorg{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -803,12 +804,12 @@ func TestChainStoreCompletedIntentDoesNotReplay(t *testing.T) {
 			},
 		})
 		require.ErrorIs(t, err, errDSTWrite)
-		_, err = backend.snapshot()
+		_, err = backend.Snapshot()
 		require.NoError(t, err)
-		require.Nil(t, backend.pending)
+		require.False(t, backend.HasPendingRollback())
 		reads.reads = 0
 		reads.limit = 2
-		_, err = backend.snapshot()
+		_, err = backend.Snapshot()
 		require.NoError(t, err)
 		require.Equal(t, 2, reads.reads)
 	})

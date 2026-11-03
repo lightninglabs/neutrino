@@ -5,6 +5,7 @@ import (
 	"testing/synctest"
 
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -46,23 +47,23 @@ func TestRollbackRecoveryReadRetainsWholeTarget(t *testing.T) {
 		bm.cfg.BlockHeaders = &lostRollbackReadFault{
 			BlockHeaderStore: blocks,
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			Height:      0,
 		}
-		_, err := backend.rollback(request)
+		_, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
-		_, err = backend.snapshot()
+		_, err = backend.Snapshot()
 		require.ErrorIs(t, err, errCFHeaderRead)
-		reply, err := backend.snapshot()
+		reply, err := backend.Snapshot()
 		require.NoError(t, err)
 		synctest.Wait()
 		t.Logf(
 			"after healing read failure: durable/published "+
 				"height=%d; pending=%t; disconnects=%d",
 			reply.BlockTip.Height,
-			backend.pending != nil,
+			backend.HasPendingRollback(),
 			len(events),
 		)
 		require.Zero(

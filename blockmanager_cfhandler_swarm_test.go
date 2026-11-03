@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/lightningnetwork/lnd/actor"
@@ -695,18 +696,21 @@ func runSwarmPipeline(t *testing.T, seed int64, connected *ServerPeer) {
 			t.Fatal("notification gate was not reached")
 		}
 		checkDurable()
-		var pending []actor.Future[chainStoreReply]
-		for i := 0; i < chainStoreMailboxCapacity; i++ {
-			pending = append(pending, bm.chainStore.ref.TryAsk(
-				t.Context(), chainStoreSnapshotRequest{},
-			))
+		pending := make(
+			chan chainstore.Result, chainstore.MailboxCapacity,
+		)
+		for i := 0; i < chainstore.MailboxCapacity; i++ {
+			bm.chainStore.TryAsk(
+				t.Context(), chainstore.SnapshotRequest{},
+				pending,
+			)
 			synctest.Wait()
 		}
-		full := bm.chainStore.ref.TryAsk(
-			t.Context(), chainStoreSnapshotRequest{},
-		).
-			Await(t.Context())
-		require.ErrorIs(t, full.Err(), actor.ErrMailboxFull)
+		full := make(chan chainstore.Result, 1)
+		bm.chainStore.TryAsk(
+			t.Context(), chainstore.SnapshotRequest{}, full,
+		)
+		require.ErrorIs(t, (<-full).Err, actor.ErrMailboxFull)
 		go bm.DonePeer(spectator)
 		synctest.Wait()
 		_, registered := bm.headerSync.Peer(spectator.Addr())
@@ -760,11 +764,11 @@ func runSwarmPipeline(t *testing.T, seed int64, connected *ServerPeer) {
 		close(notificationRelease)
 		synctest.Wait()
 		<-queued
-		for _, request := range pending {
-			pendingErr := request.Await(t.Context()).Err()
-			if pendingErr != nil {
+		for i := 0; i < chainstore.MailboxCapacity; i++ {
+			result := <-pending
+			if result.Err != nil {
 				require.ErrorIs(
-					t, pendingErr, actor.ErrMailboxFull,
+					t, result.Err, actor.ErrMailboxFull,
 				)
 			}
 		}

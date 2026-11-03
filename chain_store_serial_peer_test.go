@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/stretchr/testify/require"
@@ -235,8 +236,8 @@ func TestCheckpointRollbackSnapshotDisconnectsPeer(t *testing.T) {
 							peer: peer,
 						},
 					}
-				failed := chainStoreResult{
-					reply: chainStoreReply{
+				failed := chainstore.Result{
+					Reply: chainstore.Reply{
 						Err: errDSTWrite,
 					},
 				}
@@ -263,13 +264,13 @@ func TestSnapshotFilterFailureKeepsHeaderIntake(t *testing.T) {
 			snapshot: true,
 		}
 		filters.fail = true
-		bm.chainStore.tryAsk(
-			t.Context(), chainStoreSnapshotRequest{},
+		bm.chainStore.TryAsk(
+			t.Context(), chainstore.SnapshotRequest{},
 			bm.chainStoreResult,
 		)
 		result := <-bm.chainStoreResult
-		require.True(t, result.reply.BlockTipValid)
-		require.Error(t, result.reply.Err)
+		require.True(t, result.Reply.BlockTipValid)
+		require.Error(t, result.Reply.Err)
 
 		bm.finishAsyncHeaderCommit(peers, result)
 		require.Nil(t, bm.pendingHeaderCommit,

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -28,8 +29,8 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 					limit:            2,
 				}
 				bm.cfg.BlockHeaders = reads
-				backend := &blockManagerChainStore{manager: bm}
-				var reply chainStoreReply
+				backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+				var reply chainstore.Reply
 				var err error
 				if replace {
 					fixture := dstChains()
@@ -45,12 +46,12 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 						},
 					}
 					tip := *bm.publishedBlockTip.Load()
-					request := chainStoreReorg{
+					request := chainstore.Reorg{
 						ExpectedTip: tip,
 						ForkHeight:  1,
 						Headers:     headers,
 					}
-					reply, err = backend.reorg(request)
+					reply, err = backend.Reorg(request)
 					require.Equal(
 						t,
 						fixture.fork[1][1].BlockHash(),
@@ -58,11 +59,11 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 					)
 				} else {
 					tip := *bm.publishedBlockTip.Load()
-					request := chainStoreRollback{
+					request := chainstore.Rollback{
 						ExpectedTip: tip,
 						Height:      1,
 					}
-					reply, err = backend.rollback(request)
+					reply, err = backend.Rollback(request)
 					require.Equal(
 						t,
 						int32(1),
@@ -72,7 +73,7 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 				require.NoError(t, err)
 				require.True(t, reply.BlockTipValid)
 				require.Equal(t, 2, reads.reads)
-				require.Nil(t, backend.pending)
+				require.False(t, backend.HasPendingRollback())
 				synctest.Wait()
 				require.Len(t, events, 2)
 				require.Equal(t, uint32(3), (<-events).Height())

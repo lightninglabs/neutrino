@@ -709,7 +709,7 @@ func (d *chainDSTRun) fail(event, format string, args ...any) {
 func (d *chainDSTRun) check(event string) {
 	d.t.Helper()
 
-	if n := d.bm.chainStore.rejected.Load(); n != 0 {
+	if n := d.bm.chainStore.Rejected(); n != 0 {
 		d.fail(event, "the chain store mailbox refused %d commands, "+
 			"dropping the headers they carried", n)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -34,21 +35,21 @@ func TestRollbackParentReadRetainsTarget(t *testing.T) {
 			BlockHeaderStore: blocks,
 			failHash:         dstChains().honest[1].BlockHash(),
 		}
-		backend := &blockManagerChainStore{manager: bm}
-		request := chainStoreRollback{
+		backend := chainstore.NewStore(&chainStoreHost{manager: bm})
+		request := chainstore.Rollback{
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			Height:      0,
 		}
-		progress, err := backend.rollback(request)
+		progress, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errCFHeaderRead)
 		synctest.Wait()
-		snapshot, snapshotErr := backend.snapshot()
+		snapshot, snapshotErr := backend.Snapshot()
 		t.Logf(
 			"partial=%d valid=%t pendingNil=%t snapshot=%d "+
 				"snapshotErr=%v events=%d",
 			progress.BlockTip.Height,
 			progress.BlockTipValid,
-			backend.pending == nil,
+			!backend.HasPendingRollback(),
 			snapshot.BlockTip.Height,
 			snapshotErr,
 			len(events),
