@@ -193,7 +193,7 @@ func NewSerialReorg(tip headerlist.Node, fork wire.BlockHeader,
 // handleTipHeaders decides what a headers message that follows the tip means.
 func (d *Driver) handleTipHeaders(event TipHeaders, result *DriverResult) {
 	// The lease decides whose headers we trust before we're synced.
-	event.holdsLease = d.runtime.manager.TipLease().PeerID == event.PeerID
+	event.holdsLease = d.runtime.manager.TrustsTipPeer(event.PeerID)
 
 	// Explicitly check that each header in the message builds off of the
 	// previous one. This is a quick sanity check to avoid doing the more

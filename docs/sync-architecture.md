@@ -543,10 +543,9 @@ Each piece of mutable sync state has one owner goroutine.
 
 | Goroutine | Owns |
 | --- | --- |
-| `blockHandler` | `headerList`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers |
-| headersync manager | `HeaderSyncFSM` |
+| `blockHandler` | The driver, `TipState`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers, which take no lock |
+| headersync manager | `HeaderSyncFSM` and the private dispatch `querysync.Scheduler` |
 | headersync peer, one per peer | That peer's scheduling state |
-| headersync manager lock | The private dispatch `querysync.Scheduler` |
 | `cfHandler` | Filter-header sync progress |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |

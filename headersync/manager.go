@@ -1196,6 +1196,11 @@ func (m *Manager) SetTipLease(peerID string) TipLease {
 	return m.fsm.SetTipLease(peerID)
 }
 
+// TrustsTipPeer reports whether peerID holds the tip-following lease.
+func (m *Manager) TrustsTipPeer(peerID string) bool {
+	return m.fsm.TrustsTipPeer(peerID)
+}
+
 // TipLease returns the tip-following lease.
 func (m *Manager) TipLease() TipLease {
 	return m.fsm.TipLease()

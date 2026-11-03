@@ -37,7 +37,9 @@ type HeaderSyncFSM struct {
 // contextual validation only, with no anchor confirmation from other peers,
 // and a reorg they carry must still win on work in the chain store. Headers
 // from any other peer are only considered once the node is synced. The epoch
-// moves each time the lease changes hands.
+// moves each time the lease changes hands. Like the rest of the FSM, the lease
+// names a peer by address, so a reconnect from the same address before the old
+// connection's done message is handled shares its lease.
 type TipLease struct {
 	// PeerID is the holder, or empty when no peer holds the lease.
 	PeerID string

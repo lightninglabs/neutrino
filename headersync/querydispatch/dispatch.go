@@ -24,10 +24,10 @@ func New(scheduler *querysync.Scheduler) *Controller {
 }
 
 // NewRuntime creates a production headersync runtime that mirrors generic range
-// ownership through a querysync scheduler. The manager calls the mirror under
-// its own lock, which is what makes the scheduler safe to use. Header-specific
-// protocol details remain in headersync and blockmanager. The tipCfg builds
-// the validation cache that the runtime's driver owns.
+// ownership through a querysync scheduler. The block handler is the only
+// caller of the manager, which is what makes the scheduler safe to use.
+// Header-specific protocol details remain in headersync and blockmanager. The
+// tipCfg builds the validation cache that the runtime's driver owns.
 func NewRuntime(tip headersync.ChainPoint, checkpoints []chaincfg.Checkpoint,
 	tipCfg headersync.TipConfig) (*headersync.Runtime, int) {
 
