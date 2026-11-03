@@ -217,7 +217,20 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 				"peer %s", effect.PeerID)
 			return false
 		}
+		if effect.UnlessGone && peerDisconnected(sp) {
+			return false
+		}
 		b.setSyncPeer(sp)
+
+	case headersync.ContinueSerial:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.finishSerialHeaderFollowup(peers, sp, effect)
+
+	case headersync.SubmitRangeCommit:
+		b.submitRangeCommit(effect.Prepared)
 
 	case headersync.StartSync:
 		b.startSync(peers)
@@ -233,16 +246,6 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 
 	case headersync.ClearBootstrapDelay:
 		b.clearHeaderSyncBootstrapDelay()
-
-	case headersync.CommitReadyRanges:
-		if err := b.commitReadyHeaderSyncRanges(); err != nil {
-			log.Warnf("headersync failed to commit ready ranges: "+
-				"%v", err)
-			if b.rejectInvalidHeaderCommit(peers, err) {
-				return false
-			}
-		}
-		b.continueHeaderSync(peers)
 
 	default:
 		log.Warnf("headersync driver emitted unknown effect %T", effect)

@@ -118,10 +118,3 @@ func (d *Driver) handleRetireStaged(event RetireStaged) {
 func (d *Driver) handlePruneAnchors(event PruneAnchors, result *DriverResult) {
 	result.Pruned = d.session.PruneAnchorsAtOrBefore(event.AtOrBefore)
 }
-
-// StagedRange returns the staged headers of a range. The commit path reads
-// them to build its write. This read goes away when the commit moves behind
-// effects.
-func (d *Driver) StagedRange(rangeID RangeID) (StagedRange, bool) {
-	return d.session.StagedRange(rangeID)
-}

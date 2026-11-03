@@ -65,6 +65,10 @@ func (CooldownElapsed) driverEvent() {}
 type SetSyncPeer struct {
 	// PeerID is the new sync peer, or empty for none.
 	PeerID string
+
+	// UnlessGone leaves the sync peer alone when PeerID has disconnected
+	// in the meantime, which only the executor can see.
+	UnlessGone bool
 }
 
 func (SetSyncPeer) driverEffect() {}

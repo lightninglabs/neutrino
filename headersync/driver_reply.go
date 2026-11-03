@@ -44,17 +44,10 @@ type ScheduleCommitRetry struct{}
 
 func (ScheduleCommitRetry) driverEffect() {}
 
-// CommitReadyRanges asks the executor to commit the staged ranges that are
-// ready, and then to continue syncing, unless the commit failed on a range
-// that was invalid and the executor already dealt with it.
-type CommitReadyRanges struct{}
-
-func (CommitReadyRanges) driverEffect() {}
-
 // handleRangeReply judges a headers message against the range request of the
 // peer, if it has one.
 func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
-	result *DriverResult) {
+	view View, result *DriverResult) {
 
 	peerID := event.PeerID
 	headers := event.Headers
@@ -259,7 +252,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		)
 	}
 
-	result.Effects = append(result.Effects, CommitReadyRanges{})
+	d.commitAndContinue(ctx, view, result)
 }
 
 // handleStaleRangeReply classifies a reply from a peer that has no range

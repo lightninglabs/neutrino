@@ -654,31 +654,10 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
-	done := b.handleDriverEvent(
-		nil, headersync.PeerDone{PeerID: sp.Addr()},
-	)
-	hadHeaderSyncWork := done.result.HadWork
-	b.unregisterHeaderSyncPeer(sp)
 
-	// Attempt to find a new peer to sync from if the quitting peer is the
-	// sync peer. Also, reset the header state.
-	if b.SyncPeer() != nil && b.SyncPeer() == sp {
-		b.setSyncPeer(nil)
-		if b.pendingHeaderCommit != nil {
-			return
-		}
-		// Reset the cache and the visible tip together, so they keep
-		// describing the same header.
-		if err := b.resetHeaderListToTip(); err != nil {
-			return
-		}
-		b.startSync(peers)
-		return
-	}
-
-	if hadHeaderSyncWork && b.pendingHeaderCommit == nil {
-		b.continueHeaderSync(peers)
-	}
+	// The driver abandons the peer's requests and decides what the loss
+	// means: a lost sync peer starts sync over, a lost worker carries on.
+	b.handleDriverEvent(peers, headersync.PeerGone{PeerID: sp.Addr()}, sp)
 }
 
 // sendHeaderTimeout keeps timeout decisions behind queued peer responses
@@ -785,12 +764,7 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 			return
 		}
 		b.headerCommitRetryTimer = nil
-		if err := b.commitReadyHeaderSyncRanges(); err != nil {
-			log.Warnf("headersync commit_retry_failed: %v", err)
-			b.rejectInvalidHeaderCommit(peers, err)
-			return
-		}
-		b.continueHeaderSync(peers)
+		b.handleDriverEvent(peers, headersync.RetryCommit{})
 	case *donePeerMsg:
 		b.handleDonePeerMsg(peers, msg.peer)
 	default:
@@ -916,20 +890,6 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 			timeout:     timeout,
 		})
 	})
-}
-
-// advanceHeaderSyncTip reconciles the headersync FSM with a durable tip that
-// the serial writer persisted, and drops the staging of ranges it retired.
-func (b *blockManager) advanceHeaderSyncTip(height uint32,
-	hash chainhash.Hash) {
-
-	outcome := b.handleDriverEvent(nil, headersync.AdvanceTip{
-		Tip: headersync.ChainPoint{Height: height, Hash: hash},
-	})
-	if outcome.err != nil {
-		log.Warnf("headersync unable to advance to serial tip "+
-			"height=%d: %v", height, outcome.err)
-	}
 }
 
 // handleNoProgressReply settles an empty serial reply. From a peer that is

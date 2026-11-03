@@ -104,3 +104,67 @@ func (d *Driver) quarantinePeer(ctx context.Context, peerID string,
 	d.setPeerState(ctx, peerID, PeerQuarantined, result)
 	result.Effects = append(result.Effects, QuarantinePeer{PeerID: peerID})
 }
+
+// SerialTimedOut reports that the sync peer did not answer its serial
+// getheaders request in time. The executor sends it only for the request
+// still in flight, from the current sync peer, while headers are not synced.
+type SerialTimedOut struct {
+	// PeerID is the sync peer's address.
+	PeerID string
+
+	// StartHeight is the tip the request started from.
+	StartHeight uint32
+
+	// Timeout is the deadline that elapsed.
+	Timeout time.Duration
+}
+
+func (SerialTimedOut) driverEvent() {}
+
+// handleSerialTimedOut drops a stalled sync peer and starts over, unless the
+// chain moved past the request in the meantime.
+func (d *Driver) handleSerialTimedOut(ctx context.Context,
+	event SerialTimedOut, view View, result *DriverResult) {
+
+	var height uint32
+	if view.CommitPending {
+		height = d.cfg.PublishedTip()
+	} else {
+		_, currentHeight, err := d.tip.StoreTip()
+		if err != nil {
+			log.Errorf("Failed to get block header chain tip "+
+				"while handling header sync timeout: %v", err)
+			return
+		}
+		height = currentHeight
+	}
+	if height > event.StartHeight {
+		return
+	}
+
+	peerID := event.PeerID
+	log.Warnf("Header sync from peer %s stalled for %v at height %d; "+
+		"quarantining peer and selecting a new sync peer",
+		peerID, event.Timeout, height)
+
+	// A slow or stalled peer is quarantined, never IP-banned: on regtest
+	// and behind NAT or Tor one address can be the only usable peer.
+	d.quarantinePeer(ctx, peerID, result)
+	result.Effects = append(result.Effects, DisconnectPeer{PeerID: peerID})
+
+	if d.runtime.manager.TrustsTipPeer(peerID) {
+		result.Effects = append(result.Effects, SetSyncPeer{})
+	}
+
+	if view.CommitPending {
+		return
+	}
+
+	if err := d.resetTipToStore(ctx); err != nil {
+		log.Errorf("Failed to reset header state after header sync "+
+			"timeout: %v", err)
+		return
+	}
+
+	result.Effects = append(result.Effects, StartSync{})
+}

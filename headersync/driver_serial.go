@@ -7,11 +7,13 @@ package headersync
 // I/O and the chain store submissions.
 
 import (
+	"context"
 	"errors"
 	"math/big"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 )
@@ -38,19 +40,6 @@ type TipHeaders struct {
 }
 
 func (TipHeaders) driverEvent() {}
-
-// RollbackToCheckpoint asks for the rollback to the last verified checkpoint
-// before a height, after a header of the peer failed the checkpoint at that
-// height. The executor reports it for a reorg whose verdict came back.
-type RollbackToCheckpoint struct {
-	// PeerID is the address of the peer that sent the failing header.
-	PeerID string
-
-	// Height is the height of the checkpoint that the header failed.
-	Height int32
-}
-
-func (RollbackToCheckpoint) driverEvent() {}
 
 // FollowTip moves the tip-following lease to the executor's new sync peer, or
 // releases it when PeerID is empty.
@@ -572,4 +561,227 @@ func (d *Driver) planCheckpointRollback(peerID string, height int32,
 		},
 		ExpectedTip: nodeStamp(*tip),
 	})
+}
+
+// ExtensionCommitted reports that the chain store wrote a serial extension.
+// The driver adopts it into the cache and asks for the headers after it.
+type ExtensionCommitted struct {
+	// PeerID is the address of the peer that sent the batch.
+	PeerID string
+
+	// Extension is the batch the store wrote.
+	Extension SerialExtension
+}
+
+func (ExtensionCommitted) driverEvent() {}
+
+// ReorgCommitted reports the chain store's verdict on a submitted fork, and
+// that the store switched to the branch when the verdict accepted it.
+type ReorgCommitted struct {
+	// PeerID is the address of the peer that sent the branch.
+	PeerID string
+
+	// Reorg is the fork the store was asked to switch to.
+	Reorg SerialReorg
+
+	// Nodes is the branch for the validation cache. It is empty when
+	// Mismatch is set.
+	Nodes []headerlist.Node
+
+	// Mismatch is the height of a checkpoint the branch failed, or zero.
+	Mismatch int32
+
+	// Verdict is the store's work comparison.
+	Verdict chainstore.ReorgVerdict
+}
+
+func (ReorgCommitted) driverEvent() {}
+
+// CheckpointRolledBack reports that the chain store rolled back to the last
+// verified checkpoint. The driver resets the cache there and drops the peer
+// whose header failed the next checkpoint.
+type CheckpointRolledBack struct {
+	// PeerID is the address of the peer that sent the failing header.
+	PeerID string
+
+	// Node is the checkpoint header, now the tip.
+	Node headerlist.Node
+}
+
+func (CheckpointRolledBack) driverEvent() {}
+
+// SnapshotAdopted reports the durable tip the executor read back after a
+// chain store mutation failed. Our view of the chain is unknown until then,
+// so the driver resets the cache to it and retries whatever is staged.
+type SnapshotAdopted struct {
+	// Node is the durable tip.
+	Node headerlist.Node
+
+	// CheckpointPeerID is the address of the peer whose header failed a
+	// checkpoint, when the failed mutation was the rollback that followed.
+	// The failure must not lose the punishment, or the peer could keep
+	// serving bad checkpoints.
+	CheckpointPeerID string
+}
+
+func (SnapshotAdopted) driverEvent() {}
+
+// ContinueSerial asks the executor to ask the sync peer for the headers after
+// a batch that became durable, up to the stop hash.
+type ContinueSerial struct {
+	// PeerID is the address of the peer that sent the batch.
+	PeerID string
+
+	// FinalHash is the hash of the last header of the batch.
+	FinalHash Hash
+
+	// FinalHeight is the height of FinalHash.
+	FinalHeight int32
+
+	// StopHash is the hash of the next checkpoint, or zero past the last
+	// one.
+	StopHash Hash
+}
+
+func (ContinueSerial) driverEffect() {}
+
+// handleExtensionCommitted adopts a written extension and asks for the
+// headers after it.
+func (d *Driver) handleExtensionCommitted(ctx context.Context,
+	event ExtensionCommitted, result *DriverResult) {
+
+	nodes := event.Extension.Nodes
+	d.logProgress(nodes)
+	d.tip.Extend(nodes)
+
+	last := nodes[len(nodes)-1]
+	hash := last.Header.BlockHash()
+	d.advanceTip(ctx, uint32(last.Height), hash)
+	d.continueSerial(event.PeerID, hash, last.Height, result)
+}
+
+// handleReorgCommitted acts on the store's verdict: a losing branch costs the
+// peer its connection, a tie changes nothing, a winning branch that failed a
+// checkpoint rolls the chain back, and a winning branch rebuilds the cache
+// and makes its sender the sync peer.
+func (d *Driver) handleReorgCommitted(ctx context.Context,
+	event ReorgCommitted, result *DriverResult) {
+
+	peerID := event.PeerID
+	switch {
+	// A branch with less work is an invalid claim, and so is a tie that
+	// also failed a checkpoint, so we drop the peer.
+	case event.Verdict == chainstore.ReorgLessWork,
+		event.Verdict == chainstore.ReorgEqualWork &&
+			event.Mismatch != 0:
+
+		log.Warnf("Reorg attempt that has less work than known chain "+
+			"or fails a checkpoint, from peer %s -- disconnecting",
+			peerID)
+		d.disconnectTipPeer(peerID, result)
+		d.restartSyncIfIdle(result)
+
+		return
+
+	// A tie changes nothing, and says nothing bad about the peer.
+	case event.Verdict == chainstore.ReorgEqualWork:
+		d.restartSyncIfIdle(result)
+
+		return
+
+	// The branch would win, but it failed a checkpoint.
+	case event.Mismatch != 0:
+		d.planCheckpointRollback(peerID, event.Mismatch, result)
+
+		return
+	}
+
+	// The branch won. It answered the sync peer's request, and the peer
+	// that delivered it becomes the sync peer, unless it has gone away.
+	nodes := event.Nodes
+	last := nodes[len(nodes)-1]
+	result.Effects = append(result.Effects, UpdatePeerHeight{
+		PeerID: peerID,
+		Height: last.Height,
+	})
+	if d.runtime.manager.TrustsTipPeer(peerID) {
+		result.Effects = append(result.Effects, DisarmSerialTimeout{})
+	}
+	result.Effects = append(result.Effects, SetSyncPeer{
+		PeerID: peerID, UnlessGone: true,
+	})
+
+	d.tip.Reset(event.Reorg.Fork)
+	d.tip.Extend(nodes)
+	d.logProgress(nodes)
+
+	hash := last.Header.BlockHash()
+	d.advanceTip(ctx, uint32(last.Height), hash)
+	d.continueSerial(peerID, hash, last.Height, result)
+}
+
+// continueSerial asks for the headers after a durable batch, aimed at the
+// next checkpoint while there is one.
+func (d *Driver) continueSerial(peerID string, finalHash Hash,
+	finalHeight int32, result *DriverResult) {
+
+	effect := ContinueSerial{
+		PeerID:      peerID,
+		FinalHash:   finalHash,
+		FinalHeight: finalHeight,
+	}
+	if next := d.tip.NextCheckpoint(); next != nil {
+		effect.StopHash = *next.Hash
+	}
+
+	result.Effects = append(result.Effects, effect)
+}
+
+// handleCheckpointRolledBack resets the cache to the checkpoint and drops the
+// peer whose header failed the next one.
+func (d *Driver) handleCheckpointRolledBack(ctx context.Context,
+	event CheckpointRolledBack, result *DriverResult) {
+
+	node := event.Node
+	d.tip.Reset(node)
+	d.advanceTip(ctx, uint32(node.Height), node.Header.BlockHash())
+
+	d.rejectCheckpointPeer(event.PeerID, result)
+}
+
+// handleSnapshotAdopted resets the cache to the durable tip after a failed
+// mutation and retries whatever is staged. A snapshot that completed a
+// checkpoint rollback still drops the peer.
+func (d *Driver) handleSnapshotAdopted(ctx context.Context,
+	event SnapshotAdopted, result *DriverResult) {
+
+	node := event.Node
+	d.tip.Reset(node)
+	d.advanceTip(ctx, uint32(node.Height), node.Header.BlockHash())
+
+	// The retry wakeup goes before the restart, which may re-enter the
+	// driver and so must be the last effect. Arming the wakeup commutes
+	// with a restart, which never cancels it.
+	result.Effects = append(result.Effects, ScheduleCommitRetry{})
+	if event.CheckpointPeerID != "" {
+		d.rejectCheckpointPeer(event.CheckpointPeerID, result)
+	}
+}
+
+// rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
+// after the rollback completed. If that peer was the sync peer and already
+// went away while the rollback was pending, no peer-done handling restarts
+// sync, so it restarts here.
+func (d *Driver) rejectCheckpointPeer(peerID string, result *DriverResult) {
+	d.disconnectTipPeer(peerID, result)
+	d.restartSyncIfIdle(result)
+}
+
+// restartSyncIfIdle restarts sync when the sync peer went away while a
+// mutation's outcome was pending. The peer-done handling skips the restart
+// while a commit is pending, so nothing else would.
+func (d *Driver) restartSyncIfIdle(result *DriverResult) {
+	if d.runtime.manager.TipLease().PeerID == "" {
+		result.Effects = append(result.Effects, StartSync{})
+	}
 }

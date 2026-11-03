@@ -158,9 +158,13 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	}, hmsg.peer)
 }
 
-// finishSerialHeaderFollowup advances the peer request after durable progress.
+// finishSerialHeaderFollowup advances the peer request after durable progress,
+// as the driver asked with ContinueSerial.
 func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
-	peer *ServerPeer, finalHash *chainhash.Hash, finalHeight int32) {
+	peer *ServerPeer, effect headersync.ContinueSerial) {
+
+	finalHash := &effect.FinalHash
+	finalHeight := effect.FinalHeight
 
 	// The batch made progress, so it answered the sync peer's request.
 	// A follow-up request below re-arms the deadline.
@@ -173,10 +177,7 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 	if b.cfg.ChainParams.Net == chaincfg.SimNetParams.Net ||
 		!b.BlockHeadersSynced() {
 
-		nextHash := zeroHash
-		if next := b.driver().NextCheckpoint(); next != nil {
-			nextHash = *next.Hash
-		}
+		nextHash := effect.StopHash
 
 		// Ask the sync peer, not whoever sent this batch. There is a
 		// single serial deadline and it only acts for the sync peer,
@@ -296,20 +297,14 @@ func (b *blockManager) submitCheckpointRollback(sp *ServerPeer,
 	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
 }
 
-// finishSerialHeaderExtension updates validation and peer state only after
-// the prepared headers have been durably written.
-func (b *blockManager) finishSerialHeaderExtension(peers *list.List,
-	peer *ServerPeer, prepared headersync.SerialExtension) {
-
-	for _, node := range prepared.Nodes {
-		b.blkHeaderProgressLogger.LogBlockHeight(
-			node.Header.Timestamp,
-			node.Height,
-		)
+// submitRangeCommit sends a prepared batch of ranges to the chain store
+// actor, without waiting for the write.
+func (b *blockManager) submitRangeCommit(prepared headersync.PreparedCommit) {
+	b.pendingHeaderCommit = &pendingChainHeaderCommit{
+		ranges: &prepared,
 	}
-	b.extendTip(prepared.Nodes)
-	last := prepared.Nodes[len(prepared.Nodes)-1]
-	hash := last.Header.BlockHash()
-	b.advanceHeaderSyncTip(uint32(last.Height), hash)
-	b.finishSerialHeaderFollowup(peers, peer, &hash, last.Height)
+	b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
+		ExpectedParent: prepared.ExpectedParent,
+		Headers:        prepared.Headers,
+	}, b.chainStoreResult)
 }

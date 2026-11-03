@@ -80,21 +80,6 @@ type DriverResult struct {
 	// when the anchor was trusted, replaced or unknown, so that nothing
 	// changed.
 	AnchorRejected bool
-
-	// Ready is the outcome of ListReadyRanges.
-	Ready []RangeID
-
-	// ReadyRange is the outcome of SnapshotReadyRange.
-	ReadyRange ReadyRange
-
-	// Invalidated is the outcome of InvalidateRange.
-	Invalidated InvalidationResult
-
-	// Commit is the outcome of CommitDurableRanges.
-	Commit CommitReadyResult
-
-	// Prepared is the outcome of PrepareRanges.
-	Prepared PreparedCommit
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -232,7 +217,7 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 		d.handleRequestTimedOut(ctx, event, &result)
 
 	case RangeReply:
-		d.handleRangeReply(ctx, event, &result)
+		d.handleRangeReply(ctx, event, view, &result)
 
 	case RejectUntrustedAnchor:
 		d.handleRejectUntrustedAnchor(ctx, event, &result)
@@ -249,44 +234,38 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 	case PruneAnchors:
 		d.handlePruneAnchors(event, &result)
 
-	case AdvanceTip:
-		err = d.handleAdvanceTip(ctx, event)
+	case CommitReady:
+		err = d.commitReadyRanges(ctx, view, &result)
 
-	case ListReadyRanges:
-		err = d.handleListReadyRanges(ctx, &result)
+	case RetryCommit:
+		d.handleRetryCommit(ctx, view, &result)
 
-	case SnapshotReadyRange:
-		err = d.handleSnapshotReadyRange(ctx, event, &result)
+	case RangesCommitted:
+		d.handleRangesCommitted(ctx, event, &result)
 
-	case InvalidateRange:
-		err = d.handleInvalidateRange(ctx, event, &result)
+	case ExtensionCommitted:
+		d.handleExtensionCommitted(ctx, event, &result)
 
-	case CommitDurableRanges:
-		err = d.handleCommitDurableRanges(ctx, &result)
+	case ReorgCommitted:
+		d.handleReorgCommitted(ctx, event, &result)
 
-	case ResetTip:
-		d.ResetTip(event.Node)
+	case CheckpointRolledBack:
+		d.handleCheckpointRolledBack(ctx, event, &result)
 
-	case ExtendTip:
-		d.tip.Extend(event.Nodes)
+	case SnapshotAdopted:
+		d.handleSnapshotAdopted(ctx, event, &result)
 
-	case ReconcileTip:
-		err = d.tip.ReconcileWithStore()
+	case PeerGone:
+		d.handlePeerGone(ctx, event, view, &result)
 
-	case PrepareRanges:
-		result.Prepared, err = d.tip.PrepareRangeHeaders(event.Ranges)
-
-	case FinishRange:
-		d.tip.FinishRange(event.Prepared)
+	case SerialTimedOut:
+		d.handleSerialTimedOut(ctx, event, view, &result)
 
 	case TipHeaders:
 		d.handleTipHeaders(event, &result)
 
 	case FollowTip:
 		d.handleFollowTip(event)
-
-	case RollbackToCheckpoint:
-		d.planCheckpointRollback(event.PeerID, event.Height, &result)
 	}
 
 	return result, err

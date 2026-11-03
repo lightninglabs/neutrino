@@ -8,7 +8,6 @@ import (
 	"container/list"
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -52,24 +51,6 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 	log.Debugf("Registered headersync peer peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
 		sp.LastBlock(), rtt)
-}
-
-func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
-	peerID := sp.Addr()
-	if b.headerSync == nil {
-		return
-	}
-
-	outcome := b.handleDriverEvent(nil, headersync.PeerDisconnected{
-		PeerID: peerID,
-	})
-	if outcome.err != nil {
-		log.Warnf("Unable to remove headersync peer %s: %v", peerID,
-			outcome.err)
-		return
-	}
-
-	log.Debugf("Unregistered headersync peer peer=%s", peerID)
 }
 
 func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
@@ -232,27 +213,6 @@ func (b *blockManager) allowSerialHeaderFallback() bool {
 		b.cfg.ChainParams.Net == chaincfg.RegressionNetParams.Net
 }
 
-func (b *blockManager) resetHeaderListToTip() error {
-	header, height, err := b.cfg.BlockHeaders.ChainTip()
-	if err != nil {
-		return err
-	}
-
-	// The visible tip must describe the same header as the validation
-	// cache, or a later write can start from one and report the other.
-	b.resetTip(headerlist.Node{
-		Header: *header,
-		Height: int32(height),
-	})
-
-	// A failed serial write may still have landed. Planning stops
-	// advancing the FSM once the tip reaches the best height, so move it
-	// here, or ranges the write covered stay staged forever.
-	b.advanceHeaderSyncTip(height, header.BlockHash())
-
-	return nil
-}
-
 func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 	msg *headerSyncTimeoutMsg) {
 
@@ -278,47 +238,11 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 		return
 	}
 
-	var height uint32
-	if b.pendingHeaderCommit != nil {
-		height = b.tipFeed.Snapshot().BlockHeight
-	} else {
-		_, currentHeight, err := b.cfg.BlockHeaders.ChainTip()
-		if err != nil {
-			log.Errorf("Failed to get block header chain tip "+
-				"while handling header sync timeout: %v", err)
-			return
-		}
-		height = currentHeight
-	}
-	if height > msg.startHeight {
-		return
-	}
-
-	log.Warnf("Header sync from peer %s stalled for %v at height %d; "+
-		"quarantining peer and selecting a new sync peer",
-		msg.peer.Addr(), msg.timeout, height)
-
-	// A slow or stalled peer is quarantined, never IP-banned: on regtest
-	// and behind NAT or Tor one address can be the only usable peer.
-	b.quarantineHeaderSyncPeer(msg.peer)
-	removeSyncCandidate(peers, msg.peer)
-	msg.peer.Disconnect()
-
-	if b.syncPeer.Load() == msg.peer {
-		b.setSyncPeer(nil)
-	}
-
-	if b.pendingHeaderCommit != nil {
-		return
-	}
-
-	if err := b.resetHeaderListToTip(); err != nil {
-		log.Errorf("Failed to reset header state after header sync "+
-			"timeout: %v", err)
-		return
-	}
-
-	b.startSync(peers)
+	b.handleDriverEvent(peers, headersync.SerialTimedOut{
+		PeerID:      msg.peer.Addr(),
+		StartHeight: msg.startHeight,
+		Timeout:     msg.timeout,
+	}, msg.peer)
 }
 
 func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
@@ -656,110 +580,11 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	return outcome.result.Handled
 }
 
-// reconcileTip fast-forwards the validation cache to the durable tip.
-func (b *blockManager) reconcileTip() error {
-	return b.handleDriverEvent(nil, headersync.ReconcileTip{}).err
-}
-
-// resetTip replaces the validation cache with a single node.
-func (b *blockManager) resetTip(node headerlist.Node) {
-	b.handleDriverEvent(nil, headersync.ResetTip{Node: node})
-}
-
-// extendTip appends durable nodes to the validation cache.
-func (b *blockManager) extendTip(nodes []headerlist.Node) {
-	b.handleDriverEvent(nil, headersync.ExtendTip{Nodes: nodes})
-}
-
+// commitReadyHeaderSyncRanges asks the driver to commit the staged ranges
+// that are ready. The error is a ValidationError when a peer's data is at
+// fault.
 func (b *blockManager) commitReadyHeaderSyncRanges() error {
-	if b.pendingHeaderCommit != nil {
-		return nil
-	}
-	// A write that reported an error may still have landed, so the store,
-	// not the validation cache, decides where the next write starts.
-	if err := b.reconcileTip(); err != nil {
-		b.scheduleHeaderCommitRetry()
-		return err
-	}
-
-	listed := b.handleDriverEvent(nil, headersync.ListReadyRanges{})
-	if listed.err != nil {
-		return listed.err
-	}
-	ready := listed.result.Ready
-	if len(ready) == 0 {
-		return nil
-	}
-
-	commitRanges := make([]headersync.RangeCommit, 0, len(ready))
-	for _, rangeID := range ready {
-		event := headersync.SnapshotReadyRange{RangeID: rangeID}
-		fetched := b.handleDriverEvent(nil, event)
-		if fetched.err != nil {
-			return fetched.err
-		}
-
-		rng := fetched.result.ReadyRange.Range
-		staged := fetched.result.ReadyRange.Staged
-
-		// Skip whatever part of the range is already durable. The
-		// FSM still commits the whole range below.
-		commitRange, pending, err := b.trimDurableHeaderSyncRange(
-			rng, staged,
-		)
-		if err != nil {
-			b.scheduleHeaderCommitRetry()
-			return err
-		}
-		if pending {
-			commitRanges = append(commitRanges, commitRange)
-		}
-	}
-
-	// The actor writes the batch. Completion arrives on chainStoreResult,
-	// so the handler never waits on the store.
-	if len(commitRanges) == 0 {
-		return b.finishReadyHeaderSyncRanges()
-	}
-	preparing := b.handleDriverEvent(nil, headersync.PrepareRanges{
-		Ranges: commitRanges,
-	})
-	prepared, commitErr := preparing.result.Prepared, preparing.err
-	if commitErr == nil {
-		b.pendingHeaderCommit = &pendingChainHeaderCommit{
-			ranges: &prepared,
-		}
-		b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
-			ExpectedParent: prepared.ExpectedParent,
-			Headers:        prepared.Headers,
-		}, b.chainStoreResult)
-
-		return nil
-	}
-	if err := commitErr; err != nil {
-		var invalid *headersync.ValidationError
-		if !errors.As(err, &invalid) {
-			b.scheduleHeaderCommitRetry()
-			return err
-		}
-		outcome := b.handleDriverEvent(nil, headersync.InvalidateRange{
-			RangeID:       invalid.RangeID,
-			CooldownUntil: time.Now().Add(b.headerSyncTimeout),
-		})
-		result, recoveryErr := outcome.result.Invalidated, outcome.err
-		log.Warnf("headersync range_invalidated range_id=%d peer=%s "+
-			"invalidated_ranges=%v invalidated_anchors=%d "+
-			"reason=%v",
-			invalid.RangeID, invalid.PeerID, result.Ranges,
-			len(result.Anchors), err)
-		if recoveryErr != nil {
-			return fmt.Errorf("%w; invalidation failed: %v",
-				err, recoveryErr)
-		}
-		return err
-	}
-
-	return nil
+	return b.handleDriverEvent(nil, headersync.CommitReady{}).err
 }
 
 // pendingChainHeaderCommit is the one chain store mutation the block handler
@@ -850,30 +675,36 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 		return
 	}
 
+	// The driver finishes the mutation: it adopts the result into the
+	// validation cache and the FSM, and decides what to ask for next.
+	var landed headersync.DriverEvent
 	switch {
 	case prepared.checkpoint != nil:
-		b.finishCheckpointRollback(peers, prepared)
+		landed = headersync.CheckpointRolledBack{
+			PeerID: prepared.peer.Addr(),
+			Node:   *prepared.checkpoint,
+		}
 
 	case prepared.reorg != nil:
-		b.finishSerialHeaderReorg(peers, prepared, result.Reply.Verdict)
+		landed = headersync.ReorgCommitted{
+			PeerID:   prepared.peer.Addr(),
+			Reorg:    *prepared.reorg,
+			Nodes:    prepared.reorgNodes,
+			Mismatch: prepared.reorgMismatch,
+			Verdict:  result.Reply.Verdict,
+		}
 
 	case prepared.serial != nil:
-		b.finishSerialHeaderExtension(
-			peers, prepared.peer, *prepared.serial,
-		)
+		landed = headersync.ExtensionCommitted{
+			PeerID:    prepared.peer.Addr(),
+			Extension: *prepared.serial,
+		}
 
 	default:
-		b.finishHeaderSyncRangeHeaders(*prepared.ranges)
-
-		err := b.finishReadyHeaderSyncRanges()
-		if err != nil {
-			log.Warnf("headersync completion failed: %v", err)
-			b.scheduleHeaderCommitRetry()
-
-			return
-		}
-		b.continueHeaderSync(peers)
+		landed = headersync.RangesCommitted{Prepared: *prepared.ranges}
 	}
+
+	b.handleDriverEvent(peers, landed, prepared.peer)
 }
 
 // finishChainStoreSnapshot adopts the durable tip after a failed mutation. Our
@@ -904,188 +735,17 @@ func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
 
 	b.pendingHeaderCommit = nil
 
-	node := headerlist.Node{
-		Header: result.Reply.BlockHeader,
-		Height: result.Reply.BlockTip.Height,
-	}
-	b.resetTip(node)
-	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
-
+	var checkpointPeer string
 	if prepared.checkpoint != nil {
-		b.rejectCheckpointPeer(peers, prepared.peer)
+		checkpointPeer = prepared.peer.Addr()
 	}
-
-	b.scheduleHeaderCommitRetry()
-}
-
-// finishCheckpointRollback resets the validation cache to the last verified
-// checkpoint, then drops the peer whose header failed the next one.
-func (b *blockManager) finishCheckpointRollback(peers *list.List,
-	prepared *pendingChainHeaderCommit) {
-
-	node := *prepared.checkpoint
-	b.resetTip(node)
-	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
-
-	b.rejectCheckpointPeer(peers, prepared.peer)
-}
-
-// finishSerialHeaderReorg rebuilds the validation cache on the new branch, then
-// asks for whatever comes after it.
-func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
-	prepared *pendingChainHeaderCommit, verdict chainstore.ReorgVerdict) {
-
-	peer := prepared.peer
-
-	switch {
-	// A branch with less work is an invalid claim, and so is a tie that
-	// also failed a checkpoint, so we drop the peer.
-	case verdict == chainstore.ReorgLessWork,
-		verdict == chainstore.ReorgEqualWork &&
-			prepared.reorgMismatch != 0:
-
-		log.Warnf("Reorg attempt that has less work than known chain "+
-			"or fails a checkpoint, from peer %s -- disconnecting",
-			peer.Addr())
-		peer.Disconnect()
-		b.restartSyncIfIdle(peers)
-
-		return
-
-	// A tie changes nothing, and says nothing bad about the peer.
-	case verdict == chainstore.ReorgEqualWork:
-		b.restartSyncIfIdle(peers)
-
-		return
-
-	// The branch would win, but it failed a checkpoint.
-	case prepared.reorgMismatch != 0:
-		b.handleDriverEvent(peers, headersync.RollbackToCheckpoint{
-			PeerID: peer.Addr(),
-			Height: prepared.reorgMismatch,
-		}, peer)
-
-		return
-	}
-
-	// The branch won. It answered the sync peer's request, and the peer
-	// that delivered it becomes the sync peer, unless it has gone away.
-	last := prepared.reorgNodes[len(prepared.reorgNodes)-1]
-	peer.UpdateLastBlockHeight(last.Height)
-	if peer == b.SyncPeer() {
-		b.disarmHeaderSyncTimeout()
-	}
-	if !peerDisconnected(peer) {
-		b.setSyncPeer(peer)
-	}
-
-	b.resetTip(prepared.reorg.Fork)
-	b.extendTip(prepared.reorgNodes)
-	for _, node := range prepared.reorgNodes {
-		b.blkHeaderProgressLogger.LogBlockHeight(
-			node.Header.Timestamp, node.Height,
-		)
-	}
-
-	hash := last.Header.BlockHash()
-	b.advanceHeaderSyncTip(uint32(last.Height), hash)
-
-	b.finishSerialHeaderFollowup(
-		peers, peer, &hash, last.Height,
-	)
-}
-
-// restartSyncIfIdle restarts sync when the sync peer went away while a reorg's
-// verdict was pending. The peer-done handling skips the restart while a commit
-// is pending, so nothing else would.
-func (b *blockManager) restartSyncIfIdle(peers *list.List) {
-	if b.SyncPeer() == nil {
-		b.startSync(peers)
-	}
-}
-
-// rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
-// after the rollback completed. If that peer was the sync peer and already
-// went away while the rollback was pending, no peer-done handling restarts
-// sync, so it restarts here.
-func (b *blockManager) rejectCheckpointPeer(peers *list.List,
-	peer *ServerPeer) {
-
-	peer.Disconnect()
-	if b.SyncPeer() == nil {
-		b.startSync(peers)
-	}
-}
-
-// finishReadyHeaderSyncRanges retires staged ranges after durable completion.
-func (b *blockManager) finishReadyHeaderSyncRanges() error {
-	// Each driver event has its own deadline, so a slow write can't expire
-	// the commit.
-	outcome := b.handleDriverEvent(nil, headersync.CommitDurableRanges{})
-	if outcome.err != nil {
-		b.scheduleHeaderCommitRetry()
-		return outcome.err
-	}
-	commitResult := outcome.result.Commit
-	b.cancelHeaderCommitRetry()
-	commit := commitResult.Commit
-	if commitResult.PrunedAnchors > 0 {
-		log.Infof("headersync pruned_obsolete_anchors "+
-			"tip_height=%d pruned=%d", commit.TipHeight,
-			commitResult.PrunedAnchors)
-	}
-	b.handleDriverEvent(nil, headersync.RetireStaged{
-		RangeIDs: commit.Committed,
-	})
-	for _, rangeID := range commit.Committed {
-		log.Infof(
-			"headersync range_committed range_id=%d "+
-				"tip_height=%d "+
-				"tip_hash=%s",
-			rangeID,
-			commit.TipHeight,
-			commit.TipHash,
-		)
-	}
-
-	return nil
-}
-
-// trimDurableHeaderSyncRange drops the prefix of a ready range that is already
-// durable, so a retry after an ambiguous write appends only the missing
-// suffix. It reports pending=false when the whole range is durable; the
-// caller then skips the write and only commits the range in the FSM. A range
-// whose durable prefix disagrees with its staged headers is returned
-// unchanged, so validation classifies it as before.
-func (b *blockManager) trimDurableHeaderSyncRange(rng headersync.HeaderRange,
-	staged headersync.StagedRange) (headersync.RangeCommit, bool, error) {
-
-	commit := headersync.RangeCommit{Range: rng, Staged: staged}
-	tip := b.tipFeed.Snapshot().BlockHeight
-	if tip <= rng.StartHeight || len(staged.Headers) == 0 {
-		return commit, true, nil
-	}
-
-	durable := min(tip-rng.StartHeight, uint32(len(staged.Headers)))
-	last := staged.Headers[durable-1]
-	stored, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
-		rng.StartHeight + durable,
-	)
-	if err != nil {
-		return commit, false, err
-	}
-	if stored.BlockHash() != last.BlockHash() {
-		return commit, true, nil
-	}
-	if int(durable) == len(staged.Headers) {
-		return commit, false, nil
-	}
-
-	commit.Range.StartHeight += durable
-	commit.Range.StartHash = last.BlockHash()
-	commit.Staged.Headers = staged.Headers[durable:]
-
-	return commit, true, nil
+	b.handleDriverEvent(peers, headersync.SnapshotAdopted{
+		Node: headerlist.Node{
+			Header: result.Reply.BlockHeader,
+			Height: result.Reply.BlockTip.Height,
+		},
+		CheckpointPeerID: checkpointPeer,
+	}, prepared.peer)
 }
 
 // scheduleHeaderCommitRetry keeps one wakeup while staging waits for storage.
@@ -1133,18 +793,4 @@ func (b *blockManager) rejectInvalidHeaderCommit(peers *list.List,
 	}
 	b.continueHeaderSync(peers)
 	return true
-}
-
-// finishHeaderSyncRangeHeaders updates handler-owned validation state after a
-// prepared batch has been durably committed.
-func (b *blockManager) finishHeaderSyncRangeHeaders(
-	prepared headersync.PreparedCommit) {
-
-	for _, node := range prepared.Nodes {
-		b.blkHeaderProgressLogger.LogBlockHeight(
-			node.Header.Timestamp, node.Height,
-		)
-	}
-
-	b.handleDriverEvent(nil, headersync.FinishRange{Prepared: prepared})
 }
