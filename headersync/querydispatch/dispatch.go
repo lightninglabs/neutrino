@@ -9,7 +9,7 @@ import (
 	"github.com/lightninglabs/neutrino/querysync"
 )
 
-// Controller adapts querysync's actor-backed scheduler to headersync's generic
+// Controller adapts querysync's scheduler to headersync's generic
 // dispatch interface. Header range validation, lease epochs, active timeout
 // stealing, staging, and ordered commit stay in headersync.
 type Controller struct {
@@ -66,7 +66,8 @@ func (c *Controller) UpdatePeerRTT(id string,
 }
 
 // AssignRange asks querysync to assign unstarted header range ownership.
-func (c *Controller) AssignRange(rangeID headersync.RangeID) (headersync.DispatchAssignment, bool,
+func (c *Controller) AssignRange(
+	rangeID headersync.RangeID) (headersync.DispatchAssignment, bool,
 	error) {
 
 	assignment, ok := c.scheduler.AssignLocalTask(
@@ -106,7 +107,8 @@ func (c *Controller) SyncPeer(peer headersync.PeerSnapshot) error {
 }
 
 // StealRange asks querysync to move unstarted range ownership to the thief.
-func (c *Controller) StealRange(thiefID string) (headersync.DispatchStealResult, bool, error) {
+func (c *Controller) StealRange(
+	thiefID string) (headersync.DispatchStealResult, bool, error) {
 
 	result, ok := c.scheduler.StealOne(thiefID)
 	if !ok {

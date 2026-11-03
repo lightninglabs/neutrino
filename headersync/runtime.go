@@ -81,7 +81,7 @@ func (r *Runtime) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops the manager, the peers, the dispatch actor and the request
+// Stop stops the manager, the peers and the request
 // timers owned by the runtime.
 func (r *Runtime) Stop() {
 	if r == nil {

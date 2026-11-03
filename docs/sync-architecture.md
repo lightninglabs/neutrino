@@ -546,7 +546,7 @@ Each piece of mutable sync state has one owner goroutine.
 | `blockHandler` | `headerList`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers |
 | headersync manager | `HeaderSyncFSM` |
 | headersync peer, one per peer | That peer's scheduling state |
-| querysync actor inside headersync | The private dispatch `SchedulerFSM` |
+| headersync manager lock | The private dispatch `querysync.Scheduler` |
 | `cfHandler` | Filter-header sync progress |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |
@@ -558,7 +558,4 @@ commit retries, and the bootstrap delay only post a message to
 Every driver event from `blockHandler` uses a five-second deadline. The
 headersync manager and peers run on the caller's goroutine under a lock, so a
 deadline can't expire between a message applying and its reply arriving. The
-querysync dispatch asks are the exception: the dispatch actor runs `Receive`
-under its own context, so it can apply a message and then report a deadline
-error. Code that calls the dispatch actor must not assume that an error means
-its state is unchanged.
+dispatch mirror is a `querysync.Scheduler`, called under the manager's lock.

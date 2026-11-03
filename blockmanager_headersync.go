@@ -74,22 +74,6 @@ func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
 	log.Debugf("Unregistered headersync peer peer=%s", peerID)
 }
 
-func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {
-	rtt := time.Duration(sp.LastPingMicros()) * time.Microsecond
-	if rtt <= 0 {
-		return
-	}
-
-	outcome := b.handleDriverEvent(nil, headersync.PeerRTTUpdated{
-		PeerID: sp.Addr(),
-		RTT:    rtt,
-	})
-	if outcome.err != nil {
-		log.Warnf("Unable to update headersync peer RTT for %s: %v",
-			sp.Addr(), outcome.err)
-	}
-}
-
 func (b *blockManager) updateHeaderSyncPeerState(sp *ServerPeer,
 	state headersync.PeerState) {
 
