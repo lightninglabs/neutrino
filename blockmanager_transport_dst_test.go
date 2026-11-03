@@ -8,8 +8,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -1431,6 +1433,37 @@ func dstSwarmSeed(rng *rand.Rand) []byte {
 		seed[i] = byte(rng.Uint32())
 	}
 	return seed
+}
+
+// dstDump names a file to receive one line per seed with a digest of the seed's
+// full snapshot. A refactor that claims no behaviour change should produce the
+// same file before and after.
+var dstDump = flag.String("dst.dump", "", "write per-seed snapshot digests")
+
+// TestHeaderTransportDSTDump writes the digest of every corpus and regression
+// seed, plus the swarm that -dst.seed and -dst.swarm select, to -dst.dump.
+func TestHeaderTransportDSTDump(t *testing.T) {
+	if *dstDump == "" {
+		t.Skip("set -dst.dump to write snapshot digests")
+	}
+
+	seeds := dstSeeds(t)
+	rng := rand.New(rand.NewPCG(*dstSwarmSeedFlag, 0))
+	for i := 0; i < *dstSwarmRuns; i++ {
+		seeds = append(seeds, dstSwarmSeed(rng))
+	}
+
+	var out strings.Builder
+	for _, seed := range seeds {
+		t.Run(fmt.Sprintf("%x", seed), func(t *testing.T) {
+			snapshot := runHeaderTransportDST(t, seed)
+			digest := sha256.Sum256(
+				[]byte(fmt.Sprintf("%+v", snapshot)),
+			)
+			fmt.Fprintf(&out, "%x %x\n", seed, digest)
+		})
+	}
+	require.NoError(t, os.WriteFile(*dstDump, []byte(out.String()), 0o644))
 }
 
 // TestHeaderTransportDSTSwarm runs a fixed, reproducible swarm campaign. Each
