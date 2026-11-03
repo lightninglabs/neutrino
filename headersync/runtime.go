@@ -21,8 +21,6 @@ type ActorLifecycle interface {
 type RuntimeConfig struct {
 	Config Config
 
-	MailboxSize int
-
 	Dispatch      DispatchController
 	DispatchActor ActorLifecycle
 
@@ -38,8 +36,7 @@ type RuntimeConfig struct {
 // state. The session is private to the package: the driver is its only user
 // outside of it.
 type Runtime struct {
-	cfg         Config
-	mailboxSize int
+	cfg Config
 
 	dispatchActor ActorLifecycle
 	manager       *ManagerActor
@@ -67,12 +64,7 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	fsm.SeedCommittedAnchor()
 	seeded := fsm.AddCheckpointAnchors(checkpoints)
 
-	mailboxSize := cfg.MailboxSize
-	if mailboxSize <= 0 {
-		mailboxSize = 1
-	}
-
-	manager := NewManagerActor(fsm, mailboxSize)
+	manager := NewManagerActor(fsm)
 	if cfg.Dispatch != nil {
 		manager.SetDispatchController(cfg.Dispatch)
 	}
@@ -81,7 +73,6 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 
 	runtime := &Runtime{
 		cfg:           headerCfg,
-		mailboxSize:   mailboxSize,
 		dispatchActor: cfg.DispatchActor,
 		manager:       manager,
 		session:       session,
@@ -170,9 +161,7 @@ func (r *Runtime) RegisterPeer(ctx context.Context,
 	}
 	r.mu.Unlock()
 
-	actor := NewPeerActor(
-		peer.ID, peer.Rank, r.manager, r.mailboxSize,
-	)
+	actor := NewPeerActor(peer.ID, peer.Rank, r.manager)
 	if err := actor.Start(ctx); err != nil {
 		return nil, false, err
 	}

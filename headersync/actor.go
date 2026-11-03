@@ -11,11 +11,6 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
-const (
-	managerActorID = "headersync-manager"
-	peerActorKey   = "headersync-peer"
-)
-
 // ManagerMsg is accepted by the header sync manager actor.
 type ManagerMsg interface {
 	actor.Message
@@ -797,38 +792,26 @@ func syncStealPeers(ctx context.Context, env *managerEnv,
 	return nil
 }
 
-// ManagerActor owns the header sync FSM and exposes it through lnd's actor
-// system.
+// ManagerActor owns the header sync FSM. Every message runs synchronously on
+// the caller's goroutine, under mu. There is no mailbox, so a caller's deadline
+// can't expire between a message applying and its reply arriving, which is what
+// used to leave callers with a wrong view of the FSM.
 type ManagerActor struct {
-	fsm         *HeaderSyncFSM
-	mailboxSize int
-	dispatch    DispatchController
+	fsm      *HeaderSyncFSM
+	dispatch DispatchController
+	events   EventSink
 
-	key     actor.ServiceKey[ManagerMsg, ManagerResp]
-	system  *actor.ActorSystem
+	// mu serializes messages. A peer holds its own lock when it calls in
+	// here, and the manager never calls a peer, so the order is always
+	// peer, then manager.
+	mu      sync.Mutex
 	machine *protofsm.StateMachine[ManagerMsg, managerOutbox, *managerEnv]
-	ref     actor.ActorRef[ManagerMsg, ManagerResp]
-	events  EventSink
-
-	startOnce sync.Once
-	stopOnce  sync.Once
+	stopped bool
 }
 
-var _ actor.ActorBehavior[ManagerMsg, ManagerResp] = (*ManagerActor)(nil)
-
-// NewManagerActor creates an actor wrapper around a HeaderSyncFSM.
-func NewManagerActor(fsm *HeaderSyncFSM, mailboxSize int) *ManagerActor {
-	if mailboxSize <= 0 {
-		mailboxSize = 1
-	}
-
-	return &ManagerActor{
-		fsm:         fsm,
-		mailboxSize: mailboxSize,
-		key: actor.NewServiceKey[ManagerMsg, ManagerResp](
-			managerActorID,
-		),
-	}
+// NewManagerActor creates a manager around a HeaderSyncFSM.
+func NewManagerActor(fsm *HeaderSyncFSM) *ManagerActor {
+	return &ManagerActor{fsm: fsm}
 }
 
 // SetEventSink enables structured header sync events.
@@ -842,72 +825,67 @@ func (m *ManagerActor) SetDispatchController(dispatch DispatchController) {
 	m.dispatch = dispatch
 }
 
-// Start starts the manager actor.
+// Start starts the manager.
 func (m *ManagerActor) Start(ctx context.Context) {
-	m.startOnce.Do(func() {
-		m.system = actor.NewActorSystemWithConfig(actor.SystemConfig{
-			MailboxCapacity: m.mailboxSize,
-		})
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-		machine, err := protofsm.NewStateMachine[
-			ManagerMsg, managerOutbox,
-		](protofsm.StateMachineCfg[
-			ManagerMsg, managerOutbox, *managerEnv,
-		]{
-			InitialState: managerState{},
-			Env: &managerEnv{
-				fsm:      m.fsm,
-				dispatch: m.dispatch,
-			},
-		})
-		if err != nil {
-			panic(
-				fmt.Sprintf(
-					"unable to create header manager "+
-						"FSM: %v",
-					err,
-				),
-			)
-		}
+	if m.machine != nil {
+		return
+	}
 
-		m.machine = machine
-		m.machine.Start(ctx)
-		ref, err := m.key.Spawn(m.system, managerActorID, m)
-		if err != nil {
-			panic(
-				fmt.Sprintf(
-					"unable to spawn header manager: %v",
-					err,
-				),
-			)
-		}
-		m.ref = ref
+	machine, err := protofsm.NewStateMachine[
+		ManagerMsg, managerOutbox,
+	](protofsm.StateMachineCfg[
+		ManagerMsg, managerOutbox, *managerEnv,
+	]{
+		InitialState: managerState{},
+		Env: &managerEnv{
+			fsm:      m.fsm,
+			dispatch: m.dispatch,
+		},
 	})
+	if err != nil {
+		panic(fmt.Sprintf("unable to create header manager FSM: %v",
+			err))
+	}
+
+	m.machine = machine
+	m.machine.Start(ctx)
 }
 
-// Stop stops the manager actor.
+// Stop stops the manager. Later messages report ErrActorStopped.
 func (m *ManagerActor) Stop() {
-	m.stopOnce.Do(func() {
-		if m.system != nil {
-			_ = m.system.Shutdown()
-		}
-		if m.machine != nil {
-			m.machine.Stop()
-		}
-	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.stopped {
+		return
+	}
+	m.stopped = true
+
+	if m.machine != nil {
+		m.machine.Stop()
+	}
 }
 
-// Receive processes one manager actor message.
-func (m *ManagerActor) Receive(ctx context.Context,
-	msg ManagerMsg) fn.Result[ManagerResp] {
+// ask runs one message.
+func (m *ManagerActor) ask(ctx context.Context, msg ManagerMsg) (
+	ManagerResp, error) {
 
-	if m.machine == nil {
-		return fn.Err[ManagerResp](ErrActorStopped)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.machine == nil || m.stopped {
+		return nil, ErrActorStopped
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	outbox, err := m.machine.ProcessEvent(ctx, msg)
 	if err != nil {
-		return fn.Err[ManagerResp](err)
+		return nil, err
 	}
 
 	var resp ManagerResp = &ManagerAck{}
@@ -917,9 +895,7 @@ func (m *ManagerActor) Receive(ctx context.Context,
 			resp = out.Response
 
 		default:
-			return fn.Err[ManagerResp](
-				fmt.Errorf("unknown manager outbox: %T", out),
-			)
+			return nil, fmt.Errorf("unknown manager outbox: %T", out)
 		}
 	}
 
@@ -929,17 +905,7 @@ func (m *ManagerActor) Receive(ctx context.Context,
 		}
 	}
 
-	return fn.Ok(resp)
-}
-
-func (m *ManagerActor) ask(ctx context.Context, msg ManagerMsg) (
-	ManagerResp, error) {
-
-	if m.ref == nil {
-		return nil, ErrActorStopped
-	}
-
-	return m.ref.Ask(ctx, msg).Await(ctx).Unpack()
+	return resp, nil
 }
 
 // AddAnchor asks the manager to add or confirm an anchor.
@@ -2042,52 +2008,27 @@ func peerTransition(next protofsm.State[PeerMsg, peerOutbox, *peerEnv],
 	}, nil
 }
 
-// PeerActor owns peer-local header sync state and communicates with the
-// manager only through actor messages emitted from FSM outboxes.
+// PeerActor owns peer-local header sync state. Like the manager, it runs each
+// message synchronously on the caller's goroutine, under mu.
 type PeerActor struct {
-	id          string
-	rank        int
-	manager     *ManagerActor
-	mailboxSize int
+	id      string
+	rank    int
+	manager *ManagerActor
 
-	key     actor.ServiceKey[PeerMsg, PeerResp]
-	system  *actor.ActorSystem
+	mu      sync.Mutex
 	machine *protofsm.StateMachine[PeerMsg, peerOutbox, *peerEnv]
-	ref     actor.ActorRef[PeerMsg, PeerResp]
-
-	startOnce sync.Once
-	stopOnce  sync.Once
+	stopped bool
 }
 
-var _ actor.ActorBehavior[PeerMsg, PeerResp] = (*PeerActor)(nil)
-
-// NewPeerActor creates a peer actor.
-func NewPeerActor(id string, rank int, manager *ManagerActor,
-	mailboxSize int) *PeerActor {
-
-	if mailboxSize <= 0 {
-		mailboxSize = 1
-	}
-
-	return &PeerActor{
-		id:          id,
-		rank:        rank,
-		manager:     manager,
-		mailboxSize: mailboxSize,
-		key: actor.NewServiceKey[PeerMsg, PeerResp](
-			peerActorKey + "-" + id,
-		),
-	}
+// NewPeerActor creates a peer.
+func NewPeerActor(id string, rank int, manager *ManagerActor) *PeerActor {
+	return &PeerActor{id: id, rank: rank, manager: manager}
 }
 
-// Start starts the peer actor and registers its initial snapshot.
+// Start starts the peer and registers its initial snapshot.
 func (p *PeerActor) Start(ctx context.Context) error {
-	var startErr error
-	p.startOnce.Do(func() {
-		p.system = actor.NewActorSystemWithConfig(actor.SystemConfig{
-			MailboxCapacity: p.mailboxSize,
-		})
-
+	p.mu.Lock()
+	if p.machine == nil {
 		machine, err := protofsm.NewStateMachine[PeerMsg, peerOutbox](
 			protofsm.StateMachineCfg[
 				PeerMsg, peerOutbox, *peerEnv,
@@ -2100,61 +2041,52 @@ func (p *PeerActor) Start(ctx context.Context) error {
 			},
 		)
 		if err != nil {
-			startErr = err
-			return
+			p.mu.Unlock()
+
+			return err
 		}
 
 		p.machine = machine
 		p.machine.Start(ctx)
-		ref, err := p.key.Spawn(p.system, p.id, p)
-		if err != nil {
-			startErr = fmt.Errorf(
-				"unable to spawn header peer %s: %w",
-				p.id,
-				err,
-			)
-			return
-		}
-		p.ref = ref
-	})
-	if startErr != nil {
-		return startErr
 	}
+	p.mu.Unlock()
 
 	return p.Send(ctx, PeerReadyEvent{})
 }
 
-// Stop stops the peer actor.
+// Stop stops the peer. Later messages report ErrActorStopped.
 func (p *PeerActor) Stop() {
-	p.stopOnce.Do(func() {
-		if p.system != nil {
-			_ = p.system.Shutdown()
-		}
-		if p.machine != nil {
-			p.machine.Stop()
-		}
-	})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stopped {
+		return
+	}
+	p.stopped = true
+
+	if p.machine != nil {
+		p.machine.Stop()
+	}
 }
 
-// Receive processes one peer actor message.
-func (p *PeerActor) Receive(ctx context.Context,
-	msg PeerMsg) fn.Result[PeerResp] {
+// ask runs one message.
+func (p *PeerActor) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if p.machine == nil {
-		return fn.Err[PeerResp](ErrActorStopped)
+	if p.machine == nil || p.stopped {
+		return nil, ErrActorStopped
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	outbox, err := p.machine.ProcessEvent(ctx, msg)
 	if err != nil {
-		return fn.Err[PeerResp](err)
+		return nil, err
 	}
 
-	resp, err := p.applyPeerOutbox(ctx, outbox)
-	if err != nil {
-		return fn.Err[PeerResp](err)
-	}
-
-	return fn.Ok(resp)
+	return p.applyPeerOutbox(ctx, outbox)
 }
 
 func (p *PeerActor) applyPeerOutbox(ctx context.Context,
@@ -2228,11 +2160,7 @@ func (p *PeerActor) applyPeerOutbox(ctx context.Context,
 
 // Send applies an event to the peer actor.
 func (p *PeerActor) Send(ctx context.Context, event PeerMsg) error {
-	if p.ref == nil {
-		return ErrActorStopped
-	}
-
-	_, err := p.ref.Ask(ctx, event).Await(ctx).Unpack()
+	_, err := p.ask(ctx, event)
 
 	return err
 }
@@ -2242,13 +2170,7 @@ func (p *PeerActor) Send(ctx context.Context, event PeerMsg) error {
 func (p *PeerActor) RequestRange(ctx context.Context) (
 	RangeAssignment, bool, error) {
 
-	if p.ref == nil {
-		return RangeAssignment{}, false, ErrActorStopped
-	}
-
-	resp, err := p.ref.Ask(
-		ctx, PeerNeedRangeEvent{},
-	).Await(ctx).Unpack()
+	resp, err := p.ask(ctx, PeerNeedRangeEvent{})
 	if err != nil {
 		return RangeAssignment{}, false, err
 	}
@@ -2272,13 +2194,7 @@ func (p *PeerActor) RequestRange(ctx context.Context) (
 func (p *PeerActor) RequestStolenRange(ctx context.Context) (
 	StealResult, bool, error) {
 
-	if p.ref == nil {
-		return StealResult{}, false, ErrActorStopped
-	}
-
-	resp, err := p.ref.Ask(
-		ctx, PeerNeedStealEvent{},
-	).Await(ctx).Unpack()
+	resp, err := p.ask(ctx, PeerNeedStealEvent{})
 	if err != nil {
 		return StealResult{}, false, err
 	}
@@ -2301,16 +2217,12 @@ func (p *PeerActor) RequestStolenRange(ctx context.Context) (
 func (p *PeerActor) CompleteRange(ctx context.Context, rangeID RangeID,
 	leaseEpoch uint64, valid bool, at time.Time) (CompleteResult, error) {
 
-	if p.ref == nil {
-		return CompleteResult{}, ErrActorStopped
-	}
-
-	resp, err := p.ref.Ask(ctx, PeerRangeCompletedEvent{
+	resp, err := p.ask(ctx, PeerRangeCompletedEvent{
 		RangeID:    rangeID,
 		LeaseEpoch: leaseEpoch,
 		Valid:      valid,
 		At:         at,
-	}).Await(ctx).Unpack()
+	})
 	if err != nil {
 		return CompleteResult{}, err
 	}

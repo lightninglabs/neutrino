@@ -257,7 +257,7 @@ func newManagers(t *testing.T, ctx context.Context) (
 
 	headerManager := headersync.NewManagerActor(
 		headersync.NewHeaderSyncFSM(0, testHash(100),
-			headersync.DefaultConfig()), 8,
+			headersync.DefaultConfig()),
 	)
 	headerManager.SetDispatchController(New(queryManager))
 	headerManager.Start(ctx)

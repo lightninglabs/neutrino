@@ -489,7 +489,6 @@ func (d *dstRun) build() {
 		bm.cfg.ChainParams.Checkpoints,
 		headersync.RuntimeConfig{
 			Config:        d.headerConfig(),
-			MailboxSize:   headerSyncActorMailboxSize,
 			Dispatch:      querydispatch.New(dispatchActor),
 			DispatchActor: dispatchActor,
 			AskFault:      d.controllerFault,
