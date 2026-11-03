@@ -86,22 +86,6 @@ const (
 	// Early agreement is not authentication: collect remaining peers so a
 	// prompt honest conflict still reaches mismatch detection.
 	cfHeaderCollectTimeout = 2 * time.Second
-
-	// checkpointedCFHeadersMinBatchTimeout is the minimum total timeout
-	// for checkpointed cfheader batch queries. The legacy default of 30s
-	// is too short for large initial-sync batches because it cancels all
-	// remaining 2,000-header range requests after one slow segment.
-	checkpointedCFHeadersMinBatchTimeout = 2 * time.Minute
-
-	// checkpointedCFHeadersPerQueryTimeout scales the total batch timeout
-	// with the number of range requests. This is an upper bound only; fast
-	// batches still finish as soon as all requests return.
-	checkpointedCFHeadersPerQueryTimeout = 250 * time.Millisecond
-
-	// checkpointedCFHeadersMaxBatchTimeout keeps a pathological peer mix
-	// from pinning cfheader sync forever while still allowing
-	// testnet3-size batches enough room to retry and steal work.
-	checkpointedCFHeadersMaxBatchTimeout = 15 * time.Minute
 )
 
 // zeroHash is the zero value hash (all zeros). It is defined as a convenience.

@@ -19,7 +19,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/peer"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino/banman"
@@ -162,34 +161,6 @@ func TestSyncPeerCandidateOrdering(t *testing.T) {
 		addr:   "peer-b",
 	}
 	require.True(t, syncPeerOrdersBefore(addrA, addrB))
-}
-
-func TestCheckpointedCFHeadersBatchTimeoutScales(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(
-		t, checkpointedCFHeadersMinBatchTimeout,
-		checkpointedCFHeadersBatchTimeout(1),
-	)
-
-	scaledQueries := int(
-		(checkpointedCFHeadersMinBatchTimeout /
-			checkpointedCFHeadersPerQueryTimeout) + 1,
-	)
-	require.Equal(
-		t, time.Duration(scaledQueries)*
-			checkpointedCFHeadersPerQueryTimeout,
-		checkpointedCFHeadersBatchTimeout(scaledQueries),
-	)
-
-	hugeQueries := int(
-		(checkpointedCFHeadersMaxBatchTimeout /
-			checkpointedCFHeadersPerQueryTimeout) + 1,
-	)
-	require.Equal(
-		t, checkpointedCFHeadersMaxBatchTimeout,
-		checkpointedCFHeadersBatchTimeout(hugeQueries),
-	)
 }
 
 func TestWriteCFHeadersMsgPopulatesSQLRows(t *testing.T) {
@@ -1291,50 +1262,6 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
 		)
 	}
-}
-
-// buildNonPushScriptFilter creates a CFilter with all output scripts except all
-// OP_RETURNS with push-only scripts.
-//
-// NOTE: this is not a valid filter, only for tests.
-func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
-	blockHash := block.BlockHash()
-	b := builder.WithKeyHash(&blockHash)
-
-	for _, tx := range block.Transactions {
-		for _, txOut := range tx.TxOut {
-			// The old version of BIP-158 skipped OP_RETURNs that
-			// had a push-only script.
-			if txOut.PkScript[0] == txscript.OP_RETURN &&
-				txscript.IsPushOnlyScript(txOut.PkScript[1:]) {
-
-				continue
-			}
-
-			b.AddEntry(txOut.PkScript)
-		}
-	}
-
-	return b.Build()
-}
-
-// buildAllPkScriptsFilter creates a CFilter with all output scripts, including
-// OP_RETURNS.
-//
-// NOTE: this is not a valid filter, only for tests.
-func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
-	blockHash := block.BlockHash()
-	b := builder.WithKeyHash(&blockHash)
-
-	for _, tx := range block.Transactions {
-		for _, txOut := range tx.TxOut {
-			// An old version of BIP-158 included all output
-			// scripts.
-			b.AddEntry(txOut.PkScript)
-		}
-	}
-
-	return b.Build()
 }
 
 func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {

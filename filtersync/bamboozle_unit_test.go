@@ -1,4 +1,4 @@
-package neutrino
+package filtersync
 
 import (
 	"fmt"
@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
@@ -14,8 +15,12 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
+
+// dbOpenTimeout bounds how long the tests wait to open a walletdb.
+const dbOpenTimeout = 10 * time.Second
 
 func decodeHashNoError(str string) *chainhash.Hash {
 	hash, err := chainhash.NewHashFromStr(str)
@@ -518,6 +523,50 @@ func heightToHeader(height uint32) *wire.BlockHeader {
 	return header
 }
 
+// buildNonPushScriptFilter creates a CFilter with all output scripts except all
+// OP_RETURNS with push-only scripts.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildNonPushScriptFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// The old version of BIP-158 skipped OP_RETURNs that
+			// had a push-only script.
+			if txOut.PkScript[0] == txscript.OP_RETURN &&
+				txscript.IsPushOnlyScript(txOut.PkScript[1:]) {
+
+				continue
+			}
+
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
+}
+
+// buildAllPkScriptsFilter creates a CFilter with all output scripts, including
+// OP_RETURNS.
+//
+// NOTE: this is not a valid filter, only for tests.
+func buildAllPkScriptsFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+	blockHash := block.BlockHash()
+	b := builder.WithKeyHash(&blockHash)
+
+	for _, tx := range block.Transactions {
+		for _, txOut := range tx.TxOut {
+			// An old version of BIP-158 included all output
+			// scripts.
+			b.AddEntry(txOut.PkScript)
+		}
+	}
+
+	return b.Build()
+}
+
 func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) {
 	tempDir, err := ioutil.TempDir("", "neutrino")
 	if err != nil {
@@ -616,7 +665,7 @@ func runCheckCFCheckptSanityTestCase(t *testing.T, testCase *cfCheckptTestCase) 
 		}
 	}
 
-	heightDiff, err := checkCFCheckptSanity(testCase.checkpoints, cfStore)
+	heightDiff, err := CheckCFCheckptSanity(testCase.checkpoints, cfStore)
 	if err != nil {
 		t.Fatalf("Error from checkCFCheckptSanity: %s", err)
 	}
@@ -642,7 +691,7 @@ func TestCheckForCFHeadersMismatch(t *testing.T) {
 
 	for _, testCase := range checkCFHTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			mismatch := checkForCFHeaderMismatch(
+			mismatch := CheckForCFHeaderMismatch(
 				testCase.headers, testCase.idx,
 			)
 			if mismatch != testCase.mismatch {
@@ -678,7 +727,7 @@ func TestResolveFilterMismatchFromBlock(t *testing.T) {
 
 	for _, testCase := range resolveFilterTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			badPeers, err := resolveFilterMismatchFromBlock(
+			badPeers, err := ResolveFilterMismatchFromBlock(
 				block, wire.GCSFilterRegular, testCase.peerFilters,
 				testCase.banThreshold,
 			)
