@@ -4,7 +4,7 @@ Neutrino keeps three kinds of chain data in step with its peers: block
 headers, BIP 158 filter headers, and, on demand, filters and blocks. This
 document describes the components that do that work, who owns which state,
 and how a request moves from the network to durable storage. It reflects the
-code after the SQL and actor-based sync series (#397 through #403) and the
+code after the SQL and sync series (#397 through #403) and the
 work manager dispatcher restructuring (#412).
 
 For how the sync code is tested, see
@@ -136,7 +136,7 @@ sequenceDiagram
         CS->>BM: ResetHeaderState() rebuilds runtime at new tip
     end
     CS->>BM: Start()
-    BM->>RT: Start() actors
+    BM->>RT: Start() manager, peers, dispatch
     Note over BM: blockHandler starts, cfHandler waits for first peer
     CS->>WM: Start()
     Note over CS: connection manager and peerHandler start last
@@ -543,7 +543,7 @@ Each piece of mutable sync state has one owner goroutine.
 
 | Goroutine | Owns |
 | --- | --- |
-| `blockHandler` | `headerList`, `Session`, the sync peer, header request timers; it is the only caller of the headersync actors |
+| `blockHandler` | `headerList`, `Session`, the sync peer, header request timers; it is the only caller of the headersync manager and peers |
 | headersync manager | `HeaderSyncFSM` |
 | headersync peer, one per peer | That peer's scheduling state |
 | querysync actor inside headersync | The private dispatch `SchedulerFSM` |
@@ -555,7 +555,10 @@ Timers created with `time.AfterFunc` for range timeouts, anchor timeouts,
 commit retries, and the bootstrap delay only post a message to
 `blockHandler`. They never touch sync state directly.
 
-Every actor ask from `blockHandler` uses a five-second deadline. An actor
-can apply a message and then report a deadline error, because the actor
-runs `Receive` under its own context. Code that calls an actor must not
-assume that an error means the FSM is unchanged.
+Every driver event from `blockHandler` uses a five-second deadline. The
+headersync manager and peers run on the caller's goroutine under a lock, so a
+deadline can't expire between a message applying and its reply arriving. The
+querysync dispatch asks are the exception: the dispatch actor runs `Receive`
+under its own context, so it can apply a message and then report a deadline
+error. Code that calls the dispatch actor must not assume that an error means
+its state is unchanged.

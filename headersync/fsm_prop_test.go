@@ -26,7 +26,7 @@ func propHash(height uint32) Hash {
 }
 
 // fsmModel is a rapid state machine over HeaderSyncFSM. It drives the same
-// op alphabet the actors use, in any order, and checks the scheduler
+// op alphabet the manager and peers use, in any order, and checks the scheduler
 // invariants the header-sync DST checks end to end after every op.
 type fsmModel struct {
 	fsm *HeaderSyncFSM
@@ -180,7 +180,7 @@ func (m *fsmModel) Commit(t *rapid.T) {
 	}
 }
 
-// Requeue returns a staged range to the queue, as after an ask failure.
+// Requeue returns a staged range to the queue, as after a failed commit.
 func (m *fsmModel) Requeue(t *rapid.T) {
 	m.fsm.RequeueStagedRange(m.rangeID(t))
 }

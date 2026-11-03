@@ -34,7 +34,7 @@ func (s dstMedianTime) AdjustedTime() time.Time {
 // runHeaderDST drives the production manager and peers, structural/contextual
 // validation, and ordered store commit. The simulated transport supplies only
 // responses and faults; it does not reimplement scheduling or ownership.
-// synctest controls time and actor quiescence, while bytes select fault order.
+// synctest controls time and quiescence, while bytes select fault order.
 func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 	t.Helper()
 	var result headerDSTResult

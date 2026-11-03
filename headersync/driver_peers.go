@@ -142,10 +142,10 @@ func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
 }
 
 // releaseOrphanedRange returns the active range of a peer that has no request
-// outstanding to the queue. An ask that applied but reported an error can leave
-// such a lease behind. While the peer was blocked, another peer could steal it;
-// with no other peer, recovering the peer to ready would otherwise leave the
-// range active forever with nothing running it.
+// outstanding to the queue. A dispatch mirror call that applied but reported an
+// error can leave such a lease behind. While the peer was blocked, another peer
+// could steal it; with no other peer, recovering the peer to ready would
+// otherwise leave the range active forever with nothing running it.
 func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
 	manager := d.runtime.manager
 	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
@@ -162,7 +162,7 @@ func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
 	// Fail the lease under its current epoch, then plan the span again.
 	// Go through the peer when there is one: it still holds the
 	// range as active, and failing it only in the manager would leave the
-	// actor busy forever, answering every later request with nothing.
+	// peer busy forever, answering every later request with nothing.
 	var result CompleteResult
 	if peerActor, ok := d.runtime.Peer(peerID); ok {
 		result, err = peerActor.CompleteRange(

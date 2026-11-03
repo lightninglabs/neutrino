@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestManagerActorRangeLifecycle(t *testing.T) {
+func TestManagerRangeLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -68,7 +68,7 @@ func TestManagerActorRangeLifecycle(t *testing.T) {
 	require.EqualValues(t, 20, commit.TipHeight)
 }
 
-func TestPeerActorRequestsAndCompletesRange(t *testing.T) {
+func TestPeerRequestsAndCompletesRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -117,7 +117,7 @@ func TestPeerActorRequestsAndCompletesRange(t *testing.T) {
 	require.Equal(t, []RangeID{1}, commit.Committed)
 }
 
-func TestPeerActorRequestsStolenRange(t *testing.T) {
+func TestPeerRequestsStolenRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -158,7 +158,7 @@ func TestPeerActorRequestsStolenRange(t *testing.T) {
 	require.Equal(t, []RangeID{1}, snapshot.LocalRanges)
 }
 
-func TestPeerActorClearsStolenActiveRange(t *testing.T) {
+func TestPeerClearsStolenActiveRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -202,7 +202,7 @@ func TestPeerActorClearsStolenActiveRange(t *testing.T) {
 	require.Equal(t, NoRange, snapshot.ActiveRange)
 }
 
-func TestPeerActorBlockedDoesNotRequestRange(t *testing.T) {
+func TestPeerBlockedDoesNotRequestRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -220,7 +220,7 @@ func TestPeerActorBlockedDoesNotRequestRange(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestPeerActorCompletionPreservesQuarantine(t *testing.T) {
+func TestPeerCompletionPreservesQuarantine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
@@ -259,7 +259,7 @@ func TestPeerActorCompletionPreservesQuarantine(t *testing.T) {
 	require.Equal(t, NoRange, snapshot.ActiveRange)
 }
 
-func TestManagerActorRecordsStructuredEvents(t *testing.T) {
+func TestManagerRecordsStructuredEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 

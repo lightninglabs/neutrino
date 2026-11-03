@@ -86,8 +86,8 @@ type AnchorHeadersResult struct {
 }
 
 // Controller owns production header-sync orchestration policy that is
-// independent of blockmanager's storage and peer I/O. It composes the actor FSM
-// with request/session bookkeeping.
+// independent of blockmanager's storage and peer I/O. It composes the manager
+// FSM with request/session bookkeeping.
 type Controller struct {
 	manager *Manager
 	session *Session
@@ -179,7 +179,7 @@ func (c *Controller) AdvanceCommittedTip(ctx context.Context,
 // PruneRetiredStaging drops staged payloads whose range the FSM no longer
 // treats as staged. A range can leave the staged state without its payload
 // being deleted when the durable tip moves outside the staged commit path, or
-// when a commit ask applies in the actor but reports an error to its caller.
+// when a commit applies in the manager but reports an error to its caller.
 // The sweep costs one snapshot per staged payload, which is bounded by the
 // outstanding range limit.
 func (c *Controller) PruneRetiredStaging(ctx context.Context) error {
@@ -504,8 +504,9 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	return result, true, nil
 }
 
-// InvalidateRange removes permanently invalid work from the actor and session.
-// Cancel dependent requests before discovering again from a surviving anchor.
+// InvalidateRange removes permanently invalid work from the manager and
+// session. Cancel dependent requests before discovering again from a
+// surviving anchor.
 func (c *Controller) InvalidateRange(ctx context.Context, id RangeID,
 	staleUntil time.Time) (InvalidationResult, error) {
 
@@ -674,8 +675,8 @@ func (c *Controller) ReplanRange(ctx context.Context,
 			ErrInvalidRange)
 	}
 
-	// Skip IDs the FSM already uses: the session falls behind it when an
-	// ask applies but reports an error.
+	// Skip IDs the FSM already uses. This is a defensive check, not an
+	// expected path, since the session and the FSM share one ID sequence.
 	var (
 		retryID RangeID
 		retry   HeaderRange

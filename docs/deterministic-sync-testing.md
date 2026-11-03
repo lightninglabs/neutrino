@@ -11,7 +11,7 @@ production code under test, see
 | --- | --- | --- | --- |
 | P models | Nothing from Go; a model of the scheduler | Header contents, validation, storage | `p-models/scripts/check.sh` |
 | FSM property test | `headersync.HeaderSyncFSM` | Actors, peers, blockManager, stores | `TestHeaderSyncFSMProperties` |
-| Header-sync DST | blockManager message handling, headersync and querysync actors, production timers, contextual validation | Network (scripted peers), stores (in memory), time (virtual) | `TestHeaderTransportDST`, `TestHeaderTransportDSTSwarm` |
+| Header-sync DST | blockManager message handling, headersync manager and peers, the querysync dispatch actor, production timers, contextual validation | Network (scripted peers), stores (in memory), time (virtual) | `TestHeaderTransportDST`, `TestHeaderTransportDSTSwarm` |
 | Store tests | The SQL and flat-file stores | Everything above the store interface | `go test ./headerfs/... ./sqldb/...` |
 
 ## Run and replay
@@ -87,7 +87,7 @@ flowchart TB
         subgraph PROD["production code"]
             direction TB
             bm["blockManager<br/>handlePeerMessage, commit paths"]
-            hs["headersync.Runtime<br/>Controller, Manager, PeerActors"]
+            hs["headersync.Runtime<br/>Controller, Manager, Peers"]
             qs["querysync Manager<br/>range dispatch"]
             timers["production timers<br/>request timeout, commit retry,<br/>cooldown, bootstrap"]
         end
@@ -124,7 +124,7 @@ goroutine.
 | Component | Runs for real | Simulated by the harness |
 | --- | --- | --- |
 | `blockManager` | `handlePeerMessage`, header validation, ordered commit, the serial path, reorg rollback, timers | Its event loop; the runner plays `blockHandler` |
-| headersync and querysync actors | All of them, with production planning, leases, stealing and commit | Configuration: range cap and confirmation policy per mode |
+| headersync manager and peers, querysync actor | All of them, with production planning, leases, stealing and commit | Configuration: range cap and confirmation policy per mode |
 | Peers | `ServerPeer` records, the new-peer and done-peer handlers | Three peer slots that reply from mined chains, honestly or not |
 | Network | Wire encoding and decoding of every reply | Delivery: no sockets; replies go through `QueueHeaders` |
 | Block header store | The `headerfs.BlockHeaderStore` contract, including contiguous writes and rollback | Storage: `memBlockHeaderStore` in memory, wrapped by `dstHeaderStore` for faults |
@@ -462,8 +462,8 @@ Header contents and contextual validity are abstract inputs to P, and the
 model treats storage as atomic; the DST covers both.
 
 `TestHeaderSyncDSTExhaustive` runs a fixed recovery story through the
-headersync actors over all 1,024 combinations of four fault flags, eight
-latencies and eight deadlines. Querysync's JSON trace recorder preserves
+headersync manager and peers over all 1,024 combinations of four fault flags,
+eight latencies and eight deadlines. Querysync's JSON trace recorder preserves
 nanosecond RTTs, so replays keep peer ordering when samples differ by less
 than a millisecond. Those are Go scheduler traces, not P checker schedules.
 

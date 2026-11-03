@@ -31,8 +31,9 @@ const (
 )
 
 var (
-	// ErrActorStopped is returned when a caller sends a message to an actor
-	// that is shutting down or has not started yet.
+	// ErrActorStopped is returned when a caller sends a message to a
+	// manager or peer that is stopped or has not started yet. The name is
+	// kept from when these were actors.
 	ErrActorStopped = errors.New("header sync actor stopped")
 
 	// ErrInvalidPeer is returned when a malformed peer snapshot is added to

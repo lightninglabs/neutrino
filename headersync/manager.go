@@ -399,8 +399,6 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 	env *managerEnv) (*protofsm.StateTransition[
 	ManagerMsg, managerOutbox, *managerEnv], error) {
 
-	_ = ctx
-
 	respond := func(resp ManagerResp) (*protofsm.StateTransition[
 		ManagerMsg, managerOutbox, *managerEnv], error) {
 

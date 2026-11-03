@@ -212,11 +212,11 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 			err,
 		)
 
-		// The ask may have staged the range without its headers;
-		// the commit retry requeues such a range. Or it may not have
-		// applied at all, leaving the range active with its request
-		// already consumed. Blocking the peer lets the existing steal
-		// of blocked owners recover that case.
+		// The dispatch mirror call may have staged the range without
+		// its headers; the commit retry requeues such a range. Or it
+		// may not have applied at all, leaving the range active with
+		// its request already consumed. Blocking the peer lets the
+		// existing steal of blocked owners recover that case.
 		result.Effects = append(
 			result.Effects, ScheduleCommitRetry{},
 		)
@@ -329,7 +329,7 @@ func (d *Driver) handleRejectUntrustedAnchor(ctx context.Context,
 
 // rejectUntrustedAnchor rejects an untrusted anchor and the unstaged work
 // built on it, and logs the outcome under tag. It reports false only when the
-// anchor was trusted, replaced or unknown, so nothing changed. A failed ask
+// anchor was trusted, replaced or unknown, so nothing changed. A failed call
 // reports true, since the anchor may have been rejected.
 func (d *Driver) rejectUntrustedAnchor(ctx context.Context, tag string,
 	height uint32, hash Hash, timeout time.Duration) bool {

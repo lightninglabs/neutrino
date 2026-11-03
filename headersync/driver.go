@@ -94,8 +94,8 @@ type DriverResult struct {
 
 // Driver is the header-sync decision maker. It owns the request and timer
 // bookkeeping, the staged payloads, the peer cooldowns and the range ID
-// allocation, and it drives the controller, the manager and the peer
-// actors. Handle runs one event to completion and returns the effects for the
+// allocation, and it drives the controller, the manager and the
+// peers. Handle runs one event to completion and returns the effects for the
 // caller to execute.
 //
 // A driver has no goroutine and no lock: the caller must serialize every call
@@ -126,7 +126,7 @@ func (d *Driver) Activity() Activity {
 
 // Handle applies one event and returns the effects it produced. A non-nil
 // error means the event could not be handled at all. Failures of individual
-// actor asks inside an event are handled by the driver and logged, as they
+// manager calls inside an event are handled by the driver and logged, as they
 // were by the block manager before the driver took over.
 func (d *Driver) Handle(ctx context.Context,
 	event DriverEvent) (DriverResult, error) {

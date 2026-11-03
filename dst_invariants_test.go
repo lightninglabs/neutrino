@@ -60,7 +60,7 @@ func newDSTInvariants(d *dstRun) *dstInvariants {
 	return v
 }
 
-// reset forgets per-runtime state after a restart rebuilds the actors. The
+// reset forgets per-runtime state after a restart rebuilds the runtime. The
 // durable tip carries over: a restart must never lose committed headers.
 func (v *dstInvariants) reset() {
 	v.epochs = make(map[headersync.RangeID]uint64)
@@ -247,8 +247,9 @@ func (v *dstInvariants) rangeTable(event string) {
 			}
 
 		case headersync.RangeStaged:
-			// An ask that applied but reported an error can
-			// leave a staged range without headers. The commit
+			// A dispatch mirror call that applied but
+			// reported an error can leave a staged range without
+			// headers. The commit
 			// path requeues it once it is next, and the heal
 			// phase's quiescence check catches a range that is
 			// never recovered.
@@ -404,8 +405,8 @@ func (d *dstRun) quiescent() error {
 }
 
 // rangeIDLimit bounds scans of the FSM range table. The session's next ID can
-// trail the IDs the FSM used after an ask applied but reported an error, so
-// scan a margin past it.
+// trail the IDs the FSM used after a dispatch mirror call applied but
+// reported an error, so scan a margin past it.
 func (d *dstRun) rangeIDLimit() headersync.RangeID {
 	const margin = 32
 	return d.bm.sessionForTest().NextRangeID() + margin

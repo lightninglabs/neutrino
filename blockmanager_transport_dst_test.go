@@ -119,8 +119,8 @@ const (
 	dstFaultBlock
 	dstFaultStore
 
-	// This bit used to enable actor ask faults. It stays reserved so
-	// that saved seeds keep decoding to the same fault set.
+	// This bit used to enable ask faults on the old actors. It stays
+	// reserved so that saved seeds keep decoding to the same fault set.
 	_
 
 	dstFaultByzantine
@@ -392,7 +392,7 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 
 // params returns the chain parameters for the run's mode. SimNet proof of
 // work stays cheap while the TestNet3 network ID enables the production
-// actor path instead of the serial SimNet compatibility path.
+// multi-peer path instead of the serial SimNet compatibility path.
 func (d *dstRun) params() chaincfg.Params {
 	params := chaincfg.SimNetParams
 	params.Net = chaincfg.TestNet3Params.Net
@@ -1268,7 +1268,8 @@ var dstRegressionSeeds = []string{
 	// Serial path cache and tip consistency.
 	"4a1de7e96a0717c39ab32fbf0d1277596fb8b7a39d", "c4eb4a04faf7f3c5",
 	"0e1b043680dbd3cd07e0df85e4b36d6ac7f867a544f1d718fd25941b",
-	// F1 asks that apply then fail, and the new-peer dispatch stall.
+	// F1 dispatch mirror calls that apply then fail, and the new-peer
+	// dispatch stall.
 	"7a6fa024c529a8e9abc0eb2e03b0b23f8c233fae580d45",
 	"05baceae8c60fb040cf599bcb6a96b9296187a1b84081bf190f7120a25c4d67ab2ca",
 	"4b68e926ec48d9f1cfc8d123e73b08af8001434a9e289865",
@@ -1817,8 +1818,8 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 }
 
 // TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
-// actor asks. The op context used to derive from context.Background, so Stop
-// could wait out the full deadline for every ask still pending.
+// driver events. The op context used to derive from context.Background, so
+// Stop could wait out the full deadline for every event still pending.
 func TestHeaderSyncOpCtxCancelledOnStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
@@ -1834,7 +1835,7 @@ func TestHeaderSyncOpCtxCancelledOnStop(t *testing.T) {
 
 // TestHeaderTransportAmbiguousCommit is the regression for an ambiguous header
 // commit. A write that lands but reports an error, a write that lands in part,
-// or a CommitReadyRanges ask that fails after a successful write all used to
+// or a CommitReadyRanges call that fails after a successful write all used to
 // leave memory behind disk, after which the commit retry never connected and
 // header sync stalled until restart.
 func TestHeaderTransportAmbiguousCommit(t *testing.T) {

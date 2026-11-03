@@ -7,8 +7,8 @@ import (
 )
 
 // HeaderSyncFSM is the pure manager state machine. It owns no goroutines and
-// performs no network I/O; actors and the block manager drive it with explicit
-// events.
+// performs no network I/O; the manager and the block manager drive it with
+// explicit events.
 type HeaderSyncFSM struct {
 	cfg Config
 
@@ -535,8 +535,8 @@ func (h *HeaderSyncFSM) StageDiscoveredRange(
 }
 
 // unusedRangeID returns the first range ID at or after id that no range uses.
-// Range IDs are allocated by the caller's session, which falls behind the FSM
-// when an ask applies but reports an error to its caller.
+// Range IDs are allocated by the caller's session, which should never fall
+// behind the FSM. This check is defensive, not an expected path.
 func (h *HeaderSyncFSM) unusedRangeID(id RangeID) RangeID {
 	for {
 		if _, used := h.ranges[id]; !used && id != NoRange {
@@ -618,7 +618,7 @@ func (h *HeaderSyncFSM) AssignNextQueuedRange() (RangeAssignment, bool) {
 }
 
 // AssignQueuedRangeToPeer moves a specific queued range into a specific peer's
-// bounded local range queue. This is used when a shared dispatch actor has
+// bounded local range queue. This is used when the shared dispatch actor has
 // already made the peer selection.
 func (h *HeaderSyncFSM) AssignQueuedRangeToPeer(rangeID RangeID,
 	peerID string) (RangeAssignment, bool, error) {
@@ -1230,9 +1230,9 @@ func (h *HeaderSyncFSM) RejectAnchor(height uint32,
 }
 
 // RequeueStagedRange returns a staged range to the queue under a new lease
-// epoch. The FSM stages a range before the caller stores its headers, so an ask
-// that applies but reports an error to the caller (an lnd actor runs a request
-// on its own context) can leave a staged range with no headers. Ordered commit
+// epoch. The FSM stages a range before the caller stores its headers, so a
+// dispatch mirror call that applies but reports an error to the caller can
+// leave a staged range with no headers. Ordered commit
 // would then stop at it forever; requeueing fetches the span again.
 func (h *HeaderSyncFSM) RequeueStagedRange(id RangeID) bool {
 	rng, ok := h.ranges[id]

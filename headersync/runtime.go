@@ -17,7 +17,7 @@ type ActorLifecycle interface {
 	Stop()
 }
 
-// RuntimeConfig contains the production actor/runtime dependencies.
+// RuntimeConfig contains the production runtime dependencies.
 type RuntimeConfig struct {
 	Config Config
 
@@ -45,7 +45,7 @@ type Runtime struct {
 	mu sync.Mutex
 }
 
-// NewRuntime creates a headersync actor runtime at the current durable chain
+// NewRuntime creates a headersync runtime at the current durable chain
 // tip and seeds all known chain checkpoints as trusted anchors.
 func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	cfg RuntimeConfig) (*Runtime, int) {
@@ -95,7 +95,8 @@ func (r *Runtime) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops all actors and request timers owned by the runtime.
+// Stop stops the manager, the peers, the dispatch actor and the request
+// timers owned by the runtime.
 func (r *Runtime) Stop() {
 	if r == nil {
 		return
