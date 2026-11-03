@@ -27,6 +27,8 @@ type sqlControlTx struct {
 	once    sync.Once
 }
 
+// ExecTx runs the body against queries that are wrapped to expose the insert
+// gate.
 func (tx *sqlControlTx) ExecTx(ctx context.Context, opts sqldbv2.TxOptions,
 	body func(sqldb.HeaderQueries) error, reset func()) error {
 
@@ -35,11 +37,15 @@ func (tx *sqlControlTx) ExecTx(ctx context.Context, opts sqldbv2.TxOptions,
 	}, reset)
 }
 
+// sqlControlQueries wraps the transaction-scoped queries so that the first
+// block header insert can be paused inside the open transaction.
 type sqlControlQueries struct {
 	sqldb.HeaderQueries
 	tx *sqlControlTx
 }
 
+// InsertBlockHeader pauses on the gate once armed, and then inserts the
+// header.
 func (q *sqlControlQueries) InsertBlockHeader(ctx context.Context,
 	arg sqlc.InsertBlockHeaderParams) error {
 
@@ -52,7 +58,11 @@ func (q *sqlControlQueries) InsertBlockHeader(ctx context.Context,
 
 // TestChainStoreSQLControlProgress requires unrelated peer removal to proceed
 // while a real SQL write holds the block-store mutex and an open transaction.
+// Control messages such as peer removal must never wait on the store, or one
+// slow SQL commit would stall the whole header sync state machine. The test
+// uses a real SQL store, so the held lock is the one production code takes.
 func TestChainStoreSQLControlProgress(t *testing.T) {
+	// Build a SQL block store behind the instrumented transaction.
 	params := chaincfg.SimNetParams
 	params.Checkpoints = nil
 	db := sqldb.NewTestBackend(t)
@@ -77,6 +87,8 @@ func TestChainStoreSQLControlProgress(t *testing.T) {
 		)
 	}
 	require.NoError(t, blocks.WriteHeaders(initial...))
+
+	// Start a manager over the store, with a registered spectator peer.
 	bm := newCFHeaderTestManager(t, blocks, filters)
 	bm.cfg.ChainParams = params
 	bm.cfg.TimeSource = dstMedianTime{
@@ -100,6 +112,8 @@ func TestChainStoreSQLControlProgress(t *testing.T) {
 	bm.syncPeerMutex.Lock()
 	bm.syncPeer = peer
 	bm.syncPeerMutex.Unlock()
+
+	// Send one new header and pause its insert inside the transaction.
 	msg := wire.NewMsgHeaders()
 	require.NoError(t, msg.AddBlockHeader(fixture.honest[dstChainHeight+1]))
 	tx.armed.Store(true)
@@ -126,6 +140,8 @@ func TestChainStoreSQLControlProgress(t *testing.T) {
 		t.Fatal("SQL store mutex was not held")
 	case <-time.After(50 * time.Millisecond):
 	}
+
+	// Removing the spectator must complete while the insert is held.
 	go bm.DonePeer(spectator)
 	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
@@ -145,6 +161,8 @@ func TestChainStoreSQLControlProgress(t *testing.T) {
 		case <-tick.C:
 		}
 	}
+
+	// Releasing the insert lets the blocked tip read resume.
 	tx.once.Do(func() { close(tx.release) })
 	select {
 	case height := <-tipDone:

@@ -116,6 +116,7 @@ type chainDSTBlocks struct {
 	rollback chainDSTFault
 }
 
+// take returns and clears the pending fault for a write or a rollback.
 func (s *chainDSTBlocks) take(rollback bool) chainDSTFault {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -200,6 +201,7 @@ type chainDSTFilters struct {
 	rollback chainDSTFault
 }
 
+// take returns and clears the pending fault for a write or a rollback.
 func (s *chainDSTFilters) take(rollback bool) chainDSTFault {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
