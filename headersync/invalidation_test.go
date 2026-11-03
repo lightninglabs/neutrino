@@ -104,6 +104,6 @@ func TestInvalidationReleasesPeerActor(t *testing.T) {
 	require.True(t, ok)
 	replacement, ok, err := peer.RequestRange(ctx)
 	require.NoError(t, err)
-	require.True(t, ok, "revoked lease kept the peer actor busy")
+	require.True(t, ok, "revoked lease kept the peer busy")
 	require.Equal(t, RangeID(3), replacement.RangeID)
 }

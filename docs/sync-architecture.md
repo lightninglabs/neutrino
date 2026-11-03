@@ -35,8 +35,8 @@ flowchart TB
         direction TB
         ctl["Controller<br/>planning policy"]
         sess["Session<br/>requests, staging, cooldowns"]
-        mgr["ManagerActor<br/>owns HeaderSyncFSM"]
-        pa["PeerActor per peer"]
+        mgr["Manager<br/>owns HeaderSyncFSM"]
+        pa["Peer per peer"]
         qd["querydispatch.Controller<br/>private querysync scheduler"]
     end
 
@@ -86,11 +86,11 @@ interfaces is the same for both.
 | --- | --- | --- |
 | `blockManager` | Peer I/O for headers, the in-memory `headerList`, contextual header validation, filter-header sync | Store writes and block notifications (in `chainstore`), range planning, lease ownership, peer scheduling policy |
 | `headersync.HeaderSyncFSM` | Anchors, header ranges and their lease epochs, per-peer range queues, the committed tip known to the scheduler | Goroutines, timers, I/O, header payloads |
-| `headersync.ManagerActor` | Serialized access to the FSM; mirrors peer and range changes into the dispatch controller | Policy decisions, which live in the FSM and `Controller` |
-| `headersync.PeerActor` | One peer's scheduling state (ready, busy, blocked, quarantined, down), RTT, rank, and active range | The wire request itself, which `blockManager` sends |
+| `headersync.Manager` | Serialized access to the FSM; mirrors peer and range changes into the dispatch controller | Policy decisions, which live in the FSM and `Controller` |
+| `headersync.Peer` | One peer's scheduling state (ready, busy, blocked, quarantined, down), RTT, rank, and active range | The wire request itself, which `blockManager` sends |
 | `headersync.Controller` | Planning policy: checkpoint and frontier ranges, anchor discovery spans, hedged peer choice, invalidation fan-out, replanning | Any state of its own |
 | `headersync.Session` | In-flight range and anchor requests with their timers, stale requests, staged header payloads, peer cooldowns, range ID allocation | Range state, which lives in the FSM |
-| `headersync.Runtime` | Construction and shutdown of the actor graph | Message routing; `blockManager` calls each part directly |
+| `headersync.Runtime` | Construction and shutdown of the manager and peers | Message routing; `blockManager` calls each part directly |
 | `chainstore` | Serializing every write to the block and filter header stores on one actor, retaining a rollback until it finishes, verifying ambiguous writes | Header validation, published tips (through `Host`), sync policy |
 | `headersync/querydispatch` | Adapting a private querysync scheduler to choose range owners and steal unstarted ranges | Header validation, leases, commit order |
 | `querysync/workmanager` | The production `query.WorkManager`: the job heap, per-peer workers, retries, timeouts, cooldowns, quarantine, and a `querysync.Scheduler` consulted only from its dispatcher goroutine | Message encoding and response matching, which each `query.Request` supplies |
@@ -227,9 +227,9 @@ flowchart LR
     plan["Plan<br/>Controller.PlanCheckpointRanges<br/>or PlanFrontierRanges"]
     disc["Anchor discovery<br/>hedged getheaders<br/>to up to 4 peers"]
     assign["Assign<br/>Controller.AssignQueuedRanges<br/>querysync picks owner"]
-    req["Request<br/>PeerActor.RequestRange<br/>getheaders(StartHash, StopHash)"]
+    req["Request<br/>Peer.RequestRange<br/>getheaders(StartHash, StopHash)"]
     recv["Receive<br/>Session.FinishRangeHeaders<br/>ValidateHeaderRange"]
-    stage["Stage<br/>PeerActor.CompleteRange<br/>Session.StageRange"]
+    stage["Stage<br/>Peer.CompleteRange<br/>Session.StageRange"]
     commit["Commit<br/>ReadyRanges, checkHeaderSanity,<br/>BlockHeaders.WriteHeaders"]
     ack["Acknowledge<br/>Controller.CommitReadyRanges<br/>drop staged payloads"]
 
@@ -256,7 +256,7 @@ flowchart LR
    also ends on a confirmed anchor, its headers are staged directly.
 3. **Assign and request.** `AssignQueuedRanges` hands out up to four ranges
    per peer. The private querysync scheduler chooses the owner. When a peer
-   is idle, its `PeerActor` starts its next owned range and `blockManager`
+   is idle, its `Peer` starts its next owned range and `blockManager`
    sends `getheaders` with the range's start hash as the locator and its stop
    hash as the stop hash. An idle peer with no owned ranges asks to steal
    unstarted work from a slower peer.
@@ -544,8 +544,8 @@ Each piece of mutable sync state has one owner goroutine.
 | Goroutine | Owns |
 | --- | --- |
 | `blockHandler` | `headerList`, `Session`, the sync peer, header request timers; it is the only caller of the headersync actors |
-| headersync manager actor | `HeaderSyncFSM` |
-| headersync peer actor, one per peer | That peer's scheduling state |
+| headersync manager | `HeaderSyncFSM` |
+| headersync peer, one per peer | That peer's scheduling state |
 | querysync actor inside headersync | The private dispatch `SchedulerFSM` |
 | `cfHandler` | Filter-header sync progress |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |

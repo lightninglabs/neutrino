@@ -183,7 +183,7 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 	return nil
 }
 
-// handleAssignRanges hands queued ranges to the peer actors.
+// handleAssignRanges hands queued ranges to the peers.
 func (d *Driver) handleAssignRanges(ctx context.Context,
 	event AssignRanges) {
 
@@ -276,13 +276,13 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 	})
 }
 
-// requestPeerRange asks a peer actor to start its next range. The ask may
+// requestPeerRange asks a peer to start its next range. The ask may
 // have started a range in the actor even though it reported an error, which
 // leaves an active lease with no request behind it. On an error the peer is
 // blocked, so the steal of blocked owners or the release on cooldown recovery
 // takes the range back.
 func (d *Driver) requestPeerRange(ctx context.Context, peerID string,
-	peerActor *PeerActor, result *DriverResult) (RangeAssignment, bool,
+	peerActor *Peer, result *DriverResult) (RangeAssignment, bool,
 	error) {
 
 	assignment, ok, err := peerActor.RequestRange(ctx)

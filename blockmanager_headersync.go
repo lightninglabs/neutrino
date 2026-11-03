@@ -46,7 +46,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 		},
 	)
 	if err != nil {
-		log.Warnf("Unable to start headersync peer actor for %s: %v",
+		log.Warnf("Unable to start headersync peer for %s: %v",
 			peerID, err)
 		return
 	}
@@ -57,7 +57,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 
 	b.handleDriverEvent(nil, headersync.PeerRegistered{PeerID: peerID})
 
-	log.Debugf("Registered headersync peer actor peer=%s rank=%d "+
+	log.Debugf("Registered headersync peer peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
 		sp.LastBlock(), time.Duration(sp.LastPingMicros())*
 			time.Microsecond)
@@ -78,7 +78,7 @@ func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
 		return
 	}
 
-	log.Debugf("Unregistered headersync peer actor peer=%s", peerID)
+	log.Debugf("Unregistered headersync peer peer=%s", peerID)
 }
 
 func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {

@@ -198,7 +198,7 @@ type HeaderRange struct {
 	StagedAt    time.Time
 }
 
-// PeerSnapshot is the pure FSM view of one header peer actor.
+// PeerSnapshot is the pure FSM view of one header peer.
 type PeerSnapshot struct {
 	ID          string
 	Rank        int

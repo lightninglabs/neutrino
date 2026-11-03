@@ -12,7 +12,7 @@ func TestControllerPlansCheckpointRanges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -50,7 +50,7 @@ func TestControllerReportsAnchorDiscoveryNeeded(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxRangeHeaders = 5
 
-	manager := NewManagerActor(
+	manager := NewManager(
 		NewHeaderSyncFSM(0, testHash(100), cfg),
 	)
 	manager.Start(ctx)
@@ -90,7 +90,7 @@ func TestControllerAnchorDiscoveryStartsAtFurthestConfirmedAnchor(
 	cfg := DefaultConfig()
 	cfg.MaxRangeHeaders = 5
 
-	manager := NewManagerActor(
+	manager := NewManager(
 		NewHeaderSyncFSM(0, testHash(100), cfg),
 	)
 	manager.Start(ctx)
@@ -129,7 +129,7 @@ func TestControllerFrontierDiscoverySpan(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxRangeHeaders = 5
 
-	manager := NewManagerActor(
+	manager := NewManager(
 		NewHeaderSyncFSM(0, testHash(100), cfg),
 	)
 	manager.Start(ctx)
@@ -165,7 +165,7 @@ func TestControllerFrontierDiscoveryDoneAtBestHeight(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxRangeHeaders = 5
 
-	manager := NewManagerActor(
+	manager := NewManager(
 		NewHeaderSyncFSM(0, testHash(100), cfg),
 	)
 	manager.Start(ctx)
@@ -194,7 +194,7 @@ func TestControllerPlanFrontierRangesFillsGapBeforeStagedRanges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -423,7 +423,7 @@ func TestControllerFinishAnchorHeadersConfirmsDiscovery(t *testing.T) {
 		StopHash:    testHash(110),
 	}
 
-	manager := NewManagerActor(NewHeaderSyncFSM(0, start, cfg))
+	manager := NewManager(NewHeaderSyncFSM(0, start, cfg))
 	manager.Start(ctx)
 	defer manager.Stop()
 	_, ok, err := manager.AddAnchor(ctx, 0, start, true)
@@ -467,7 +467,7 @@ func TestControllerFinishAnchorHeadersRejectsInvalidResponse(t *testing.T) {
 	defer cancel()
 
 	start := testHash(100)
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -517,7 +517,7 @@ func TestControllerAssignQueuedRangesHonorsControllerLimit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -548,7 +548,7 @@ func TestControllerCommitReadyPrunesObsoleteAnchors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -599,7 +599,7 @@ func TestControllerReplanRangeAllocatesSessionID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 

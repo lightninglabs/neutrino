@@ -87,8 +87,8 @@ flowchart TB
         subgraph PROD["production code"]
             direction TB
             bm["blockManager<br/>handlePeerMessage, commit paths"]
-            hs["headersync.Runtime<br/>Controller, ManagerActor, PeerActors"]
-            qs["querysync ManagerActor<br/>range dispatch"]
+            hs["headersync.Runtime<br/>Controller, Manager, PeerActors"]
+            qs["querysync Manager<br/>range dispatch"]
             timers["production timers<br/>request timeout, commit retry,<br/>cooldown, bootstrap"]
         end
         drain["blockNtfnChan drain goroutine"]

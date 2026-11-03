@@ -283,7 +283,7 @@ func (h *HeaderSyncFSM) AddPeer(peer PeerSnapshot) error {
 		peer.LocalRanges = existing.LocalRanges
 	}
 
-	// The range table owns leases. A peer actor's snapshot can still name
+	// The range table owns leases. A peer's snapshot can still name
 	// a range the FSM took away without telling it (discovery staging the
 	// span, or a tip advance); restoring it would give the range a second
 	// owner once it is reassigned.

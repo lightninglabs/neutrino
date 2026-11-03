@@ -89,16 +89,16 @@ type AnchorHeadersResult struct {
 // independent of blockmanager's storage and peer I/O. It composes the actor FSM
 // with request/session bookkeeping.
 type Controller struct {
-	manager *ManagerActor
+	manager *Manager
 	session *Session
 	cfg     Config
 
-	peerLookup func(string) (*PeerActor, bool)
+	peerLookup func(string) (*Peer, bool)
 }
 
-// NewController creates a production controller around the manager actor and
-// session. The caller remains responsible for starting the manager actor.
-func NewController(manager *ManagerActor, session *Session,
+// NewController creates a production controller around the manager and
+// session. The caller remains responsible for starting the manager.
+func NewController(manager *Manager, session *Session,
 	cfg Config) *Controller {
 
 	if session == nil {

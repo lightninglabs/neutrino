@@ -12,7 +12,7 @@ func TestManagerActorRangeLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -72,14 +72,14 @@ func TestPeerActorRequestsAndCompletesRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
 	addManagerAnchor(t, ctx, manager, 0, 100)
 	addManagerAnchor(t, ctx, manager, 10, 110)
 
-	peer := NewPeerActor("peer", 0, manager)
+	peer := NewPeer("peer", 0, manager)
 	require.NoError(t, peer.Start(ctx))
 	defer peer.Stop()
 
@@ -121,7 +121,7 @@ func TestPeerActorRequestsStolenRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
@@ -141,7 +141,7 @@ func TestPeerActorRequestsStolenRange(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	thief := NewPeerActor("thief", 10, manager)
+	thief := NewPeer("thief", 10, manager)
 	require.NoError(t, thief.Start(ctx))
 	defer thief.Stop()
 
@@ -162,17 +162,17 @@ func TestPeerActorClearsStolenActiveRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
 	addManagerAnchor(t, ctx, manager, 0, 100)
 	addManagerAnchor(t, ctx, manager, 10, 110)
 
-	donor := NewPeerActor("donor", 0, manager)
+	donor := NewPeer("donor", 0, manager)
 	require.NoError(t, donor.Start(ctx))
 	defer donor.Stop()
-	thief := NewPeerActor("thief", 10, manager)
+	thief := NewPeer("thief", 10, manager)
 	require.NoError(t, thief.Start(ctx))
 	defer thief.Stop()
 
@@ -206,11 +206,11 @@ func TestPeerActorBlockedDoesNotRequestRange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
-	peer := NewPeerActor("peer", 0, manager)
+	peer := NewPeer("peer", 0, manager)
 	require.NoError(t, peer.Start(ctx))
 	defer peer.Stop()
 	require.NoError(t, peer.Send(ctx, PeerBlockedEvent{}))
@@ -224,14 +224,14 @@ func TestPeerActorCompletionPreservesQuarantine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.Start(ctx)
 	defer manager.Stop()
 
 	addManagerAnchor(t, ctx, manager, 0, 100)
 	addManagerAnchor(t, ctx, manager, 10, 110)
 
-	peer := NewPeerActor("peer", 0, manager)
+	peer := NewPeer("peer", 0, manager)
 	require.NoError(t, peer.Start(ctx))
 	defer peer.Stop()
 
@@ -264,7 +264,7 @@ func TestManagerActorRecordsStructuredEvents(t *testing.T) {
 	defer cancel()
 
 	events := &EventRecorder{}
-	manager := NewManagerActor(newTestFSM())
+	manager := NewManager(newTestFSM())
 	manager.SetEventSink(events)
 	manager.Start(ctx)
 	defer manager.Stop()
@@ -321,7 +321,7 @@ func TestManagerActorRecordsStructuredEvents(t *testing.T) {
 }
 
 func addManagerAnchor(t *testing.T, ctx context.Context,
-	manager *ManagerActor, height uint32, hashByte byte) {
+	manager *Manager, height uint32, hashByte byte) {
 
 	t.Helper()
 	anchor, ok, err := manager.AddAnchor(ctx, height, testHash(hashByte),
@@ -332,7 +332,7 @@ func addManagerAnchor(t *testing.T, ctx context.Context,
 }
 
 func mustManagerPlan(t *testing.T, ctx context.Context,
-	manager *ManagerActor, id RangeID, startHeight, stopHeight uint32) {
+	manager *Manager, id RangeID, startHeight, stopHeight uint32) {
 
 	t.Helper()
 	_, ok, err := manager.PlanRange(ctx, id, startHeight, stopHeight)

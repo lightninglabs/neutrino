@@ -16,7 +16,7 @@ const (
 	EventRangeInvalidated EventType = "range_invalidated"
 )
 
-// Event is the structured observability record emitted by the manager actor.
+// Event is the structured observability record emitted by the manager.
 type Event struct {
 	Type EventType
 	OK   bool

@@ -94,7 +94,7 @@ type DriverResult struct {
 
 // Driver is the header-sync decision maker. It owns the request and timer
 // bookkeeping, the staged payloads, the peer cooldowns and the range ID
-// allocation, and it drives the controller, the manager actor and the peer
+// allocation, and it drives the controller, the manager and the peer
 // actors. Handle runs one event to completion and returns the effects for the
 // caller to execute.
 //

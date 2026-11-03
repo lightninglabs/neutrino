@@ -6,7 +6,7 @@ import (
 )
 
 // PeerStateChanged tells the driver that a peer moved to a new scheduling
-// state. The driver updates the peer's cooldown, then the peer actor.
+// state. The driver updates the peer's cooldown, then the peer.
 type PeerStateChanged struct {
 	PeerID string
 	State  PeerState
@@ -14,7 +14,7 @@ type PeerStateChanged struct {
 
 func (PeerStateChanged) driverEvent() {}
 
-// PeerRegistered tells the driver that a peer actor was just created for a
+// PeerRegistered tells the driver that a peer was just created for a
 // peer. A peer that reconnects inside its cooldown is blocked again.
 type PeerRegistered struct {
 	PeerID string
@@ -74,7 +74,7 @@ func (d *Driver) handlePeerRegistered(ctx context.Context,
 	}
 
 	d.setPeerState(ctx, event.PeerID, PeerBlocked, result)
-	log.Debugf("Registered headersync peer actor peer=%s in "+
+	log.Debugf("Registered headersync peer peer=%s in "+
 		"cooldown_until=%s", event.PeerID, until.Format(time.RFC3339))
 }
 
@@ -84,7 +84,7 @@ func (d *Driver) handleCooldownWakeDue(result *DriverResult) {
 }
 
 // setPeerState tracks the peer's cooldown, schedules a wakeup for it, and
-// updates the peer actor.
+// updates the peer.
 func (d *Driver) setPeerState(ctx context.Context, peerID string,
 	state PeerState, result *DriverResult) {
 
@@ -160,7 +160,7 @@ func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
 	}
 
 	// Fail the lease under its current epoch, then plan the span again.
-	// Go through the peer actor when there is one: it still holds the
+	// Go through the peer when there is one: it still holds the
 	// range as active, and failing it only in the manager would leave the
 	// actor busy forever, answering every later request with nothing.
 	var result CompleteResult

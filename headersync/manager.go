@@ -11,7 +11,7 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
-// ManagerMsg is accepted by the header sync manager actor.
+// ManagerMsg is accepted by the header sync manager.
 type ManagerMsg interface {
 	actor.Message
 
@@ -28,7 +28,7 @@ func (managerMessage) MessageType() string {
 	return "headersync.ManagerMsg"
 }
 
-// ManagerResp is returned by the header sync manager actor.
+// ManagerResp is returned by the header sync manager.
 type ManagerResp interface {
 	managerResp()
 }
@@ -792,11 +792,11 @@ func syncStealPeers(ctx context.Context, env *managerEnv,
 	return nil
 }
 
-// ManagerActor owns the header sync FSM. Every message runs synchronously on
+// Manager owns the header sync FSM. Every message runs synchronously on
 // the caller's goroutine, under mu. There is no mailbox, so a caller's deadline
 // can't expire between a message applying and its reply arriving, which is what
 // used to leave callers with a wrong view of the FSM.
-type ManagerActor struct {
+type Manager struct {
 	fsm      *HeaderSyncFSM
 	dispatch DispatchController
 	events   EventSink
@@ -809,24 +809,24 @@ type ManagerActor struct {
 	stopped bool
 }
 
-// NewManagerActor creates a manager around a HeaderSyncFSM.
-func NewManagerActor(fsm *HeaderSyncFSM) *ManagerActor {
-	return &ManagerActor{fsm: fsm}
+// NewManager creates a manager around a HeaderSyncFSM.
+func NewManager(fsm *HeaderSyncFSM) *Manager {
+	return &Manager{fsm: fsm}
 }
 
 // SetEventSink enables structured header sync events.
-func (m *ManagerActor) SetEventSink(events EventSink) {
+func (m *Manager) SetEventSink(events EventSink) {
 	m.events = events
 }
 
 // SetDispatchController routes generic range ownership and unstarted-work
 // stealing through an external scheduler. It should be called before Start.
-func (m *ManagerActor) SetDispatchController(dispatch DispatchController) {
+func (m *Manager) SetDispatchController(dispatch DispatchController) {
 	m.dispatch = dispatch
 }
 
 // Start starts the manager.
-func (m *ManagerActor) Start(ctx context.Context) {
+func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -855,7 +855,7 @@ func (m *ManagerActor) Start(ctx context.Context) {
 }
 
 // Stop stops the manager. Later messages report ErrActorStopped.
-func (m *ManagerActor) Stop() {
+func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -870,7 +870,7 @@ func (m *ManagerActor) Stop() {
 }
 
 // ask runs one message.
-func (m *ManagerActor) ask(ctx context.Context, msg ManagerMsg) (
+func (m *Manager) ask(ctx context.Context, msg ManagerMsg) (
 	ManagerResp, error) {
 
 	m.mu.Lock()
@@ -895,7 +895,9 @@ func (m *ManagerActor) ask(ctx context.Context, msg ManagerMsg) (
 			resp = out.Response
 
 		default:
-			return nil, fmt.Errorf("unknown manager outbox: %T", out)
+			return nil, fmt.Errorf(
+				"unknown manager outbox: %T", out,
+			)
 		}
 	}
 
@@ -909,7 +911,7 @@ func (m *ManagerActor) ask(ctx context.Context, msg ManagerMsg) (
 }
 
 // AddAnchor asks the manager to add or confirm an anchor.
-func (m *ManagerActor) AddAnchor(ctx context.Context, height uint32,
+func (m *Manager) AddAnchor(ctx context.Context, height uint32,
 	hash Hash, trusted bool) (Anchor, bool, error) {
 
 	resp, err := m.ask(ctx, &AddAnchorMsg{
@@ -931,7 +933,7 @@ func (m *ManagerActor) AddAnchor(ctx context.Context, height uint32,
 
 // AdvanceCommittedTip asks the manager to reconcile its committed tip with a
 // block-header tip that has already been persisted by the block manager.
-func (m *ManagerActor) AdvanceCommittedTip(ctx context.Context, height uint32,
+func (m *Manager) AdvanceCommittedTip(ctx context.Context, height uint32,
 	hash Hash) (bool, error) {
 
 	resp, err := m.ask(ctx, &AdvanceCommittedTipMsg{
@@ -952,7 +954,7 @@ func (m *ManagerActor) AdvanceCommittedTip(ctx context.Context, height uint32,
 
 // RequeueStagedRange asks the manager to return a staged range whose headers
 // were lost to the queue under a new lease epoch.
-func (m *ManagerActor) RequeueStagedRange(ctx context.Context,
+func (m *Manager) RequeueStagedRange(ctx context.Context,
 	id RangeID) (bool, error) {
 
 	resp, err := m.ask(ctx, &RequeueStagedRangeMsg{ID: id})
@@ -968,8 +970,8 @@ func (m *ManagerActor) RequeueStagedRange(ctx context.Context,
 	return requeueResp.OK, nil
 }
 
-// Anchors asks the manager actor for the current known anchors.
-func (m *ManagerActor) Anchors(ctx context.Context) ([]Anchor, error) {
+// Anchors asks the manager for the current known anchors.
+func (m *Manager) Anchors(ctx context.Context) ([]Anchor, error) {
 	resp, err := m.ask(ctx, &AnchorsMsg{})
 	if err != nil {
 		return nil, err
@@ -984,7 +986,7 @@ func (m *ManagerActor) Anchors(ctx context.Context) ([]Anchor, error) {
 }
 
 // PlanRange asks the manager to create queued range work.
-func (m *ManagerActor) PlanRange(ctx context.Context, id RangeID,
+func (m *Manager) PlanRange(ctx context.Context, id RangeID,
 	startHeight, stopHeight uint32) (HeaderRange, bool, error) {
 
 	resp, err := m.ask(ctx, &PlanRangeMsg{
@@ -1006,7 +1008,7 @@ func (m *ManagerActor) PlanRange(ctx context.Context, id RangeID,
 
 // StageDiscoveredRange asks the manager to stage a range using a confirmed
 // anchor-discovery response.
-func (m *ManagerActor) StageDiscoveredRange(ctx context.Context,
+func (m *Manager) StageDiscoveredRange(ctx context.Context,
 	id RangeID, peerID string, startHeight, stopHeight uint32,
 	at time.Time) (HeaderRange, bool, error) {
 
@@ -1031,7 +1033,7 @@ func (m *ManagerActor) StageDiscoveredRange(ctx context.Context,
 
 // InvalidateRange asks the FSM to reject invalid work and dependent
 // boundaries.
-func (m *ManagerActor) InvalidateRange(ctx context.Context,
+func (m *Manager) InvalidateRange(ctx context.Context,
 	id RangeID) (InvalidationResult, error) {
 
 	resp, err := m.ask(ctx, &InvalidateRangeMsg{ID: id})
@@ -1047,7 +1049,7 @@ func (m *ManagerActor) InvalidateRange(ctx context.Context,
 
 // RejectAnchor asks the FSM to reject an untrusted discovered anchor and the
 // unstaged work that uses it as a boundary.
-func (m *ManagerActor) RejectAnchor(ctx context.Context, height uint32,
+func (m *Manager) RejectAnchor(ctx context.Context, height uint32,
 	hash Hash) (InvalidationResult, error) {
 
 	resp, err := m.ask(ctx, &RejectAnchorMsg{Height: height, Hash: hash})
@@ -1063,7 +1065,7 @@ func (m *ManagerActor) RejectAnchor(ctx context.Context, height uint32,
 
 // PlanConfirmedAnchorRanges asks the manager to plan all bounded adjacent
 // ranges between confirmed anchors in [startHeight, stopHeight].
-func (m *ManagerActor) PlanConfirmedAnchorRanges(ctx context.Context,
+func (m *Manager) PlanConfirmedAnchorRanges(ctx context.Context,
 	nextID RangeID, startHeight, stopHeight uint32) (
 	PlanRangesResult, error) {
 
@@ -1084,8 +1086,8 @@ func (m *ManagerActor) PlanConfirmedAnchorRanges(ctx context.Context,
 	return planResp.Result, nil
 }
 
-// AddPeer asks the manager actor to add a peer.
-func (m *ManagerActor) AddPeer(ctx context.Context,
+// AddPeer asks the manager to add a peer.
+func (m *Manager) AddPeer(ctx context.Context,
 	peer PeerSnapshot) error {
 
 	_, err := m.ask(ctx, &AddPeerMsg{Peer: peer})
@@ -1093,15 +1095,15 @@ func (m *ManagerActor) AddPeer(ctx context.Context,
 	return err
 }
 
-// RemovePeer asks the manager actor to remove a peer.
-func (m *ManagerActor) RemovePeer(ctx context.Context, id string) error {
+// RemovePeer asks the manager to remove a peer.
+func (m *Manager) RemovePeer(ctx context.Context, id string) error {
 	_, err := m.ask(ctx, &RemovePeerMsg{ID: id})
 
 	return err
 }
 
-// UpdatePeerState asks the manager actor to update peer state.
-func (m *ManagerActor) UpdatePeerState(ctx context.Context, id string,
+// UpdatePeerState asks the manager to update peer state.
+func (m *Manager) UpdatePeerState(ctx context.Context, id string,
 	state PeerState) error {
 
 	_, err := m.ask(ctx, &UpdatePeerStateMsg{
@@ -1112,8 +1114,8 @@ func (m *ManagerActor) UpdatePeerState(ctx context.Context, id string,
 	return err
 }
 
-// UpdatePeerRTT asks the manager actor to update peer RTT.
-func (m *ManagerActor) UpdatePeerRTT(ctx context.Context, id string,
+// UpdatePeerRTT asks the manager to update peer RTT.
+func (m *Manager) UpdatePeerRTT(ctx context.Context, id string,
 	rtt time.Duration) error {
 
 	_, err := m.ask(ctx, &UpdatePeerRTTMsg{ID: id, RTT: rtt})
@@ -1122,7 +1124,7 @@ func (m *ManagerActor) UpdatePeerRTT(ctx context.Context, id string,
 }
 
 // AssignNextQueuedRange asks the manager to assign global queued work.
-func (m *ManagerActor) AssignNextQueuedRange(ctx context.Context) (
+func (m *Manager) AssignNextQueuedRange(ctx context.Context) (
 	RangeAssignment, bool, error) {
 
 	resp, err := m.ask(ctx, &AssignRangeMsg{})
@@ -1139,7 +1141,7 @@ func (m *ManagerActor) AssignNextQueuedRange(ctx context.Context) (
 }
 
 // StartPeerRange asks the manager to start a peer-local range.
-func (m *ManagerActor) StartPeerRange(ctx context.Context,
+func (m *Manager) StartPeerRange(ctx context.Context,
 	peerID string) (RangeAssignment, bool, error) {
 
 	resp, err := m.ask(ctx, &StartRangeMsg{PeerID: peerID})
@@ -1156,7 +1158,7 @@ func (m *ManagerActor) StartPeerRange(ctx context.Context,
 }
 
 // StealNextRange asks the manager to select stealable work for a peer.
-func (m *ManagerActor) StealNextRange(ctx context.Context,
+func (m *Manager) StealNextRange(ctx context.Context,
 	thiefID string) (StealResult, bool, error) {
 
 	return m.StealRange(ctx, thiefID, NoRange)
@@ -1164,7 +1166,7 @@ func (m *ManagerActor) StealNextRange(ctx context.Context,
 
 // StealRange asks the manager to steal a specific range, or any stealable
 // range when rangeID is NoRange.
-func (m *ManagerActor) StealRange(ctx context.Context, thiefID string,
+func (m *Manager) StealRange(ctx context.Context, thiefID string,
 	rangeID RangeID) (StealResult, bool, error) {
 
 	resp, err := m.ask(ctx, &StealRangeMsg{
@@ -1184,7 +1186,7 @@ func (m *ManagerActor) StealRange(ctx context.Context, thiefID string,
 }
 
 // CompleteRange asks the manager to record a range response.
-func (m *ManagerActor) CompleteRange(ctx context.Context, peerID string,
+func (m *Manager) CompleteRange(ctx context.Context, peerID string,
 	rangeID RangeID, leaseEpoch uint64, valid bool,
 	at time.Time) (CompleteResult, error) {
 
@@ -1208,7 +1210,7 @@ func (m *ManagerActor) CompleteRange(ctx context.Context, peerID string,
 }
 
 // CommitReadyRanges asks the manager to drain staged contiguous ranges.
-func (m *ManagerActor) CommitReadyRanges(ctx context.Context) (
+func (m *Manager) CommitReadyRanges(ctx context.Context) (
 	CommitResult, error) {
 
 	resp, err := m.ask(ctx, &CommitReadyMsg{})
@@ -1226,7 +1228,7 @@ func (m *ManagerActor) CommitReadyRanges(ctx context.Context) (
 
 // ReadyRanges asks the manager which staged ranges are ready for
 // side-effectful persistence before the FSM-visible tip advances.
-func (m *ManagerActor) ReadyRanges(ctx context.Context) ([]RangeID, error) {
+func (m *Manager) ReadyRanges(ctx context.Context) ([]RangeID, error) {
 	resp, err := m.ask(ctx, &ReadyRangesMsg{})
 	if err != nil {
 		return nil, err
@@ -1241,7 +1243,7 @@ func (m *ManagerActor) ReadyRanges(ctx context.Context) ([]RangeID, error) {
 }
 
 // SnapshotPeer asks the manager for one peer snapshot.
-func (m *ManagerActor) SnapshotPeer(ctx context.Context,
+func (m *Manager) SnapshotPeer(ctx context.Context,
 	id string) (PeerSnapshot, bool, error) {
 
 	resp, err := m.ask(ctx, &SnapshotPeerMsg{ID: id})
@@ -1258,7 +1260,7 @@ func (m *ManagerActor) SnapshotPeer(ctx context.Context,
 }
 
 // SnapshotRange asks the manager for one range snapshot.
-func (m *ManagerActor) SnapshotRange(ctx context.Context,
+func (m *Manager) SnapshotRange(ctx context.Context,
 	id RangeID) (HeaderRange, bool, error) {
 
 	resp, err := m.ask(ctx, &SnapshotRangeMsg{ID: id})
@@ -1275,7 +1277,7 @@ func (m *ManagerActor) SnapshotRange(ctx context.Context,
 }
 
 // Metrics asks the manager for current counters.
-func (m *ManagerActor) Metrics(ctx context.Context) (Metrics, error) {
+func (m *Manager) Metrics(ctx context.Context) (Metrics, error) {
 	resp, err := m.ask(ctx, &MetricsMsg{})
 	if err != nil {
 		return Metrics{}, err
@@ -1290,7 +1292,7 @@ func (m *ManagerActor) Metrics(ctx context.Context) (Metrics, error) {
 }
 
 // CommitStats asks the manager for current staged-range pressure.
-func (m *ManagerActor) CommitStats(ctx context.Context,
+func (m *Manager) CommitStats(ctx context.Context,
 	now time.Time) (CommitStats, error) {
 
 	resp, err := m.ask(ctx, &CommitStatsMsg{Now: now})
@@ -1310,7 +1312,7 @@ func unexpectedManagerResp(resp ManagerResp) error {
 	return fmt.Errorf("unexpected manager response: %T", resp)
 }
 
-// PeerMsg is accepted by a header peer actor.
+// PeerMsg is accepted by a header peer.
 type PeerMsg interface {
 	actor.Message
 
@@ -1327,7 +1329,7 @@ func (peerMessage) MessageType() string {
 	return "headersync.PeerMsg"
 }
 
-// PeerResp is returned by peer actor messages.
+// PeerResp is returned by peer messages.
 type PeerResp interface {
 	peerResp()
 }
@@ -2008,25 +2010,25 @@ func peerTransition(next protofsm.State[PeerMsg, peerOutbox, *peerEnv],
 	}, nil
 }
 
-// PeerActor owns peer-local header sync state. Like the manager, it runs each
+// Peer owns peer-local header sync state. Like the manager, it runs each
 // message synchronously on the caller's goroutine, under mu.
-type PeerActor struct {
+type Peer struct {
 	id      string
 	rank    int
-	manager *ManagerActor
+	manager *Manager
 
 	mu      sync.Mutex
 	machine *protofsm.StateMachine[PeerMsg, peerOutbox, *peerEnv]
 	stopped bool
 }
 
-// NewPeerActor creates a peer.
-func NewPeerActor(id string, rank int, manager *ManagerActor) *PeerActor {
-	return &PeerActor{id: id, rank: rank, manager: manager}
+// NewPeer creates a peer.
+func NewPeer(id string, rank int, manager *Manager) *Peer {
+	return &Peer{id: id, rank: rank, manager: manager}
 }
 
 // Start starts the peer and registers its initial snapshot.
-func (p *PeerActor) Start(ctx context.Context) error {
+func (p *Peer) Start(ctx context.Context) error {
 	p.mu.Lock()
 	if p.machine == nil {
 		machine, err := protofsm.NewStateMachine[PeerMsg, peerOutbox](
@@ -2055,7 +2057,7 @@ func (p *PeerActor) Start(ctx context.Context) error {
 }
 
 // Stop stops the peer. Later messages report ErrActorStopped.
-func (p *PeerActor) Stop() {
+func (p *Peer) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -2070,7 +2072,7 @@ func (p *PeerActor) Stop() {
 }
 
 // ask runs one message.
-func (p *PeerActor) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
+func (p *Peer) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -2089,7 +2091,7 @@ func (p *PeerActor) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
 	return p.applyPeerOutbox(ctx, outbox)
 }
 
-func (p *PeerActor) applyPeerOutbox(ctx context.Context,
+func (p *Peer) applyPeerOutbox(ctx context.Context,
 	outbox []peerOutbox) (PeerResp, error) {
 
 	resp := PeerResp(&PeerAck{})
@@ -2158,16 +2160,16 @@ func (p *PeerActor) applyPeerOutbox(ctx context.Context,
 	return resp, nil
 }
 
-// Send applies an event to the peer actor.
-func (p *PeerActor) Send(ctx context.Context, event PeerMsg) error {
+// Send applies an event to the peer.
+func (p *Peer) Send(ctx context.Context, event PeerMsg) error {
 	_, err := p.ask(ctx, event)
 
 	return err
 }
 
-// RequestRange asks the peer actor to request its next local range from the
+// RequestRange asks the peer to request its next local range from the
 // manager.
-func (p *PeerActor) RequestRange(ctx context.Context) (
+func (p *Peer) RequestRange(ctx context.Context) (
 	RangeAssignment, bool, error) {
 
 	resp, err := p.ask(ctx, PeerNeedRangeEvent{})
@@ -2189,9 +2191,9 @@ func (p *PeerActor) RequestRange(ctx context.Context) (
 	return rangeResp.Assignment, rangeResp.OK, nil
 }
 
-// RequestStolenRange asks the peer actor to ask the manager for stealable
+// RequestStolenRange asks the peer to ask the manager for stealable
 // work.
-func (p *PeerActor) RequestStolenRange(ctx context.Context) (
+func (p *Peer) RequestStolenRange(ctx context.Context) (
 	StealResult, bool, error) {
 
 	resp, err := p.ask(ctx, PeerNeedStealEvent{})
@@ -2214,7 +2216,7 @@ func (p *PeerActor) RequestStolenRange(ctx context.Context) (
 }
 
 // CompleteRange reports this peer's active range completion.
-func (p *PeerActor) CompleteRange(ctx context.Context, rangeID RangeID,
+func (p *Peer) CompleteRange(ctx context.Context, rangeID RangeID,
 	leaseEpoch uint64, valid bool, at time.Time) (CompleteResult, error) {
 
 	resp, err := p.ask(ctx, PeerRangeCompletedEvent{
