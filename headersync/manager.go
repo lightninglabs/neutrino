@@ -593,7 +593,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				)
 			} else {
 				result, ok, err = stealRangeWithDispatch(
-					ctx, env, m.ThiefID,
+					env, m.ThiefID,
 				)
 			}
 		} else {
@@ -601,7 +601,8 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				m.ThiefID, m.RangeID,
 			)
 			if ok && env.dispatch != nil {
-				if err := syncStealPeers(env, result); err != nil {
+				err := syncStealPeers(env, result)
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -709,7 +710,7 @@ func assignRangeWithDispatch(env *managerEnv) (
 	)
 }
 
-func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
+func stealRangeWithDispatch(env *managerEnv,
 	thiefID string) (StealResult, bool, error) {
 
 	dispatchSteal, ok, err := env.dispatch.StealRange(thiefID)
@@ -754,7 +755,6 @@ func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
 }
 
 func syncStealPeers(env *managerEnv, result StealResult) error {
-
 	thief, ok := env.fsm.SnapshotPeer(result.ThiefID)
 	if ok {
 		if err := env.dispatch.SyncPeer(thief); err != nil {

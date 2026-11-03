@@ -40,7 +40,6 @@ func NewRuntime(tip headersync.ChainPoint,
 
 // AddPeer mirrors a header peer into the querysync scheduler.
 func (c *Controller) AddPeer(peer headersync.PeerSnapshot) error {
-
 	return c.scheduler.AddPeer(toQueryPeer(peer))
 }
 
@@ -86,7 +85,6 @@ func (c *Controller) AssignRange(
 // StartRange mirrors the peer's local queue after headersync has moved the
 // range into the active slot, then marks the peer busy in querysync.
 func (c *Controller) StartRange(peer headersync.PeerSnapshot) error {
-
 	if err := c.SyncPeer(peer); err != nil {
 		return err
 	}
@@ -96,13 +94,11 @@ func (c *Controller) StartRange(peer headersync.PeerSnapshot) error {
 
 // CompleteRange marks a mirrored active range finished.
 func (c *Controller) CompleteRange(peerID string) error {
-
 	return c.scheduler.CompletePeerWork(peerID)
 }
 
 // SyncPeer replaces the mirrored peer snapshot.
 func (c *Controller) SyncPeer(peer headersync.PeerSnapshot) error {
-
 	return c.scheduler.AddPeer(toQueryPeer(peer))
 }
 
