@@ -160,7 +160,7 @@ func (s *Store) verifyBlockWrite(request BlockCommit) (Reply, error) {
 // Snapshot finishes any retained rollback, publishes any durable but
 // unpublished filter headers, and reads both tips. A failure on the filter side
 // still returns the verified block tip, so the block handler can recover its
-// view of the chain while the filter side heals.
+// view of the chain while the filter side's error is retried.
 func (s *Store) Snapshot() (Reply, error) {
 	if err := s.resumePendingRollback(); err != nil {
 		return Reply{}, err

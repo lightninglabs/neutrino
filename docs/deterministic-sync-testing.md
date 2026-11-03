@@ -305,7 +305,7 @@ The heal phase removes faults without hiding the bugs they caused:
 The tip phase runs when the reorg fault class is enabled. Peers announce
 three more honest headers; in the two frontier modes they then announce the
 heavier reorg branch forking at height 10. This drives the serial extension
-path, `rollBackToHeight`, and the block notifications.
+path, the chain store rollback, and the block notifications.
 
 ## Fault injection points
 
@@ -467,7 +467,7 @@ than a millisecond. Those are Go scheduler traces, not P checker schedules.
 - **No cfheader DST.** The filter-header path, `cfHandler` and the query work
   manager are not driven. So the producer-side invariant is unchecked: after
   a reorg, every stored filter header's block hash must equal the block-header
-  store's hash at that height. `rollBackToHeight` on `blockHandler` and
+  store's hash at that height. the chain store rollback on `blockHandler` and
   `cfHandler` both write the filter-header store today. Tracked in
   [#416](https://github.com/lightninglabs/neutrino/issues/416).
 - **Notification order is recorded, not asserted.** A connected notification

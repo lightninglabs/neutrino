@@ -1165,7 +1165,8 @@ func (d *dstRun) heal() {
 
 // tipPhase follows the chain past the sync target, then announces a heavier
 // branch from below the old tip. It drives the serial path's extension and
-// reorg handling, rollBackToHeight, and the reorg's block notifications.
+// reorg handling, the chain store rollback, and the reorg's block
+// notifications.
 func (d *dstRun) tipPhase() {
 	d.t.Helper()
 	fixture := dstChains()
@@ -1792,7 +1793,7 @@ func (s *ackLostFilterStore) WriteHeaders(
 }
 
 // TestCFHeaderLostWriteAckPublishesDurablePrefix is the regression for a
-// filter header write that lands but reports an error. writeCFHeadersMsgs
+// filter header write that lands but reports an error. writeFilterHeaders
 // returned before publishing the tip and the connected notifications, and the
 // retry found the store already at the checkpoint, planned nothing and
 // returned: the published tip stayed behind disk for good and the

@@ -173,15 +173,17 @@ func (s *Store) resumePendingRollback() error {
 	return nil
 }
 
-// settleInterruptedStep works out how far a failed block removal got, using the
-// durable stores as the only witness. A removal touches the filter store first
-// and the block store second, so there are three possible states:
+// settleInterruptedStep works out how far a failed block removal got, by
+// reading only the durable stores. A removal touches the filter store first, if the
+// block has a filter header, and the block store second, so there are three
+// possible states:
 //
 //  1. Neither store changed. We clear the step, and rollBackBlocks repeats the
 //     removal from the start.
 //
-//  2. The filter header is gone but the block isn't. We finish by removing the
-//     block.
+//  2. The filter store is below the block, because its header was removed or
+//     it never had one, and the block is still there. We finish by removing
+//     the block.
 //
 //  3. Both are gone, and only the publication and notification were lost.
 //
@@ -210,7 +212,7 @@ func (s *Store) settleInterruptedStep(intent *rollbackIntent) error {
 			return nil
 		}
 
-		// State 2: the filter store is ahead on the way down. The
+		// State 2: the filter store is already below the block. The
 		// published filter tip has to come down first, so that nothing
 		// reads a filter tip above the store.
 		filterHeader, err := blocks.FetchHeaderByHeight(filterHeight)

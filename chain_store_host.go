@@ -10,7 +10,8 @@ import (
 // chainStoreHost lets the chain store actor publish what became durable. The
 // store decides what happened, and these methods make it visible to the
 // handlers and to block notification subscribers. It runs on the actor's
-// goroutine, so it touches only state behind the header mutexes.
+// goroutine, and the handlers read the tips it publishes, so every write goes
+// through the header mutexes.
 type chainStoreHost struct {
 	manager *blockManager
 }
