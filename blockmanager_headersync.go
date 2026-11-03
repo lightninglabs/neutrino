@@ -350,9 +350,7 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 		}
 	}
 
-	b.syncPeerMutex.Lock()
-	b.setSyncPeerLocked(bestPeer)
-	b.syncPeerMutex.Unlock()
+	b.setSyncPeer(bestPeer)
 
 	started := b.dispatchHeaderSyncWork(peers)
 	activity := b.headerSync.Driver().Activity()
@@ -360,11 +358,9 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 		return true
 	}
 
-	b.syncPeerMutex.Lock()
-	if b.syncPeer == bestPeer {
-		b.setSyncPeerLocked(nil)
+	if b.syncPeer.Load() == bestPeer {
+		b.setSyncPeer(nil)
 	}
-	b.syncPeerMutex.Unlock()
 
 	return false
 }
@@ -415,9 +411,7 @@ func (b *blockManager) continueHeaderSync(peers *list.List) {
 		return
 	}
 
-	b.syncPeerMutex.Lock()
-	b.setSyncPeerLocked(nil)
-	b.syncPeerMutex.Unlock()
+	b.setSyncPeer(nil)
 
 	b.startSync(peers)
 }
@@ -537,11 +531,9 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 	removeSyncCandidate(peers, msg.peer)
 	msg.peer.Disconnect()
 
-	b.syncPeerMutex.Lock()
-	if b.syncPeer == msg.peer {
-		b.setSyncPeerLocked(nil)
+	if b.syncPeer.Load() == msg.peer {
+		b.setSyncPeer(nil)
 	}
-	b.syncPeerMutex.Unlock()
 
 	if b.pendingHeaderCommit != nil {
 		return
@@ -577,13 +569,11 @@ func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
 		return
 	}
 
-	b.syncPeerMutex.Lock()
-	if b.syncPeer == msg.peer ||
+	if b.syncPeer.Load() == msg.peer ||
 		b.headerSync.Driver().Activity().Anchors == 0 {
 
-		b.setSyncPeerLocked(nil)
+		b.setSyncPeer(nil)
 	}
-	b.syncPeerMutex.Unlock()
 
 	b.startSync(peers)
 }
@@ -688,11 +678,9 @@ func (b *blockManager) replanHeaderSyncAnchor(peers *list.List,
 		return
 	}
 
-	b.syncPeerMutex.Lock()
 	if b.headerSync.Driver().Activity().Anchors == 0 {
-		b.setSyncPeerLocked(nil)
+		b.setSyncPeer(nil)
 	}
-	b.syncPeerMutex.Unlock()
 
 	b.startSync(peers)
 }
@@ -717,9 +705,7 @@ func (b *blockManager) maybeContinueHeaderAnchorDiscovery(peers *list.List,
 		return
 	}
 
-	b.syncPeerMutex.Lock()
-	b.setSyncPeerLocked(nil)
-	b.syncPeerMutex.Unlock()
+	b.setSyncPeer(nil)
 
 	if b.allowSerialHeaderFallback() {
 		b.startSync(peers)
@@ -863,9 +849,7 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 	}
 
 	if planned == 0 && !b.headerSync.Driver().Activity().HasWork() {
-		b.syncPeerMutex.Lock()
-		b.setSyncPeerLocked(nil)
-		b.syncPeerMutex.Unlock()
+		b.setSyncPeer(nil)
 		b.startSync(peers)
 	}
 
@@ -1216,9 +1200,7 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 		b.disarmHeaderSyncTimeout()
 	}
 	if !peerDisconnected(peer) {
-		b.syncPeerMutex.Lock()
-		b.setSyncPeerLocked(peer)
-		b.syncPeerMutex.Unlock()
+		b.setSyncPeer(peer)
 	}
 
 	b.resetTip(prepared.reorg.Fork)

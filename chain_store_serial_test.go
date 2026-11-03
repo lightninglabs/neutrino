@@ -172,9 +172,7 @@ func TestChainStoreDisconnectedPeerQueuedWork(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		writer := newTestServerPeer(t, "127.0.0.1:18331", 1)
 		stale := newTestServerPeer(t, "127.0.0.1:18332", 2)
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(writer)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(writer)
 
 		// The sync peer's headers hold the store inside a write.
 		first := wire.NewMsgHeaders()
@@ -249,9 +247,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		bm.Start()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		peer := newTestServerPeer(t, "127.0.0.1:18333", 2)
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(peer)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(peer)
 
 		// The peer sends block 2, which does not match the checkpoint.
 		message := wire.NewMsgHeaders()
@@ -307,9 +303,7 @@ func TestChainStoreKnownPrefixUsesActor(t *testing.T) {
 		writer := newTestServerPeer(t, "127.0.0.1:18334", 2)
 		spectator := newTestServerPeer(t, "127.0.0.1:18335", 2)
 		bm.registerHeaderSyncPeer(spectator)
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(writer)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(writer)
 		message := wire.NewMsgHeaders()
 		for _, header := range fixture.honest[1:3] {
 			require.NoError(t, message.AddBlockHeader(header))
@@ -387,9 +381,7 @@ func TestChainStoreSerialLostWriteAckReconciles(t *testing.T) {
 		bm.Start()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		peer := newTestServerPeer(t, "127.0.0.1:18336", 1)
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(peer)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(peer)
 		message := wire.NewMsgHeaders()
 		require.NoError(
 			t,
@@ -440,7 +432,7 @@ func TestSerialPartialWriteRetainsObservedPeerHeight(t *testing.T) {
 		recorder := &locatorRecorder{}
 		bm.cfg.HeaderTransport = recorder
 		peer := newTestServerPeer(t, "127.0.0.1:8333", 0)
-		bm.setSyncPeerLocked(peer)
+		bm.setSyncPeer(peer)
 		peers := list.New()
 		peers.PushBack(peer)
 
@@ -535,7 +527,7 @@ func TestReorgWorkComparisonStoreReadFailure(t *testing.T) {
 		peer := newTestServerPeer(
 			t, "127.0.0.1:8333", int32(len(fixture.reorg)-1),
 		)
-		bm.setSyncPeerLocked(peer)
+		bm.setSyncPeer(peer)
 		peers := list.New()
 		peers.PushBack(peer)
 
@@ -604,7 +596,7 @@ func TestRejectedReorgRestartsSync(t *testing.T) {
 		other := newTestServerPeer(
 			t, "127.0.0.1:8334", int32(dstChainHeight+5),
 		)
-		bm.setSyncPeerLocked(liar)
+		bm.setSyncPeer(liar)
 		peers := list.New()
 		peers.PushBack(liar)
 		peers.PushBack(other)
@@ -620,9 +612,7 @@ func TestRejectedReorgRestartsSync(t *testing.T) {
 
 		// The sync peer goes away while the verdict is pending.
 		peers.Remove(peers.Front())
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(nil)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(nil)
 
 		settleHeaderCommit(t, bm, peers)
 		synctest.Wait()
@@ -695,9 +685,9 @@ func TestCheckpointRollbackSnapshotDisconnectsPeer(t *testing.T) {
 					t, "127.0.0.2:8333", 3,
 				)
 				peers.PushBack(other)
-				bm.setSyncPeerLocked(peer)
+				bm.setSyncPeer(peer)
 				if syncPeerGone {
-					bm.setSyncPeerLocked(nil)
+					bm.setSyncPeer(nil)
 				}
 
 				// Hand-build a checkpoint commit whose
@@ -804,9 +794,7 @@ func TestKnownPrefixDoesNotReadStoreBeforeActorWrite(t *testing.T) {
 		writer := newTestServerPeer(t, "127.0.0.1:18434", 3)
 		spectator := newTestServerPeer(t, "127.0.0.1:18435", 3)
 		bm.registerHeaderSyncPeer(spectator)
-		bm.syncPeerMutex.Lock()
-		bm.setSyncPeerLocked(writer)
-		bm.syncPeerMutex.Unlock()
+		bm.setSyncPeer(writer)
 		message := wire.NewMsgHeaders()
 		for _, header := range fixture.honest[1:4] {
 			require.NoError(t, message.AddBlockHeader(header))
