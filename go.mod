@@ -89,7 +89,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.0
 	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
-	github.com/lightningnetwork/lnd/actor v0.0.7
+	github.com/lightningnetwork/lnd/actor v0.0.8
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/lightningnetwork/lnd/sqldb/v2 v2.0.0-20260504151100-6fd5b7bb27d7
