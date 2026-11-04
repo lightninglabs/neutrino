@@ -67,6 +67,9 @@ type driverResult struct {
 //
 // A driver has no goroutine of its own: the caller must serialize every call
 // to ProcessEvent. Today that caller is the block manager's block handler.
+// An event handler must never call ProcessEvent itself, since the machine's
+// lock isn't reentrant and the call would deadlock. A handler that needs a
+// follow-up emits a Then effect instead.
 type Driver struct {
 	cfg     DriverConfig
 	runtime *Runtime
