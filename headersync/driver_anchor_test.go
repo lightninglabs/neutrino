@@ -188,17 +188,17 @@ func TestAnchorReplyContinuesSpanWhileCommitPending(t *testing.T) {
 		CommitPending: true,
 	}
 
-	result, err := f.driver.Handle(t.Context(), HeadersReceived{
+	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
-	requireReplyTaken(t, result.Effects)
+	requireReplyTaken(t, effects)
 
 	// The reply staged the range below the boundary it named.
 	_, staged := f.driver.session.StagedRange(1)
 	require.True(t, staged, "the reply did not stage its range")
 
-	requireAnchorSpanContinued(t, f.request, headers, result.Effects)
+	requireAnchorSpanContinued(t, f.request, headers, effects)
 }
 
 // TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier checks the same
@@ -222,22 +222,24 @@ func TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier(
 		CommitPending: true,
 	}
 
-	result, err := f.driver.Handle(t.Context(), HeadersReceived{
+	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
-	requireReplyTaken(t, result.Effects)
+	requireReplyTaken(t, effects)
 
 	// The reply pipelines the frontier above its boundary, and leaves the
 	// rest of its own span to the follow-up of that round.
-	require.NotEmpty(t, result.Effects)
-	followUp, ok := result.Effects[len(result.Effects)-1].(Then)
+	require.NotEmpty(t, effects)
+	followUp, ok := effects[len(effects)-1].(Then)
 	require.True(t, ok, "the batch does not end with a follow-up")
 	require.Len(t, followUp.Events, 1)
 	require.IsType(t, anchorPipelined{}, followUp.Events[0])
 
-	result, err = f.driver.Handle(t.Context(), followUp.Events[0], view)
+	effects, err = f.driver.ProcessEvent(
+		t.Context(), followUp.Events[0], view,
+	)
 	require.NoError(t, err)
 
-	requireAnchorSpanContinued(t, f.request, headers, result.Effects)
+	requireAnchorSpanContinued(t, f.request, headers, effects)
 }

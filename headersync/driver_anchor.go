@@ -61,7 +61,7 @@ func (anchorReplanned) driverEvent() {}
 // and carries on from what the reply named. It reports whether the message
 // was for anchor discovery.
 func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
-	peerID string, headers []*wire.BlockHeader, result *DriverResult) bool {
+	peerID string, headers []*wire.BlockHeader, result *driverResult) bool {
 
 	finished, ok, err := d.runtime.controller.FinishAnchorHeaders(
 		ctx, peerID, headers, DefaultMaxRangeHeaders,
@@ -206,7 +206,7 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 // of the staged range is in flight: planning then waits for its result, and
 // only the rest of the span is discovered.
 func (d *Driver) handleAnchorPipelined(ctx context.Context,
-	event anchorPipelined, view View, result *DriverResult) {
+	event anchorPipelined, view View, result *driverResult) {
 
 	if d.discoveryActive(event.Round) {
 		log.Debugf("headersync frontier_discovery_overlapped "+
@@ -227,7 +227,7 @@ func (d *Driver) handleAnchorPipelined(ctx context.Context,
 // dispatches them, or keeps discovering while the anchor waits for
 // confirmation.
 func (d *Driver) planAfterAnchor(ctx context.Context, view View,
-	peerID string, finished AnchorHeadersResult, result *DriverResult) {
+	peerID string, finished AnchorHeadersResult, result *driverResult) {
 
 	request := finished.Request
 	if !finished.Confirmed {
@@ -256,7 +256,7 @@ func (d *Driver) planAfterAnchor(ctx context.Context, view View,
 
 // handleAnchorPlanned carries on once the planned ranges are dispatched.
 func (d *Driver) handleAnchorPlanned(event anchorPlanned, view View,
-	result *DriverResult) {
+	result *driverResult) {
 
 	d.finishAnchorPlan(view, event.Finished, event.Planned, result)
 }
@@ -264,7 +264,7 @@ func (d *Driver) handleAnchorPlanned(event anchorPlanned, view View,
 // finishAnchorPlan keeps discovering the rest of the span, or starts over
 // when the anchor finished the span and nothing is in flight.
 func (d *Driver) finishAnchorPlan(view View, finished AnchorHeadersResult,
-	planned int, result *DriverResult) {
+	planned int, result *driverResult) {
 
 	if d.continueAnchorSpan(view, finished, result) {
 		return
@@ -279,7 +279,7 @@ func (d *Driver) finishAnchorPlan(view View, finished AnchorHeadersResult,
 // stopped short of it, from the boundary the reply named. It reports whether
 // there was anything left to discover.
 func (d *Driver) continueAnchorSpan(view View, finished AnchorHeadersResult,
-	result *DriverResult) bool {
+	result *driverResult) bool {
 
 	request := finished.Request
 	response := finished.Response
@@ -298,7 +298,7 @@ func (d *Driver) continueAnchorSpan(view View, finished AnchorHeadersResult,
 // excluded peer out of the round.
 func (d *Driver) waitForAnchor(view View, request AnchorRequest,
 	startHeight uint32, startHash Hash, excludePeerID string,
-	result *DriverResult) {
+	result *driverResult) {
 
 	span := AnchorRequest{
 		StartHeight: startHeight,
@@ -321,7 +321,7 @@ func (d *Driver) waitForAnchor(view View, request AnchorRequest,
 // flight. The serial networks start over; the others wait for a peer that
 // can answer.
 func (d *Driver) handleAnchorWaiting(event anchorWaiting,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if d.discoveryActive(event.Round) {
 		return
@@ -347,7 +347,7 @@ func (d *Driver) handleAnchorWaiting(event anchorWaiting,
 // rejectAnchor punishes a peer whose discovery reply was malformed, and
 // discovers the span again without it.
 func (d *Driver) rejectAnchor(ctx context.Context, view View, peerID string,
-	request AnchorRequest, reason string, result *DriverResult) {
+	request AnchorRequest, reason string, result *driverResult) {
 
 	log.Warnf("headersync anchor_rejected peer=%s start_height=%d "+
 		"stop_height=%d reason=%s", peerID, request.StartHeight,
@@ -378,7 +378,7 @@ func (d *Driver) rejectAnchor(ctx context.Context, view View, peerID string,
 // cannot stall it. We accept the loop for the stricter test-only policy.
 func (d *Driver) conflictAnchor(ctx context.Context, view View,
 	peerID string, request AnchorRequest, anchor Anchor,
-	result *DriverResult) {
+	result *driverResult) {
 
 	log.Warnf("headersync anchor_conflict peer=%s start_height=%d "+
 		"stop_height=%d anchor_height=%d recorded_hash=%s",
@@ -404,7 +404,7 @@ func (d *Driver) conflictAnchor(ctx context.Context, view View,
 // the excluded peers out of the new round, and falls back to the regular sync
 // start when no other peer can answer.
 func (d *Driver) replanAnchor(view View, request AnchorRequest,
-	excluded []string, result *DriverResult) {
+	excluded []string, result *driverResult) {
 
 	round := d.discoverFrom(request, view.Peers, excluded, result)
 	then(result, anchorReplanned{Round: round})
@@ -412,7 +412,7 @@ func (d *Driver) replanAnchor(view View, request AnchorRequest,
 
 // handleAnchorReplanned starts over when no peer took the span.
 func (d *Driver) handleAnchorReplanned(event anchorReplanned,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if d.discoveryActive(event.Round) {
 		return

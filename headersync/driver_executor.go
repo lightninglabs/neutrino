@@ -36,7 +36,7 @@ type DriverConfig struct {
 }
 
 // View is the executor-owned state the driver reads while handling an event.
-// The executor builds a fresh one for every Handle call, including the
+// The executor builds a fresh one for every ProcessEvent call, including the
 // follow-up events of a Then effect, so a decision made after an effect sees
 // the state that effect produced. The driver never keeps a view across
 // events.

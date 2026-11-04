@@ -2,7 +2,11 @@ package headersync
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"github.com/lightninglabs/neutrino/protofsm"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 // DefaultPeerCooldown is the time a blocked or quarantined header peer is
@@ -22,10 +26,11 @@ type DriverEvent interface {
 // driver itself sends no message, arms no timer and punishes no peer. The
 // executor reports the outcome of an effect that can fail back as an event.
 //
-// The executor runs the effects of one event in order, after Handle returns,
-// and a nested Handle call sees the state those effects produced. An effect
-// that re-enters the driver, such as Then or StartSync, must therefore be the
-// last effect of its batch. Every emitter follows this.
+// The effects of one event are the outbox of the driver's state machine. The
+// executor runs them in order, after ProcessEvent returns, and a nested
+// ProcessEvent call sees the state those effects produced. An effect that
+// re-enters the driver, such as Then or StartSync, must therefore be the last
+// effect of its batch. Every emitter follows this.
 type DriverEffect interface {
 	driverEffect()
 }
@@ -46,20 +51,22 @@ func (a Activity) HasWork() bool {
 	return a.Ranges > 0 || a.Anchors > 0
 }
 
-// DriverResult is the outcome of handling one event.
-type DriverResult struct {
+// driverResult collects the effects of one event, in order. The state hands
+// them to the machine as its outbox.
+type driverResult struct {
 	// Effects are the side effects to perform, in order.
 	Effects []DriverEffect
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
 // bookkeeping, the staged payloads, the peer cooldowns and the range ID
-// allocation, and it drives the controller, the manager and the
-// peers. Handle runs one event to completion and returns the effects for the
-// caller to execute.
+// allocation, and it drives the controller, the manager and the peers. It is
+// a protofsm state machine with a single state, so it speaks the same event
+// and outbox vocabulary as the manager and the peers: ProcessEvent runs one
+// event to completion and returns the effects for the caller to execute.
 //
-// A driver has no goroutine and no lock: the caller must serialize every call
-// to Handle. Today that caller is the block manager's block handler.
+// A driver has no goroutine of its own: the caller must serialize every call
+// to ProcessEvent. Today that caller is the block manager's block handler.
 type Driver struct {
 	cfg     DriverConfig
 	runtime *Runtime
@@ -73,18 +80,60 @@ type Driver struct {
 
 	// requestID numbers the range and anchor requests the driver tracks.
 	requestID uint64
+
+	// machine runs the driver's events. The driver is its environment:
+	// the state holds no data of its own and reads and writes the
+	// bookkeeping above through the driver.
+	machine *protofsm.StateMachine[DriverEvent, DriverEffect, *Driver]
+
+	// view is the executor's state for the event being processed. It
+	// lives in the environment rather than in each event because it
+	// describes the world an event runs in, not the event: the executor
+	// sets it once per ProcessEvent call, and the follow-up events of a
+	// Then effect come back through ProcessEvent with a fresh one. An
+	// event that carried its own view could be replayed with a stale one.
+	view View
+
+	// err is the error of the event being processed, recorded by the
+	// state for ProcessEvent to return next to the effects. It does not
+	// fail the transition: the driver has already dealt with the failure,
+	// by logging it or by scheduling a retry, and the effects it emitted
+	// on the way must still run, which the machine would drop with a
+	// failed transition.
+	err error
 }
 
 // newDriver creates a driver over the runtime's session and validation cache.
 func newDriver(runtime *Runtime, session *Session, tip *TipState,
 	cfg DriverConfig) *Driver {
 
-	return &Driver{
+	driver := &Driver{
 		cfg:     cfg,
 		runtime: runtime,
 		session: session,
 		tip:     tip,
 	}
+
+	machine, err := protofsm.NewStateMachine[
+		DriverEvent, DriverEffect,
+	](protofsm.StateMachineCfg[DriverEvent, DriverEffect, *Driver]{
+		InitialState: driverState{},
+		Env:          driver,
+	})
+	if err != nil {
+		// The machine only refuses a nil initial state.
+		panic(fmt.Sprintf("unable to create headersync driver FSM: %v",
+			err))
+	}
+	driver.machine = machine
+
+	// The machine has no lifecycle beyond the driver's: it starts with it
+	// and is never stopped, since the runtime's stop reaches the driver as
+	// ErrActorStopped from the manager, and the machine runs on its
+	// caller's goroutine with nothing of its own to wind down.
+	machine.Start(context.Background())
+
+	return driver
 }
 
 // Activity returns the driver's in-flight request counts.
@@ -95,17 +144,52 @@ func (d *Driver) Activity() Activity {
 	}
 }
 
-// Handle applies one event and returns the effects it produced. The view is
-// the executor's state at the time of the call. A non-nil error means the
-// event could not be handled at all. Failures of individual manager calls
-// inside an event are handled by the driver and logged, as they were by the
-// block manager before the driver took over.
-func (d *Driver) Handle(ctx context.Context, event DriverEvent,
-	view View) (DriverResult, error) {
+// ProcessEvent applies one event with the executor's view and returns the
+// effects it produced, in order. A non-nil error means the event could not be
+// handled; the effects returned with it still stand. Failures of individual
+// manager calls inside an event are handled by the driver and logged, as they
+// were by the block manager before the driver took over.
+func (d *Driver) ProcessEvent(ctx context.Context, event DriverEvent,
+	view View) ([]DriverEffect, error) {
+
+	d.view = view
+
+	effects, err := d.machine.ProcessEvent(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+
+	return effects, d.err
+}
+
+// driverState is the driver's one state. The driver tracks no phases of its
+// own: the sync's phases live in the manager's FSM and in the peers' machines,
+// and the driver decides each event from the bookkeeping it owns. So a single
+// state holds the dispatch, and the machine gives the driver the same event
+// and outbox contract as the rest of the package.
+type driverState struct{}
+
+// String returns the state's name.
+func (driverState) String() string {
+	return "headersync-driver"
+}
+
+// IsTerminal reports that the driver never finishes.
+func (driverState) IsTerminal() bool {
+	return false
+}
+
+// ProcessEvent applies one event to the driver and emits the effects it
+// produced as the machine's outbox. The view is the executor's state at the
+// time of the call, set by the driver's ProcessEvent.
+func (s driverState) ProcessEvent(ctx context.Context, event DriverEvent,
+	d *Driver) (*protofsm.StateTransition[
+	DriverEvent, DriverEffect, *Driver], error) {
 
 	var (
-		result DriverResult
+		result driverResult
 		err    error
+		view   = d.view
 	)
 	switch event := event.(type) {
 	case PeerStateChanged:
@@ -226,5 +310,14 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 		d.handleFollowTip(event)
 	}
 
-	return result, err
+	d.err = err
+
+	return &protofsm.StateTransition[DriverEvent, DriverEffect, *Driver]{
+		NextState: s,
+		NewEvents: fn.Some(protofsm.EmittedEvent[
+			DriverEvent, DriverEffect,
+		]{
+			Outbox: result.Effects,
+		}),
+	}, nil
 }

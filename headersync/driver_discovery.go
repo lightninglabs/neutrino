@@ -22,7 +22,7 @@ type DiscoveryOutcome struct {
 // span between the durable tip and the checkpoint.
 func (d *Driver) discoverAnchors(ctx context.Context, tip, stop ChainPoint,
 	bestHeight uint32, peers []PeerCandidate,
-	result *DriverResult) DiscoveryOutcome {
+	result *driverResult) DiscoveryOutcome {
 
 	span, ok, err := d.runtime.controller.AnchorDiscoverySpan(
 		ctx, tip, stop, bestHeight,
@@ -43,7 +43,7 @@ func (d *Driver) discoverAnchors(ctx context.Context, tip, stop ChainPoint,
 // tip, once there is no checkpoint left to aim at.
 func (d *Driver) discoverFrontier(ctx context.Context, tip ChainPoint,
 	bestHeight uint32, peers []PeerCandidate,
-	result *DriverResult) DiscoveryOutcome {
+	result *driverResult) DiscoveryOutcome {
 
 	span, ok, err := d.runtime.controller.FrontierDiscoverySpan(
 		ctx, tip, bestHeight,
@@ -71,7 +71,7 @@ func (d *Driver) discoverFrontier(ctx context.Context, tip ChainPoint,
 // just learned, overlapping that discovery with the commit of the span below
 // it.
 func (d *Driver) pipelineFrontier(view View, after AnchorResponse,
-	result *DriverResult) DiscoveryOutcome {
+	result *driverResult) DiscoveryOutcome {
 
 	bestHeight := view.bestHeight()
 	span, ok := d.runtime.controller.FrontierLookaheadSpan(
@@ -91,7 +91,7 @@ func (d *Driver) pipelineFrontier(view View, after AnchorResponse,
 // discoverFrom asks every peer the plan selects for the anchor at the end of
 // the span, leaving the excluded peers out of the round.
 func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
-	excluded []string, result *DriverResult) DiscoveryOutcome {
+	excluded []string, result *driverResult) DiscoveryOutcome {
 
 	plan := d.runtime.controller.PlanAnchorRequests(
 		span, peers, excluded...,

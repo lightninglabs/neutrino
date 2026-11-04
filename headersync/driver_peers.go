@@ -78,7 +78,7 @@ func (ArmCooldownWake) driverEffect() {}
 
 // handlePeerStateChanged applies a peer state change.
 func (d *Driver) handlePeerStateChanged(ctx context.Context,
-	event PeerStateChanged, result *DriverResult) {
+	event PeerStateChanged, result *driverResult) {
 
 	d.setPeerState(ctx, event.PeerID, event.State, result)
 }
@@ -86,7 +86,7 @@ func (d *Driver) handlePeerStateChanged(ctx context.Context,
 // handlePeerConnected registers a peer, and blocks it if it's still in its
 // cooldown.
 func (d *Driver) handlePeerConnected(ctx context.Context,
-	event PeerConnected, result *DriverResult) error {
+	event PeerConnected, result *driverResult) error {
 
 	peer := event.Peer
 	_, created, err := d.runtime.RegisterPeer(ctx, peer)
@@ -131,14 +131,14 @@ func (d *Driver) handlePeerRTTUpdated(ctx context.Context,
 }
 
 // handleCooldownWakeDue schedules the next cooldown wakeup.
-func (d *Driver) handleCooldownWakeDue(result *DriverResult) {
+func (d *Driver) handleCooldownWakeDue(result *driverResult) {
 	d.scheduleCooldownWake(result)
 }
 
 // setPeerState tracks the peer's cooldown, schedules a wakeup for it, and
 // updates the peer.
 func (d *Driver) setPeerState(ctx context.Context, peerID string,
-	state PeerState, result *DriverResult) {
+	state PeerState, result *driverResult) {
 
 	d.session.TrackPeerCooldown(
 		peerID, state, time.Now(), DefaultPeerCooldown,
@@ -154,7 +154,7 @@ func (d *Driver) setPeerState(ctx context.Context, peerID string,
 
 // scheduleCooldownWake asks for a wakeup at the earliest cooldown expiry, if
 // any peer is still cooling down.
-func (d *Driver) scheduleCooldownWake(result *DriverResult) {
+func (d *Driver) scheduleCooldownWake(result *driverResult) {
 	until, ok := d.session.NextCooldownExpiry(time.Now())
 	if !ok {
 		return
@@ -165,7 +165,7 @@ func (d *Driver) scheduleCooldownWake(result *DriverResult) {
 
 // handleRecoverPeers moves peers whose cooldown has expired back to ready.
 func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if d.session.CooldownCount() == 0 {
 		return
@@ -214,7 +214,7 @@ func (d *Driver) replanRange(ctx context.Context, rng HeaderRange) {
 // handlePeerDone abandons the requests of a disconnected peer. It reports
 // whether the peer had a request in flight.
 func (d *Driver) handlePeerDone(ctx context.Context, event PeerDone,
-	result *DriverResult) bool {
+	result *driverResult) bool {
 
 	var hadWork bool
 	peerID := event.PeerID
@@ -245,7 +245,7 @@ func (PeerGone) driverEvent() {}
 // handlePeerGone abandons a disconnected peer's requests and removes it, then
 // decides what the loss means for the sync.
 func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
-	view View, result *DriverResult) {
+	view View, result *driverResult) {
 
 	peerID := event.PeerID
 	hadWork := d.handlePeerDone(ctx, PeerDone{PeerID: peerID}, result)

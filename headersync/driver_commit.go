@@ -99,7 +99,7 @@ func (d *Driver) resetTipToStore(ctx context.Context) error {
 // handleRetryCommit commits what is ready and carries on. A commit that failed
 // on an invalid range drops its peer instead.
 func (d *Driver) handleRetryCommit(ctx context.Context, view View,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if _, err := d.commitReadyRanges(ctx, view, result); err != nil {
 		log.Warnf("headersync commit_retry_failed: %v", err)
@@ -114,7 +114,7 @@ func (d *Driver) handleRetryCommit(ctx context.Context, view View,
 // commitAndContinue commits what is ready, then carries on, unless the commit
 // failed on an invalid range and the peer was dealt with.
 func (d *Driver) commitAndContinue(ctx context.Context, view View,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if _, err := d.commitReadyRanges(ctx, view, result); err != nil {
 		log.Warnf("headersync failed to commit ready ranges: %v", err)
@@ -131,7 +131,7 @@ func (d *Driver) commitAndContinue(ctx context.Context, view View,
 // that is not the peer's fault schedules a retry; one that is invalidates the
 // range and is returned as a ValidationError.
 func (d *Driver) commitReadyRanges(ctx context.Context, view View,
-	result *DriverResult) (bool, error) {
+	result *driverResult) (bool, error) {
 
 	if view.CommitPending {
 		return false, nil
@@ -217,7 +217,7 @@ func (d *Driver) commitReadyRanges(ctx context.Context, view View,
 // write may have left payloads behind that the durable tip has passed, so we
 // prune those.
 func (d *Driver) listReadyRanges(ctx context.Context,
-	result *DriverResult) ([]RangeID, error) {
+	result *driverResult) ([]RangeID, error) {
 
 	ready, err := d.runtime.manager.ReadyRanges(ctx)
 	if err != nil {
@@ -300,7 +300,7 @@ func (d *Driver) trimDurableRange(rng HeaderRange,
 // finishReadyRanges advances the FSM past the ready ranges, which are now
 // durable, and retires their staging.
 func (d *Driver) finishReadyRanges(ctx context.Context,
-	result *DriverResult) error {
+	result *driverResult) error {
 
 	commitResult, err := d.runtime.controller.CommitReadyRanges(ctx)
 	if err != nil {
@@ -331,7 +331,7 @@ func (d *Driver) finishReadyRanges(ctx context.Context,
 // handleRangesCommitted adopts a written batch into the validation cache,
 // retires its ranges and carries on.
 func (d *Driver) handleRangesCommitted(ctx context.Context,
-	event RangesCommitted, result *DriverResult) {
+	event RangesCommitted, result *driverResult) {
 
 	d.logProgress(event.Prepared.Nodes)
 	d.tip.FinishRange(event.Prepared)
@@ -348,7 +348,7 @@ func (d *Driver) handleRangesCommitted(ctx context.Context,
 // rejectInvalidCommit drops the peer whose range failed validation at commit
 // and carries on. It reports false when the error was not a peer's fault.
 func (d *Driver) rejectInvalidCommit(ctx context.Context, view View,
-	err error, result *DriverResult) bool {
+	err error, result *driverResult) bool {
 
 	var invalid *ValidationError
 	if !errors.As(err, &invalid) {

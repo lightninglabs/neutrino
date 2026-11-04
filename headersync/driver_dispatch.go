@@ -202,7 +202,7 @@ func (d *Driver) handleAssignRanges(ctx context.Context,
 
 // handleDispatchPeer starts the next range for one peer.
 func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
-	result *DriverResult) {
+	result *driverResult) {
 
 	peerID := event.PeerID
 	if d.session.RangeActive(peerID) {
@@ -278,7 +278,7 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 // means the manager is stopped or the event's deadline passed, the peer is
 // blocked until its cooldown ends.
 func (d *Driver) requestPeerRange(ctx context.Context, peerID string,
-	peerActor *Peer, result *DriverResult) (RangeAssignment, bool,
+	peerActor *Peer, result *driverResult) (RangeAssignment, bool,
 	error) {
 
 	assignment, ok, err := peerActor.RequestRange(ctx)
@@ -316,7 +316,7 @@ func (d *Driver) markRangeStolen(ctx context.Context, steal StealResult) {
 
 // handleRequestSent starts tracking a request that went out, and asks for its
 // deadline.
-func (d *Driver) handleRequestSent(event RequestSent, result *DriverResult) {
+func (d *Driver) handleRequestSent(event RequestSent, result *driverResult) {
 	request := event.Request
 	d.requestID++
 	requestID := d.requestID
@@ -363,7 +363,7 @@ func (d *Driver) handleRequestSent(event RequestSent, result *DriverResult) {
 
 // handleRequestFailed blocks a peer that a request could not be written to.
 func (d *Driver) handleRequestFailed(ctx context.Context,
-	event RequestFailed, result *DriverResult) {
+	event RequestFailed, result *driverResult) {
 
 	request := event.Request
 	switch request.Kind {

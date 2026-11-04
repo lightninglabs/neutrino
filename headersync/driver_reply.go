@@ -64,7 +64,7 @@ func (NoProgressReply) driverEffect() {}
 
 // handleHeadersReceived finds the request a headers message answers.
 func (d *Driver) handleHeadersReceived(ctx context.Context,
-	event HeadersReceived, view View, result *DriverResult) {
+	event HeadersReceived, view View, result *driverResult) {
 
 	peerID := event.PeerID
 	headers := event.Headers
@@ -105,7 +105,7 @@ func (d *Driver) handleHeadersReceived(ctx context.Context,
 // peer, if it has one. It reports whether the message was the driver's to
 // take, as a range reply or as the late answer to a request that timed out.
 func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
-	view View, result *DriverResult) bool {
+	view View, result *driverResult) bool {
 
 	peerID := event.peerID
 	headers := event.headers
@@ -318,7 +318,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 // request in flight. It reports whether the reply answered a request that
 // timed out. Any other reply is not the driver's.
 func (d *Driver) handleStaleRangeReply(peerID string,
-	result *DriverResult) bool {
+	result *driverResult) bool {
 
 	staleRequest, ok := d.session.PopStale(peerID)
 	if !ok {
@@ -353,7 +353,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 
 // rejectRangePeer punishes a peer that answered a range with invalid headers.
 func (d *Driver) rejectRangePeer(ctx context.Context, peerID string,
-	rangeID RangeID, result *DriverResult) {
+	rangeID RangeID, result *driverResult) {
 
 	log.Warnf("headersync peer_rejected peer=%s range_id=%d reason=%s",
 		peerID, rangeID, banman.InvalidBlock)

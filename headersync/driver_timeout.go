@@ -54,7 +54,7 @@ func (anchorTimedOut) driverEvent() {}
 // handleRequestTimedOut classifies a timeout and, if it matches, punishes the
 // peer and moves its work on.
 func (d *Driver) handleRequestTimedOut(ctx context.Context,
-	event RequestTimedOut, view View, result *DriverResult) {
+	event RequestTimedOut, view View, result *driverResult) {
 
 	peerID := event.PeerID
 	switch event.Kind {
@@ -113,7 +113,7 @@ func (d *Driver) handleRequestTimedOut(ctx context.Context,
 // handleAnchorTimedOut starts over when no other peer took the span of a
 // timed-out anchor request.
 func (d *Driver) handleAnchorTimedOut(event anchorTimedOut,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if d.discoveryActive(event.Round) {
 		return
@@ -131,7 +131,7 @@ func (d *Driver) handleAnchorTimedOut(event anchorTimedOut,
 // quarantinePeer blocks a peer from scheduling until its cooldown expires, and
 // asks for the address quarantine.
 func (d *Driver) quarantinePeer(ctx context.Context, peerID string,
-	result *DriverResult) {
+	result *driverResult) {
 
 	d.setPeerState(ctx, peerID, PeerQuarantined, result)
 	result.Effects = append(result.Effects, QuarantinePeer{PeerID: peerID})
@@ -156,7 +156,7 @@ func (SerialTimedOut) driverEvent() {}
 // handleSerialTimedOut drops a stalled sync peer and starts over, unless the
 // chain moved past the request in the meantime.
 func (d *Driver) handleSerialTimedOut(ctx context.Context,
-	event SerialTimedOut, view View, result *DriverResult) {
+	event SerialTimedOut, view View, result *driverResult) {
 
 	var height uint32
 	if view.CommitPending {
