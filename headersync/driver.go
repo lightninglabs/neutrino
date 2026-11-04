@@ -50,20 +50,6 @@ func (a Activity) HasWork() bool {
 type DriverResult struct {
 	// Effects are the side effects to perform, in order.
 	Effects []DriverEffect
-
-	// PeerCreated is set by PeerConnected when the peer is new.
-	PeerCreated bool
-
-	// HadWork is set by PeerDone when the peer had a request in flight.
-	HadWork bool
-
-	// Planned is the number of ranges PlanRanges planned.
-	Planned int
-
-	// Handled is set by HeadersReceived when the driver took the message.
-	// An empty message that answered no request is left to the executor,
-	// which settles the serial request it may answer.
-	Handled bool
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -168,7 +154,7 @@ func (d *Driver) Handle(ctx context.Context, event DriverEvent,
 		d.handleCooldownElapsed(event, &result)
 
 	case PlanRanges:
-		result.Planned, err = d.planRanges(ctx, event.BestHeight)
+		_, err = d.planRanges(ctx, event.BestHeight)
 
 	case DispatchWork:
 		d.handleDispatchWork(ctx, view, &result)

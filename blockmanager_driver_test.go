@@ -19,13 +19,16 @@ func (b *blockManager) sessionForTest() *headersync.Session {
 }
 
 // planHeaderSyncRanges plans the ranges up to the best height and reports how
-// many the driver planned.
+// many the driver planned. Planning takes one range ID per range, and leaves
+// the cursor alone when it fails, so the cursor's advance is the count.
 func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
+	session := b.sessionForTest()
+	before := session.NextRangeID()
 	outcome := b.handleDriverEvent(nil, headersync.PlanRanges{
 		BestHeight: bestHeight,
 	})
 
-	return outcome.result.Planned, outcome.err
+	return int(session.NextRangeID() - before), outcome.err
 }
 
 // dispatchHeaderSyncWork hands queued ranges to the candidates and reports

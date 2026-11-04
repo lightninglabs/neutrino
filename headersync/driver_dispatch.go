@@ -18,8 +18,9 @@ const (
 
 // PlanRanges asks the driver to plan the ranges between the durable tip and
 // the next boundary: the next checkpoint the chain must reach, or the best
-// peer height once the chain is past its last checkpoint. The number of
-// ranges planned is the Planned field of the result.
+// peer height once the chain is past its last checkpoint. Each range planned
+// takes one range ID from the session. Production plans through the events
+// that discover anchors; tests drive this directly.
 type PlanRanges struct {
 	BestHeight uint32
 }

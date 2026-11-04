@@ -84,7 +84,7 @@ func (d *Driver) handlePeerStateChanged(ctx context.Context,
 }
 
 // handlePeerConnected registers a peer, and blocks it if it's still in its
-// cooldown. It reports in result whether the peer is new.
+// cooldown.
 func (d *Driver) handlePeerConnected(ctx context.Context,
 	event PeerConnected, result *DriverResult) error {
 
@@ -93,7 +93,6 @@ func (d *Driver) handlePeerConnected(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	result.PeerCreated = created
 
 	if !created {
 		return d.handlePeerRTTUpdated(ctx, PeerRTTUpdated{
@@ -104,6 +103,9 @@ func (d *Driver) handlePeerConnected(ctx context.Context,
 
 	until, ok := d.session.CooldownUntil(peer.ID, time.Now())
 	if !ok {
+		log.Debugf("Registered headersync peer peer=%s rank=%d rtt=%v",
+			peer.ID, peer.Rank, peer.RTT)
+
 		return nil
 	}
 
@@ -209,20 +211,24 @@ func (d *Driver) replanRange(ctx context.Context, rng HeaderRange) {
 		result.ID, result.Range.StartHeight, result.Range.StopHeight)
 }
 
-// handlePeerDone abandons the requests of a disconnected peer.
+// handlePeerDone abandons the requests of a disconnected peer. It reports
+// whether the peer had a request in flight.
 func (d *Driver) handlePeerDone(ctx context.Context, event PeerDone,
-	result *DriverResult) {
+	result *DriverResult) bool {
 
+	var hadWork bool
 	peerID := event.PeerID
 	if _, ok := d.session.FinishRange(peerID); ok {
 		d.session.ClearStale(peerID)
 		d.setPeerState(ctx, peerID, PeerQuarantined, result)
-		result.HadWork = true
+		hadWork = true
 	}
 	if _, ok := d.session.FinishAnchor(peerID); ok {
 		d.setPeerState(ctx, peerID, PeerQuarantined, result)
-		result.HadWork = true
+		hadWork = true
 	}
+
+	return hadWork
 }
 
 // PeerGone tells the driver that a peer disconnected and the executor dropped
@@ -242,8 +248,7 @@ func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
 	view View, result *DriverResult) {
 
 	peerID := event.PeerID
-	d.handlePeerDone(ctx, PeerDone{PeerID: peerID}, result)
-	hadWork := result.HadWork
+	hadWork := d.handlePeerDone(ctx, PeerDone{PeerID: peerID}, result)
 
 	err := d.runtime.UnregisterPeer(ctx, peerID)
 	if err != nil {

@@ -186,6 +186,13 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.DisarmSerialTimeout:
 		b.disarmHeaderSyncTimeout()
 
+	case headersync.NoProgressReply:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.handleNoProgressReply(peers, sp)
+
 	case headersync.CommitExtension:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
