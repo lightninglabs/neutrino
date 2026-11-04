@@ -516,6 +516,9 @@ func (sp *ServerPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 
 // Config is a struct detailing the configuration of the chain service.
 type Config struct {
+	// BlockDN selects HTTP-only synchronization instead of Bitcoin P2P.
+	BlockDN *BlockDNConfig
+
 	// DataDir is the directory that neutrino will store all header
 	// information within.
 	DataDir string
@@ -686,6 +689,7 @@ type ChainService struct { // nolint:maligned
 	persistToDisk    bool
 
 	headersImport *HeadersImportConfig
+	blockDN       *blockDNSync
 
 	FilterCache *lru.Cache[FilterCacheKey, *CacheableFilter]
 	BlockCache  *lru.Cache[wire.InvVect, *CacheableBlock]
@@ -746,6 +750,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			"or cfg.SQLConfig must be set")
 	}
 
+	if cfg.BlockDN != nil {
+		if len(cfg.ConnectPeers) != 0 || len(cfg.AddPeers) != 0 ||
+			cfg.HeadersImport != nil {
+
+			return nil, errors.New(
+				"block-dn mode cannot be combined " +
+					"with peers or HeadersImport",
+			)
+		}
+		if _, err := newBlockDNSync(nil, cfg.BlockDN); err != nil {
+			return nil, err
+		}
+	}
+
 	// Use the default broadcast timeout if one isn't provided.
 	if cfg.BroadcastTimeout == 0 {
 		cfg.BroadcastTimeout = pushtx.DefaultBroadcastTimeout
@@ -804,14 +822,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			map[string]time.Time,
 		),
 	}
-	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
-		ConnectedPeers:     s.ConnectedPeers,
-		Peers:              s.eligiblePeers,
-		OnPeerUnresponsive: s.onPeerUnresponsive,
-		Ranking:            querysyncwm.NewPeerRanking(),
-		SchedulerTrace:     cfg.QuerySchedulerTrace,
-		SchedulerEvents:    cfg.QuerySchedulerEvents,
-	})
+	if cfg.BlockDN == nil {
+		s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
+			ConnectedPeers:     s.ConnectedPeers,
+			Peers:              s.eligiblePeers,
+			OnPeerUnresponsive: s.onPeerUnresponsive,
+			Ranking:            querysyncwm.NewPeerRanking(),
+			SchedulerTrace:     cfg.QuerySchedulerTrace,
+			SchedulerEvents:    cfg.QuerySchedulerEvents,
+		})
+	}
 
 	var err error
 
@@ -917,124 +937,160 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
-	bm, err := newBlockManager(&blockManagerCfg{
-		ChainParams:      s.chainParams,
-		BlockHeaders:     s.BlockHeaders,
-		RegFilterHeaders: s.RegFilterHeaders,
-		TimeSource:       s.timeSource,
-		QueryDispatcher:  s.workManager,
-		BanPeer:          s.BanPeer,
-		DisconnectPeer:   s.DisconnectPeer,
-		QuarantinePeer:   s.QuarantinePeer,
-		GetBlock:         s.GetBlock,
-		firstPeerSignal:  s.firstPeerConnect,
-		Broadcaster:      s.workManager,
-	})
-	if err != nil {
-		return nil, err
-	}
-	s.blockManager = bm
-	s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(s.blockManager)
-
-	// Only setup a function to return new addresses to connect to when not
-	// running in connect-only mode.  Private development networks are always in
-	// connect-only mode since it is only intended to connect to specified peers
-	// and actively avoid advertising and connecting to discovered peers in
-	// order to prevent it from becoming a public test network.
-	var newAddressFunc func() (net.Addr, error)
-	if !isDevNetwork(s.chainParams.Net) {
-		newAddressFunc = func() (net.Addr, error) {
-			// Gather our set of currently connected peers to avoid
-			// connecting to them again.
-			connectedPeers := make(map[string]struct{})
-			for _, peer := range s.Peers() {
-				peerAddr := addrmgr.NetAddressKey(peer.NA())
-				connectedPeers[peerAddr] = struct{}{}
-			}
-
-			for tries := 0; tries < 100; tries++ {
-				select {
-				case <-s.quit:
-					return nil, ErrShuttingDown
-				default:
-				}
-
-				addr := s.addrManager.GetAddress()
-				if addr == nil {
-					break
-				}
-
-				// Ignore peers that we've already banned.
-				addrString := addrmgr.NetAddressKey(addr.NetAddress())
-				if s.IsBanned(addrString) {
-					log.Debugf("Ignoring banned peer: %v", addrString)
-					continue
-				}
-
-				// Skip any addresses that correspond to our set
-				// of currently connected peers.
-				if _, ok := connectedPeers[addrString]; ok {
-					continue
-				}
-
-				// The peer behind this address should support
-				// all of our required services.
-				if addr.Services()&RequiredServices != RequiredServices {
-					continue
-				}
-
-				// Address will not be invalid, local or unroutable
-				// because addrmanager rejects those on addition.
-				// Just check that we don't already have an address
-				// in the same group so that we are not connecting
-				// to the same network segment at the expense of
-				// others.
-				key := addrmgr.GroupKey(addr.NetAddress())
-				if s.OutboundGroupCount(key) != 0 {
-					continue
-				}
-
-				// only allow recent nodes (10mins) after we failed 30
-				// times
-				if tries < 30 && time.Since(addr.LastAttempt()) < 10*time.Minute {
-					continue
-				}
-
-				// allow nondefault ports after 50 failed tries.
-				if tries < 50 && fmt.Sprintf("%d", addr.NetAddress().Port) !=
-					s.chainParams.DefaultPort {
-
-					continue
-				}
-
-				// Mark an attempt for the valid address.
-				s.addrManager.Attempt(addr.NetAddress())
-				return s.addrStringToNetAddr(addrString)
-			}
-
-			return nil, errors.New("no valid connect address")
+	if cfg.BlockDN == nil {
+		bm, err := newBlockManager(&blockManagerCfg{
+			ChainParams:      s.chainParams,
+			BlockHeaders:     s.BlockHeaders,
+			RegFilterHeaders: s.RegFilterHeaders,
+			TimeSource:       s.timeSource,
+			QueryDispatcher:  s.workManager,
+			BanPeer:          s.BanPeer,
+			DisconnectPeer:   s.DisconnectPeer,
+			QuarantinePeer:   s.QuarantinePeer,
+			GetBlock:         s.GetBlock,
+			firstPeerSignal:  s.firstPeerConnect,
+			Broadcaster:      s.workManager,
+		})
+		if err != nil {
+			return nil, err
 		}
-	}
+		s.blockManager = bm
+		s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(
+			s.blockManager,
+		)
 
-	cmgrCfg := &connmgr.Config{
-		RetryDuration:  ConnectionRetryInterval,
-		TargetOutbound: uint32(TargetOutbound),
-		OnConnection:   s.outboundPeerConnected,
-		Dial:           dialer,
-	}
-	if len(cfg.ConnectPeers) == 0 {
-		cmgrCfg.GetNewAddress = newAddressFunc
-	}
+		// Only setup a function to return new addresses to connect to
+		// when not running in connect-only mode.  Private development
+		// networks are always in connect-only mode since it is only
+		// intended to connect to specified peers and actively avoid
+		// advertising and connecting to discovered peers in order to
+		// prevent it from becoming a public test network.
+		var newAddressFunc func() (net.Addr, error)
+		if !isDevNetwork(s.chainParams.Net) {
+			newAddressFunc = func() (net.Addr, error) {
+				// Gather our set of currently connected peers
+				// to avoid connecting to them again.
+				connected := make(map[string]struct{})
+				for _, peer := range s.Peers() {
+					peerAddr := addrmgr.NetAddressKey(
+						peer.NA(),
+					)
+					connected[peerAddr] = struct{}{}
+				}
 
-	// Create a connection manager.
-	if MaxPeers < TargetOutbound {
-		TargetOutbound = MaxPeers
+				for tries := 0; tries < 100; tries++ {
+					select {
+					case <-s.quit:
+						return nil, ErrShuttingDown
+					default:
+					}
+
+					addr := s.addrManager.GetAddress()
+					if addr == nil {
+						break
+					}
+
+					// Ignore peers that we've already
+					// banned.
+					addrString := addrmgr.NetAddressKey(
+						addr.NetAddress(),
+					)
+					if s.IsBanned(addrString) {
+						log.Debugf(
+							"Ignoring banned "+
+								"peer: %v",
+							addrString,
+						)
+						continue
+					}
+
+					// Skip any addresses that correspond to
+					// our set of currently connected peers.
+					if _, ok := connected[addrString]; ok {
+						continue
+					}
+
+					// The peer behind this address should
+					// support all of our required services.
+					if addr.Services()&RequiredServices !=
+						RequiredServices {
+
+						continue
+					}
+
+					// Address will not be invalid, local or
+					// unroutable because addrmanager
+					// rejects those on addition. Just check
+					// that we don't already have an address
+					// in the same group so that we are not
+					// connecting to the same network
+					// segment at the expense of others.
+					key := addrmgr.GroupKey(
+						addr.NetAddress(),
+					)
+					if s.OutboundGroupCount(key) != 0 {
+						continue
+					}
+
+					// only allow recent nodes (10mins)
+					// after we failed 30 times
+					if tries < 30 && time.Since(
+						addr.LastAttempt(),
+					) < 10*time.Minute {
+
+						continue
+					}
+
+					// allow nondefault ports after 50
+					// failed tries.
+					if tries < 50 && fmt.Sprintf(
+						"%d", addr.NetAddress().Port,
+					) !=
+						s.chainParams.DefaultPort {
+
+						continue
+					}
+
+					// Mark an attempt for the valid
+					// address.
+					s.addrManager.Attempt(addr.NetAddress())
+					return s.addrStringToNetAddr(addrString)
+				}
+
+				return nil, errors.New(
+					"no valid connect address",
+				)
+			}
+		}
+
+		cmgrCfg := &connmgr.Config{
+			RetryDuration:  ConnectionRetryInterval,
+			TargetOutbound: uint32(TargetOutbound),
+			OnConnection:   s.outboundPeerConnected,
+			Dial:           dialer,
+		}
+		if len(cfg.ConnectPeers) == 0 {
+			cmgrCfg.GetNewAddress = newAddressFunc
+		}
+
+		// Create a connection manager.
+		if MaxPeers < TargetOutbound {
+			TargetOutbound = MaxPeers
+		}
+		cmgr, err := connmgr.New(cmgrCfg)
+		if err != nil {
+			return nil, err
+		}
+		s.connManager = cmgr
+	} else {
+		s.blockDN, err = newBlockDNSync(&s, cfg.BlockDN)
+		if err != nil {
+			return nil, err
+		}
+		s.blockSubscriptionMgr = blockntfns.NewSubscriptionManager(
+			s.blockDN,
+		)
 	}
-	cmgr, err := connmgr.New(cmgrCfg)
-	if err != nil {
-		return nil, err
-	}
-	s.connManager = cmgr
 
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
@@ -1053,6 +1109,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 	s.broadcaster = pushtx.NewBroadcaster(&pushtx.Config{
 		Broadcast: func(tx *wire.MsgTx) error {
+			if s.blockDN != nil {
+				if s.blockDN.cfg.Broadcast == nil {
+					return ErrBlockDNReadOnly
+				}
+				ctx, cancel := context.WithTimeout(
+					s.blockDN.ctx, s.broadcastTimeout,
+				)
+				defer cancel()
+				return s.blockDN.cfg.Broadcast(ctx, tx)
+			}
 			return s.sendTransaction(tx)
 		},
 		SubscribeBlocks: func() (*blockntfns.Subscription, error) {
@@ -1068,6 +1134,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize ban store: %v", err)
+	}
+
+	if s.blockDN != nil {
+		return &s, nil
 	}
 
 	// Start up persistent peers.
@@ -1117,6 +1187,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 // BestBlock retrieves the most recent block's height and hash where we
 // have both the header and filter header ready.
 func (s *ChainService) BestBlock() (*headerfs.BlockStamp, error) {
+	if s.blockDN != nil {
+		s.blockDN.mu.RLock()
+		defer s.blockDN.mu.RUnlock()
+	}
 	bestHeader, bestHeight, err := s.BlockHeaders.ChainTip()
 	if err != nil {
 		return nil, err
@@ -1225,6 +1299,9 @@ func (s *ChainService) DisconnectPeer(addr string) error {
 // peer's IP address, so multiple localhost or NAT-shared peers are not grouped
 // together.
 func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
+	if s.blockDN != nil {
+		return
+	}
 	until := time.Now().Add(duration)
 	log.Warnf("Quarantining peer %v until %s", addr,
 		until.Format(time.RFC3339))
@@ -1321,6 +1398,12 @@ func (s *ChainService) IsBanned(addr string) bool {
 
 // AddPeer adds a new peer that has already been connected to the server.
 func (s *ChainService) AddPeer(sp *ServerPeer) {
+	if s.blockDN != nil {
+		if sp != nil {
+			sp.Disconnect()
+		}
+		return
+	}
 	select {
 	case s.newPeers <- sp:
 	case <-s.quit:
@@ -1689,6 +1772,9 @@ func disconnectPeer(peerList map[int32]*ServerPeer,
 // transaction broadcast through this method will be rebroadcast upon every
 // change of the tip of the chain.
 func (s *ChainService) SendTransaction(tx *wire.MsgTx) error {
+	if s.blockDN != nil && s.blockDN.cfg.Broadcast == nil {
+		return ErrBlockDNReadOnly
+	}
 	// TODO(roasbeef): pipe through querying interface
 	return s.broadcaster.Broadcast(tx)
 }
@@ -1799,6 +1885,9 @@ func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
 // selection has access to the latest block heights for each peer.
 func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash,
 	latestHeight int32, updateSource *ServerPeer) {
+	if s.blockDN != nil {
+		return
+	}
 
 	select {
 	case s.peerHeightsUpdate <- updatePeerHeightsMsg{
@@ -1821,6 +1910,10 @@ func (s *ChainService) Start(ctx context.Context) error {
 	// Already started?
 	if atomic.AddInt32(&s.started, 1) != 1 {
 		return nil
+	}
+
+	if s.blockDN != nil {
+		return s.startBlockDN(ctx)
 	}
 
 	// Import headers if configured.
@@ -1894,6 +1987,10 @@ func (s *ChainService) Stop() error {
 		return nil
 	}
 
+	if s.blockDN != nil {
+		return s.stopBlockDN()
+	}
+
 	var returnErr error
 	storeJoined := true
 	s.connManager.Stop()
@@ -1943,6 +2040,10 @@ func (s *ChainService) Stop() error {
 // IsCurrent lets the caller know whether the chain service's block manager
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
+	if s.blockDN != nil {
+		status, _ := s.BlockDNStatus()
+		return status.Current
+	}
 	return s.blockManager.IsFullySynced()
 }
 

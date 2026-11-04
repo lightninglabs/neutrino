@@ -225,6 +225,9 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 // ConnectedCount returns the number of currently connected peers.
 func (s *ChainService) ConnectedCount() int32 {
+	if s.blockDN != nil {
+		return 0
+	}
 	replyChan := make(chan int32)
 
 	select {
@@ -240,6 +243,10 @@ func (s *ChainService) ConnectedCount() int32 {
 // imemdiately, and new peers as they connect.
 func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(),
 	error) {
+
+	if s.blockDN != nil {
+		return nil, nil, ErrP2PDisabled
+	}
 
 	replyChan := make(chan subConnPeersReply, 1)
 
@@ -265,6 +272,9 @@ func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(),
 // OutboundGroupCount returns the number of peers connected to the given
 // outbound group key.
 func (s *ChainService) OutboundGroupCount(key string) int {
+	if s.blockDN != nil {
+		return 0
+	}
 	replyChan := make(chan int)
 
 	select {
@@ -278,6 +288,9 @@ func (s *ChainService) OutboundGroupCount(key string) int {
 // AddedNodeInfo returns an array of btcjson.GetAddedNodeInfoResult structures
 // describing the persistent (added) nodes.
 func (s *ChainService) AddedNodeInfo() []*ServerPeer {
+	if s.blockDN != nil {
+		return nil
+	}
 	replyChan := make(chan []*ServerPeer)
 
 	select {
@@ -290,6 +303,9 @@ func (s *ChainService) AddedNodeInfo() []*ServerPeer {
 
 // Peers returns an array of all connected peers.
 func (s *ChainService) Peers() []*ServerPeer {
+	if s.blockDN != nil {
+		return nil
+	}
 	replyChan := make(chan []*ServerPeer)
 
 	select {
@@ -303,6 +319,9 @@ func (s *ChainService) Peers() []*ServerPeer {
 // eligiblePeers returns the connected peers that are currently eligible to
 // receive queries, as a snapshot suitable for the work manager's broadcasts.
 func (s *ChainService) eligiblePeers() []querysyncwm.Peer {
+	if s.blockDN != nil {
+		return nil
+	}
 	serverPeers := s.Peers()
 
 	peers := make([]querysyncwm.Peer, len(serverPeers))
@@ -317,6 +336,9 @@ func (s *ChainService) eligiblePeers() []querysyncwm.Peer {
 // inbound nodes will be searched for the target node. An error message will
 // be returned if the peer was not found.
 func (s *ChainService) DisconnectNodeByAddr(addr string) error {
+	if s.blockDN != nil {
+		return ErrP2PDisabled
+	}
 	replyChan := make(chan error)
 
 	select {
@@ -334,6 +356,9 @@ func (s *ChainService) DisconnectNodeByAddr(addr string) error {
 // inbound nodes will be searched for the target node. An error message will be
 // returned if the peer was not found.
 func (s *ChainService) DisconnectNodeByID(id int32) error {
+	if s.blockDN != nil {
+		return ErrP2PDisabled
+	}
 	replyChan := make(chan error)
 
 	select {
@@ -350,6 +375,9 @@ func (s *ChainService) DisconnectNodeByID(id int32) error {
 // RemoveNodeByAddr removes a peer from the list of persistent peers if
 // present. An error will be returned if the peer was not found.
 func (s *ChainService) RemoveNodeByAddr(addr string) error {
+	if s.blockDN != nil {
+		return ErrP2PDisabled
+	}
 	replyChan := make(chan error)
 
 	select {
@@ -366,6 +394,9 @@ func (s *ChainService) RemoveNodeByAddr(addr string) error {
 // RemoveNodeByID removes a peer by node ID from the list of persistent peers
 // if present. An error will be returned if the peer was not found.
 func (s *ChainService) RemoveNodeByID(id int32) error {
+	if s.blockDN != nil {
+		return ErrP2PDisabled
+	}
 	replyChan := make(chan error)
 
 	select {
@@ -383,6 +414,9 @@ func (s *ChainService) RemoveNodeByID(id int32) error {
 // peer will be persistent and reconnect if the connection is lost.
 // It is an error to call this with an already existing peer.
 func (s *ChainService) ConnectNode(addr string, permanent bool) error {
+	if s.blockDN != nil {
+		return ErrP2PDisabled
+	}
 	replyChan := make(chan error)
 
 	select {
@@ -402,6 +436,9 @@ func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 // ForAllPeers method doesn't return anything as the closure passed to it
 // doesn't return anything.
 func (s *ChainService) ForAllPeers(closure func(sp *ServerPeer)) {
+	if s.blockDN != nil {
+		return
+	}
 	select {
 	case s.query <- forAllPeersMsg{closure: closure}:
 	case <-s.quit:
