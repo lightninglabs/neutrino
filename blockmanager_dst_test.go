@@ -217,7 +217,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		require.NoError(t, err)
 		require.EqualValues(t, 4, height)
 		require.Equal(t, headers[3].BlockHash(), tip.BlockHash())
-		require.Equal(t, height, bm.headerTip)
+		require.Equal(t, height, bm.tipFeed.Snapshot().BlockHeight)
 		for _, id := range []headersync.RangeID{firstID, secondID} {
 			rng, ok, err := manager.SnapshotRange(ctx, id)
 			require.NoError(t, err)

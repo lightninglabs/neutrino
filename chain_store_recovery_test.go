@@ -227,7 +227,7 @@ func TestRollbackAppliedErrorRetainsDisconnect(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			Height:      0,
 		}
 		_, err := backend.Rollback(request)
@@ -272,7 +272,8 @@ func TestSnapshotHealsBlockWrite(t *testing.T) {
 		fixture := dstChains()
 		_, err := backend.CommitBlocks(
 			chainstore.BlockCommit{
-				ExpectedParent: *bm.publishedBlockTip.Load(),
+				ExpectedParent: bm.tipFeed.Snapshot().
+					BlockStamp(),
 				Headers: []headerfs.BlockHeader{
 					{
 						BlockHeader: fixture.honest[1],
@@ -288,7 +289,7 @@ func TestSnapshotHealsBlockWrite(t *testing.T) {
 		require.Equal(
 			t,
 			int32(1),
-			bm.publishedBlockTip.Load().Height,
+			bm.tipFeed.Snapshot().BlockStamp().Height,
 			"snapshot must heal actor-owned visible block status "+
 				"after an applied write",
 		)
@@ -308,7 +309,8 @@ func TestChainStoreRollbackLostAckAndReadback(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		reply, err := backend.Rollback(chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 2,
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
+			Height:      2,
 		})
 		require.ErrorIs(t, err, errDSTWrite)
 		require.False(t, reply.BlockTipValid)
@@ -389,7 +391,7 @@ func TestChainStoreReorgWriteOutcomes(t *testing.T) {
 				backend := newChainStoreBackend(bm)
 
 				// Replace blocks 2 and 3 with the fork.
-				tip := *bm.publishedBlockTip.Load()
+				tip := bm.tipFeed.Snapshot().BlockStamp()
 				reply, err := backend.Reorg(chainstore.Reorg{
 					Work:        winningReorgWork,
 					ExpectedTip: tip,
@@ -477,7 +479,8 @@ func TestChainStoreRollbackFailureBeforeWrite(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 2,
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
+			Height:      2,
 		}
 		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
@@ -571,7 +574,7 @@ func TestChainStorePairedRollbackRetry(t *testing.T) {
 				}
 				bm.cfg.RegFilterHeaders = fault
 				backend := newChainStoreBackend(bm)
-				tip := *bm.publishedBlockTip.Load()
+				tip := bm.tipFeed.Snapshot().BlockStamp()
 				request := chainstore.Rollback{
 					ExpectedTip: tip,
 					Height:      1,
@@ -663,7 +666,7 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 		bm.cfg.RegFilterHeaders = fault
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			Height:      1,
 		}
 		reply, err := backend.Rollback(request)
@@ -684,7 +687,9 @@ func TestChainStoreFilterRollbackLostAckAndReadback(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, reply.BlockTipValid)
 		require.Equal(t, int32(1), reply.BlockTip.Height)
-		require.Equal(t, uint32(1), bm.filterHeaderTip)
+		require.Equal(
+			t, uint32(1), bm.tipFeed.Snapshot().FilterHeight,
+		)
 		synctest.Wait()
 		require.Len(t, events, 2)
 		for height := 3; height >= 2; height-- {
@@ -720,7 +725,8 @@ func TestChainStoreRollbackRepeatedLostAcks(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(), Height: 0,
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
+			Height:      0,
 		}
 		reply, err := backend.Rollback(request)
 		require.ErrorIs(t, err, errDSTWrite)
@@ -777,7 +783,7 @@ func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 		backend := newChainStoreBackend(bm)
 		reply, err := backend.Reorg(chainstore.Reorg{
 			Work:        winningReorgWork,
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
 				{BlockHeader: fixture.
@@ -839,7 +845,7 @@ func TestChainStoreReorgResumesReplacementPrefix(t *testing.T) {
 		backend := newChainStoreBackend(bm)
 		reply, err := backend.Reorg(chainstore.Reorg{
 			Work:        winningReorgWork,
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
 				{BlockHeader: fixture.
@@ -915,7 +921,7 @@ func TestChainStoreCompletedIntentDoesNotReplay(t *testing.T) {
 		backend := newChainStoreBackend(bm)
 		_, err := backend.Reorg(chainstore.Reorg{
 			Work:        winningReorgWork,
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
 				{BlockHeader: fixture.
@@ -987,7 +993,7 @@ func TestRollbackRecoveryReadRetainsWholeTarget(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			Height:      0,
 		}
 		// The rollback is applied, but its acknowledgement is lost.
@@ -1045,7 +1051,7 @@ func TestRollbackParentReadRetainsTarget(t *testing.T) {
 		}
 		backend := newChainStoreBackend(bm)
 		request := chainstore.Rollback{
-			ExpectedTip: *bm.publishedBlockTip.Load(),
+			ExpectedTip: bm.tipFeed.Snapshot().BlockStamp(),
 			Height:      0,
 		}
 		_, err := backend.Rollback(request)
@@ -1072,7 +1078,7 @@ func TestChainStoreReorgRejectsWeakBranch(t *testing.T) {
 		backend := newChainStoreBackend(bm)
 		fixture := dstChains()
 		fork := fixture.fork[1]
-		tip := *bm.publishedBlockTip.Load()
+		tip := bm.tipFeed.Snapshot().BlockStamp()
 
 		// The two blocks above the fork are the known work.
 		header2, err := blocks.FetchHeaderByHeight(2)
@@ -1166,7 +1172,8 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 							Height:      3,
 						},
 					}
-					tip := *bm.publishedBlockTip.Load()
+					tip := bm.tipFeed.Snapshot().
+						BlockStamp()
 					request := chainstore.Reorg{
 						Work:        winningReorgWork,
 						ExpectedTip: tip,
@@ -1180,7 +1187,8 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 						reply.BlockTip.Hash,
 					)
 				} else {
-					tip := *bm.publishedBlockTip.Load()
+					tip := bm.tipFeed.Snapshot().
+						BlockStamp()
 					request := chainstore.Rollback{
 						ExpectedTip: tip,
 						Height:      1,
@@ -1252,8 +1260,8 @@ func TestChainStoreBackendBlockMutation(t *testing.T) {
 		require.NoError(t, reply.Err)
 		require.Equal(t, header.BlockHash(), reply.BlockTip.Hash)
 		require.Equal(t, int32(1), reply.BlockTip.Height)
-		visible := bm.publishedBlockTip.Load()
-		require.Equal(t, reply.BlockTip, *visible)
+		visible := bm.tipFeed.Snapshot().BlockStamp()
+		require.Equal(t, reply.BlockTip, visible)
 
 		// A second command prepared on the old parent is rejected.
 		result = client.Ask(t.Context(), request)
@@ -1272,8 +1280,8 @@ func TestChainStoreBackendBlockMutation(t *testing.T) {
 		rolledBack := result.UnwrapOr(chainstore.Reply{})
 		require.NoError(t, rolledBack.Err)
 		require.Equal(t, genesis.BlockHash(), rolledBack.BlockTip.Hash)
-		visible = bm.publishedBlockTip.Load()
-		require.Equal(t, rolledBack.BlockTip, *visible)
+		visible = bm.tipFeed.Snapshot().BlockStamp()
+		require.Equal(t, rolledBack.BlockTip, visible)
 		n := <-notifications
 		_, ok := n.(*blockntfns.Disconnected)
 		require.True(t, ok)

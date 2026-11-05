@@ -106,7 +106,7 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 					d.bm.tipForTest().Tip().Header.
 						BlockHash(),
 				)
-				visible := d.bm.publishedBlockTip.Load()
+				visible := d.bm.tipFeed.Snapshot().BlockStamp()
 				require.Equal(t, tc.height, visible.Height)
 				require.Equal(
 					t,
@@ -396,7 +396,9 @@ func TestChainStoreSerialLostWriteAckReconciles(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), height)
 		require.Equal(t, int32(1), bm.tipForTest().Tip().Height)
-		require.Equal(t, int32(1), bm.publishedBlockTip.Load().Height)
+		require.Equal(
+			t, int32(1), bm.tipFeed.Snapshot().BlockStamp().Height,
+		)
 		require.Nil(t, bm.pendingHeaderCommit)
 		require.NotNil(t, bm.headerCommitRetryTimer)
 	})

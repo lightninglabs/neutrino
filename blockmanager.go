@@ -233,57 +233,11 @@ type blockManager struct { // nolint:maligned
 	// genesisHeader is the filter header of the genesis block.
 	genesisHeader chainhash.Hash
 
-	// headerTip will be set to the current block header tip at all times.
-	// Callers MUST hold the lock below each time they read/write from this
-	// field.
-	headerTip uint32
-
-	// headerTipHash will be set to the hash of the current block header
-	// tip at all times. Callers MUST hold the lock below each time they
-	// read/write from this field.
-	headerTipHash chainhash.Hash
-
-	// publishedBlockTip is an immutable status snapshot safe to read while
-	// a store write holds its internal lock.
-	publishedBlockTip atomic.Pointer[headerfs.BlockStamp]
-
-	// newHeadersMtx is the mutex that should be held when reading/writing
-	// the headerTip variable above.
-	//
-	// NOTE: When using this mutex along with newFilterHeadersMtx at the
-	// same time, newHeadersMtx should always be acquired first.
-	newHeadersMtx sync.RWMutex
-
-	// newHeadersSignal is condition variable which will be used to notify
-	// any waiting callers (via Broadcast()) that the tip of the current
-	// chain has changed. This is useful when callers need to know we have
-	// a new tip, but not necessarily each block that was connected during
-	// switch over.
-	newHeadersSignal *sync.Cond
-
-	// filterHeaderTip will be set to the height of the current filter
-	// header tip at all times. Callers MUST hold the lock below each time
-	// they read/write from this field.
-	filterHeaderTip uint32
-
-	// filterHeaderTipHash will be set to the current block hash of the
-	// block at height filterHeaderTip at all times. Callers MUST hold the
-	// lock below each time they read/write from this field.
-	filterHeaderTipHash chainhash.Hash
-
-	// newFilterHeadersMtx is the mutex that should be held when
-	// reading/writing the filterHeaderTip variable above.
-	//
-	// NOTE: When using this mutex along with newHeadersMtx at the same
-	// time, newHeadersMtx should always be acquired first.
-	newFilterHeadersMtx sync.RWMutex
-
-	// newFilterHeadersSignal is condition variable which will be used to
-	// notify any waiting callers (via Broadcast()) that the tip of the
-	// current filter header chain has changed. This is useful when callers
-	// need to know we have a new tip, but not necessarily each filter
-	// header that was connected during switch over.
-	newFilterHeadersSignal *sync.Cond
+	// tipFeed holds the block header tip and the filter header tip that
+	// the chain store has made visible. The chain store publishes to it,
+	// and the filter header handler waits on it. Reading a snapshot never
+	// waits on a store write.
+	tipFeed chainstore.TipFeed
 
 	// syncPeer is the peer we sync headers from. Only the block handler
 	// writes it, through setSyncPeer, and other goroutines read it as a
@@ -375,12 +329,6 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	}
 	bm.quitCtx, bm.quitCancel = context.WithCancel(context.Background())
 
-	// Next we'll create the two signals that goroutines will use to wait
-	// on a particular header chain height before starting their normal
-	// duties.
-	bm.newHeadersSignal = sync.NewCond(&bm.newHeadersMtx)
-	bm.newFilterHeadersSignal = sync.NewCond(&bm.newFilterHeadersMtx)
-
 	// We fetch the genesis header to use for verifying the first received
 	// interval.
 	genesisHeader, err := cfg.RegFilterHeaders.FetchHeaderByHeight(0)
@@ -398,30 +346,25 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		Header: *header,
 		Height: int32(height),
 	}
-	bm.headerTip = height
-	bm.headerTipHash = header.BlockHash()
-	bm.publishedBlockTip.Store(&headerfs.BlockStamp{
-		Height: int32(height), Hash: bm.headerTipHash,
-		Timestamp: header.Timestamp,
-	})
+	bm.tipFeed.SetBlockTip(height, header.BlockHash(), header.Timestamp)
 	if err := bm.initHeaderSyncManager(tipNode); err != nil {
 		return nil, err
 	}
 
 	// Finally, we'll set the filter header tip so any goroutines waiting
-	// on the condition obtain the correct initial state.
-	_, bm.filterHeaderTip, err = cfg.RegFilterHeaders.ChainTip()
+	// on the feed obtain the correct initial state.
+	_, filterHeight, err := cfg.RegFilterHeaders.ChainTip()
 	if err != nil {
 		return nil, err
 	}
 
 	// We must also ensure the filter header tip hash is set to the block
 	// hash at the filter tip height.
-	fh, err := cfg.BlockHeaders.FetchHeaderByHeight(bm.filterHeaderTip)
+	fh, err := cfg.BlockHeaders.FetchHeaderByHeight(filterHeight)
 	if err != nil {
 		return nil, err
 	}
-	bm.filterHeaderTipHash = fh.BlockHash()
+	bm.tipFeed.SetFilterTip(filterHeight, fh.BlockHash())
 
 	// The chain store actor exists from construction so that every
 	// header and filter header write goes through it, whether or not
@@ -496,12 +439,7 @@ func (b *blockManager) ResetHeaderState() error {
 		return fmt.Errorf("failed to read block header chain "+
 			"tip: %w", err)
 	}
-	b.headerTip = height
-	b.headerTipHash = header.BlockHash()
-	b.publishedBlockTip.Store(&headerfs.BlockStamp{
-		Height: int32(height), Hash: b.headerTipHash,
-		Timestamp: header.Timestamp,
-	})
+	b.tipFeed.SetBlockTip(height, header.BlockHash(), header.Timestamp)
 	tipNode := headerlist.Node{
 		Header: *header,
 		Height: int32(height),
@@ -511,7 +449,7 @@ func (b *blockManager) ResetHeaderState() error {
 	}
 
 	// Re-read the filter header chain tip from the store.
-	_, b.filterHeaderTip, err = b.cfg.RegFilterHeaders.ChainTip()
+	_, filterHeight, err := b.cfg.RegFilterHeaders.ChainTip()
 	if err != nil {
 		return fmt.Errorf("failed to read filter header chain "+
 			"tip: %w", err)
@@ -519,15 +457,15 @@ func (b *blockManager) ResetHeaderState() error {
 
 	// Ensure the filter header tip hash is set to the block hash at the
 	// filter tip height.
-	fh, err := b.cfg.BlockHeaders.FetchHeaderByHeight(b.filterHeaderTip)
+	fh, err := b.cfg.BlockHeaders.FetchHeaderByHeight(filterHeight)
 	if err != nil {
 		return fmt.Errorf("failed to fetch block header at filter "+
-			"tip height %d: %w", b.filterHeaderTip, err)
+			"tip height %d: %w", filterHeight, err)
 	}
-	b.filterHeaderTipHash = fh.BlockHash()
+	b.tipFeed.SetFilterTip(filterHeight, fh.BlockHash())
 
 	log.Infof("Block manager header state reset: block tip=%d, "+
-		"filter tip=%d", height, b.filterHeaderTip)
+		"filter tip=%d", height, filterHeight)
 
 	return nil
 }
@@ -571,25 +509,6 @@ func (b *blockManager) Stop() error {
 		return nil
 	}
 
-	// We'll send out update signals before the quit to ensure that any
-	// goroutines waiting on them will properly exit.
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(time.Millisecond * 50)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-			}
-
-			b.newHeadersSignal.Broadcast()
-			b.newFilterHeadersSignal.Broadcast()
-		}
-	}()
-
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.quitCancel()
@@ -604,12 +523,7 @@ func (b *blockManager) Stop() error {
 	b.cancelHeaderCooldownWakeup()
 	b.stopHeaderSyncActors()
 
-	if err := b.chainStore.Stop(); err != nil {
-		close(done)
-		return err
-	}
-	close(done)
-	return nil
+	return b.chainStore.Stop()
 }
 
 func (b *blockManager) startHeaderSyncActors() {
@@ -1277,11 +1191,8 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	syncPeer := b.syncPeer.Load()
 
 	// Status must not wait on a store write holding the backend lock.
-	tip := b.publishedBlockTip.Load()
-	if tip == nil {
-		return false
-	}
-	height := uint32(tip.Height)
+	tips := b.tipFeed.Snapshot()
+	height := tips.BlockHeight
 
 	// There is no last checkpoint if checkpoints are disabled or there are
 	// none for this current network.
@@ -1303,7 +1214,7 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	// If our time source (median times of all the connected peers) is at
 	// least 24 hours ahead of our best known block, we aren't current.
 	minus24Hours := b.cfg.TimeSource.AdjustedTime().Add(-24 * time.Hour)
-	if tip.Timestamp.Before(minus24Hours) {
+	if tips.BlockTime.Before(minus24Hours) {
 		return false
 	}
 
@@ -1387,9 +1298,7 @@ func (b *blockManager) Notifications() <-chan blockntfns.BlockNtfn {
 func (b *blockManager) NotificationsSinceHeight(
 	height uint32) ([]blockntfns.BlockNtfn, uint32, error) {
 
-	b.newFilterHeadersMtx.RLock()
-	bestHeight := b.filterHeaderTip
-	b.newFilterHeadersMtx.RUnlock()
+	bestHeight := b.tipFeed.Snapshot().FilterHeight
 
 	// If a height of 0 is provided by the caller, then a backlog of
 	// notifications is not needed.

@@ -55,9 +55,8 @@ func (b *blockManager) cfHandler() {
 	}
 
 waitForHeaders:
-	b.newFilterHeadersMtx.RLock()
-	filterTip := b.filterHeaderTip
-	b.newFilterHeadersMtx.RUnlock()
+	filterTip := b.tipFeed.Snapshot().FilterHeight
+
 	// We'll wait until the main header sync is either finished or the
 	// filter headers are lagging at least a checkpoint interval behind the
 	// block headers, before we actually start to sync the set of
@@ -65,29 +64,13 @@ waitForHeaders:
 	log.Infof("Waiting for more block headers, then will start "+
 		"cfheaders sync from height %v...", filterTip)
 
-	b.newHeadersSignal.L.Lock()
-	b.newFilterHeadersMtx.RLock()
-	for !(b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip ||
-		b.BlockHeadersSynced()) {
-		b.newFilterHeadersMtx.RUnlock()
-		b.newHeadersSignal.Wait()
-
-		// While we're awake, we'll quickly check to see if we need to
-		// quit early.
-		select {
-		case <-b.quit:
-			b.newHeadersSignal.L.Unlock()
-			return
-
-		default:
-		}
-
-		// Re-acquire the lock in order to check for the filter header
-		// tip at the next iteration of the loop.
-		b.newFilterHeadersMtx.RLock()
+	_, ok := b.tipFeed.Wait(b.quit, func(tips chainstore.Tips) bool {
+		return tips.FilterHeight+wire.CFCheckptInterval <=
+			tips.BlockHeight || b.BlockHeadersSynced()
+	})
+	if !ok {
+		return
 	}
-	b.newFilterHeadersMtx.RUnlock()
-	b.newHeadersSignal.L.Unlock()
 
 	// Now that the block headers are finished or ahead of the filter
 	// headers, we'll grab the current chain tip so we can base our filter
@@ -108,12 +91,11 @@ waitForHeaders:
 	}
 	lastHash := lastHeader.BlockHash()
 
-	b.newFilterHeadersMtx.RLock()
+	tips := b.tipFeed.Snapshot()
 	log.Infof("Starting cfheaders sync from (block_height=%v, "+
 		"block_hash=%v) to (block_height=%v, block_hash=%v)",
-		b.filterHeaderTip, b.filterHeaderTipHash, lastHeight,
+		tips.FilterHeight, tips.FilterHash, lastHeight,
 		lastHeader.BlockHash())
-	b.newFilterHeadersMtx.RUnlock()
 
 	fType := wire.GCSFilterRegular
 	store := b.cfg.RegFilterHeaders
@@ -226,15 +208,10 @@ waitForHeaders:
 	// lagging more than a checkpoint interval behind the block header tip,
 	// we also go back to the loop to utilize the faster check pointed
 	// fetching.
-	b.newHeadersMtx.RLock()
-	b.newFilterHeadersMtx.RLock()
-	if b.filterHeaderTip+wire.CFCheckptInterval <= b.headerTip {
-		b.newFilterHeadersMtx.RUnlock()
-		b.newHeadersMtx.RUnlock()
+	tips = b.tipFeed.Snapshot()
+	if tips.FilterHeight+wire.CFCheckptInterval <= tips.BlockHeight {
 		goto waitForHeaders
 	}
-	b.newFilterHeadersMtx.RUnlock()
-	b.newHeadersMtx.RUnlock()
 
 	log.Infof("Fully caught up with cfheaders at height "+
 		"%v, waiting at tip for new blocks", lastHeight)
@@ -246,29 +223,14 @@ waitForHeaders:
 	for {
 		// We'll wait until the filter header tip and the header tip
 		// are mismatched.
-		b.newHeadersSignal.L.Lock()
-		b.newFilterHeadersMtx.RLock()
-		for b.filterHeaderTipHash == b.headerTipHash {
-			// We'll wait here until we're woken up by the
-			// broadcast signal.
-			b.newFilterHeadersMtx.RUnlock()
-			b.newHeadersSignal.Wait()
-
-			// Before we proceed, we'll check if we need to exit at
-			// all.
-			select {
-			case <-b.quit:
-				b.newHeadersSignal.L.Unlock()
-				return
-			default:
-			}
-
-			// Re-acquire the lock in order to check for the filter
-			// header tip at the next iteration of the loop.
-			b.newFilterHeadersMtx.RLock()
+		_, ok := b.tipFeed.Wait(
+			b.quit, func(tips chainstore.Tips) bool {
+				return tips.FilterHash != tips.BlockHash
+			},
+		)
+		if !ok {
+			return
 		}
-		b.newFilterHeadersMtx.RUnlock()
-		b.newHeadersSignal.L.Unlock()
 
 		// At this point, we know that there're a set of new filter
 		// headers to fetch, so we'll grab them now.

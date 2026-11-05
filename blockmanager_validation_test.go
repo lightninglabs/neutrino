@@ -212,7 +212,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 	bm.tipForTest().Reset(headerlist.Node{
 		Height: 11, Header: *parent,
 	})
-	bm.headerTip, bm.headerTipHash = 11, parent.BlockHash()
+	bm.tipFeed.SetBlockTip(11, parent.BlockHash(), parent.Timestamp)
 	manager := bm.headerSync.ManagerForTest()
 	_, err = manager.AdvanceCommittedTip(ctx, 11, parent.BlockHash())
 	require.NoError(t, err)
@@ -247,7 +247,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, headersync.PeerReady, peer.State)
-	require.EqualValues(t, 11, bm.headerTip)
+	require.EqualValues(t, 11, bm.tipFeed.Snapshot().BlockHeight)
 
 	failing.readErr = nil
 	require.NoError(t, bm.commitReadyHeaderSyncRanges())

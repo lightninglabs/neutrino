@@ -232,9 +232,8 @@ func testCFHeaderWriteRollback(
 	_, filterHeight, err := filters.ChainTip()
 	require.NoError(t, err)
 	require.Equal(t, uint32(dstReorgFork), filterHeight)
-	bm.newFilterHeadersMtx.RLock()
-	cachedHeight, cachedHash := bm.filterHeaderTip, bm.filterHeaderTipHash
-	bm.newFilterHeadersMtx.RUnlock()
+	tips := bm.tipFeed.Snapshot()
+	cachedHeight, cachedHash := tips.FilterHeight, tips.FilterHash
 	require.Equal(t, filterHeight, cachedHeight)
 	require.Equal(t, fixture.honest[dstReorgFork].BlockHash(), cachedHash)
 	for height := dstReorgFork + 1; height <= oldTip; height++ {
@@ -432,10 +431,9 @@ func TestCFHeaderMutationErrors(t *testing.T) {
 					test.wantHeight,
 					durableHeight,
 				)
-				bm.newFilterHeadersMtx.RLock()
-				cachedHeight := bm.filterHeaderTip
-				cachedHash := bm.filterHeaderTipHash
-				bm.newFilterHeadersMtx.RUnlock()
+				tips := bm.tipFeed.Snapshot()
+				cachedHeight := tips.FilterHeight
+				cachedHash := tips.FilterHash
 				require.Equal(
 					t,
 					durableHeight,
@@ -793,12 +791,10 @@ func testCFHeaderWatermark(t *testing.T, published bool, target uint32,
 			h.BlockHash(),
 		)
 	}
-	bm.newFilterHeadersMtx.RLock()
-	defer bm.newFilterHeadersMtx.RUnlock()
 	require.Equal(
 		t,
 		target,
-		bm.filterHeaderTip,
+		bm.tipFeed.Snapshot().FilterHeight,
 	)
 }
 

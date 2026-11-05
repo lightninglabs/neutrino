@@ -490,9 +490,11 @@ func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
 		Height:      1,
 	}))
 
-	// The durable tip has advanced, while headerTipHash still identifies
+	// The durable tip has advanced, while the visible tip still identifies
 	// genesis. A request must take both boundary fields from the store.
-	require.Equal(t, genesis.BlockHash(), bm.headerTipHash)
+	require.Equal(
+		t, genesis.BlockHash(), bm.tipFeed.Snapshot().BlockHash,
+	)
 	stopHash := chainhash.Hash{1}
 	bm.tipForTest().SetNextCheckpointForTest(&chaincfg.Checkpoint{
 		Height: 3001,
@@ -535,8 +537,7 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 	cache := bm.tipForTest()
 	cache.PushBackForTest(headerlist.Node{Header: first, Height: 1})
 	cache.PushBackForTest(headerlist.Node{Header: second, Height: 2})
-	bm.headerTip = 2
-	bm.headerTipHash = second.BlockHash()
+	bm.tipFeed.SetBlockTip(2, second.BlockHash(), second.Timestamp)
 	stopHash := chainhash.Hash{1}
 	bm.tipForTest().SetNextCheckpointForTest(
 		&chaincfg.Checkpoint{Height: 3002, Hash: &stopHash},
@@ -560,8 +561,9 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 		},
 	})
 
-	require.Equal(t, uint32(2), bm.headerTip)
-	require.Equal(t, second.BlockHash(), bm.headerTipHash)
+	tips := bm.tipFeed.Snapshot()
+	require.Equal(t, uint32(2), tips.BlockHeight)
+	require.Equal(t, second.BlockHash(), tips.BlockHash)
 	tip, height, err := store.ChainTip()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), height)

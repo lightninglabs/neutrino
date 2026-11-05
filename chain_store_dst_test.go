@@ -789,10 +789,9 @@ func (d *chainDSTRun) checkPublished(event string, blockHash []chainhash.Hash) {
 	_, fh, err := d.rawFilters.ChainTip()
 	require.NoError(d.t, err)
 
-	d.bm.newFilterHeadersMtx.RLock()
-	published := d.bm.filterHeaderTip
-	publishedHash := d.bm.filterHeaderTipHash
-	d.bm.newFilterHeadersMtx.RUnlock()
+	tips := d.bm.tipFeed.Snapshot()
+	published := tips.FilterHeight
+	publishedHash := tips.FilterHash
 	if published > fh {
 		d.fail(event, "published filter tip %d above durable %d",
 			published, fh)
@@ -864,9 +863,7 @@ func (d *chainDSTRun) converged() (bool, string) {
 	_, fh, err := d.rawFilters.ChainTip()
 	require.NoError(d.t, err)
 
-	d.bm.newFilterHeadersMtx.RLock()
-	published := d.bm.filterHeaderTip
-	d.bm.newFilterHeadersMtx.RUnlock()
+	published := d.bm.tipFeed.Snapshot().FilterHeight
 
 	d.mtx.Lock()
 	defer d.mtx.Unlock()

@@ -503,11 +503,7 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 
 	var height uint32
 	if b.pendingHeaderCommit != nil {
-		tip := b.publishedBlockTip.Load()
-		if tip == nil {
-			return
-		}
-		height = uint32(tip.Height)
+		height = b.tipFeed.Snapshot().BlockHeight
 	} else {
 		_, currentHeight, err := b.cfg.BlockHeaders.ChainTip()
 		if err != nil {
@@ -1285,13 +1281,7 @@ func (b *blockManager) trimDurableHeaderSyncRange(rng headersync.HeaderRange,
 	staged headersync.StagedRange) (headersync.RangeCommit, bool, error) {
 
 	commit := headersync.RangeCommit{Range: rng, Staged: staged}
-	snapshot := b.publishedBlockTip.Load()
-	if snapshot == nil {
-		return commit, false, fmt.Errorf(
-			"published block tip unavailable",
-		)
-	}
-	tip := uint32(snapshot.Height)
+	tip := b.tipFeed.Snapshot().BlockHeight
 	if tip <= rng.StartHeight || len(staged.Headers) == 0 {
 		return commit, true, nil
 	}
