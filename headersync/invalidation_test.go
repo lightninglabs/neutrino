@@ -91,7 +91,7 @@ func TestInvalidationReleasesPeerActor(t *testing.T) {
 	old, ok, err := peer.RequestRange(ctx)
 	require.NoError(t, err)
 	require.True(t, ok)
-	runtime.Session().TrackRange("honest", RangeRequest{Assignment: old})
+	runtime.session.TrackRange("honest", RangeRequest{Assignment: old})
 	_, err = runtime.Controller().InvalidateRange(
 		ctx, 1, time.Now().Add(time.Hour),
 	)

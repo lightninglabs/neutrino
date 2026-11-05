@@ -72,7 +72,7 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 					dstConfig{mode: dstModeCheckpointAll},
 				)
 				d.inv.skipLeases = true
-				d.bm.headerSync.Session().StopAll()
+				d.bm.sessionForTest().StopAll()
 				d.store.mode = tc.mode
 
 				// Deliver two headers into the faulty store.

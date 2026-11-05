@@ -90,7 +90,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		slow, _, err := runtime.RegisterPeer(ctx, slowPeer)
 		require.NoError(t, err)
 		synctest.Wait()
-		firstID := runtime.Session().AllocateRangeID()
+		firstID := runtime.Driver().SessionForTest().AllocateRangeID()
 		_, ok, err := manager.PlanRange(ctx, firstID, 0, 2)
 		require.NoError(t, err)
 		require.True(t, ok)
@@ -107,7 +107,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		fast, _, err := runtime.RegisterPeer(ctx, fastPeer)
 		require.NoError(t, err)
 		synctest.Wait()
-		secondID := runtime.Session().AllocateRangeID()
+		secondID := runtime.Driver().SessionForTest().AllocateRangeID()
 		_, ok, err = manager.PlanRange(ctx, secondID, 2, 4)
 		require.NoError(t, err)
 		require.True(t, ok)
@@ -138,7 +138,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 			)
 			require.NoError(t, err)
 			require.True(t, completion.Accepted)
-			runtime.Session().StageRange(
+			runtime.Driver().SessionForTest().StageRange(
 				assignment.RangeID, data, assignment.PeerID,
 			)
 		}
@@ -223,7 +223,8 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.Equal(t, headersync.RangeCommitted, rng.State)
-			_, staged := runtime.Session().StagedRange(id)
+			session := runtime.Driver().SessionForTest()
+			_, staged := session.StagedRange(id)
 			require.False(t, staged)
 		}
 		metrics, err := manager.Metrics(ctx)
