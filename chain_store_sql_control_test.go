@@ -109,9 +109,7 @@ func TestChainStoreSQLControlProgress(t *testing.T) {
 	_, ok := bm.headerSync.Peer(spectator.Addr())
 	require.True(t, ok)
 	peer := newTestServerPeer(t, "127.0.0.1:18444", dstChainHeight+1)
-	bm.syncPeerMutex.Lock()
-	bm.setSyncPeerLocked(peer)
-	bm.syncPeerMutex.Unlock()
+	bm.setSyncPeer(peer)
 
 	// Send one new header and pause its insert inside the transaction.
 	msg := wire.NewMsgHeaders()

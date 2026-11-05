@@ -398,7 +398,7 @@ func TestCFHeaderReorgDoesNotBanHonestPeer(t *testing.T) {
 			"127.0.0.1:18444",
 			int32(oldHeight+1),
 		)
-		bm.setSyncPeerLocked(peer)
+		bm.setSyncPeer(peer)
 		go func() {
 			for {
 				select {

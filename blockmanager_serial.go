@@ -218,11 +218,9 @@ func (b *blockManager) finishSerialHeaderFollowup(peers *list.List,
 			// rather than wait for a deadline that was never
 			// armed.
 			removeSyncCandidate(peers, target)
-			b.syncPeerMutex.Lock()
-			if b.syncPeer == target {
-				b.setSyncPeerLocked(nil)
+			if b.syncPeer.Load() == target {
+				b.setSyncPeer(nil)
 			}
-			b.syncPeerMutex.Unlock()
 			b.startSync(peers)
 		}
 	}

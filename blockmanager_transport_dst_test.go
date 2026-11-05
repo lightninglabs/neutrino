@@ -1645,7 +1645,7 @@ func TestSerialFollowUpUsesFullLocator(t *testing.T) {
 		peers := list.New()
 		peers.PushBack(syncPeer)
 		peers.PushBack(other)
-		bm.setSyncPeerLocked(syncPeer)
+		bm.setSyncPeer(syncPeer)
 
 		msg := wire.NewMsgHeaders()
 		for _, header := range dstChains().honest[1:3] {

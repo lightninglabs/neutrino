@@ -285,12 +285,10 @@ type blockManager struct { // nolint:maligned
 	// header that was connected during switch over.
 	newFilterHeadersSignal *sync.Cond
 
-	// syncPeer points to the peer that we're currently syncing block
-	// headers from.
-	syncPeer *ServerPeer
-
-	// syncPeerMutex protects the above syncPeer pointer at all times.
-	syncPeerMutex sync.RWMutex
+	// syncPeer is the peer we sync headers from. Only the block handler
+	// writes it, through setSyncPeer, and other goroutines read it as a
+	// snapshot.
+	syncPeer atomic.Pointer[ServerPeer]
 
 	// peerChan is a channel for messages that come from peers
 	peerChan chan interface{}
@@ -736,9 +734,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer. Also, reset the header state.
 	if b.SyncPeer() != nil && b.SyncPeer() == sp {
-		b.syncPeerMutex.Lock()
-		b.setSyncPeerLocked(nil)
-		b.syncPeerMutex.Unlock()
+		b.setSyncPeer(nil)
 		if b.pendingHeaderCommit != nil {
 			return
 		}
@@ -894,12 +890,11 @@ func peerDisconnected(sp *ServerPeer) bool {
 	}
 }
 
-// setSyncPeerLocked records a new sync peer, or none, and moves the FSM's
-// tip-following lease with it, so the lease always names the sync peer. The
-// caller holds syncPeerMutex. The driver never reads the sync peer, so it's
-// safe to call into it under the lock.
-func (b *blockManager) setSyncPeerLocked(sp *ServerPeer) {
-	b.syncPeer = sp
+// setSyncPeer records a new sync peer, or none, and moves the FSM's
+// tip-following lease with it, so the lease always names the sync peer. Only
+// the block handler calls it.
+func (b *blockManager) setSyncPeer(sp *ServerPeer) {
+	b.syncPeer.Store(sp)
 	if b.headerSync == nil {
 		return
 	}
@@ -913,10 +908,7 @@ func (b *blockManager) setSyncPeerLocked(sp *ServerPeer) {
 
 // SyncPeer returns the current sync peer.
 func (b *blockManager) SyncPeer() *ServerPeer {
-	b.syncPeerMutex.Lock()
-	defer b.syncPeerMutex.Unlock()
-
-	return b.syncPeer
+	return b.syncPeer.Load()
 }
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
@@ -1051,9 +1043,7 @@ func (b *blockManager) handleNoProgressReply(peers *list.List,
 		peer.LastBlock(), height)
 
 	removeSyncCandidate(peers, peer)
-	b.syncPeerMutex.Lock()
-	b.setSyncPeerLocked(nil)
-	b.syncPeerMutex.Unlock()
+	b.setSyncPeer(nil)
 	b.startSync(peers)
 }
 
@@ -1146,7 +1136,7 @@ func (b *blockManager) startSync(peers *list.List) {
 		return
 	}
 	// Return now if we're already syncing.
-	if b.syncPeer != nil {
+	if b.syncPeer.Load() != nil {
 		return
 	}
 
@@ -1211,9 +1201,7 @@ func (b *blockManager) startSync(peers *list.List) {
 
 		// Now that we know we have a new sync peer, we'll lock it in
 		// within the proper attribute.
-		b.syncPeerMutex.Lock()
-		b.setSyncPeerLocked(bestPeer)
-		b.syncPeerMutex.Unlock()
+		b.setSyncPeer(bestPeer)
 
 		// By default will use the zero hash as our stop hash to query
 		// for all the headers beyond our view of the network based on
@@ -1246,11 +1234,9 @@ func (b *blockManager) startSync(peers *list.List) {
 
 			removeSyncCandidate(peers, bestPeer)
 
-			b.syncPeerMutex.Lock()
-			if b.syncPeer == bestPeer {
-				b.setSyncPeerLocked(nil)
+			if b.syncPeer.Load() == bestPeer {
+				b.setSyncPeer(nil)
 			}
-			b.syncPeerMutex.Unlock()
 
 			b.startSync(peers)
 		}
@@ -1287,8 +1273,8 @@ func (b *blockManager) IsFullySynced() bool {
 // BlockHeadersSynced returns whether or not the block manager believes its
 // block headers are synced with the connected peers.
 func (b *blockManager) BlockHeadersSynced() bool {
-	b.syncPeerMutex.RLock()
-	defer b.syncPeerMutex.RUnlock()
+	// Read the sync peer once, so every check below sees the same one.
+	syncPeer := b.syncPeer.Load()
 
 	// Status must not wait on a store write holding the backend lock.
 	tip := b.publishedBlockTip.Load()
@@ -1310,7 +1296,7 @@ func (b *blockManager) BlockHeadersSynced() bool {
 
 	// If we have a syncPeer and are below the block we are syncing to, we
 	// are not current.
-	if b.syncPeer != nil && int32(height) < b.syncPeer.LastBlock() {
+	if syncPeer != nil && int32(height) < syncPeer.LastBlock() {
 		return false
 	}
 
@@ -1322,7 +1308,7 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	}
 
 	// If we have no sync peer, we can assume we're current for now.
-	if b.syncPeer == nil {
+	if syncPeer == nil {
 		return true
 	}
 
@@ -1330,7 +1316,7 @@ func (b *blockManager) BlockHeadersSynced() bool {
 	// height on connect than we know the peer already has, we're probably
 	// not current. If the peer is lying to us, other code will disconnect
 	// it and then we'll re-check and notice that we're actually current.
-	return b.syncPeer.LastBlock() >= b.syncPeer.StartingHeight()
+	return syncPeer.LastBlock() >= syncPeer.StartingHeight()
 }
 
 // QueueInv adds the passed inv message and peer to the block handling queue.

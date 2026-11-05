@@ -3,7 +3,6 @@ package headersync
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/lightninglabs/neutrino/protofsm"
@@ -752,19 +751,16 @@ func syncStealPeers(env *managerEnv, result StealResult) error {
 	return nil
 }
 
-// Manager owns the header sync FSM. Every message runs synchronously on
-// the caller's goroutine, under mu. There is no mailbox, so a caller's deadline
-// can't expire between a message applying and its reply arriving, which is what
-// used to leave callers with a wrong view of the FSM.
+// Manager owns the header sync FSM. Every message runs synchronously on the
+// caller's goroutine, and there's exactly one caller: the block handler, which
+// owns the driver. Nothing else may touch the manager while the handler runs,
+// so it takes no lock. A message can't be split by a deadline or a mailbox,
+// which is what used to leave callers with a wrong view of the FSM.
 type Manager struct {
 	fsm      *HeaderSyncFSM
 	dispatch DispatchController
 	events   EventSink
 
-	// mu serializes messages. A peer holds its own lock when it calls in
-	// here, and the manager never calls a peer, so the order is always
-	// peer, then manager.
-	mu      sync.Mutex
 	machine *protofsm.StateMachine[ManagerMsg, managerOutbox, *managerEnv]
 	stopped bool
 }
@@ -787,9 +783,6 @@ func (m *Manager) SetDispatchController(dispatch DispatchController) {
 
 // Start starts the manager.
 func (m *Manager) Start(ctx context.Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.machine != nil {
 		return
 	}
@@ -816,9 +809,6 @@ func (m *Manager) Start(ctx context.Context) {
 
 // Stop stops the manager. Later messages report ErrActorStopped.
 func (m *Manager) Stop() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.stopped {
 		return
 	}
@@ -832,9 +822,6 @@ func (m *Manager) Stop() {
 // ask runs one message.
 func (m *Manager) ask(ctx context.Context, msg ManagerMsg) (
 	ManagerResp, error) {
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// There's deliberately no deadline check here. A message runs in
 	// memory, and checking between the messages of one event would let a
@@ -1206,17 +1193,16 @@ func (m *Manager) SnapshotPeer(ctx context.Context,
 // peerID is empty. It works whether or not the manager has started, since the
 // block manager picks a sync peer before and after the manager runs.
 func (m *Manager) SetTipLease(peerID string) TipLease {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	return m.fsm.SetTipLease(peerID)
+}
+
+// TrustsTipPeer reports whether peerID holds the tip-following lease.
+func (m *Manager) TrustsTipPeer(peerID string) bool {
+	return m.fsm.TrustsTipPeer(peerID)
 }
 
 // TipLease returns the tip-following lease.
 func (m *Manager) TipLease() TipLease {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	return m.fsm.TipLease()
 }
 
@@ -1972,13 +1958,12 @@ func peerTransition(next protofsm.State[PeerMsg, peerOutbox, *peerEnv],
 }
 
 // Peer owns peer-local header sync state. Like the manager, it runs each
-// message synchronously on the caller's goroutine, under mu.
+// message synchronously on the block handler's goroutine, and takes no lock.
 type Peer struct {
 	id      string
 	rank    int
 	manager *Manager
 
-	mu      sync.Mutex
 	machine *protofsm.StateMachine[PeerMsg, peerOutbox, *peerEnv]
 	stopped bool
 }
@@ -1990,7 +1975,6 @@ func NewPeer(id string, rank int, manager *Manager) *Peer {
 
 // Start starts the peer and registers its initial snapshot.
 func (p *Peer) Start(ctx context.Context) error {
-	p.mu.Lock()
 	if p.machine == nil {
 		machine, err := protofsm.NewStateMachine[PeerMsg, peerOutbox](
 			protofsm.StateMachineCfg[
@@ -2004,24 +1988,18 @@ func (p *Peer) Start(ctx context.Context) error {
 			},
 		)
 		if err != nil {
-			p.mu.Unlock()
-
 			return err
 		}
 
 		p.machine = machine
 		p.machine.Start(ctx)
 	}
-	p.mu.Unlock()
 
 	return p.Send(ctx, PeerReadyEvent{})
 }
 
 // Stop stops the peer. Later messages report ErrActorStopped.
 func (p *Peer) Stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.stopped {
 		return
 	}
@@ -2034,9 +2012,6 @@ func (p *Peer) Stop() {
 
 // ask runs one message.
 func (p *Peer) ask(ctx context.Context, msg PeerMsg) (PeerResp, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	// As in Manager.ask, there's deliberately no deadline check.
 	if p.machine == nil || p.stopped {
 		return nil, ErrActorStopped
