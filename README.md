@@ -22,6 +22,11 @@ pipeline in detail: which component owns which state, how header ranges move
 from planning to durable commit, how filter headers are verified, and how the
 storage backends are laid out.
 
+The header sync, chain store, and filter header sync packages each have their
+own document: [docs/headersync-architecture.md](docs/headersync-architecture.md),
+[docs/chainstore-architecture.md](docs/chainstore-architecture.md), and
+[docs/filtersync-architecture.md](docs/filtersync-architecture.md).
+
 ## Usage
 The client is instantiated as an object using `NewChainService` and then
 started. Upon start, the client sets up its database and other relevant files

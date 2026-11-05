@@ -145,13 +145,13 @@ type continueDiscovered struct {
 func (continueDiscovered) driverEvent() {}
 
 // then appends a Then effect with the events.
-func then(result *DriverResult, events ...DriverEvent) {
+func then(result *driverResult, events ...DriverEvent) {
 	result.Effects = append(result.Effects, Then{Events: events})
 }
 
 // handleBeginSync decides between the parallel and the serial path.
 func (d *Driver) handleBeginSync(ctx context.Context, event BeginSync,
-	view View, result *DriverResult) {
+	view View, result *driverResult) {
 
 	// The multi-peer scheduler needs multiple independent peers to
 	// confirm discovered anchors. The local sim/reg test harnesses often
@@ -183,7 +183,7 @@ func (d *Driver) handleBeginSync(ctx context.Context, event BeginSync,
 // handleSyncDiscovered counts a running discovery as planned work, then
 // dispatches.
 func (d *Driver) handleSyncDiscovered(event syncDiscovered,
-	result *DriverResult) {
+	result *driverResult) {
 
 	var planned int
 	if d.discoveryActive(event.Round) {
@@ -196,7 +196,7 @@ func (d *Driver) handleSyncDiscovered(event syncDiscovered,
 // dispatchSync makes the chosen peer the sync peer and dispatches the planned
 // work, then judges whether the parallel path took the sync.
 func (d *Driver) dispatchSync(sync BeginSync, planned int,
-	result *DriverResult) {
+	result *driverResult) {
 
 	result.Effects = append(result.Effects, SetSyncPeer{
 		PeerID: sync.BestPeerID,
@@ -210,7 +210,7 @@ func (d *Driver) dispatchSync(sync BeginSync, planned int,
 // started anything, and otherwise gives the sync peer back and falls back to
 // the serial path.
 func (d *Driver) handleSyncDispatched(event syncDispatched,
-	result *DriverResult) {
+	result *driverResult) {
 
 	if d.session.HasActiveWork() || event.Planned > 0 {
 		result.Effects = append(result.Effects, ClearBootstrapDelay{})
@@ -227,7 +227,7 @@ func (d *Driver) handleSyncDispatched(event syncDispatched,
 
 // startSerialSync asks the executor for the serial path, aimed at the next
 // checkpoint while the chain is still within the checkpoints.
-func (d *Driver) startSerialSync(sync BeginSync, result *DriverResult) {
+func (d *Driver) startSerialSync(sync BeginSync, result *driverResult) {
 	effect := StartSerialSync{
 		PeerID:      sync.BestPeerID,
 		StartHeight: sync.TipHeight,
@@ -245,7 +245,7 @@ func (d *Driver) startSerialSync(sync BeginSync, result *DriverResult) {
 // With startWhenIdle, it releases the sync peer and asks for a fresh start
 // once nothing is in flight.
 func (d *Driver) resumeWork(ctx context.Context, view View,
-	startWhenIdle bool, result *DriverResult) {
+	startWhenIdle bool, result *driverResult) {
 
 	// The asynchronous commit in flight owns the header tip, and planning
 	// before it settles would build on a stale tip.
@@ -266,7 +266,7 @@ func (d *Driver) resumeWork(ctx context.Context, view View,
 // handleContinueDiscover restarts discovery once the queued work is
 // dispatched.
 func (d *Driver) handleContinueDiscover(ctx context.Context,
-	event continueDiscover, view View, result *DriverResult) {
+	event continueDiscover, view View, result *driverResult) {
 
 	round := d.startDiscovery(ctx, view, event.BestHeight, result)
 	then(result, continueDiscovered{
@@ -276,7 +276,7 @@ func (d *Driver) handleContinueDiscover(ctx context.Context,
 
 // handleContinueDiscovered asks for a fresh start when nothing is in flight.
 func (d *Driver) handleContinueDiscovered(event continueDiscovered,
-	result *DriverResult) {
+	result *driverResult) {
 
 	active := d.discoveryActive(event.Round)
 	if !event.StartWhenIdle || active || d.session.HasActiveWork() {
@@ -288,14 +288,14 @@ func (d *Driver) handleContinueDiscovered(event continueDiscovered,
 
 // restartSync releases the sync peer and asks the executor to choose one
 // again.
-func (d *Driver) restartSync(result *DriverResult) {
+func (d *Driver) restartSync(result *driverResult) {
 	result.Effects = append(result.Effects, SetSyncPeer{}, StartSync{})
 }
 
 // handleCooldownElapsed carries on with the recovered peers, then arms the
 // next wakeup for any still cooling down.
 func (d *Driver) handleCooldownElapsed(event CooldownElapsed,
-	result *DriverResult) {
+	result *driverResult) {
 
 	var resume DriverEvent = Continue{}
 	if event.SerialRequestPending {
@@ -308,7 +308,7 @@ func (d *Driver) handleCooldownElapsed(event CooldownElapsed,
 // handleDispatchWork recovers and assigns, then starts the peers one at a
 // time.
 func (d *Driver) handleDispatchWork(ctx context.Context, view View,
-	result *DriverResult) {
+	result *driverResult) {
 
 	d.handleRecoverPeers(ctx, RecoverPeers{Peers: view.Peers}, result)
 	d.handleAssignRanges(ctx, AssignRanges{PeerCount: len(view.Peers)})
@@ -365,7 +365,7 @@ func (d *Driver) nextCheckpointPoint() *ChainPoint {
 // the next boundary above the tip once the chain is past its checkpoints, and
 // asks for its requests. The caller judges the round once they are written.
 func (d *Driver) startDiscovery(ctx context.Context, view View,
-	bestHeight uint32, result *DriverResult) DiscoveryOutcome {
+	bestHeight uint32, result *driverResult) DiscoveryOutcome {
 
 	d.handleRecoverPeers(ctx, RecoverPeers{Peers: view.Peers}, result)
 

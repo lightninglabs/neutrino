@@ -10,17 +10,18 @@
 // fetch checkpoints, resolve a conflict, fetch checkpointed or uncheckpointed
 // headers, sleep before a retry, or poll the quit channel.
 //
-// The machine reproduces the loop it replaced, decision for decision. A pass
-// waits until the filter header tip lags the block header tip by a checkpoint
-// interval or the block header sync is current, reads the block header tip,
-// fetches checkpoints from the peers when the ones it holds do not reach that
-// tip, caps them at the tip, resolves which list is right, and fetches the
-// headers up to the agreed checkpoints. A pass that ends with the block
-// headers still syncing, or the filter headers still a checkpoint interval
-// behind, starts over. A pass that ends caught up waits at the tip, and
-// fetches the uncheckpointed headers each time the filter tip hash differs
-// from the block tip hash. Every failed round sleeps for the retry delay and
-// then continues where that failure continued before.
+// A pass waits until the filter header tip lags the block header tip by a
+// checkpoint interval or the block header sync is current, reads the block
+// header tip, fetches checkpoints from the peers when the ones it holds do not
+// reach that tip, caps them at the tip, resolves which list is right, and
+// fetches the headers up to the agreed checkpoints. A pass that ends with the
+// block headers still syncing, or the filter headers still a checkpoint
+// interval behind, starts over. A pass that ends caught up waits at the tip,
+// and fetches the uncheckpointed headers each time the filter tip hash differs
+// from the block tip hash. A round that fails with a store or chain store
+// error sleeps for the retry delay and then retries the same step. A
+// checkpointed batch that ends in a query error is logged and ends the pass,
+// so the next pass starts while the filter tip still lags.
 //
 // Three invariants hold:
 //

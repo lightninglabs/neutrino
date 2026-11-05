@@ -114,6 +114,17 @@ func anchorRequestsSent(effects []DriverEffect) map[string]SendGetHeaders {
 	return sent
 }
 
+// requireReplyTaken checks that the driver took a headers message as an
+// answer to one of its requests, rather than handing it back to the executor.
+func requireReplyTaken(t *testing.T, effects []DriverEffect) {
+	t.Helper()
+
+	for _, effect := range effects {
+		_, ok := effect.(NoProgressReply)
+		require.False(t, ok, "the driver handed the reply back")
+	}
+}
+
 // requireAnchorSpanContinued checks that the effects ask the idle peers, and
 // not the peer whose hedged anchor request is still in flight, for the rest of
 // the span above the reply, and that nothing plans or dispatches ranges while
@@ -177,17 +188,17 @@ func TestAnchorReplyContinuesSpanWhileCommitPending(t *testing.T) {
 		CommitPending: true,
 	}
 
-	result, err := f.driver.Handle(t.Context(), HeadersReceived{
+	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
-	require.True(t, result.Handled)
+	requireReplyTaken(t, effects)
 
 	// The reply staged the range below the boundary it named.
 	_, staged := f.driver.session.StagedRange(1)
 	require.True(t, staged, "the reply did not stage its range")
 
-	requireAnchorSpanContinued(t, f.request, headers, result.Effects)
+	requireAnchorSpanContinued(t, f.request, headers, effects)
 }
 
 // TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier checks the same
@@ -211,22 +222,24 @@ func TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier(
 		CommitPending: true,
 	}
 
-	result, err := f.driver.Handle(t.Context(), HeadersReceived{
+	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
-	require.True(t, result.Handled)
+	requireReplyTaken(t, effects)
 
 	// The reply pipelines the frontier above its boundary, and leaves the
 	// rest of its own span to the follow-up of that round.
-	require.NotEmpty(t, result.Effects)
-	followUp, ok := result.Effects[len(result.Effects)-1].(Then)
+	require.NotEmpty(t, effects)
+	followUp, ok := effects[len(effects)-1].(Then)
 	require.True(t, ok, "the batch does not end with a follow-up")
 	require.Len(t, followUp.Events, 1)
 	require.IsType(t, anchorPipelined{}, followUp.Events[0])
 
-	result, err = f.driver.Handle(t.Context(), followUp.Events[0], view)
+	effects, err = f.driver.ProcessEvent(
+		t.Context(), followUp.Events[0], view,
+	)
 	require.NoError(t, err)
 
-	requireAnchorSpanContinued(t, f.request, headers, result.Effects)
+	requireAnchorSpanContinued(t, f.request, headers, effects)
 }

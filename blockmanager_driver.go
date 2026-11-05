@@ -14,9 +14,6 @@ import (
 
 // driverOutcome is what executing one driver event produced.
 type driverOutcome struct {
-	// result is the driver's answer to the event.
-	result headersync.DriverResult
-
 	// err is the error the driver reported for the event, if any.
 	err error
 
@@ -36,6 +33,11 @@ func (b *blockManager) driver() *headersync.Driver {
 // outcome of an effect that can fail back as a further event. It must be
 // called from the block handler's goroutine, which serializes the driver.
 //
+// The effects are the outbox of the driver's state machine, which never
+// dispatches them itself. A Then effect carries follow-up events, which run
+// here rather than inside the machine so that each sees a fresh view and the
+// state the effects before it produced.
+//
 // Effects find their peer among the candidate peers, or among known, which
 // holds the peer that an event came from when it may not be a candidate.
 func (b *blockManager) handleDriverEvent(peers *list.List,
@@ -45,11 +47,12 @@ func (b *blockManager) handleDriverEvent(peers *list.List,
 	defer cancel()
 
 	var outcome driverOutcome
-	outcome.result, outcome.err = b.headerSync.Driver().Handle(
+	effects, err := b.driver().ProcessEvent(
 		ctx, event, b.driverView(peers),
 	)
+	outcome.err = err
 
-	for _, effect := range outcome.result.Effects {
+	for _, effect := range effects {
 		if then, ok := effect.(headersync.Then); ok {
 			for _, next := range then.Events {
 				nested := b.handleDriverEvent(
@@ -185,6 +188,13 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 
 	case headersync.DisarmSerialTimeout:
 		b.disarmHeaderSyncTimeout()
+
+	case headersync.NoProgressReply:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.handleNoProgressReply(peers, sp)
 
 	case headersync.CommitExtension:
 		sp := driverPeer(peers, known, effect.PeerID)

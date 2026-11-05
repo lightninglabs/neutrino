@@ -11,8 +11,8 @@ import (
 // HeadersReceived delivers a headers message. The driver matches it against
 // the peer's anchor request, then its range request, and otherwise reads it
 // as headers that follow the tip. An empty message that answers no request
-// depends on the executor's serial deadline, so the driver leaves it
-// unhandled and the executor settles it.
+// depends on the executor's serial deadline, so the driver hands it back with
+// NoProgressReply and the executor settles it.
 type HeadersReceived struct {
 	// PeerID is the address of the peer that sent the headers.
 	PeerID string
@@ -50,31 +50,45 @@ type ScheduleCommitRetry struct{}
 
 func (ScheduleCommitRetry) driverEffect() {}
 
+// NoProgressReply tells the executor that a headers message carried no
+// headers and answered none of the driver's requests. Whether it answers the
+// serial request, and whether that costs the sync peer its role, depends on
+// the serial deadline, which only the executor sees, so the executor settles
+// it. It is the only effect of its event.
+type NoProgressReply struct {
+	// PeerID is the address of the peer that sent the message.
+	PeerID string
+}
+
+func (NoProgressReply) driverEffect() {}
+
 // handleHeadersReceived finds the request a headers message answers.
 func (d *Driver) handleHeadersReceived(ctx context.Context,
-	event HeadersReceived, view View, result *DriverResult) {
+	event HeadersReceived, view View, result *driverResult) {
 
 	peerID := event.PeerID
 	headers := event.Headers
 	if d.handleAnchorHeaders(ctx, view, peerID, headers, result) {
-		result.Handled = true
-
 		return
 	}
 
-	d.handleRangeReply(ctx, rangeReply{
+	handled := d.handleRangeReply(ctx, rangeReply{
 		peerID:        peerID,
 		peerHeight:    event.PeerHeight,
 		headers:       headers,
 		anchorTimeout: d.cfg.RequestTimeout(),
 	}, view, result)
-	if result.Handled {
+	if handled {
 		return
 	}
 
 	// Nothing to do for an empty headers message, beyond settling the
 	// sync peer's outstanding request, which the executor does.
 	if len(headers) == 0 {
+		result.Effects = append(result.Effects, NoProgressReply{
+			PeerID: peerID,
+		})
+
 		return
 	}
 
@@ -85,13 +99,13 @@ func (d *Driver) handleHeadersReceived(ctx context.Context,
 		Headers:       headers,
 		HeadersSynced: event.HeadersSynced,
 	}, result)
-	result.Handled = true
 }
 
 // handleRangeReply judges a headers message against the range request of the
-// peer, if it has one.
+// peer, if it has one. It reports whether the message was the driver's to
+// take, as a range reply or as the late answer to a request that timed out.
 func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
-	view View, result *DriverResult) {
+	view View, result *driverResult) bool {
 
 	peerID := event.peerID
 	headers := event.headers
@@ -100,13 +114,12 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		if d.session.RangeActive(peerID) {
 			log.Debugf("headersync unmatched_range_reply peer=%s",
 				peerID)
-			result.Handled = true
-			return
+
+			return true
 		}
-		result.Handled = d.handleStaleRangeReply(peerID, result)
-		return
+
+		return d.handleStaleRangeReply(peerID, result)
 	}
-	result.Handled = true
 
 	assignment := request.Assignment
 	manager := d.runtime.manager
@@ -114,7 +127,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 	if err != nil {
 		log.Warnf("headersync unable to snapshot range_id=%d: %v",
 			assignment.RangeID, err)
-		return
+		return true
 	}
 	if !ok {
 		log.Warnf(
@@ -123,7 +136,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			assignment.RangeID,
 			peerID,
 		)
-		return
+		return true
 	}
 
 	// The lease may have ended while the reply was in flight, for example
@@ -138,7 +151,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, rng.State)
 		then(result, Continue{})
-		return
+		return true
 	}
 
 	// Replies are matched by their first parent hash, so a late answer to
@@ -251,7 +264,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		)
 		d.setPeerState(ctx, peerID, PeerBlocked, result)
 		then(result, Continue{})
-		return
+		return true
 	}
 
 	if complete.Stale {
@@ -259,7 +272,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, complete.RangeState)
 		then(result, Continue{})
-		return
+		return true
 	}
 	if !complete.Accepted || !valid {
 		switch {
@@ -274,7 +287,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			d.replanRange(ctx, rng)
 		}
 		then(result, Continue{})
-		return
+		return true
 	}
 
 	d.session.StageRange(assignment.RangeID, headers, peerID)
@@ -297,13 +310,15 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 	}
 
 	d.commitAndContinue(ctx, view, result)
+
+	return true
 }
 
 // handleStaleRangeReply classifies a reply from a peer that has no range
 // request in flight. It reports whether the reply answered a request that
 // timed out. Any other reply is not the driver's.
 func (d *Driver) handleStaleRangeReply(peerID string,
-	result *DriverResult) bool {
+	result *driverResult) bool {
 
 	staleRequest, ok := d.session.PopStale(peerID)
 	if !ok {
@@ -338,7 +353,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 
 // rejectRangePeer punishes a peer that answered a range with invalid headers.
 func (d *Driver) rejectRangePeer(ctx context.Context, peerID string,
-	rangeID RangeID, result *DriverResult) {
+	rangeID RangeID, result *driverResult) {
 
 	log.Warnf("headersync peer_rejected peer=%s range_id=%d reason=%s",
 		peerID, rangeID, banman.InvalidBlock)

@@ -133,16 +133,14 @@ func (b *blockManager) handleHeadersMsgWithPeers(peers *list.List,
 	// The driver decides what the headers answer: an anchor discovery
 	// request, a range request, or the tip. We perform the effects it
 	// returns. An empty message that answered no request depends on the
-	// serial deadline, which only we can see, so it comes back to us.
-	outcome := b.handleDriverEvent(peers, headersync.HeadersReceived{
+	// serial deadline, which only we can see, so it comes back to us as a
+	// NoProgressReply effect.
+	b.handleDriverEvent(peers, headersync.HeadersReceived{
 		PeerID:        hmsg.peer.Addr(),
 		PeerHeight:    hmsg.peer.LastBlock(),
 		Headers:       hmsg.headers.Headers,
 		HeadersSynced: b.BlockHeadersSynced(),
 	}, hmsg.peer)
-	if !outcome.result.Handled {
-		b.handleNoProgressReply(peers, hmsg.peer)
-	}
 }
 
 // finishSerialHeaderFollowup advances the peer request after durable progress,

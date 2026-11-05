@@ -101,14 +101,14 @@ func TestTipHeadersDisconnectsUnconnected(t *testing.T) {
 	chain := serialHeaderChain(3)
 	driver := newSerialTestDriver(chain)
 
-	result, err := driver.Handle(t.Context(), TipHeaders{
+	effects, err := driver.ProcessEvent(t.Context(), TipHeaders{
 		PeerID:  "peer",
 		Headers: []*wire.BlockHeader{chain[1], chain[0]},
 	}, View{})
 	require.NoError(t, err)
 	require.Equal(
 		t, []DriverEffect{DisconnectTipPeer{PeerID: "peer"}},
-		result.Effects,
+		effects,
 	)
 }
 
@@ -122,16 +122,22 @@ func TestTipLeaseFollowsTheSyncPeer(t *testing.T) {
 	driver := newSerialTestDriver(chain)
 	manager := driver.runtime.manager
 
-	_, err := driver.Handle(t.Context(), FollowTip{PeerID: "a"}, View{})
+	_, err := driver.ProcessEvent(
+		t.Context(), FollowTip{PeerID: "a"}, View{},
+	)
 	require.NoError(t, err)
 	first := manager.TipLease()
 	require.Equal(t, "a", first.PeerID)
 
-	_, err = driver.Handle(t.Context(), FollowTip{PeerID: "a"}, View{})
+	_, err = driver.ProcessEvent(
+		t.Context(), FollowTip{PeerID: "a"}, View{},
+	)
 	require.NoError(t, err)
 	require.Equal(t, first, manager.TipLease())
 
-	_, err = driver.Handle(t.Context(), FollowTip{PeerID: ""}, View{})
+	_, err = driver.ProcessEvent(
+		t.Context(), FollowTip{PeerID: ""}, View{},
+	)
 	require.NoError(t, err)
 	released := manager.TipLease()
 	require.Empty(t, released.PeerID)
@@ -148,10 +154,10 @@ func TestTipHeadersIgnoresForeignPeerWhileSyncing(t *testing.T) {
 	chain := serialHeaderChain(3)
 	driver := newSerialTestDriver(chain)
 
-	result, err := driver.Handle(t.Context(), TipHeaders{
+	effects, err := driver.ProcessEvent(t.Context(), TipHeaders{
 		PeerID:  "peer",
 		Headers: chain[:1],
 	}, View{})
 	require.NoError(t, err)
-	require.Empty(t, result.Effects)
+	require.Empty(t, effects)
 }

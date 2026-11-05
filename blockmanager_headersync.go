@@ -39,15 +39,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 	if outcome.err != nil {
 		log.Warnf("Unable to start headersync peer for %s: %v",
 			peerID, outcome.err)
-		return
 	}
-	if !outcome.result.PeerCreated {
-		return
-	}
-
-	log.Debugf("Registered headersync peer peer=%s rank=%d "+
-		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
-		sp.LastBlock(), rtt)
 }
 
 // quarantineHeaderSyncAddress asks the node to stop using a peer's address for
