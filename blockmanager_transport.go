@@ -1,5 +1,7 @@
 package neutrino
 
+// This file holds the header executor's outbound getheaders transport.
+
 import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"

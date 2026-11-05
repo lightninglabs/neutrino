@@ -69,9 +69,6 @@ type FetchCheckpoints struct {
 
 	// StopHash is the block hash the checkpoints are requested up to.
 	StopHash chainhash.Hash
-
-	// Height is the height of StopHash.
-	Height uint32
 }
 
 func (FetchCheckpoints) syncEffect() {}

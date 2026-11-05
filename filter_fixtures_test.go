@@ -7,9 +7,9 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
-// This file holds the block and filter fixtures the block manager tests share
-// with the filtersync package's tests, where the checkpoint and mismatch
-// checks now live.
+// This file holds copies of the block and filter fixtures in the filtersync
+// package's tests, which the block manager tests also need. Test fixtures
+// can't be shared across packages without a test helper package.
 
 var (
 	script1 = []byte{

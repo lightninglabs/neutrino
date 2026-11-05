@@ -178,7 +178,7 @@ func testCFHeaderReadFailure(
 			&hashes[i],
 		)
 	}
-	_, _, err = bm.submitCFHeaders(
+	_, _, err = bm.cfSync.submitCFHeaders(
 		[]*wire.MsgCFHeaders{msg},
 	)
 	require.ErrorIs(t, err, errDSTWrite)
@@ -202,14 +202,14 @@ func testCFHeaderReadFailure(
 				&hash,
 			)
 		}
-		_, _, err = bm.submitCFHeaders(
+		_, _, err = bm.cfSync.submitCFHeaders(
 			[]*wire.MsgCFHeaders{
 				next,
 			},
 		)
 		require.NoError(t, err)
 	} else {
-		require.NoError(t, bm.getUncheckpointedCFHeaders(
+		require.NoError(t, bm.cfSync.getUncheckpointedCFHeaders(
 			wire.GCSFilterRegular,
 		))
 	}
@@ -249,7 +249,7 @@ func testCFHeaderReadFailure(
 	}
 	require.NoError(
 		t,
-		bm.getUncheckpointedCFHeaders(
+		bm.cfSync.getUncheckpointedCFHeaders(
 			wire.GCSFilterRegular,
 		),
 	)
@@ -413,7 +413,7 @@ func TestCFHeaderReorgDoesNotBanHonestPeer(t *testing.T) {
 		gate.armed = true
 		done := make(chan error, 1)
 		go func() {
-			done <- bm.getUncheckpointedCFHeaders(
+			done <- bm.cfSync.getUncheckpointedCFHeaders(
 				wire.GCSFilterRegular,
 			)
 		}()
@@ -428,7 +428,7 @@ func TestCFHeaderReorgDoesNotBanHonestPeer(t *testing.T) {
 		// A stale batch may be rejected and retried. Peer immunity
 		// must hold whether commit or reorg is processed first.
 		<-done
-		_, _, err = bm.submitCFHeaders(nil)
+		_, _, err = bm.cfSync.submitCFHeaders(nil)
 		require.ErrorContains(t, err, "no cfheaders")
 		synctest.Wait()
 		require.Empty(

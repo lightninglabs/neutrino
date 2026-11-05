@@ -329,7 +329,6 @@ func (s *Syncer) stepCheckpointLoop() []Effect {
 			FetchCheckpoints{
 				FilterType: s.fType,
 				StopHash:   bestHash,
-				Height:     bestHeight,
 			},
 		}
 	}
