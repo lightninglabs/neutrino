@@ -2,7 +2,9 @@ package chainstore
 
 import (
 	"errors"
+	"math/big"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -63,9 +65,35 @@ func (s *Store) Rollback(request Rollback) (Reply, error) {
 	return s.startRollback(request, nil)
 }
 
-// Reorg rolls back to the fork height and appends the replacement branch, as
-// one retained operation.
+// Reorg compares the branch's work with the durable chain above the fork, and
+// if the branch wins, rolls back to the fork height and appends the replacement
+// branch, as one retained operation. Comparing on the actor's turn means no
+// write can land between the comparison and the rollback.
 func (s *Store) Reorg(request Reorg) (Reply, error) {
+	if err := s.resumePendingRollback(); err != nil {
+		return Reply{}, err
+	}
+
+	known, err := s.workAboveFork(request.ForkHeight)
+	if err != nil {
+		return Reply{}, err
+	}
+
+	log.Tracef("Reorg branch work %v, known chain work %v", request.Work,
+		known)
+
+	switch known.Cmp(request.Work) {
+	case 1:
+		return Reply{Verdict: ReorgLessWork}, nil
+
+	case 0:
+		return Reply{Verdict: ReorgEqualWork}, nil
+	}
+
+	if request.CompareOnly {
+		return Reply{}, nil
+	}
+
 	return s.startRollback(Rollback{
 		ExpectedTip: request.ExpectedTip,
 		Height:      request.ForkHeight,
@@ -142,6 +170,32 @@ func (s *Store) startRollback(request Rollback,
 		BlockTip:      blockStamp(last.Height, *last.BlockHeader),
 		BlockTipValid: true,
 	}, nil
+}
+
+// workAboveFork adds up the proof of work of the durable blocks above height.
+func (s *Store) workAboveFork(height uint32) (*big.Int, error) {
+	blocks := s.host.BlockHeaders()
+	header, tipHeight, err := blocks.ChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	work := new(big.Int)
+	for h := tipHeight; h > height; h-- {
+		work.Add(work, blockchain.CalcWork(header.Bits))
+
+		if h-1 == height {
+			break
+		}
+
+		parentHash := header.PrevBlock
+		header, _, err = blocks.FetchHeader(&parentHash)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return work, nil
 }
 
 // resumePendingRollback finishes a retained rollback, if there is one. Every

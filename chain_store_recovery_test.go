@@ -2,10 +2,12 @@ package neutrino
 
 import (
 	"fmt"
+	"math/big"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -14,6 +16,10 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
+
+// winningReorgWork beats any chain a test builds, for tests about what happens
+// after a reorg wins.
+var winningReorgWork = new(big.Int).Lsh(big.NewInt(1), 256)
 
 // newChainStoreBackend returns the production chain store backend bound to
 // the given block manager, so tests exercise the same request path that the
@@ -385,6 +391,7 @@ func TestChainStoreReorgWriteOutcomes(t *testing.T) {
 				// Replace blocks 2 and 3 with the fork.
 				tip := *bm.publishedBlockTip.Load()
 				reply, err := backend.Reorg(chainstore.Reorg{
+					Work:        winningReorgWork,
 					ExpectedTip: tip,
 					ForkHeight:  1,
 					Headers: []headerfs.BlockHeader{
@@ -769,6 +776,7 @@ func TestChainStoreReorgRetainsReplacement(t *testing.T) {
 		fixture := dstChains()
 		backend := newChainStoreBackend(bm)
 		reply, err := backend.Reorg(chainstore.Reorg{
+			Work:        winningReorgWork,
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -830,6 +838,7 @@ func TestChainStoreReorgResumesReplacementPrefix(t *testing.T) {
 		fixture := dstChains()
 		backend := newChainStoreBackend(bm)
 		reply, err := backend.Reorg(chainstore.Reorg{
+			Work:        winningReorgWork,
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -905,6 +914,7 @@ func TestChainStoreCompletedIntentDoesNotReplay(t *testing.T) {
 		fixture := dstChains()
 		backend := newChainStoreBackend(bm)
 		_, err := backend.Reorg(chainstore.Reorg{
+			Work:        winningReorgWork,
 			ExpectedTip: *bm.publishedBlockTip.Load(),
 			ForkHeight:  1,
 			Headers: []headerfs.BlockHeader{
@@ -1052,11 +1062,69 @@ func TestRollbackParentReadRetainsTarget(t *testing.T) {
 	})
 }
 
+// TestChainStoreReorgRejectsWeakBranch verifies that the store compares a
+// branch's work on its own turn, and that a branch without more work changes
+// nothing. A tie keeps the durable chain too, since switching gains nothing.
+// A CompareOnly request that wins also changes nothing.
+func TestChainStoreReorgRejectsWeakBranch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		bm, blocks, _, events := chainStoreFixture(t, 3, 3)
+		backend := newChainStoreBackend(bm)
+		fixture := dstChains()
+		fork := fixture.fork[1]
+		tip := *bm.publishedBlockTip.Load()
+
+		// The two blocks above the fork are the known work.
+		header2, err := blocks.FetchHeaderByHeight(2)
+		require.NoError(t, err)
+		header3, err := blocks.FetchHeaderByHeight(3)
+		require.NoError(t, err)
+		known := new(big.Int).Add(
+			blockchain.CalcWork(header2.Bits),
+			blockchain.CalcWork(header3.Bits),
+		)
+
+		request := func(work *big.Int, compare bool) chainstore.Reorg {
+			return chainstore.Reorg{
+				ExpectedTip: tip,
+				ForkHeight:  1,
+				Work:        work,
+				CompareOnly: compare,
+				Headers: []headerfs.BlockHeader{
+					{BlockHeader: fork[0], Height: 2},
+					{BlockHeader: fork[1], Height: 3},
+				},
+			}
+		}
+
+		reply, err := backend.Reorg(request(big.NewInt(1), false))
+		require.NoError(t, err)
+		require.Equal(t, chainstore.ReorgLessWork, reply.Verdict)
+
+		reply, err = backend.Reorg(request(known, false))
+		require.NoError(t, err)
+		require.Equal(t, chainstore.ReorgEqualWork, reply.Verdict)
+
+		reply, err = backend.Reorg(request(winningReorgWork, true))
+		require.NoError(t, err)
+		require.Equal(t, chainstore.ReorgNotRejected, reply.Verdict)
+
+		// None of them moved the chain or sent a notification.
+		_, height, err := blocks.ChainTip()
+		require.NoError(t, err)
+		require.EqualValues(t, 3, height)
+		synctest.Wait()
+		require.Empty(t, events)
+		require.False(t, backend.HasPendingRollback())
+	})
+}
+
 // TestChainStoreSuccessfulRollbackAndReorgAvoidReadback checks that a
-// rollback or reorg that succeeds performs no tip readback beyond the two
-// reads made before it begins. The readback exists only to resolve ambiguous
-// errors, so reading after every success would add a store round trip, and a
-// failure point, to the common path.
+// rollback or reorg that succeeds performs no tip readback beyond the reads
+// made before it begins: two, plus one for a reorg's work comparison. The
+// readback exists only to resolve ambiguous errors, so reading after every
+// success would add a store round trip, and a failure point, to the common
+// path.
 func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 	for _, replace := range []bool{false, true} {
 		name := "rollback"
@@ -1070,9 +1138,13 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 					3,
 					3,
 				)
+				limit := 2
+				if replace {
+					limit = 3
+				}
 				reads := &chainStoreTipReadLimit{
 					BlockHeaderStore: blocks,
-					limit:            2,
+					limit:            limit,
 				}
 				bm.cfg.BlockHeaders = reads
 				backend := newChainStoreBackend(bm)
@@ -1096,6 +1168,7 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 					}
 					tip := *bm.publishedBlockTip.Load()
 					request := chainstore.Reorg{
+						Work:        winningReorgWork,
 						ExpectedTip: tip,
 						ForkHeight:  1,
 						Headers:     headers,
@@ -1124,7 +1197,7 @@ func TestChainStoreSuccessfulRollbackAndReorgAvoidReadback(t *testing.T) {
 				// only before the mutation.
 				require.NoError(t, err)
 				require.True(t, reply.BlockTipValid)
-				require.Equal(t, 2, reads.reads)
+				require.Equal(t, limit, reads.reads)
 				require.False(t, backend.HasPendingRollback())
 				synctest.Wait()
 				require.Len(t, events, 2)

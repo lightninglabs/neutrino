@@ -573,6 +573,8 @@ func TestReorgWorkComparisonStoreReadFailure(t *testing.T) {
 		)
 		synctest.Wait()
 
+		settleHeaderCommit(t, bm, peers)
+
 		// The message is abandoned without a penalty, a retry is
 		// scheduled, and the chain is unchanged.
 		require.False(t, dstDisconnected(peer),
@@ -583,6 +585,76 @@ func TestReorgWorkComparisonStoreReadFailure(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.EqualValues(t, dstChainHeight, height)
+	})
+}
+
+// TestRejectedReorgRestartsSync is the regression for a stall after a reorg is
+// rejected. The chain store decides a reorg's work on its own turn, so the
+// sync peer can go away while the verdict is pending. The peer-done handling
+// skips the restart while a commit is pending, so the rejection must restart
+// sync itself, or nothing asks for headers until another peer connects.
+func TestRejectedReorgRestartsSync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		params := &chaincfg.SimNetParams
+		fixture := dstChains()
+		blocks := newMemBlockHeaderStore(params)
+		filters, err := newMemFilterHeaderStore(params)
+		require.NoError(t, err)
+
+		// Store the full honest chain.
+		var headers []headerfs.BlockHeader
+		for h := uint32(1); h <= dstChainHeight; h++ {
+			headers = append(headers, headerfs.BlockHeader{
+				BlockHeader: fixture.honest[h], Height: h,
+			})
+		}
+		require.NoError(t, blocks.WriteHeaders(headers...))
+
+		bm := newCFHeaderTestManager(t, blocks, filters)
+		bm.cfg.TimeSource = dstMedianTime{
+			MedianTimeSource: bm.cfg.TimeSource,
+			offset: time.Until(
+				params.GenesisBlock.Header.Timestamp.Add(
+					time.Hour,
+				),
+			),
+		}
+
+		// The sync peer offers a branch of one block above the fork,
+		// which has less work than the two honest blocks above it.
+		liar := newTestServerPeer(
+			t, "127.0.0.1:8333", int32(dstChainHeight),
+		)
+		other := newTestServerPeer(
+			t, "127.0.0.1:8334", int32(dstChainHeight+5),
+		)
+		bm.syncPeer = liar
+		peers := list.New()
+		peers.PushBack(liar)
+		peers.PushBack(other)
+
+		msg := wire.NewMsgHeaders()
+		require.NoError(t, msg.AddBlockHeader(
+			fixture.reorg[dstReorgFork+1],
+		))
+		bm.handleHeadersMsgWithPeers(
+			peers, &headersMsg{peer: liar, headers: msg},
+		)
+		require.NotNil(t, bm.pendingHeaderCommit)
+
+		// The sync peer goes away while the verdict is pending.
+		peers.Remove(peers.Front())
+		bm.syncPeerMutex.Lock()
+		bm.syncPeer = nil
+		bm.syncPeerMutex.Unlock()
+
+		settleHeaderCommit(t, bm, peers)
+		synctest.Wait()
+
+		require.True(t, dstDisconnected(liar),
+			"a peer that sent less work was not disconnected")
+		require.Equal(t, other, bm.SyncPeer(),
+			"sync did not restart with the remaining peer")
 	})
 }
 

@@ -1,6 +1,8 @@
 package chainstore
 
 import (
+	"math/big"
+
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
@@ -58,6 +60,15 @@ type Reorg struct {
 
 	// Headers is the replacement branch, starting at ForkHeight+1.
 	Headers []headerfs.BlockHeader
+
+	// Work is the proof of work of the whole branch the peer sent, which
+	// can extend past Headers. The branch must beat the durable chain
+	// above the fork, or nothing changes.
+	Work *big.Int
+
+	// CompareOnly asks only for the work verdict. The caller found a
+	// problem with the branch that only matters if it has the most work.
+	CompareOnly bool
 }
 
 // MessageType returns the name of the command.
@@ -116,8 +127,29 @@ type FilterSnapshot struct {
 	StopHeight uint32
 }
 
+// ReorgVerdict is the outcome of comparing a branch's work with the durable
+// chain above the fork.
+type ReorgVerdict uint8
+
+const (
+	// ReorgNotRejected means the branch has more work, or the command
+	// wasn't a reorg.
+	ReorgNotRejected ReorgVerdict = iota
+
+	// ReorgLessWork means the branch has less work than the durable chain.
+	ReorgLessWork
+
+	// ReorgEqualWork means the branch ties the durable chain, so the
+	// durable chain stays.
+	ReorgEqualWork
+)
+
 // Reply is the outcome of one command.
 type Reply struct {
+	// Verdict is the work comparison of a reorg. Nothing changed if it
+	// rejects the branch.
+	Verdict ReorgVerdict
+
 	// BlockTip is the verified durable block tip, when BlockTipValid is
 	// set.
 	BlockTip headerfs.BlockStamp

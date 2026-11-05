@@ -556,6 +556,7 @@ commit retries, and the bootstrap delay only post a message to
 `blockHandler`. They never touch sync state directly.
 
 Every driver event from `blockHandler` uses a five-second deadline. The
-headersync manager and peers run on the caller's goroutine under a lock, so a
-deadline can't expire between a message applying and its reply arriving. The
+headersync manager and peers run on the caller's goroutine under a lock, and
+don't check the deadline, so a deadline can't split an event's messages or
+expire between a message applying and its reply arriving. The
 dispatch mirror is a `querysync.Scheduler`, called under the manager's lock.

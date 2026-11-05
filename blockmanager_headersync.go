@@ -1001,6 +1001,10 @@ type pendingChainHeaderCommit struct {
 	reorg      *serialHeaderReorg
 	reorgNodes []headerlist.Node
 
+	// reorgMismatch is the height of a checkpoint the reorg's branch
+	// failed, or zero. The command only compares work in that case.
+	reorgMismatch int32
+
 	// checkpoint is set for a rollback to the last verified checkpoint
 	// after a peer's header failed a checkpoint. It's the new tip.
 	checkpoint *headerlist.Node
@@ -1073,7 +1077,7 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 		b.finishCheckpointRollback(peers, prepared)
 
 	case prepared.reorg != nil:
-		b.finishSerialHeaderReorg(peers, prepared)
+		b.finishSerialHeaderReorg(peers, prepared, result.Reply.Verdict)
 
 	case prepared.serial != nil:
 		b.finishSerialHeaderExtension(
@@ -1151,7 +1155,52 @@ func (b *blockManager) finishCheckpointRollback(peers *list.List,
 // finishSerialHeaderReorg rebuilds the validation cache on the new branch, then
 // asks for whatever comes after it.
 func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
-	prepared *pendingChainHeaderCommit) {
+	prepared *pendingChainHeaderCommit, verdict chainstore.ReorgVerdict) {
+
+	peer := prepared.message.peer
+
+	switch {
+	// A branch with less work is an invalid claim, and so is a tie that
+	// also failed a checkpoint, so we drop the peer.
+	case verdict == chainstore.ReorgLessWork,
+		verdict == chainstore.ReorgEqualWork &&
+			prepared.reorgMismatch != 0:
+
+		log.Warnf("Reorg attempt that has less work than known chain "+
+			"or fails a checkpoint, from peer %s -- disconnecting",
+			peer.Addr())
+		peer.Disconnect()
+		b.restartSyncIfIdle(peers)
+
+		return
+
+	// A tie changes nothing, and says nothing bad about the peer.
+	case verdict == chainstore.ReorgEqualWork:
+		b.restartSyncIfIdle(peers)
+
+		return
+
+	// The branch would win, but it failed a checkpoint.
+	case prepared.reorgMismatch != 0:
+		b.submitCheckpointRollback(
+			prepared.message, prepared.reorgMismatch,
+		)
+
+		return
+	}
+
+	// The branch won. It answered the sync peer's request, and the peer
+	// that delivered it becomes the sync peer, unless it has gone away.
+	last := prepared.reorgNodes[len(prepared.reorgNodes)-1]
+	peer.UpdateLastBlockHeight(last.Height)
+	if peer == b.SyncPeer() {
+		b.disarmHeaderSyncTimeout()
+	}
+	if !peerDisconnected(peer) {
+		b.syncPeerMutex.Lock()
+		b.syncPeer = peer
+		b.syncPeerMutex.Unlock()
+	}
 
 	b.tip.Reset(prepared.reorg.fork)
 	b.tip.Extend(prepared.reorgNodes)
@@ -1161,13 +1210,21 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 		)
 	}
 
-	last := prepared.reorgNodes[len(prepared.reorgNodes)-1]
 	hash := last.Header.BlockHash()
 	b.advanceHeaderSyncTip(uint32(last.Height), hash)
 
 	b.finishSerialHeaderFollowup(
 		peers, prepared.message, &hash, last.Height,
 	)
+}
+
+// restartSyncIfIdle restarts sync when the sync peer went away while a reorg's
+// verdict was pending. The peer-done handling skips the restart while a commit
+// is pending, so nothing else would.
+func (b *blockManager) restartSyncIfIdle(peers *list.List) {
+	if b.SyncPeer() == nil {
+		b.startSync(peers)
+	}
 }
 
 // rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
