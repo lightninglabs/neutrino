@@ -47,6 +47,30 @@ Each campaign's generator seed is `run_number * 16 + n` for `n` in 1 to 4, so
 consecutive nights explore different seeds and any failure is reproducible
 from the run number. The same workflow runs the P checker.
 
+## Chain-store DST
+
+`chain_store_dst_test.go` runs the real chain-store actor, `blockHandler` and
+`cfHandler` through `blockManager.Start` in a synctest bubble. Unlike the
+header-sync DST, no handler is driven by the runner. The harness supplies a
+scripted header peer, a scripted cfheaders responder, a notification consumer
+that can stall, and fault wrappers on both stores. Every store operation takes
+virtual time, so a rollback and a filter batch commit can overlap.
+
+After every event the oracle checks, against the durable stores, that the
+block chain links, that each stored filter header is bound to the block the
+block header store holds at that height, and that the delivered notifications
+replay into a consistent chain. Where no actor turn can be in progress, it also
+checks the published filter tip. The heal phase clears every fault, resumes the
+consumer, and redelivers the heaviest chain until block tip, filter tip,
+published tip and notified tip agree.
+
+```sh
+go test . -run '^TestChainStoreDST$' -count=1
+go test . -run '^TestChainStoreDSTSwarm$' -dst.swarm=2000 -dst.seed=3
+go test . -run '^TestChainStoreDSTReplay$' -dst.replay=<hex>
+go test . -run '^$' -fuzz '^FuzzChainStoreDST$' -fuzztime=5m
+```
+
 ## Harness components
 
 The DST runs inside one `testing/synctest` bubble. Production code that
@@ -281,7 +305,7 @@ The heal phase removes faults without hiding the bugs they caused:
 The tip phase runs when the reorg fault class is enabled. Peers announce
 three more honest headers; in the two frontier modes they then announce the
 heavier reorg branch forking at height 10. This drives the serial extension
-path, `rollBackToHeight`, and the block notifications.
+path, the chain store rollback, and the block notifications.
 
 ## Fault injection points
 
@@ -443,7 +467,7 @@ than a millisecond. Those are Go scheduler traces, not P checker schedules.
 - **No cfheader DST.** The filter-header path, `cfHandler` and the query work
   manager are not driven. So the producer-side invariant is unchecked: after
   a reorg, every stored filter header's block hash must equal the block-header
-  store's hash at that height. `rollBackToHeight` on `blockHandler` and
+  store's hash at that height. the chain store rollback on `blockHandler` and
   `cfHandler` both write the filter-header store today. Tracked in
   [#416](https://github.com/lightninglabs/neutrino/issues/416).
 - **Notification order is recorded, not asserted.** A connected notification

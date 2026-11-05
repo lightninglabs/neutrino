@@ -1,6 +1,6 @@
 module github.com/lightninglabs/neutrino/tools
 
-go 1.25.11
+go 1.26.10
 
 require (
 	github.com/btcsuite/btcd v0.26.0

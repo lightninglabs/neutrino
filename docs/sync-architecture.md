@@ -84,13 +84,14 @@ interfaces is the same for both.
 
 | Package or type | Owns | Does not own |
 | --- | --- | --- |
-| `blockManager` | Peer I/O for headers, the in-memory `headerList`, contextual header validation, ordered writes to the header stores, filter-header sync, block notifications | Range planning, lease ownership, peer scheduling policy |
+| `blockManager` | Peer I/O for headers, the in-memory `headerList`, contextual header validation, filter-header sync | Store writes and block notifications (in `chainstore`), range planning, lease ownership, peer scheduling policy |
 | `headersync.HeaderSyncFSM` | Anchors, header ranges and their lease epochs, per-peer range queues, the committed tip known to the scheduler | Goroutines, timers, I/O, header payloads |
 | `headersync.ManagerActor` | Serialized access to the FSM; mirrors peer and range changes into the dispatch controller | Policy decisions, which live in the FSM and `Controller` |
 | `headersync.PeerActor` | One peer's scheduling state (ready, busy, blocked, quarantined, down), RTT, rank, and active range | The wire request itself, which `blockManager` sends |
 | `headersync.Controller` | Planning policy: checkpoint and frontier ranges, anchor discovery spans, hedged peer choice, invalidation fan-out, replanning | Any state of its own |
 | `headersync.Session` | In-flight range and anchor requests with their timers, stale requests, staged header payloads, peer cooldowns, range ID allocation | Range state, which lives in the FSM |
 | `headersync.Runtime` | Construction and shutdown of the actor graph | Message routing; `blockManager` calls each part directly |
+| `chainstore` | Serializing every write to the block and filter header stores on one actor, retaining a rollback until it finishes, verifying ambiguous writes | Header validation, published tips (through `Host`), sync policy |
 | `headersync/querydispatch` | Adapting a private querysync scheduler to choose range owners and steal unstarted ranges | Header validation, leases, commit order |
 | `querysync/workmanager` | The production `query.WorkManager`: the job heap, per-peer workers, retries, timeouts, cooldowns, quarantine, and a `querysync.Scheduler` consulted only from its dispatcher goroutine | Message encoding and response matching, which each `query.Request` supplies |
 | `querysync.SchedulerFSM` | Pure peer scheduling state: per-peer snapshots, owner selection, steal selection | Concrete jobs, which the dispatcher keeps |
@@ -158,7 +159,7 @@ serial path in three cases:
 - The parallel path could neither plan a range nor start anchor discovery.
 - The node has caught up. New blocks announced by `inv` or unsolicited
   `headers` messages go through `handleHeadersMsgWithPeers`, which also
-  handles reorgs and calls `rollBackToHeight`.
+  handles reorgs by submitting a `chainstore.Reorg` to the chain store actor.
 
 ### Anchors and ranges
 
@@ -382,8 +383,8 @@ Transaction broadcast and the all-peer filter-header checks still use
 ## Filter header sync
 
 The `cfHandler` goroutine syncs regular filter headers behind the block
-header tip. Block header commits wake it: both header writers set
-`headerTip` under `newHeadersMtx` and broadcast `newHeadersSignal`.
+header tip. Block header commits wake it: the chain store actor sets
+`headerTip` under `newHeadersMtx` and broadcasts `newHeadersSignal`.
 
 ```mermaid
 flowchart TB
@@ -393,7 +394,7 @@ flowchart TB
     bad["detectBadPeers,<br/>resolveFilterMismatchFromBlock<br/>ban peers that sent wrong headers"]
     batch["getCheckpointedCFHeaders<br/>one getcfheaders per 2,000 headers,<br/>one querysync batch"]
     check["handleResponse<br/>check against bracketing checkpoints"]
-    write["writeCFHeadersMsgs<br/>contiguous batches, up to 32 msgs per tx"]
+    write["chainstore.Store.writeFilterHeaders<br/>contiguous batches, up to 32 msgs per tx"]
     tip["getUncheckpointedCFHeaders<br/>near the tip: one getcfheaders to all peers"]
     ntfn["BlockConnected per header<br/>to blockntfns subscribers"]
 
@@ -427,12 +428,12 @@ flowchart TB
 
 ### Notifications
 
-`writeCFHeadersMsgs` is the only producer of `BlockConnected` notifications.
-After each filter-header write it advances `filterHeaderTip` and sends one
-`BlockConnected` per header. A block is therefore reported as connected only
-once its filter header is durable. `rollBackToHeight`, which runs on
-`blockHandler` during a reorg, sends `BlockDisconnected` for each block it
-removes. `blockntfns.SubscriptionManager` fans both out to subscribers and
+`chainstore.Store` sends every block notification, on the chain store actor's
+goroutine. `writeFilterHeaders` advances `filterHeaderTip` after each
+filter-header write and sends one `BlockConnected` per header, so a block is
+reported as connected only once its filter header is durable. `rollBackBlocks`,
+or `settleInterruptedStep` when it resumes an interrupted removal, sends one
+`BlockDisconnected` per removed block, only after that block has left the store. `blockntfns.SubscriptionManager` fans both out to subscribers and
 uses `NotificationsSinceHeight` to replay a backlog, bounded by
 `filterHeaderTip`.
 
