@@ -471,17 +471,13 @@ func (d *dstRun) build() {
 	tipHeader, err := d.store.FetchHeaderByHeight(tip)
 	require.NoError(t, err)
 	bm.headerSync.Stop()
-	dispatchFSM := querysync.NewSchedulerFSM(querysync.DefaultConfig())
-	dispatchActor := querysync.NewManagerActor(
-		dispatchFSM, headerSyncActorMailboxSize,
-	)
+	scheduler := querysync.NewScheduler(querysync.DefaultConfig(), nil, nil)
 	bm.headerSync, _ = headersync.NewRuntime(
 		headersync.ChainPoint{Height: tip, Hash: tipHeader.BlockHash()},
 		bm.cfg.ChainParams.Checkpoints,
 		headersync.RuntimeConfig{
-			Config:        d.headerConfig(),
-			Dispatch:      querydispatch.New(dispatchActor),
-			DispatchActor: dispatchActor,
+			Config:   d.headerConfig(),
+			Dispatch: querydispatch.New(scheduler),
 		},
 	)
 	d.recorder = &headersync.EventRecorder{}

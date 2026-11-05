@@ -9,20 +9,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 )
 
-// ActorLifecycle is the minimal lifecycle surface needed for an auxiliary
-// actor that the runtime owns. This keeps querysync wiring outside this
-// package while still letting headersync control startup and shutdown.
-type ActorLifecycle interface {
-	Start(context.Context)
-	Stop()
-}
-
 // RuntimeConfig contains the production runtime dependencies.
 type RuntimeConfig struct {
 	Config Config
 
-	Dispatch      DispatchController
-	DispatchActor ActorLifecycle
+	Dispatch DispatchController
 }
 
 // Runtime owns the headersync manager, its peers and production request
@@ -34,11 +25,10 @@ type RuntimeConfig struct {
 type Runtime struct {
 	cfg Config
 
-	dispatchActor ActorLifecycle
-	manager       *Manager
-	session       *Session
-	controller    *Controller
-	driver        *Driver
+	manager    *Manager
+	session    *Session
+	controller *Controller
+	driver     *Driver
 
 	peers map[string]*Peer
 
@@ -68,10 +58,9 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	session := NewSession()
 
 	runtime := &Runtime{
-		cfg:           headerCfg,
-		dispatchActor: cfg.DispatchActor,
-		manager:       manager,
-		session:       session,
+		cfg:     headerCfg,
+		manager: manager,
+		session: session,
 		controller: NewController(
 			manager, session, headerCfg,
 		),
@@ -87,15 +76,12 @@ func (r *Runtime) Start(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	if r.dispatchActor != nil {
-		r.dispatchActor.Start(ctx)
-	}
 	if r.manager != nil {
 		r.manager.Start(ctx)
 	}
 }
 
-// Stop stops the manager, the peers, the dispatch actor and the request
+// Stop stops the manager, the peers and the request
 // timers owned by the runtime.
 func (r *Runtime) Stop() {
 	if r == nil {
@@ -114,9 +100,6 @@ func (r *Runtime) Stop() {
 	}
 	if r.manager != nil {
 		r.manager.Stop()
-	}
-	if r.dispatchActor != nil {
-		r.dispatchActor.Stop()
 	}
 }
 

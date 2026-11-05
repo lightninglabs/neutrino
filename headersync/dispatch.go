@@ -1,7 +1,6 @@
 package headersync
 
 import (
-	"context"
 	"time"
 )
 
@@ -25,15 +24,15 @@ type DispatchStealResult struct {
 // Implementations should not know about getheaders, anchors, validation, or
 // ordered commit. Those remain headersync responsibilities.
 type DispatchController interface {
-	AddPeer(context.Context, PeerSnapshot) error
-	RemovePeer(context.Context, string) error
-	UpdatePeerState(context.Context, string, PeerState) error
-	UpdatePeerRTT(context.Context, string, time.Duration) error
+	AddPeer(PeerSnapshot) error
+	RemovePeer(string) error
+	UpdatePeerState(string, PeerState) error
+	UpdatePeerRTT(string, time.Duration) error
 
-	AssignRange(context.Context, RangeID) (DispatchAssignment, bool, error)
-	StartRange(context.Context, PeerSnapshot) error
-	CompleteRange(context.Context, string) error
-	SyncPeer(context.Context, PeerSnapshot) error
+	AssignRange(RangeID) (DispatchAssignment, bool, error)
+	StartRange(PeerSnapshot) error
+	CompleteRange(string) error
+	SyncPeer(PeerSnapshot) error
 
-	StealRange(context.Context, string) (DispatchStealResult, bool, error)
+	StealRange(string) (DispatchStealResult, bool, error)
 }

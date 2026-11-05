@@ -69,10 +69,6 @@ const (
 	// still happen promptly when that peer's chain later becomes best.
 	defaultHeaderPeerQueryQuarantine = 10 * time.Second
 
-	// headerSyncActorMailboxSize sizes the mailbox of the querysync
-	// dispatch actor that headersync uses.
-	headerSyncActorMailboxSize = 128
-
 	// headerSyncBootstrapMinPeers is the minimum candidate peer set we try
 	// to collect before leasing the first header range. This avoids giving
 	// the genesis checkpoint range to the first peer that happens to
@@ -474,7 +470,6 @@ func (b *blockManager) initHeaderSyncManager(height uint32,
 			Hash:   hash,
 		},
 		b.cfg.ChainParams.Checkpoints,
-		headerSyncActorMailboxSize,
 	)
 	b.headerSync = runtime
 

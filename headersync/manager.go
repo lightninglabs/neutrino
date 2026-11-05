@@ -370,14 +370,14 @@ type managerEnv struct {
 
 // syncPeers mirrors every peer's FSM state into the dispatch scheduler and
 // returns the last error, so one failing peer does not skip the rest.
-func (e *managerEnv) syncPeers(ctx context.Context) error {
+func (e *managerEnv) syncPeers() error {
 	if e.dispatch == nil {
 		return nil
 	}
 
 	var syncErr error
 	for _, peer := range e.fsm.Peers() {
-		if err := e.dispatch.SyncPeer(ctx, peer); err != nil {
+		if err := e.dispatch.SyncPeer(peer); err != nil {
 			syncErr = err
 		}
 	}
@@ -469,14 +469,14 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 		if err != nil {
 			return nil, err
 		}
-		syncErr := env.syncPeers(ctx)
+		syncErr := env.syncPeers()
 		return respond(&InvalidateRangeResp{
 			Result: result, Err: syncErr,
 		})
 
 	case *RejectAnchorMsg:
 		result := env.fsm.RejectAnchor(m.Height, m.Hash)
-		syncErr := env.syncPeers(ctx)
+		syncErr := env.syncPeers()
 		return respond(&RejectAnchorResp{
 			Result: result, Err: syncErr,
 		})
@@ -496,10 +496,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.AddPeer(
-				ctx,
-				m.Peer,
-			); err != nil {
+			if err := env.dispatch.AddPeer(m.Peer); err != nil {
 				return nil, err
 			}
 		}
@@ -509,10 +506,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 	case *RemovePeerMsg:
 		env.fsm.RemovePeer(m.ID)
 		if env.dispatch != nil {
-			if err := env.dispatch.RemovePeer(
-				ctx,
-				m.ID,
-			); err != nil {
+			if err := env.dispatch.RemovePeer(m.ID); err != nil {
 				return nil, err
 			}
 		}
@@ -524,9 +518,8 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.UpdatePeerState(
-				ctx, m.ID, m.State,
-			); err != nil {
+			err := env.dispatch.UpdatePeerState(m.ID, m.State)
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -538,9 +531,8 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if env.dispatch != nil {
-			if err := env.dispatch.UpdatePeerRTT(
-				ctx, m.ID, m.RTT,
-			); err != nil {
+			err := env.dispatch.UpdatePeerRTT(m.ID, m.RTT)
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -556,7 +548,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 		if env.dispatch == nil {
 			assignment, ok = env.fsm.AssignNextQueuedRange()
 		} else {
-			assignment, ok, err = assignRangeWithDispatch(ctx, env)
+			assignment, ok, err = assignRangeWithDispatch(env)
 			if err != nil {
 				return nil, err
 			}
@@ -578,10 +570,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				return nil, fmt.Errorf("%w: %s", ErrUnknownPeer,
 					m.PeerID)
 			}
-			if err := env.dispatch.StartRange(
-				ctx,
-				peer,
-			); err != nil {
+			if err := env.dispatch.StartRange(peer); err != nil {
 				return nil, err
 			}
 		}
@@ -604,7 +593,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				)
 			} else {
 				result, ok, err = stealRangeWithDispatch(
-					ctx, env, m.ThiefID,
+					env, m.ThiefID,
 				)
 			}
 		} else {
@@ -612,11 +601,8 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 				m.ThiefID, m.RangeID,
 			)
 			if ok && env.dispatch != nil {
-				if err := syncStealPeers(
-					ctx,
-					env,
-					result,
-				); err != nil {
+				err := syncStealPeers(env, result)
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -646,16 +632,14 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 			return nil, err
 		}
 		if result.Accepted && !result.Stale && env.dispatch != nil {
-			if err := env.dispatch.CompleteRange(
-				ctx, m.PeerID,
-			); err != nil {
+			err := env.dispatch.CompleteRange(m.PeerID)
+			if err != nil {
 				return nil, err
 			}
 			peer, peerOK := env.fsm.SnapshotPeer(m.PeerID)
 			if peerOK {
-				if err := env.dispatch.SyncPeer(
-					ctx, peer,
-				); err != nil {
+				err := env.dispatch.SyncPeer(peer)
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -703,7 +687,7 @@ func (managerState) ProcessEvent(ctx context.Context, msg ManagerMsg,
 	}
 }
 
-func assignRangeWithDispatch(ctx context.Context, env *managerEnv) (
+func assignRangeWithDispatch(env *managerEnv) (
 	RangeAssignment, bool, error) {
 
 	rangeID, ok := env.fsm.nextQueuedRange()
@@ -712,7 +696,7 @@ func assignRangeWithDispatch(ctx context.Context, env *managerEnv) (
 		return RangeAssignment{}, false, nil
 	}
 
-	dispatchAssignment, ok, err := env.dispatch.AssignRange(ctx, rangeID)
+	dispatchAssignment, ok, err := env.dispatch.AssignRange(rangeID)
 	if err != nil || !ok {
 		if !ok {
 			env.fsm.metrics.FailedAssignments++
@@ -726,10 +710,10 @@ func assignRangeWithDispatch(ctx context.Context, env *managerEnv) (
 	)
 }
 
-func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
+func stealRangeWithDispatch(env *managerEnv,
 	thiefID string) (StealResult, bool, error) {
 
-	dispatchSteal, ok, err := env.dispatch.StealRange(ctx, thiefID)
+	dispatchSteal, ok, err := env.dispatch.StealRange(thiefID)
 	if err != nil {
 		return StealResult{}, false, err
 	}
@@ -738,7 +722,7 @@ func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
 		if err != nil || !ok {
 			return StealResult{}, ok, err
 		}
-		if err := syncStealPeers(ctx, env, result); err != nil {
+		if err := syncStealPeers(env, result); err != nil {
 			return StealResult{}, false, err
 		}
 
@@ -770,19 +754,17 @@ func stealRangeWithDispatch(ctx context.Context, env *managerEnv,
 	return result, true, nil
 }
 
-func syncStealPeers(ctx context.Context, env *managerEnv,
-	result StealResult) error {
-
+func syncStealPeers(env *managerEnv, result StealResult) error {
 	thief, ok := env.fsm.SnapshotPeer(result.ThiefID)
 	if ok {
-		if err := env.dispatch.SyncPeer(ctx, thief); err != nil {
+		if err := env.dispatch.SyncPeer(thief); err != nil {
 			return err
 		}
 	}
 
 	donor, ok := env.fsm.SnapshotPeer(result.DonorID)
 	if ok {
-		if err := env.dispatch.SyncPeer(ctx, donor); err != nil {
+		if err := env.dispatch.SyncPeer(donor); err != nil {
 			return err
 		}
 	}

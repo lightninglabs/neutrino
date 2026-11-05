@@ -1,5 +1,7 @@
 package querysync
 
+import "time"
+
 // Scheduler is a synchronous wrapper around a SchedulerFSM for callers that
 // already serialize access to the scheduler from a single goroutine. It applies
 // the same transitions as ManagerActor and records the same trace and event
@@ -43,6 +45,46 @@ func (s *Scheduler) AddPeer(peer PeerSnapshot) error {
 func (s *Scheduler) RemovePeer(id string) {
 	s.fsm.RemovePeer(id)
 	s.record(&RemovePeerMsg{ID: id}, &ManagerAck{})
+}
+
+// UpdatePeerState sets a peer's scheduling state.
+func (s *Scheduler) UpdatePeerState(id string, state PeerState) error {
+	if err := s.fsm.UpdatePeerState(id, state); err != nil {
+		return err
+	}
+
+	s.record(
+		&UpdatePeerStateMsg{ID: id, State: state}, &ManagerAck{},
+	)
+
+	return nil
+}
+
+// UpdatePeerRTT sets a peer's round trip time.
+func (s *Scheduler) UpdatePeerRTT(id string, rtt time.Duration) error {
+	if err := s.fsm.UpdatePeerRTT(id, rtt); err != nil {
+		return err
+	}
+
+	s.record(&UpdatePeerRTTMsg{ID: id, RTT: rtt}, &ManagerAck{})
+
+	return nil
+}
+
+// CompletePeerWork marks a peer's active work finished.
+func (s *Scheduler) CompletePeerWork(id string) error {
+	if err := s.fsm.CompletePeerWork(id); err != nil {
+		return err
+	}
+
+	s.record(&CompletePeerWorkMsg{ID: id}, &ManagerAck{})
+
+	return nil
+}
+
+// SnapshotPeer returns a copy of a peer's state.
+func (s *Scheduler) SnapshotPeer(id string) (PeerSnapshot, bool) {
+	return s.fsm.SnapshotPeer(id)
 }
 
 // AssignLocalTask picks the peer that should own the task's unstarted local

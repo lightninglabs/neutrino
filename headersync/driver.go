@@ -50,6 +50,9 @@ type DriverResult struct {
 	// Effects are the side effects to perform, in order.
 	Effects []DriverEffect
 
+	// PeerCreated is set by PeerConnected when the peer is new.
+	PeerCreated bool
+
 	// HadWork is set by PeerDone when the peer had a request in flight.
 	HadWork bool
 
@@ -139,8 +142,14 @@ func (d *Driver) Handle(ctx context.Context,
 	case PeerStateChanged:
 		d.handlePeerStateChanged(ctx, event, &result)
 
-	case PeerRegistered:
-		d.handlePeerRegistered(ctx, event, &result)
+	case PeerConnected:
+		err = d.handlePeerConnected(ctx, event, &result)
+
+	case PeerDisconnected:
+		err = d.handlePeerDisconnected(ctx, event)
+
+	case PeerRTTUpdated:
+		err = d.handlePeerRTTUpdated(ctx, event)
 
 	case CooldownWakeDue:
 		d.handleCooldownWakeDue(&result)

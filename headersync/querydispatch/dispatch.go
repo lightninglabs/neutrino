@@ -1,7 +1,6 @@
 package querydispatch
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -10,77 +9,71 @@ import (
 	"github.com/lightninglabs/neutrino/querysync"
 )
 
-// Controller adapts querysync's actor-backed scheduler to headersync's generic
+// Controller adapts querysync's scheduler to headersync's generic
 // dispatch interface. Header range validation, lease epochs, active timeout
 // stealing, staging, and ordered commit stay in headersync.
 type Controller struct {
-	manager *querysync.ManagerActor
+	scheduler *querysync.Scheduler
 }
 
 var _ headersync.DispatchController = (*Controller)(nil)
 
 // New creates a querysync-backed header range dispatch controller.
-func New(manager *querysync.ManagerActor) *Controller {
-	return &Controller{manager: manager}
+func New(scheduler *querysync.Scheduler) *Controller {
+	return &Controller{scheduler: scheduler}
 }
 
 // NewRuntime creates a production headersync runtime that mirrors generic range
-// ownership through querysync's actor-backed scheduler. Header-specific
+// ownership through a querysync scheduler. The manager calls the mirror under
+// its own lock, which is what makes the scheduler safe to use. Header-specific
 // protocol details remain in headersync and blockmanager.
 func NewRuntime(tip headersync.ChainPoint,
-	checkpoints []chaincfg.Checkpoint,
-	mailboxSize int) (*headersync.Runtime, int) {
+	checkpoints []chaincfg.Checkpoint) (*headersync.Runtime, int) {
 
-	if mailboxSize <= 0 {
-		mailboxSize = 1
-	}
-
-	dispatchFSM := querysync.NewSchedulerFSM(querysync.DefaultConfig())
-	dispatchActor := querysync.NewManagerActor(dispatchFSM, mailboxSize)
+	scheduler := querysync.NewScheduler(querysync.DefaultConfig(), nil, nil)
 
 	return headersync.NewRuntime(tip, checkpoints, headersync.RuntimeConfig{
-		Config:        headersync.ProductionConfig(),
-		Dispatch:      New(dispatchActor),
-		DispatchActor: dispatchActor,
+		Config:   headersync.ProductionConfig(),
+		Dispatch: New(scheduler),
 	})
 }
 
 // AddPeer mirrors a header peer into the querysync scheduler.
-func (c *Controller) AddPeer(ctx context.Context,
-	peer headersync.PeerSnapshot) error {
-
-	return c.manager.AddPeer(ctx, toQueryPeer(peer))
+func (c *Controller) AddPeer(peer headersync.PeerSnapshot) error {
+	return c.scheduler.AddPeer(toQueryPeer(peer))
 }
 
 // RemovePeer removes a mirrored header peer.
-func (c *Controller) RemovePeer(ctx context.Context, id string) error {
-	return c.manager.RemovePeer(ctx, id)
+func (c *Controller) RemovePeer(id string) error {
+	c.scheduler.RemovePeer(id)
+
+	return nil
 }
 
 // UpdatePeerState mirrors peer scheduling state.
-func (c *Controller) UpdatePeerState(ctx context.Context, id string,
+func (c *Controller) UpdatePeerState(id string,
 	state headersync.PeerState) error {
 
-	return c.manager.UpdatePeerState(ctx, id, toQueryPeerState(state))
+	return c.scheduler.UpdatePeerState(id, toQueryPeerState(state))
 }
 
 // UpdatePeerRTT mirrors peer RTT.
-func (c *Controller) UpdatePeerRTT(ctx context.Context, id string,
+func (c *Controller) UpdatePeerRTT(id string,
 	rtt time.Duration) error {
 
-	return c.manager.UpdatePeerRTT(ctx, id, rtt)
+	return c.scheduler.UpdatePeerRTT(id, rtt)
 }
 
 // AssignRange asks querysync to assign unstarted header range ownership.
-func (c *Controller) AssignRange(ctx context.Context,
+func (c *Controller) AssignRange(
 	rangeID headersync.RangeID) (headersync.DispatchAssignment, bool,
 	error) {
 
-	assignment, ok, err := c.manager.AskAssignLocalTask(
-		ctx, querysync.Task{ID: toTaskID(rangeID)},
+	assignment, ok := c.scheduler.AssignLocalTask(
+		querysync.Task{ID: toTaskID(rangeID)},
 	)
-	if err != nil || !ok {
-		return headersync.DispatchAssignment{}, ok, err
+	if !ok {
+		return headersync.DispatchAssignment{}, false, nil
 	}
 
 	return headersync.DispatchAssignment{
@@ -91,39 +84,31 @@ func (c *Controller) AssignRange(ctx context.Context,
 
 // StartRange mirrors the peer's local queue after headersync has moved the
 // range into the active slot, then marks the peer busy in querysync.
-func (c *Controller) StartRange(ctx context.Context,
-	peer headersync.PeerSnapshot) error {
-
-	if err := c.SyncPeer(ctx, peer); err != nil {
+func (c *Controller) StartRange(peer headersync.PeerSnapshot) error {
+	if err := c.SyncPeer(peer); err != nil {
 		return err
 	}
 
-	return c.manager.UpdatePeerState(
-		ctx, peer.ID, querysync.PeerBusy,
-	)
+	return c.scheduler.UpdatePeerState(peer.ID, querysync.PeerBusy)
 }
 
 // CompleteRange marks a mirrored active range finished.
-func (c *Controller) CompleteRange(ctx context.Context,
-	peerID string) error {
-
-	return c.manager.CompletePeerWork(ctx, peerID)
+func (c *Controller) CompleteRange(peerID string) error {
+	return c.scheduler.CompletePeerWork(peerID)
 }
 
 // SyncPeer replaces the mirrored peer snapshot.
-func (c *Controller) SyncPeer(ctx context.Context,
-	peer headersync.PeerSnapshot) error {
-
-	return c.manager.AddPeer(ctx, toQueryPeer(peer))
+func (c *Controller) SyncPeer(peer headersync.PeerSnapshot) error {
+	return c.scheduler.AddPeer(toQueryPeer(peer))
 }
 
 // StealRange asks querysync to move unstarted range ownership to the thief.
-func (c *Controller) StealRange(ctx context.Context,
+func (c *Controller) StealRange(
 	thiefID string) (headersync.DispatchStealResult, bool, error) {
 
-	result, ok, err := c.manager.AskSteal(ctx, thiefID)
-	if err != nil || !ok {
-		return headersync.DispatchStealResult{}, ok, err
+	result, ok := c.scheduler.StealOne(thiefID)
+	if !ok {
+		return headersync.DispatchStealResult{}, false, nil
 	}
 
 	rangeIDs := make([]headersync.RangeID, 0, len(result.TaskIDs))

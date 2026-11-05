@@ -14,13 +14,33 @@ type PeerStateChanged struct {
 
 func (PeerStateChanged) driverEvent() {}
 
-// PeerRegistered tells the driver that a peer was just created for a
-// peer. A peer that reconnects inside its cooldown is blocked again.
-type PeerRegistered struct {
+// PeerConnected registers a peer with the driver. If it's already registered,
+// its RTT is refreshed instead.
+type PeerConnected struct {
+	// Peer is the peer's scheduling snapshot.
+	Peer PeerSnapshot
+}
+
+func (PeerConnected) driverEvent() {}
+
+// PeerDisconnected removes a peer from the driver.
+type PeerDisconnected struct {
+	// PeerID is the peer's address.
 	PeerID string
 }
 
-func (PeerRegistered) driverEvent() {}
+func (PeerDisconnected) driverEvent() {}
+
+// PeerRTTUpdated reports a new round trip time for a peer.
+type PeerRTTUpdated struct {
+	// PeerID is the peer's address.
+	PeerID string
+
+	// RTT is the new round trip time.
+	RTT time.Duration
+}
+
+func (PeerRTTUpdated) driverEvent() {}
 
 // RecoverPeers asks the driver to return every candidate peer whose cooldown
 // has expired and that has no request in flight to the ready state. A lease
@@ -63,19 +83,49 @@ func (d *Driver) handlePeerStateChanged(ctx context.Context,
 	d.setPeerState(ctx, event.PeerID, event.State, result)
 }
 
-// handlePeerRegistered blocks a freshly registered peer that is still in its
-// cooldown.
-func (d *Driver) handlePeerRegistered(ctx context.Context,
-	event PeerRegistered, result *DriverResult) {
+// handlePeerConnected registers a peer, and blocks it if it's still in its
+// cooldown. It reports in result whether the peer is new.
+func (d *Driver) handlePeerConnected(ctx context.Context,
+	event PeerConnected, result *DriverResult) error {
 
-	until, ok := d.session.CooldownUntil(event.PeerID, time.Now())
-	if !ok {
-		return
+	peer := event.Peer
+	_, created, err := d.runtime.RegisterPeer(ctx, peer)
+	if err != nil {
+		return err
+	}
+	result.PeerCreated = created
+
+	if !created {
+		return d.handlePeerRTTUpdated(ctx, PeerRTTUpdated{
+			PeerID: peer.ID,
+			RTT:    peer.RTT,
+		})
 	}
 
-	d.setPeerState(ctx, event.PeerID, PeerBlocked, result)
+	until, ok := d.session.CooldownUntil(peer.ID, time.Now())
+	if !ok {
+		return nil
+	}
+
+	d.setPeerState(ctx, peer.ID, PeerBlocked, result)
 	log.Debugf("Registered headersync peer peer=%s in "+
-		"cooldown_until=%s", event.PeerID, until.Format(time.RFC3339))
+		"cooldown_until=%s", peer.ID, until.Format(time.RFC3339))
+
+	return nil
+}
+
+// handlePeerDisconnected removes a peer.
+func (d *Driver) handlePeerDisconnected(ctx context.Context,
+	event PeerDisconnected) error {
+
+	return d.runtime.UnregisterPeer(ctx, event.PeerID)
+}
+
+// handlePeerRTTUpdated updates a peer's round trip time.
+func (d *Driver) handlePeerRTTUpdated(ctx context.Context,
+	event PeerRTTUpdated) error {
+
+	return d.runtime.UpdatePeerRTT(ctx, event.PeerID, event.RTT)
 }
 
 // handleCooldownWakeDue schedules the next cooldown wakeup.
