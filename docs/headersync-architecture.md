@@ -521,29 +521,23 @@ and re-discovers from the same request excluding that peer.
 This is the main pipeline. A `headers` message from a peer becomes a
 `HeadersReceived` event, and `handleHeadersReceived` tries it as an anchor
 reply, then a range reply, then an empty reply (`NoProgressReply`), and
-otherwise hands it to `handleTipHeaders` for the serial path.
+otherwise hands it to `handleTipHeaders` for the serial path. The pipeline
+has two halves: a reply becomes a Staged range, and Staged ranges become a
+durable commit. The first diagram covers the reply.
 
 ```mermaid
 flowchart TB
     recv["HeadersReceived<br/>handleRangeReply"]
-    match["Session.FinishRangeHeaders<br/>first PrevBlock == StartHash"]
-    stalerep["handleStaleRangeReply<br/>Session.PopStale, Then{Continue}"]
+    match["Session.FinishRangeHeaders<br/>first PrevBlock is StartHash"]
+    stalerep["handleStaleRangeReply<br/>Session.PopStale, Then Continue"]
     snap["Manager.SnapshotRange<br/>state Active, owner, epoch match"]
-    stalec["stale completion<br/>Then{Continue}"]
-    val["ValidateHeaderRange<br/>exact count, connected, ends on StopHash"]
+    stalec["stale completion<br/>Then Continue"]
+    val["ValidateHeaderRange<br/>exact count, connected,<br/>ends on StopHash"]
     lag["lagging: PeerBlocked"]
     contra["StopAnchorContradicted:<br/>PeerBlocked, rejectUntrustedAnchor"]
     bad["rejectRangePeer<br/>QuarantinePeer, DisconnectPeer,<br/>replanRange"]
-    complete["Peer.CompleteRange<br/>FSM CompleteRangeAt: Active to Staged"]
-    stage["Session.StageRange"]
-    ready["commitReadyRanges<br/>ReconcileWithStore, Manager.ReadyRanges,<br/>trimDurableRange"]
-    prep["TipState.PrepareRangeHeaders<br/>PoW, difficulty, timestamps,<br/>checkpoint hash"]
-    submit["SubmitRangeCommit{Prepared}<br/>pendingHeaderCommit set"]
-    inval["Controller.InvalidateRange<br/>rejectInvalidCommit"]
-    retry["ScheduleCommitRetry<br/>1 s, RetryCommit"]
-    store["chain store actor<br/>BlockCommit{ExpectedParent, Headers}"]
-    snapshot["SnapshotRequest, retry each 1 s<br/>SnapshotAdopted: TipState.Reset,<br/>AdvanceCommittedTip"]
-    landed["RangesCommitted<br/>TipState.FinishRange,<br/>Controller.CommitReadyRanges,<br/>DeleteStagedRange, Then{Continue}"]
+    complete["Peer.CompleteRange<br/>CompleteRangeAt: Active to Staged"]
+    stage["Session.StageRange<br/>then the commit step"]
 
     recv --> match
     match -- "no request" --> stalerep
@@ -555,9 +549,25 @@ flowchart TB
     val -- "invalid" --> bad
     val --> complete
     complete -- "error or stale" --> stalec
-    complete --> stage --> ready
-    ready -- "CommitPending" --> stalec
-    ready -- "nothing ready" --> stalec
+    complete --> stage
+```
+
+The second diagram starts from the Staged ranges and ends at the durable
+tip.
+
+```mermaid
+flowchart TB
+    ready["commitReadyRanges<br/>ReconcileWithStore, Manager.ReadyRanges,<br/>trimDurableRange"]
+    wait["wait: commit pending<br/>or nothing ready"]
+    prep["TipState.PrepareRangeHeaders<br/>PoW, difficulty, timestamps,<br/>checkpoint hash"]
+    submit["SubmitRangeCommit<br/>pendingHeaderCommit set"]
+    inval["Controller.InvalidateRange<br/>rejectInvalidCommit"]
+    retry["ScheduleCommitRetry<br/>1 s, RetryCommit"]
+    store["chain store actor<br/>BlockCommit: ExpectedParent, Headers"]
+    snapshot["SnapshotRequest, retry each 1 s<br/>SnapshotAdopted: TipState.Reset,<br/>AdvanceCommittedTip"]
+    landed["RangesCommitted<br/>TipState.FinishRange,<br/>Controller.CommitReadyRanges,<br/>DeleteStagedRange, Then Continue"]
+
+    ready -- "CommitPending or none" --> wait
     ready --> prep
     prep -- "ValidationError" --> inval
     prep -- "other error" --> retry
