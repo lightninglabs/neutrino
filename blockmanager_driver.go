@@ -27,6 +27,13 @@ func (b *blockManager) driver() *headersync.Driver {
 	return b.headerSync.Driver()
 }
 
+// driverItem is one step of the agenda handleDriverEvent works through: an
+// event to hand to the driver, or an effect to execute.
+type driverItem struct {
+	event  headersync.DriverEvent
+	effect headersync.DriverEffect
+}
+
 // handleDriverEvent hands one event to the header sync driver and executes
 // the effects it returns, in order. The block manager is the driver's
 // executor: it owns peer I/O, timers and the chain store, and reports the
@@ -34,48 +41,92 @@ func (b *blockManager) driver() *headersync.Driver {
 // called from the block handler's goroutine, which serializes the driver.
 //
 // The effects are the outbox of the driver's state machine, which never
-// dispatches them itself. A Then effect carries follow-up events, which run
-// here rather than inside the machine so that each sees a fresh view and the
-// state the effects before it produced.
+// dispatches them itself. The follow-up events of an effect, and the events
+// of a Then effect, run here in a loop over one agenda rather than inside the
+// driver or by calling back into this function, so that each sees a fresh view
+// and the state the effects before it produced, and the driver is never
+// entered from one of its own handlers or effects. An event's effects run
+// before whatever followed the event on the agenda.
 //
 // Effects find their peer among the candidate peers, or among known, which
 // holds the peer that an event came from when it may not be a candidate.
 func (b *blockManager) handleDriverEvent(peers *list.List,
 	event headersync.DriverEvent, known ...*ServerPeer) driverOutcome {
 
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
-
-	var outcome driverOutcome
-	effects, err := b.driver().ProcessEvent(
-		ctx, event, b.driverView(peers),
+	var (
+		outcome driverOutcome
+		agenda  = []driverItem{{event: event}}
+		first   = true
 	)
-	outcome.err = err
+	push := func(items ...driverItem) {
+		// The next item to run is the last one on the agenda.
+		for i := len(items) - 1; i >= 0; i-- {
+			agenda = append(agenda, items[i])
+		}
+	}
 
-	for _, effect := range effects {
-		if then, ok := effect.(headersync.Then); ok {
-			for _, next := range then.Events {
-				nested := b.handleDriverEvent(
-					peers, next, known...,
-				)
-				outcome.sent += nested.sent
+	for len(agenda) > 0 {
+		item := agenda[len(agenda)-1]
+		agenda = agenda[:len(agenda)-1]
+
+		switch {
+		case item.event != nil:
+			effects, err := b.processDriverEvent(peers, item.event)
+			if first {
+				outcome.err = err
+				first = false
 			}
 
-			continue
-		}
-		if b.executeDriverEffect(peers, known, effect) {
-			outcome.sent++
+			items := make([]driverItem, 0, len(effects))
+			for _, eff := range effects {
+				items = append(items, driverItem{effect: eff})
+			}
+			push(items...)
+
+		default:
+			if then, ok := item.effect.(headersync.Then); ok {
+				items := make([]driverItem, 0, len(then.Events))
+				for _, ev := range then.Events {
+					item := driverItem{event: ev}
+					items = append(items, item)
+				}
+				push(items...)
+
+				continue
+			}
+
+			sent, followUps := b.executeDriverEffect(
+				peers, known, item.effect,
+			)
+			if sent {
+				outcome.sent++
+			}
+
+			items := make([]driverItem, 0, len(followUps))
+			for _, next := range followUps {
+				items = append(items, driverItem{event: next})
+			}
+			push(items...)
 		}
 	}
 
 	return outcome
 }
 
+// processDriverEvent runs one event through the driver under the deadline of
+// a header sync operation, with a view of the world as it is now.
+func (b *blockManager) processDriverEvent(peers *list.List,
+	event headersync.DriverEvent) ([]headersync.DriverEffect, error) {
+
+	ctx, cancel := b.headerSyncOpCtx()
+	defer cancel()
+
+	return b.driver().ProcessEvent(ctx, event, b.driverView(peers))
+}
+
 // driverView snapshots the state the driver reads but the block manager owns.
 func (b *blockManager) driverView(peers *list.List) headersync.View {
-	view := headersync.View{
-		CommitPending: b.pendingHeaderCommit != nil,
-	}
+	var view headersync.View
 	if peers != nil {
 		view.Peers = headerSyncPeerCandidates(peers)
 	}
@@ -105,11 +156,16 @@ func driverPeer(peers *list.List, known []*ServerPeer,
 }
 
 // executeDriverEffect performs one driver effect. It reports whether the
-// effect was a getheaders request that was written to its peer.
+// effect was a getheaders request that was written to its peer, and returns the
+// events that report the outcome of the effect back to the driver.
 func (b *blockManager) executeDriverEffect(peers *list.List,
-	known []*ServerPeer, effect headersync.DriverEffect) bool {
+	known []*ServerPeer, effect headersync.DriverEffect) (bool,
+	[]headersync.DriverEvent) {
 
 	switch effect := effect.(type) {
+	case headersync.Deliver:
+		b.handlePeerMessage(peers, effect.Message)
+
 	case headersync.ArmCooldownWake:
 		b.armHeaderCooldownWake(effect.Until)
 
@@ -118,7 +174,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		if sp == nil {
 			log.Warnf("headersync driver asked for a request to "+
 				"unknown peer %s", effect.PeerID)
-			return false
+			return false, nil
 		}
 
 		startHash := effect.StartHash
@@ -128,31 +184,31 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		)
 		err := b.sendHeaderRequest(sp, locator, &stopHash)
 		if err != nil {
-			b.handleDriverEvent(peers, headersync.RequestFailed{
-				Request: effect,
-				Err:     err,
-			}, known...)
-			return false
+			return false, []headersync.DriverEvent{
+				headersync.RequestFailed{
+					Request: effect,
+					Err:     err,
+				},
+			}
 		}
 
-		b.handleDriverEvent(peers, headersync.RequestSent{
+		return true, []headersync.DriverEvent{headersync.RequestSent{
 			Request: effect,
-		}, known...)
-
-		return true
+		}}
 
 	case headersync.ArmRequestTimer:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		timer := b.armHeaderSyncRequestTimer(sp, effect)
-		b.handleDriverEvent(peers, headersync.TimerArmed{
+
+		return false, []headersync.DriverEvent{headersync.TimerArmed{
 			PeerID:    effect.PeerID,
 			Kind:      effect.Kind,
 			RequestID: effect.RequestID,
 			Timer:     timer,
-		}, known...)
+		}}
 
 	case headersync.QuarantinePeer:
 		b.quarantineHeaderSyncAddress(effect.PeerID)
@@ -160,7 +216,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.DisconnectPeer:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		removeSyncCandidate(peers, sp)
 		sp.Disconnect()
@@ -168,21 +224,21 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.DropCandidate:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		removeSyncCandidate(peers, sp)
 
 	case headersync.DisconnectTipPeer:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		sp.Disconnect()
 
 	case headersync.UpdatePeerHeight:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		sp.UpdateLastBlockHeight(effect.Height)
 
@@ -192,28 +248,28 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.NoProgressReply:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		b.handleNoProgressReply(peers, sp)
 
 	case headersync.CommitExtension:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, abandonedCommit()
 		}
 		b.submitSerialExtension(sp, effect)
 
 	case headersync.CommitReorg:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, abandonedCommit()
 		}
 		b.submitSerialHeaderReorg(sp, effect)
 
 	case headersync.CheckpointRollback:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, abandonedCommit()
 		}
 		b.submitCheckpointRollback(sp, effect)
 
@@ -226,23 +282,23 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.SetSyncPeer:
 		if effect.PeerID == "" {
 			b.setSyncPeer(nil)
-			return false
+			return false, nil
 		}
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
 			log.Warnf("headersync driver named unknown sync "+
 				"peer %s", effect.PeerID)
-			return false
+			return false, nil
 		}
 		if effect.UnlessGone && peerDisconnected(sp) {
-			return false
+			return false, nil
 		}
 		b.setSyncPeer(sp)
 
 	case headersync.ContinueSerial:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
-			return false
+			return false, nil
 		}
 		b.finishSerialHeaderFollowup(peers, sp, effect)
 
@@ -257,7 +313,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		if sp == nil {
 			log.Warnf("headersync driver named unknown serial "+
 				"sync peer %s", effect.PeerID)
-			return false
+			return false, nil
 		}
 		b.startSerialSync(peers, sp, effect)
 
@@ -268,7 +324,15 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		log.Warnf("headersync driver emitted unknown effect %T", effect)
 	}
 
-	return false
+	return false, nil
+}
+
+// abandonedCommit returns the event that tells the driver a mutation it asked
+// for was never submitted, so it stops waiting on a result that will not come.
+func abandonedCommit() []headersync.DriverEvent {
+	log.Warnf("headersync driver asked for a commit from an unknown peer")
+
+	return []headersync.DriverEvent{headersync.CommitAbandoned{}}
 }
 
 // armHeaderSyncRequestTimer arms the deadline of a tracked request. When it

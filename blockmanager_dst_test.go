@@ -269,7 +269,7 @@ func settleHeaderCommit(t *testing.T, bm *blockManager, peers *list.List) {
 
 	for bm.pendingHeaderCommit != nil {
 		select {
-		case result := <-bm.chainStoreResult:
+		case result := <-inboxOf(t, bm).result:
 			bm.finishAsyncHeaderCommit(peers, result)
 
 		case <-time.After(time.Minute):

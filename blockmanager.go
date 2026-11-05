@@ -28,6 +28,7 @@ import (
 	"github.com/lightninglabs/neutrino/headersync"
 	"github.com/lightninglabs/neutrino/headersync/querydispatch"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
+	"github.com/lightningnetwork/lnd/actor"
 )
 
 const (
@@ -234,17 +235,19 @@ type blockManager struct { // nolint:maligned
 	// snapshot.
 	syncPeer atomic.Pointer[ServerPeer]
 
-	// peerChan is a channel for messages that come from peers
-	peerChan chan interface{}
+	// handler is the block handler actor. Every message the block manager
+	// reacts to is queued in its mailbox: messages from peers, departed
+	// peers, timers, deadlines and the results of chain store mutations.
+	handler *actor.Actor[blockInput, struct{}]
+
+	// deliver queues a message in the handler's mailbox. Tests that drive
+	// the handlers themselves replace it to collect the messages.
+	deliver atomic.Pointer[func(message any)]
 
 	// chainStore owns runtime header store mutations once integrated.
 	chainStore          *chainstore.Client
 	storeOps            *chainstore.Store
-	chainStoreResult    chan chainstore.Result
 	pendingHeaderCommit *pendingChainHeaderCommit
-	donePeerChan        chan *ServerPeer
-	timerChan           chan interface{}
-	timeoutChan         chan *headerSyncTimeoutMsg
 
 	// blockNtfnChan is a channel in which the latest block notifications
 	// for the tip of the chain will be sent upon.
@@ -294,13 +297,8 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	}
 
 	bm := blockManager{
-		cfg:              cfg,
-		peerChan:         make(chan interface{}, MaxPeers*3),
-		donePeerChan:     make(chan *ServerPeer, MaxPeers),
-		timerChan:        make(chan interface{}, MaxPeers*3),
-		timeoutChan:      make(chan *headerSyncTimeoutMsg, MaxPeers*3),
-		chainStoreResult: make(chan chainstore.Result, 1),
-		blockNtfnChan:    make(chan blockntfns.BlockNtfn),
+		cfg:           cfg,
+		blockNtfnChan: make(chan blockntfns.BlockNtfn),
 		blkHeaderProgressLogger: newBlockProgressLogger(
 			"Processed", "block", log,
 		),
@@ -318,6 +316,9 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		bm.headerSyncTimeout = defaultHeaderSyncTimeout
 	}
 	bm.quitCtx, bm.quitCancel = context.WithCancel(context.Background())
+	if err := bm.newBlockHandler(); err != nil {
+		return nil, err
+	}
 
 	// We fetch the genesis header to use for verifying the first received
 	// interval.
@@ -495,8 +496,8 @@ func (b *blockManager) Start() {
 	log.Trace("Starting block manager")
 	b.startHeaderSyncActors()
 
-	b.wg.Add(2)
-	go b.blockHandler()
+	b.wg.Add(1)
+	b.startBlockHandler()
 	go func() {
 		defer b.wg.Done()
 
@@ -527,11 +528,11 @@ func (b *blockManager) Stop() error {
 	log.Infof("Block manager shutting down")
 	close(b.quit)
 	b.quitCancel()
+	b.stopBlockHandler()
 	b.wg.Wait()
 
-	// Stop every block handler timer. A callback that fires after quit
-	// closed sees both quit and a buffered peerChan ready, and select may
-	// still enqueue a message nobody will read.
+	// Stop every block handler timer. A callback that fires after the
+	// handler stopped finds its mailbox closed and drops the message.
 	b.cancelHeaderCommitRetry()
 	b.disarmHeaderSyncTimeout()
 	b.clearHeaderSyncBootstrapDelay()
@@ -562,11 +563,7 @@ func (b *blockManager) NewPeer(sp *ServerPeer) {
 		return
 	}
 
-	select {
-	case b.peerChan <- &newPeerMsg{peer: sp}:
-	case <-b.quit:
-		return
-	}
+	b.post(&newPeerMsg{peer: sp})
 }
 
 // handleNewPeerMsg deals with new peers that have signalled they may be
@@ -633,11 +630,7 @@ func (b *blockManager) DonePeer(sp *ServerPeer) {
 		return
 	}
 
-	select {
-	case b.donePeerChan <- sp:
-	case <-b.quit:
-		return
-	}
+	b.post(&donePeerMsg{peer: sp})
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done. It
@@ -664,62 +657,20 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 // while allowing other controls to run during a store mutation. A response
 // arriving just after a deadline can also be handled before punishment.
 func (b *blockManager) sendHeaderTimeout(msg *headerSyncTimeoutMsg) {
-	select {
-	case b.timeoutChan <- msg:
-	case <-b.quit:
-	}
+	b.post(msg)
 }
 
-// blockHandler is the main handler for the block manager. It must be run as a
-// goroutine. It processes block and inv messages in a separate goroutine from
-// the peer handlers so the block (MsgBlock) messages are handled by a single
-// thread without needing to lock memory data structures. This is important
-// because the block manager controls which blocks are needed and how the
-// fetching should proceed.
-func (b *blockManager) blockHandler() {
-	defer b.wg.Done()
-
-	candidatePeers := list.New()
-	var timeout *headerSyncTimeoutMsg
-	var queuedBeforeTimeout int
-out:
-	for {
-		if timeout != nil && queuedBeforeTimeout == 0 &&
-			b.pendingHeaderCommit == nil {
-
-			b.handleHeaderSyncTimeoutMsg(candidatePeers, timeout)
-			timeout = nil
-			continue
-		}
-		peerChan := b.peerChan
-		timeoutChan := b.timeoutChan
-		if b.pendingHeaderCommit != nil {
-			peerChan, timeoutChan = nil, nil
-		}
-		if timeout != nil {
-			timeoutChan = nil
-		}
-		select {
-		case m := <-peerChan:
-			b.handlePeerMessage(candidatePeers, m)
-			if timeout != nil && queuedBeforeTimeout > 0 {
-				queuedBeforeTimeout--
-			}
-		case peer := <-b.donePeerChan:
-			b.handleDonePeerMsg(candidatePeers, peer)
-		case timer := <-b.timerChan:
-			b.handlePeerMessage(candidatePeers, timer)
-		case msg := <-timeoutChan:
-			timeout = msg
-			queuedBeforeTimeout = len(b.peerChan)
-		case result := <-b.chainStoreResult:
-			b.finishAsyncHeaderCommit(candidatePeers, result)
-		case <-b.quit:
-			break out
-		}
+// dispatchInbound hands a message from a peer, or an expired deadline, to the
+// driver. The driver holds it back while a chain store mutation is in flight,
+// since handling it reads the header stores that the mutation holds, and
+// otherwise returns it as a Deliver effect for the executor to handle.
+func (b *blockManager) dispatchInbound(peers *list.List, message any) {
+	if b.headerSync == nil {
+		b.handlePeerMessage(peers, message)
+		return
 	}
 
-	log.Trace("Block handler done")
+	b.handleDriverEvent(peers, headersync.Inbound{Message: message})
 }
 
 // handlePeerMessage is the serialized peer-event entry point. Keeping dispatch
@@ -990,10 +941,7 @@ func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
 	if b.headerSyncBootstrapTimer == nil {
 		b.headerSyncBootstrapTimer = time.AfterFunc(
 			headerSyncBootstrapMaxWait, func() {
-				select {
-				case b.timerChan <- &headerSyncBootstrapMsg{}:
-				case <-b.quit:
-				}
+				b.post(&headerSyncBootstrapMsg{})
 			},
 		)
 	}
@@ -1217,11 +1165,7 @@ func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *ServerPeer) {
 		return
 	}
 
-	select {
-	case b.peerChan <- &invMsg{inv: inv, peer: sp}:
-	case <-b.quit:
-		return
-	}
+	b.post(&invMsg{inv: inv, peer: sp})
 }
 
 // QueueHeaders adds the passed headers message and peer to the block handling
@@ -1233,11 +1177,7 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *ServerPeer) {
 		return
 	}
 
-	select {
-	case b.peerChan <- &headersMsg{headers: headers, peer: sp}:
-	case <-b.quit:
-		return
-	}
+	b.post(&headersMsg{headers: headers, peer: sp})
 }
 
 // onBlockConnected queues a block notification that extends the current chain.

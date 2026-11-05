@@ -54,7 +54,9 @@ func (anchorTimedOut) driverEvent() {}
 // handleRequestTimedOut classifies a timeout and, if it matches, punishes the
 // peer and moves its work on.
 func (d *Driver) handleRequestTimedOut(ctx context.Context,
-	event RequestTimedOut, view View, result *driverResult) {
+	event RequestTimedOut, view View) []DriverEffect {
+
+	var effects []DriverEffect
 
 	peerID := event.PeerID
 	switch event.Kind {
@@ -63,24 +65,25 @@ func (d *Driver) handleRequestTimedOut(ctx context.Context,
 			peerID, event.RequestID, event.StartHeight,
 		)
 		if !ok {
-			return
+			return effects
 		}
 
 		log.Warnf("headersync anchor_timeout peer=%s start_height=%d "+
 			"stop_height=%d timeout=%v", peerID,
 			request.StartHeight, request.StopHeight, event.Timeout)
-		d.quarantinePeer(ctx, peerID, result)
-		result.Effects = append(
-			result.Effects, DisconnectPeer{PeerID: peerID},
-		)
+		effects = append(effects, d.quarantinePeer(ctx, peerID)...)
+		effects = append(effects, DisconnectPeer{PeerID: peerID})
 
 		// The disconnect drops the peer from the candidates once the
 		// effects run, so the round that replaces its request leaves
 		// it out the same way.
-		round := d.discoverFrom(
-			request, view.Peers, []string{peerID}, result,
+		discoverEffects, round := d.discoverFrom(
+			request, view.Peers, []string{peerID},
 		)
-		then(result, anchorTimedOut{PeerID: peerID, Round: round})
+		effects = append(effects, discoverEffects...)
+		effects = append(effects, then(
+			anchorTimedOut{PeerID: peerID, Round: round},
+		))
 
 	case RequestRange:
 		request, ok := d.session.TimeoutRange(
@@ -88,7 +91,7 @@ func (d *Driver) handleRequestTimedOut(ctx context.Context,
 			event.LeaseEpoch,
 		)
 		if !ok {
-			return
+			return effects
 		}
 
 		d.session.MarkStale(peerID, StaleRequest{
@@ -99,42 +102,50 @@ func (d *Driver) handleRequestTimedOut(ctx context.Context,
 			"epoch=%d start_height=%d timeout=%v", peerID,
 			event.RangeID, event.LeaseEpoch, event.StartHeight,
 			event.Timeout)
-		d.quarantinePeer(ctx, peerID, result)
-		result.Effects = append(
-			result.Effects, DisconnectPeer{PeerID: peerID},
-		)
+		effects = append(effects, d.quarantinePeer(ctx, peerID)...)
+		effects = append(effects, DisconnectPeer{PeerID: peerID})
 
 		// The range goes to another peer once the disconnect has
 		// dropped this one from the candidates.
-		then(result, DispatchWork{})
+		effects = append(effects, then(DispatchWork{}))
 	}
+
+	return effects
 }
 
 // handleAnchorTimedOut starts over when no other peer took the span of a
 // timed-out anchor request.
-func (d *Driver) handleAnchorTimedOut(event anchorTimedOut,
-	result *driverResult) {
+func (d *Driver) handleAnchorTimedOut(event anchorTimedOut) []DriverEffect {
+	var effects []DriverEffect
 
 	if d.discoveryActive(event.Round) {
-		return
+		return effects
 	}
 
 	if d.runtime.manager.TrustsTipPeer(event.PeerID) ||
 		d.session.ActiveAnchorCount() == 0 {
 
-		result.Effects = append(result.Effects, SetSyncPeer{})
+		effects = append(effects, SetSyncPeer{})
 	}
 
-	result.Effects = append(result.Effects, StartSync{})
+	effects = append(effects, StartSync{})
+
+	return effects
 }
 
 // quarantinePeer blocks a peer from scheduling until its cooldown expires, and
 // asks for the address quarantine.
-func (d *Driver) quarantinePeer(ctx context.Context, peerID string,
-	result *driverResult) {
+func (d *Driver) quarantinePeer(ctx context.Context,
+	peerID string) []DriverEffect {
 
-	d.setPeerState(ctx, peerID, PeerQuarantined, result)
-	result.Effects = append(result.Effects, QuarantinePeer{PeerID: peerID})
+	var effects []DriverEffect
+
+	effects = append(effects, d.setPeerState(
+		ctx, peerID, PeerQuarantined,
+	)...)
+	effects = append(effects, QuarantinePeer{PeerID: peerID})
+
+	return effects
 }
 
 // SerialTimedOut reports that the sync peer did not answer its serial
@@ -156,22 +167,18 @@ func (SerialTimedOut) driverEvent() {}
 // handleSerialTimedOut drops a stalled sync peer and starts over, unless the
 // chain moved past the request in the meantime.
 func (d *Driver) handleSerialTimedOut(ctx context.Context,
-	event SerialTimedOut, view View, result *driverResult) {
+	event SerialTimedOut) []DriverEffect {
 
-	var height uint32
-	if view.CommitPending {
-		height = d.cfg.PublishedTip()
-	} else {
-		_, currentHeight, err := d.tip.StoreTip()
-		if err != nil {
-			log.Errorf("Failed to get block header chain tip "+
-				"while handling header sync timeout: %v", err)
-			return
-		}
-		height = currentHeight
+	var effects []DriverEffect
+
+	_, height, err := d.tip.StoreTip()
+	if err != nil {
+		log.Errorf("Failed to get block header chain tip "+
+			"while handling header sync timeout: %v", err)
+		return effects
 	}
 	if height > event.StartHeight {
-		return
+		return effects
 	}
 
 	peerID := event.PeerID
@@ -181,22 +188,20 @@ func (d *Driver) handleSerialTimedOut(ctx context.Context,
 
 	// A slow or stalled peer is quarantined, never IP-banned: on regtest
 	// and behind NAT or Tor one address can be the only usable peer.
-	d.quarantinePeer(ctx, peerID, result)
-	result.Effects = append(result.Effects, DisconnectPeer{PeerID: peerID})
+	effects = append(effects, d.quarantinePeer(ctx, peerID)...)
+	effects = append(effects, DisconnectPeer{PeerID: peerID})
 
 	if d.runtime.manager.TrustsTipPeer(peerID) {
-		result.Effects = append(result.Effects, SetSyncPeer{})
-	}
-
-	if view.CommitPending {
-		return
+		effects = append(effects, SetSyncPeer{})
 	}
 
 	if err := d.resetTipToStore(ctx); err != nil {
 		log.Errorf("Failed to reset header state after header sync "+
 			"timeout: %v", err)
-		return
+		return effects
 	}
 
-	result.Effects = append(result.Effects, StartSync{})
+	effects = append(effects, StartSync{})
+
+	return effects
 }

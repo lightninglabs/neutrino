@@ -43,11 +43,6 @@ type DriverConfig struct {
 type View struct {
 	// Peers are the sync candidates, in the executor's order.
 	Peers []PeerCandidate
-
-	// CommitPending is set while a chain store mutation is in flight. The
-	// executor owns that mutation, and planning before it settles would
-	// build on a stale tip.
-	CommitPending bool
 }
 
 // bestHeight returns the highest height a candidate advertises, or zero when

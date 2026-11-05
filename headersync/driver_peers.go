@@ -78,24 +78,32 @@ func (ArmCooldownWake) driverEffect() {}
 
 // handlePeerStateChanged applies a peer state change.
 func (d *Driver) handlePeerStateChanged(ctx context.Context,
-	event PeerStateChanged, result *driverResult) {
+	event PeerStateChanged) []DriverEffect {
 
-	d.setPeerState(ctx, event.PeerID, event.State, result)
+	var effects []DriverEffect
+
+	effects = append(effects, d.setPeerState(
+		ctx, event.PeerID, event.State,
+	)...)
+
+	return effects
 }
 
 // handlePeerConnected registers a peer, and blocks it if it's still in its
 // cooldown.
 func (d *Driver) handlePeerConnected(ctx context.Context,
-	event PeerConnected, result *driverResult) error {
+	event PeerConnected) ([]DriverEffect, error) {
+
+	var effects []DriverEffect
 
 	peer := event.Peer
 	_, created, err := d.runtime.RegisterPeer(ctx, peer)
 	if err != nil {
-		return err
+		return effects, err
 	}
 
 	if !created {
-		return d.handlePeerRTTUpdated(ctx, PeerRTTUpdated{
+		return effects, d.handlePeerRTTUpdated(ctx, PeerRTTUpdated{
 			PeerID: peer.ID,
 			RTT:    peer.RTT,
 		})
@@ -106,14 +114,14 @@ func (d *Driver) handlePeerConnected(ctx context.Context,
 		log.Debugf("Registered headersync peer peer=%s rank=%d rtt=%v",
 			peer.ID, peer.Rank, peer.RTT)
 
-		return nil
+		return effects, nil
 	}
 
-	d.setPeerState(ctx, peer.ID, PeerBlocked, result)
+	effects = append(effects, d.setPeerState(ctx, peer.ID, PeerBlocked)...)
 	log.Debugf("Registered headersync peer peer=%s in "+
 		"cooldown_until=%s", peer.ID, until.Format(time.RFC3339))
 
-	return nil
+	return effects, nil
 }
 
 // handlePeerDisconnected removes a peer.
@@ -131,44 +139,58 @@ func (d *Driver) handlePeerRTTUpdated(ctx context.Context,
 }
 
 // handleCooldownWakeDue schedules the next cooldown wakeup.
-func (d *Driver) handleCooldownWakeDue(result *driverResult) {
-	d.scheduleCooldownWake(result)
+func (d *Driver) handleCooldownWakeDue() []DriverEffect {
+	var effects []DriverEffect
+
+	effects = append(effects, d.scheduleCooldownWake()...)
+
+	return effects
 }
 
 // setPeerState tracks the peer's cooldown, schedules a wakeup for it, and
 // updates the peer.
 func (d *Driver) setPeerState(ctx context.Context, peerID string,
-	state PeerState, result *driverResult) {
+	state PeerState) []DriverEffect {
+
+	var effects []DriverEffect
 
 	d.session.TrackPeerCooldown(
 		peerID, state, time.Now(), DefaultPeerCooldown,
 	)
-	d.scheduleCooldownWake(result)
+	effects = append(effects, d.scheduleCooldownWake()...)
 
 	err := d.runtime.UpdatePeerState(ctx, peerID, state)
 	if err != nil {
 		log.Warnf("Unable to update headersync peer state for %s: %v",
 			peerID, err)
 	}
+
+	return effects
 }
 
 // scheduleCooldownWake asks for a wakeup at the earliest cooldown expiry, if
 // any peer is still cooling down.
-func (d *Driver) scheduleCooldownWake(result *driverResult) {
+func (d *Driver) scheduleCooldownWake() []DriverEffect {
+	var effects []DriverEffect
+
 	until, ok := d.session.NextCooldownExpiry(time.Now())
 	if !ok {
-		return
+		return effects
 	}
 
-	result.Effects = append(result.Effects, ArmCooldownWake{Until: until})
+	effects = append(effects, ArmCooldownWake{Until: until})
+
+	return effects
 }
 
 // handleRecoverPeers moves peers whose cooldown has expired back to ready.
-func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
-	result *driverResult) {
+func (d *Driver) handleRecoverPeers(ctx context.Context,
+	event RecoverPeers) []DriverEffect {
+
+	var effects []DriverEffect
 
 	if d.session.CooldownCount() == 0 {
-		return
+		return effects
 	}
 
 	now := time.Now()
@@ -188,8 +210,12 @@ func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
 		log.Infof("headersync peer_recovered peer=%s "+
 			"cooldown_until=%s",
 			peerID, until.Format(time.RFC3339))
-		d.setPeerState(ctx, peerID, PeerReady, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerReady,
+		)...)
 	}
+
+	return effects
 }
 
 // replanRange plans a failed range again.
@@ -213,22 +239,28 @@ func (d *Driver) replanRange(ctx context.Context, rng HeaderRange) {
 
 // handlePeerDone abandons the requests of a disconnected peer. It reports
 // whether the peer had a request in flight.
-func (d *Driver) handlePeerDone(ctx context.Context, event PeerDone,
-	result *driverResult) bool {
+func (d *Driver) handlePeerDone(ctx context.Context,
+	event PeerDone) ([]DriverEffect, bool) {
+
+	var effects []DriverEffect
 
 	var hadWork bool
 	peerID := event.PeerID
 	if _, ok := d.session.FinishRange(peerID); ok {
 		d.session.ClearStale(peerID)
-		d.setPeerState(ctx, peerID, PeerQuarantined, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerQuarantined,
+		)...)
 		hadWork = true
 	}
 	if _, ok := d.session.FinishAnchor(peerID); ok {
-		d.setPeerState(ctx, peerID, PeerQuarantined, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerQuarantined,
+		)...)
 		hadWork = true
 	}
 
-	return hadWork
+	return effects, hadWork
 }
 
 // PeerGone tells the driver that a peer disconnected and the executor dropped
@@ -244,11 +276,14 @@ func (PeerGone) driverEvent() {}
 
 // handlePeerGone abandons a disconnected peer's requests and removes it, then
 // decides what the loss means for the sync.
-func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
-	view View, result *driverResult) {
+func (d *Driver) handlePeerGone(ctx context.Context,
+	event PeerGone) []DriverEffect {
+
+	var effects []DriverEffect
 
 	peerID := event.PeerID
-	hadWork := d.handlePeerDone(ctx, PeerDone{PeerID: peerID}, result)
+	doneEffects, hadWork := d.handlePeerDone(ctx, PeerDone{PeerID: peerID})
+	effects = append(effects, doneEffects...)
 
 	err := d.runtime.UnregisterPeer(ctx, peerID)
 	if err != nil {
@@ -261,22 +296,24 @@ func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer. Also, reset the header state.
 	if d.runtime.manager.TrustsTipPeer(peerID) {
-		result.Effects = append(result.Effects, SetSyncPeer{})
-		if view.CommitPending {
-			return
+		effects = append(effects, SetSyncPeer{})
+		if d.commitPending {
+			return effects
 		}
 
 		// Reset the cache and the visible tip together, so they keep
 		// describing the same header.
 		if err := d.resetTipToStore(ctx); err != nil {
-			return
+			return effects
 		}
-		result.Effects = append(result.Effects, StartSync{})
+		effects = append(effects, StartSync{})
 
-		return
+		return effects
 	}
 
-	if hadWork && !view.CommitPending {
-		then(result, Continue{})
+	if hadWork && !d.commitPending {
+		effects = append(effects, then(Continue{}))
 	}
+
+	return effects
 }

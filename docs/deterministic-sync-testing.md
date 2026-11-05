@@ -49,7 +49,7 @@ from the run number. The same workflow runs the P checker.
 
 ## Chain-store DST
 
-`chain_store_dst_test.go` runs the real chain-store actor, `blockHandler` and
+`chain_store_dst_test.go` runs the real chain-store actor, the block handler actor and
 the `cfHeaderSync` loop through `blockManager.Start` in a synctest bubble.
 Unlike the header-sync DST, no handler is driven by the runner. The harness
 supplies a scripted header peer, a scripted cfheaders responder, a notification consumer
@@ -76,14 +76,17 @@ go test . -run '^$' -fuzz '^FuzzChainStoreDST$' -fuzztime=5m
 The DST runs inside one `testing/synctest` bubble. Production code that
 normally runs on its own goroutines runs there for real, and the harness
 replaces only the network, the stores and the clock. The runner goroutine
-also takes the place of `blockHandler`: `blockManager.Start` is never called,
-and the runner calls `handlePeerMessage` itself.
+also takes the place of the block handler actor: `blockManager.Start` is
+never called, the harness points `blockManager.post` at a test inbox
+(`collectInbox` in `blockmanager_inbox_test.go`) instead of the actor's
+mailbox, and the runner calls `handlePeerMessage` itself. The driver's
+`Inbound` and `Deliver` step is therefore not on the path the DST runs.
 
 ```mermaid
 flowchart TB
     subgraph BUBBLE["synctest bubble"]
         direction TB
-        run["dstRun runner goroutine<br/>(blockmanager_transport_dst_test.go)<br/>plays blockHandler"]
+        run["dstRun runner goroutine<br/>(blockmanager_transport_dst_test.go)<br/>plays the block handler"]
         subgraph PROD["production code"]
             direction TB
             bm["blockManager<br/>handlePeerMessage, commit paths"]
@@ -104,7 +107,7 @@ flowchart TB
     hs --> qs
     bm -- "SendGetHeaders" --> transport
     run -- "answer: QueueHeaders" --> bm
-    timers -- "messages on peerChan" --> run
+    timers -- "messages in the test inbox" --> run
     bm -- "WriteHeaders" --> store
     bm -- "BlockConnected, BlockDisconnected" --> drain
     fixture -- "honest, reorg, fork,<br/>badTime, badBits chains" --> run
@@ -117,13 +120,13 @@ Requests and replies take different routes on purpose. Production sends each
 `dstHeaderTransport` records it and returns. The runner later builds a reply,
 encodes and decodes it as a wire message, and queues it through the
 production `QueueHeaders` entry point. Production timers post their messages
-to `peerChan` as usual. The runner drains that channel and handles the
-messages one at a time, so all of blockManager's handler state stays on one
-goroutine.
+through `blockManager.post` as usual, and the test inbox queues them. The
+runner drains the inbox and handles the messages one at a time, so all of
+blockManager's handler state stays on one goroutine.
 
 | Component | Runs for real | Simulated by the harness |
 | --- | --- | --- |
-| `blockManager` | `handlePeerMessage`, header validation, ordered commit, the serial path, reorg rollback, timers | Its event loop; the runner plays `blockHandler` |
+| `blockManager` | `handlePeerMessage`, header validation, ordered commit, the serial path, reorg rollback, timers | Its mailbox and actor; the runner plays the block handler |
 | headersync manager and peers, querysync actor | All of them, with production planning, leases, stealing and commit | Configuration: range cap and confirmation policy per mode |
 | Peers | `ServerPeer` records, the new-peer and done-peer handlers | Three peer slots that reply from mined chains, honestly or not |
 | Network | Wire encoding and decoding of every reply | Delivery: no sockets; replies go through `QueueHeaders` |
@@ -158,7 +161,7 @@ flowchart TB
     decode["decodeDSTScript<br/>mode, fault mask, order, ops"]
     setup["newDSTRun<br/>build blockManager, connect 3 slots"]
     step["step(op)<br/>at most dstMaxSteps = 32 ops"]
-    pump["pump: synctest.Wait,<br/>drain peerChan, sort, shuffle"]
+    pump["pump: synctest.Wait,<br/>drain the inbox, sort, shuffle"]
     handle["handle: handlePeerMessage,<br/>reapRemoved"]
     check{"dstInvariants.check"}
     heal["heal(): restore store,<br/>refill empty slots, honest replies"]
@@ -190,7 +193,7 @@ flowchart TB
    fault class is disabled performs an honest reply instead, so every seed
    keeps making progress.
 4. **Pump.** `pump` waits until every goroutine in the bubble is blocked, then
-   drains `peerChan`. Messages that arrived together are sorted by a stable
+   drains the test inbox. Messages that arrived together are sorted by a stable
    key, such as the timeout's request ID or the peer address, and then
    shuffled with the run's generator. `synctest` makes the set of ready
    messages deterministic but not their order, so the seed chooses the order.
@@ -283,7 +286,7 @@ A restart keeps the stores, the transport and the invariant checker's view
 of the durable tip, so recovery from the stored state is checked rather than
 recovery from scratch. A shutdown ends the run early. After stopping, the
 runner sleeps 6 s of virtual time and requires that no callback reached
-`peerChan`, that no range is active, and that no commit retry is armed.
+the test inbox, that no range is active, and that no commit retry is armed.
 
 The heal phase removes faults without hiding the bugs they caused:
 
@@ -472,7 +475,7 @@ than a millisecond. Those are Go scheduler traces, not P checker schedules.
 - **No cfheader DST.** The filter-header path, `cfHeaderSync` and the query
   work manager are not driven. So the producer-side invariant is unchecked:
   after a reorg, every stored filter header's block hash must equal the block-header
-  store's hash at that height. the chain store rollback on `blockHandler` and
+  store's hash at that height. the chain store rollback on the block handler and
   `cfHeaderSync` both write the filter-header store today. Tracked in
   [#416](https://github.com/lightninglabs/neutrino/issues/416).
 - **Notification order is recorded, not asserted.** A connected notification

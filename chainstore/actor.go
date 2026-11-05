@@ -134,10 +134,25 @@ func (c *Client) Ask(ctx context.Context, message Message) fn.Result[Reply] {
 }
 
 // TryAsk submits without parking the caller on mailbox admission, and delivers
-// the outcome to result. The block handler uses this, since it must keep
+// the outcome to result. The block handler used this, since it must keep
 // serving peers while a commit runs.
 func (c *Client) TryAsk(ctx context.Context, message Message,
 	result chan<- Result) {
+
+	c.TryAskFunc(ctx, message, func(r Result) {
+		select {
+		case result <- r:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// TryAskFunc submits without parking the caller on mailbox admission, and
+// passes the outcome to deliver on a goroutine of its own. The block handler
+// uses this, since it must keep serving peers while a commit runs, and the
+// outcome goes straight to its mailbox.
+func (c *Client) TryAskFunc(ctx context.Context, message Message,
+	deliver func(Result)) {
 
 	c.ref.TryAsk(ctx, message).OnComplete(ctx, func(r fn.Result[Reply]) {
 		reply, err := r.Unpack()
@@ -145,10 +160,7 @@ func (c *Client) TryAsk(ctx context.Context, message Message,
 			c.rejected.Add(1)
 		}
 
-		select {
-		case result <- Result{Reply: reply, Err: err}:
-		case <-ctx.Done():
-		}
+		deliver(Result{Reply: reply, Err: err})
 	})
 }
 

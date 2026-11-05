@@ -16,6 +16,7 @@ import (
 // never moves, with one anchor request for the span up to stopHeight in
 // flight from each of the given peers.
 type anchorDriverFixture struct {
+	ctx     context.Context
 	driver  *Driver
 	request AnchorRequest
 	start   Hash
@@ -94,10 +95,24 @@ func newAnchorDriverFixture(t *testing.T, checkpoint bool,
 	})
 
 	return &anchorDriverFixture{
+		ctx:     ctx,
 		driver:  driver,
 		request: request,
 		start:   start,
 	}
+}
+
+// processPending runs the event as the driver does while a chain store
+// mutation is in flight and the event is not one it defers. A headers message
+// is deferred in that state, so the test enters the handler directly: the
+// reply it models is the one that submitted the mutation, whose follow-up
+// events then run with the mutation in flight.
+func (f *anchorDriverFixture) processPending(event DriverEvent,
+	view View) ([]DriverEffect, error) {
+
+	f.driver.view = view
+
+	return f.driver.dispatch(f.ctx, event, true)
 }
 
 // anchorRequestsSent returns the anchor requests among the effects, by peer.
@@ -185,10 +200,9 @@ func TestAnchorReplyContinuesSpanWhileCommitPending(t *testing.T) {
 			{ID: "hedged", Height: 20},
 			{ID: "idle", Height: 20},
 		},
-		CommitPending: true,
 	}
 
-	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
+	effects, err := f.processPending(HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
@@ -219,10 +233,9 @@ func TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier(
 			{ID: "hedged", Height: 20},
 			{ID: "idle", Height: 20},
 		},
-		CommitPending: true,
 	}
 
-	effects, err := f.driver.ProcessEvent(t.Context(), HeadersReceived{
+	effects, err := f.processPending(HeadersReceived{
 		PeerID: "replier", PeerHeight: 20, Headers: headers,
 	}, view)
 	require.NoError(t, err)
@@ -236,9 +249,7 @@ func TestAnchorReplyContinuesSpanWhileCommitPendingOnFrontier(
 	require.Len(t, followUp.Events, 1)
 	require.IsType(t, anchorPipelined{}, followUp.Events[0])
 
-	effects, err = f.driver.ProcessEvent(
-		t.Context(), followUp.Events[0], view,
-	)
+	effects, err = f.processPending(followUp.Events[0], view)
 	require.NoError(t, err)
 
 	requireAnchorSpanContinued(t, f.request, headers, effects)

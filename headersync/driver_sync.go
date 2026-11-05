@@ -144,90 +144,107 @@ type continueDiscovered struct {
 
 func (continueDiscovered) driverEvent() {}
 
-// then appends a Then effect with the events.
-func then(result *driverResult, events ...DriverEvent) {
-	result.Effects = append(result.Effects, Then{Events: events})
+// then returns a Then effect that re-enters the driver with the events.
+func then(events ...DriverEvent) DriverEffect {
+	return Then{Events: events}
 }
 
 // handleBeginSync decides between the parallel and the serial path.
 func (d *Driver) handleBeginSync(ctx context.Context, event BeginSync,
-	view View, result *driverResult) {
+	view View) []DriverEffect {
+
+	var effects []DriverEffect
 
 	// The multi-peer scheduler needs multiple independent peers to
 	// confirm discovered anchors. The local sim/reg test harnesses often
 	// run with a single peer, so keep those networks on the serial path.
 	if event.BestHeight == 0 || d.cfg.SerialFallback {
-		d.startSerialSync(event, result)
+		effects = append(effects, d.startSerialSync(event)...)
 
-		return
+		return effects
 	}
 
 	planned, err := d.planRanges(ctx, event.BestHeight)
 	if err != nil {
 		log.Warnf("headersync failed to plan checkpoint ranges: %v",
 			err)
-		d.startSerialSync(event, result)
+		effects = append(effects, d.startSerialSync(event)...)
 
-		return
+		return effects
 	}
 	if planned > 0 {
-		d.dispatchSync(event, planned, result)
+		effects = append(effects, d.dispatchSync(event, planned)...)
 
-		return
+		return effects
 	}
 
-	round := d.startDiscovery(ctx, view, event.BestHeight, result)
-	then(result, syncDiscovered{Sync: event, Round: round})
+	discoverEffects, round := d.startDiscovery(
+		ctx, view, event.BestHeight,
+	)
+	effects = append(effects, discoverEffects...)
+	effects = append(effects, then(
+		syncDiscovered{Sync: event, Round: round},
+	))
+
+	return effects
 }
 
 // handleSyncDiscovered counts a running discovery as planned work, then
 // dispatches.
-func (d *Driver) handleSyncDiscovered(event syncDiscovered,
-	result *driverResult) {
+func (d *Driver) handleSyncDiscovered(event syncDiscovered) []DriverEffect {
+	var effects []DriverEffect
 
 	var planned int
 	if d.discoveryActive(event.Round) {
 		planned = 1
 	}
 
-	d.dispatchSync(event.Sync, planned, result)
+	effects = append(effects, d.dispatchSync(event.Sync, planned)...)
+
+	return effects
 }
 
 // dispatchSync makes the chosen peer the sync peer and dispatches the planned
 // work, then judges whether the parallel path took the sync.
-func (d *Driver) dispatchSync(sync BeginSync, planned int,
-	result *driverResult) {
+func (d *Driver) dispatchSync(sync BeginSync, planned int) []DriverEffect {
+	var effects []DriverEffect
 
-	result.Effects = append(result.Effects, SetSyncPeer{
+	effects = append(effects, SetSyncPeer{
 		PeerID: sync.BestPeerID,
 	})
-	then(result, DispatchWork{}, syncDispatched{
+	effects = append(effects, then(DispatchWork{}, syncDispatched{
 		Sync: sync, Planned: planned,
-	})
+	}))
+
+	return effects
 }
 
 // handleSyncDispatched keeps the parallel path when it planned, discovered or
 // started anything, and otherwise gives the sync peer back and falls back to
 // the serial path.
-func (d *Driver) handleSyncDispatched(event syncDispatched,
-	result *driverResult) {
+func (d *Driver) handleSyncDispatched(event syncDispatched) []DriverEffect {
+	var effects []DriverEffect
 
 	if d.session.HasActiveWork() || event.Planned > 0 {
-		result.Effects = append(result.Effects, ClearBootstrapDelay{})
+		effects = append(effects, ClearBootstrapDelay{})
 
-		return
+		return effects
 	}
 
 	if d.runtime.manager.TrustsTipPeer(event.Sync.BestPeerID) {
-		result.Effects = append(result.Effects, SetSyncPeer{})
+		effects = append(effects, SetSyncPeer{})
 	}
 
-	d.startSerialSync(event.Sync, result)
+	effects = append(effects, d.startSerialSync(event.Sync)...)
+
+	return effects
 }
 
 // startSerialSync asks the executor for the serial path, aimed at the next
 // checkpoint while the chain is still within the checkpoints.
-func (d *Driver) startSerialSync(sync BeginSync, result *driverResult) {
+func (d *Driver) startSerialSync(sync BeginSync) []DriverEffect {
+	var effects []DriverEffect
+
 	effect := StartSerialSync{
 		PeerID:      sync.BestPeerID,
 		StartHeight: sync.TipHeight,
@@ -238,19 +255,23 @@ func (d *Driver) startSerialSync(sync BeginSync, result *driverResult) {
 		effect.StopHeight = uint32(next.Height)
 	}
 
-	result.Effects = append(result.Effects, effect)
+	effects = append(effects, effect)
+
+	return effects
 }
 
 // resumeWork plans ranges, dispatches queued work and restarts discovery.
 // With startWhenIdle, it releases the sync peer and asks for a fresh start
 // once nothing is in flight.
 func (d *Driver) resumeWork(ctx context.Context, view View,
-	startWhenIdle bool, result *driverResult) {
+	startWhenIdle bool) []DriverEffect {
+
+	var effects []DriverEffect
 
 	// The asynchronous commit in flight owns the header tip, and planning
 	// before it settles would build on a stale tip.
-	if view.CommitPending {
-		return
+	if d.commitPending {
+		return effects
 	}
 
 	best := view.bestHeight()
@@ -258,70 +279,95 @@ func (d *Driver) resumeWork(ctx context.Context, view View,
 		log.Warnf("headersync failed to plan follow-up ranges: %v", err)
 	}
 
-	then(result, DispatchWork{}, continueDiscover{
+	effects = append(effects, then(DispatchWork{}, continueDiscover{
 		BestHeight: best, StartWhenIdle: startWhenIdle,
-	})
+	}))
+
+	return effects
 }
 
 // handleContinueDiscover restarts discovery once the queued work is
 // dispatched.
 func (d *Driver) handleContinueDiscover(ctx context.Context,
-	event continueDiscover, view View, result *driverResult) {
+	event continueDiscover, view View) []DriverEffect {
 
-	round := d.startDiscovery(ctx, view, event.BestHeight, result)
-	then(result, continueDiscovered{
+	var effects []DriverEffect
+
+	discoverEffects, round := d.startDiscovery(
+		ctx, view, event.BestHeight,
+	)
+	effects = append(effects, discoverEffects...)
+	effects = append(effects, then(continueDiscovered{
 		Round: round, StartWhenIdle: event.StartWhenIdle,
-	})
+	}))
+
+	return effects
 }
 
 // handleContinueDiscovered asks for a fresh start when nothing is in flight.
-func (d *Driver) handleContinueDiscovered(event continueDiscovered,
-	result *driverResult) {
+func (d *Driver) handleContinueDiscovered(
+	event continueDiscovered) []DriverEffect {
+
+	var effects []DriverEffect
 
 	active := d.discoveryActive(event.Round)
 	if !event.StartWhenIdle || active || d.session.HasActiveWork() {
-		return
+		return effects
 	}
 
-	d.restartSync(result)
+	effects = append(effects, d.restartSync()...)
+
+	return effects
 }
 
 // restartSync releases the sync peer and asks the executor to choose one
 // again.
-func (d *Driver) restartSync(result *driverResult) {
-	result.Effects = append(result.Effects, SetSyncPeer{}, StartSync{})
+func (d *Driver) restartSync() []DriverEffect {
+	var effects []DriverEffect
+
+	effects = append(effects, SetSyncPeer{}, StartSync{})
+
+	return effects
 }
 
 // handleCooldownElapsed carries on with the recovered peers, then arms the
 // next wakeup for any still cooling down.
-func (d *Driver) handleCooldownElapsed(event CooldownElapsed,
-	result *driverResult) {
+func (d *Driver) handleCooldownElapsed(event CooldownElapsed) []DriverEffect {
+	var effects []DriverEffect
 
 	var resume DriverEvent = Continue{}
 	if event.SerialRequestPending {
 		resume = ResumeWork{}
 	}
 
-	then(result, resume, CooldownWakeDue{})
+	effects = append(effects, then(resume, CooldownWakeDue{}))
+
+	return effects
 }
 
 // handleDispatchWork recovers and assigns, then starts the peers one at a
 // time.
-func (d *Driver) handleDispatchWork(ctx context.Context, view View,
-	result *driverResult) {
+func (d *Driver) handleDispatchWork(ctx context.Context,
+	view View) []DriverEffect {
 
-	d.handleRecoverPeers(ctx, RecoverPeers{Peers: view.Peers}, result)
+	var effects []DriverEffect
+
+	effects = append(effects, d.handleRecoverPeers(
+		ctx, RecoverPeers{Peers: view.Peers}, //nolint:gosimple
+	)...)
 	d.handleAssignRanges(ctx, AssignRanges{PeerCount: len(view.Peers)})
 
 	if len(view.Peers) == 0 {
-		return
+		return effects
 	}
 	events := make([]DriverEvent, 0, len(view.Peers))
 	for _, peer := range view.Peers {
 		events = append(events, DispatchPeer{PeerID: peer.ID})
 	}
 
-	then(result, events...)
+	effects = append(effects, then(events...))
+
+	return effects
 }
 
 // planRanges plans the ranges between the durable tip and the next boundary,
@@ -365,9 +411,13 @@ func (d *Driver) nextCheckpointPoint() *ChainPoint {
 // the next boundary above the tip once the chain is past its checkpoints, and
 // asks for its requests. The caller judges the round once they are written.
 func (d *Driver) startDiscovery(ctx context.Context, view View,
-	bestHeight uint32, result *driverResult) DiscoveryOutcome {
+	bestHeight uint32) ([]DriverEffect, DiscoveryOutcome) {
 
-	d.handleRecoverPeers(ctx, RecoverPeers{Peers: view.Peers}, result)
+	var effects []DriverEffect
+
+	effects = append(effects, d.handleRecoverPeers(
+		ctx, RecoverPeers{Peers: view.Peers}, //nolint:gosimple
+	)...)
 
 	checkpoint := d.nextCheckpointPoint()
 	kind := "frontier"
@@ -380,17 +430,23 @@ func (d *Driver) startDiscovery(ctx context.Context, view View,
 		log.Warnf("headersync unable to get chain tip for %s "+
 			"discovery: %v", kind, err)
 
-		return DiscoveryOutcome{Settled: true}
+		return effects, DiscoveryOutcome{Settled: true}
 	}
 	tip := ChainPoint{Height: height, Hash: header.BlockHash()}
 
 	if checkpoint != nil {
-		return d.discoverAnchors(
-			ctx, tip, *checkpoint, bestHeight, view.Peers, result,
+		discoverEffects, round := d.discoverAnchors(
+			ctx, tip, *checkpoint, bestHeight, view.Peers,
 		)
+
+		return append(effects, discoverEffects...), round
 	}
 
-	return d.discoverFrontier(ctx, tip, bestHeight, view.Peers, result)
+	discoverEffects, round := d.discoverFrontier(
+		ctx, tip, bestHeight, view.Peers,
+	)
+
+	return append(effects, discoverEffects...), round
 }
 
 // discoveryActive reports whether anchor discovery is running after the

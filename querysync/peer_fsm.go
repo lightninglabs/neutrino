@@ -1,92 +1,66 @@
 package querysync
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	"github.com/lightninglabs/neutrino/protofsm"
 )
 
-// PeerFSM is the pure per-peer state machine. It deliberately models only the
-// state that the manager needs for scheduling decisions; network I/O belongs in
-// the actor or adapter layer that feeds events into this FSM.
+// peerStateInfo is implemented by the states of the peer machine, so a caller
+// that only holds the machine can read the scheduling state it is in.
+type peerStateInfo interface {
+	// peerState returns the scheduling state and the latest RTT sample.
+	peerState() (PeerState, time.Duration)
+}
+
+// PeerFSM is the pure per-peer state machine. It runs the same protofsm
+// machine that PeerActor does, one state per scheduling state, and models only
+// the state that the manager needs for scheduling decisions; network I/O
+// belongs in the actor or adapter layer that feeds events into this FSM.
 type PeerFSM struct {
-	id     string
-	state  PeerState
-	rtt    time.Duration
-	active *TaskID
+	id      string
+	machine *protofsm.StateMachine[PeerMsg, peerOutbox, *peerEnv]
 }
 
 // NewPeerFSM creates a new peer FSM.
 func NewPeerFSM(id string) *PeerFSM {
-	return &PeerFSM{
-		id:    id,
-		state: PeerReady,
-	}
-}
-
-func (PeerReadyEvent) apply(f *PeerFSM) error {
-	f.state = PeerReady
-	f.active = nil
-	return nil
-}
-
-func (PeerBlockedEvent) apply(f *PeerFSM) error {
-	f.state = PeerBlocked
-	return nil
-}
-
-func (PeerQuarantinedEvent) apply(f *PeerFSM) error {
-	f.state = PeerQuarantined
-	f.active = nil
-	return nil
-}
-
-//nolint:unparam // Peer events share the fallible transition signature.
-func (PeerDownEvent) apply(f *PeerFSM) error {
-	f.state = PeerDown
-	f.active = nil
-	return nil
-}
-
-func (e PeerRTTEvent) apply(f *PeerFSM) error {
-	if e.RTT < 0 {
-		return fmt.Errorf("negative RTT: %v", e.RTT)
+	machine, err := protofsm.NewStateMachine[PeerMsg, peerOutbox](
+		protofsm.StateMachineCfg[PeerMsg, peerOutbox, *peerEnv]{
+			InitialState: peerReadyState{},
+			Env:          &peerEnv{id: id},
+		},
+	)
+	if err != nil {
+		// The machine only refuses a nil initial state.
+		panic(fmt.Sprintf("unable to create peer FSM: %v", err))
 	}
 
-	f.rtt = e.RTT
-	return nil
+	// The machine has no lifecycle beyond the FSM's: it starts with it and
+	// runs on its caller's goroutine.
+	machine.Start(context.Background())
+
+	return &PeerFSM{id: id, machine: machine}
 }
 
-func (PeerRankEvent) apply(*PeerFSM) error {
-	return nil
-}
-
-func (e PeerAssignedEvent) apply(f *PeerFSM) error {
-	if f.state != PeerReady {
-		return fmt.Errorf("peer %s cannot accept work while %s",
-			f.id, f.state)
-	}
-
-	f.state = PeerBusy
-	f.active = &e.TaskID
-	return nil
-}
-
-func (PeerNeedWorkEvent) apply(*PeerFSM) error {
-	return nil
-}
-
-// Apply processes one peer event.
+// Apply processes one peer event. The outbox the machine emits for the actor
+// is dropped, since the FSM has no manager to send it to.
 func (f *PeerFSM) Apply(event PeerEvent) error {
-	return event.apply(f)
+	_, err := f.machine.ProcessEvent(context.Background(), event)
+
+	return err
 }
 
 // Snapshot returns the manager-facing peer state.
 func (f *PeerFSM) Snapshot(rank int, localWork []TaskID) PeerSnapshot {
+	state, rtt := f.machine.CurrentState().(peerStateInfo).peerState()
+
 	return PeerSnapshot{
 		ID:        f.id,
 		Rank:      rank,
-		RTT:       f.rtt,
-		State:     f.state,
+		RTT:       rtt,
+		State:     state,
 		LocalWork: append([]TaskID(nil), localWork...),
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 // TipHeaders reports a non-empty headers message that no parallel range or
@@ -179,78 +180,140 @@ func NewSerialReorg(tip headerlist.Node, fork wire.BlockHeader,
 	}
 }
 
+// errHeadersDisconnected is the failure of a message whose headers do not
+// build on each other.
+var errHeadersDisconnected = errors.New("headers do not connect")
+
+// errIgnoreTipHeaders marks a message from a peer we do not follow that does
+// not attach to our tip. It needs no further processing and costs the peer
+// nothing.
+var errIgnoreTipHeaders = errors.New("headers ignored")
+
+// errForkUnattached is the failure of a header that attaches to nothing we
+// know, or to a point that a checkpoint rules out.
+var errForkUnattached = errors.New("fork does not attach to the chain")
+
 // handleTipHeaders decides what a headers message that follows the tip means.
-func (d *Driver) handleTipHeaders(event TipHeaders, result *driverResult) {
+// Each step that can reject the message fails with an error, and the one place
+// that turns a failure into effects is tipFailureEffects.
+func (d *Driver) handleTipHeaders(event TipHeaders) []DriverEffect {
 	// The lease decides whose headers we trust before we're synced.
 	event.holdsLease = d.runtime.manager.TrustsTipPeer(event.PeerID)
 
-	// Explicitly check that each header in the message builds off of the
-	// previous one. This is a quick sanity check to avoid doing the more
-	// expensive checks below if we know the headers are invalid.
+	return fn.AndThen(
+		requireConnected(event), d.applyTipHeaders,
+	).UnwrapOrElse(func(err error) []DriverEffect {
+		return d.tipFailureEffects(event.PeerID, err)
+	})
+}
+
+// requireConnected explicitly checks that each header in the message builds
+// off of the previous one. This is a quick sanity check to avoid doing the
+// more expensive checks that follow if we know the headers are invalid.
+func requireConnected(event TipHeaders) fn.Result[TipHeaders] {
 	if !HeadersConnected(event.Headers) {
 		log.Warnf("Headers received from peer don't connect")
-		d.disconnectTipPeer(event.PeerID, result)
 
-		return
+		return fn.Err[TipHeaders](errHeadersDisconnected)
 	}
 
-	// A batch that extends the validation chain is committed through the
-	// chain store actor. What remains are headers that do not connect to
-	// our tip: known headers, a reorg, or garbage.
-	if d.extendSerialTip(event, result) {
-		return
-	}
+	return fn.Ok(event)
+}
 
-	d.followSerialFork(event, result)
+// applyTipHeaders commits a batch that extends the validation chain through
+// the chain store actor. What remains are headers that do not connect to our
+// tip: known headers, a reorg, or garbage.
+func (d *Driver) applyTipHeaders(event TipHeaders) fn.Result[[]DriverEffect] {
+	return fn.FlatMapResult(d.extendSerialTip(event), d.orFollowFork(event))
+}
+
+// orFollowFork returns the step that follows the fork of a message that did not
+// extend the tip, and passes on the effects of one that did.
+func (d *Driver) orFollowFork(event TipHeaders) func(
+	fn.Option[[]DriverEffect]) fn.Result[[]DriverEffect] {
+
+	type effects = []DriverEffect
+
+	return func(extended fn.Option[effects]) fn.Result[effects] {
+		if extended.IsSome() {
+			return fn.Ok(extended.UnsafeFromSome())
+		}
+
+		return d.followSerialFork(event)
+	}
+}
+
+// tipFailureEffects answers a headers message that failed one of the steps
+// above: a checkpoint mismatch rolls the chain back, a message to ignore does
+// nothing, and anything else drops the peer.
+func (d *Driver) tipFailureEffects(peerID string, err error) []DriverEffect {
+	var mismatch *SerialCheckpointMismatch
+	switch {
+	case errors.As(err, &mismatch):
+		return d.planCheckpointRollback(peerID, mismatch.Height)
+
+	case errors.Is(err, errIgnoreTipHeaders):
+		return nil
+
+	default:
+		return d.disconnectTipPeer(peerID)
+	}
 }
 
 // disconnectTipPeer asks for the peer to be disconnected.
-func (d *Driver) disconnectTipPeer(peerID string, result *driverResult) {
-	result.Effects = append(
-		result.Effects, DisconnectTipPeer{PeerID: peerID},
-	)
+func (d *Driver) disconnectTipPeer(peerID string) []DriverEffect {
+	return []DriverEffect{DisconnectTipPeer{PeerID: peerID}}
 }
 
 // extendSerialTip commits a batch that extends the validation chain, without
-// waiting for the write. It returns false when the batch does not extend the
-// tip, so the caller can treat it as known headers or a reorg.
-func (d *Driver) extendSerialTip(event TipHeaders,
-	result *driverResult) bool {
+// waiting for the write. It succeeds with none when the batch does not extend
+// the tip, so the caller can treat it as known headers or a reorg, and fails
+// when the batch is invalid.
+func (d *Driver) extendSerialTip(
+	event TipHeaders) fn.Result[fn.Option[[]DriverEffect]] {
+
+	notExtended := fn.Ok(fn.None[[]DriverEffect]())
 
 	back := d.tip.Tip()
 	if back == nil {
-		return false
+		return notExtended
 	}
 
 	headers, ok := headersAfterTip(back, event.Headers)
 	if !ok {
-		return false
+		return notExtended
 	}
 
 	prepared, handled, err := d.tip.PrepareSerialExtension(headers)
 	if !handled {
-		return false
+		return notExtended
 	}
 	if err != nil {
-		d.rejectSerialExtension(event.PeerID, err, result)
+		var mismatch *SerialCheckpointMismatch
+		if !errors.As(err, &mismatch) {
+			log.Warnf("Header doesn't pass sanity check: %s -- "+
+				"disconnecting peer", err)
+		}
 
-		return true
+		return fn.Err[fn.Option[[]DriverEffect]](err)
 	}
 
+	var effects []DriverEffect
+
 	last := prepared.Nodes[len(prepared.Nodes)-1]
-	result.Effects = append(result.Effects, UpdatePeerHeight{
+	effects = append(effects, UpdatePeerHeight{
 		PeerID: event.PeerID,
 		Height: last.Height,
 	})
 	if event.holdsLease {
-		result.Effects = append(result.Effects, DisarmSerialTimeout{})
+		effects = append(effects, DisarmSerialTimeout{})
 	}
-	result.Effects = append(result.Effects, CommitExtension{
+	effects = append(effects, CommitExtension{
 		PeerID:    event.PeerID,
 		Extension: prepared,
 	})
 
-	return true
+	return fn.Ok(fn.Some(effects))
 }
 
 // headersAfterTip returns the part of a connected batch that follows the cache
@@ -276,23 +339,6 @@ func headersAfterTip(back *headerlist.Node,
 	return nil, false
 }
 
-// rejectSerialExtension answers a batch that failed validation: a checkpoint
-// mismatch rolls the chain back, and anything else drops the peer.
-func (d *Driver) rejectSerialExtension(peerID string, err error,
-	result *driverResult) {
-
-	var mismatch *SerialCheckpointMismatch
-	if errors.As(err, &mismatch) {
-		d.planCheckpointRollback(peerID, mismatch.Height, result)
-
-		return
-	}
-
-	log.Warnf("Header doesn't pass sanity check: %s -- "+
-		"disconnecting peer", err)
-	d.disconnectTipPeer(peerID, result)
-}
-
 // forkAttach is where a header that does not extend the tip attaches to the
 // chain we know.
 type forkAttach struct {
@@ -311,20 +357,16 @@ type forkAttach struct {
 // publish a new tip or start a request from an old hash, so the loop skips
 // them. Such a reply usually answers an older request, so it says nothing
 // about the outstanding one: its deadline stays armed.
-func (d *Driver) followSerialFork(event TipHeaders, result *driverResult) {
+func (d *Driver) followSerialFork(event TipHeaders) fn.Result[[]DriverEffect] {
 	for i, blockHeader := range event.Headers {
-		attach, stop := d.locateFork(event, blockHeader, result)
-		if stop {
-			return
+		located, err := d.locateFork(event, blockHeader).Unpack()
+		if err != nil {
+			return fn.Err[[]DriverEffect](err)
 		}
-		if attach == nil {
+		if located.IsNone() {
 			continue
 		}
-
-		work, ok := d.validateFork(event, i, attach, result)
-		if !ok {
-			return
-		}
+		attach := located.UnsafeFromSome()
 
 		// Preserve the validated fork and replacement as an immutable
 		// payload for the chain store.
@@ -332,17 +374,23 @@ func (d *Driver) followSerialFork(event TipHeaders, result *driverResult) {
 			*attach.tip, *attach.head, attach.height, *blockHeader,
 		)
 		headers := event.Headers[i:]
-		d.planReorg(event.PeerID, reorg, headers, work, result)
 
-		return
+		return fn.MapOk(func(work *big.Int) []DriverEffect {
+			return d.planReorg(event.PeerID, reorg, headers, work)
+		})(d.validateFork(event, i, attach))
 	}
+
+	return fn.Ok[[]DriverEffect](nil)
 }
 
-// locateFork finds where a header attaches to our chain. It returns nil with
-// stop unset for a header that is already known, and stop set once the
-// message needs no further processing.
-func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
-	result *driverResult) (*forkAttach, bool) {
+// locateFork finds where a header attaches to our chain. It succeeds with
+// none for a header that is already known, and fails once the message needs
+// no further processing.
+func (d *Driver) locateFork(event TipHeaders,
+	blockHeader *wire.BlockHeader) fn.Result[fn.Option[*forkAttach]] {
+
+	unattached := fn.Err[fn.Option[*forkAttach]]
+	known := fn.Ok(fn.None[*forkAttach]())
 
 	blockHash := blockHeader.BlockHash()
 
@@ -351,9 +399,8 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 	if prevNode == nil {
 		log.Warnf("Header list does not contain a previous" +
 			"element as expected -- disconnecting peer")
-		d.disconnectTipPeer(event.PeerID, result)
 
-		return nil, true
+		return unattached(errForkUnattached)
 	}
 	prevHash := prevNode.Header.BlockHash()
 
@@ -370,21 +417,21 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 	// peer or disconnect the peer that sent us these bad
 	// headers.
 	if !event.holdsLease && !event.HeadersSynced {
-		return nil, true
+		return unattached(errIgnoreTipHeaders)
 	}
 
 	// Check if this is the last block we know of. This is
 	// a shortcut for sendheaders so that each redundant
 	// header doesn't cause a disk read.
 	if blockHash == prevHash {
-		return nil, false
+		return known
 	}
 
 	// Check if this block is known. If so, we continue to
 	// the next one.
 	_, _, err := d.tip.FetchHeader(&blockHash)
 	if err == nil {
-		return nil, false
+		return known
 	}
 
 	// Check if the previous block is known. If it is, this
@@ -401,9 +448,8 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 			" properly connect to the chain from"+
 			" peer %s (%s) -- disconnecting",
 			event.PeerID, err)
-		d.disconnectTipPeer(event.PeerID, result)
 
-		return nil, true
+		return unattached(errForkUnattached)
 	}
 
 	// We've found a branch we weren't aware of. If the
@@ -417,23 +463,21 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 			"checkpoint past which we've already "+
 			"synchronized -- disconnecting peer "+
 			"%s", event.PeerID)
-		d.disconnectTipPeer(event.PeerID, result)
 
-		return nil, true
+		return unattached(errForkUnattached)
 	}
 
-	return &forkAttach{
+	return fn.Ok(fn.Some(&forkAttach{
 		tip: prevNode, head: backHead, height: backHeight,
-	}, false
+	}))
 }
 
 // validateFork checks the sanity of the new branch that starts at the header
-// i of the message. If any of the blocks don't pass sanity checks, it asks for
-// the peer to be disconnected and reports false. Otherwise it returns the
-// work the branch represents, so the store can compare it to the work in the
-// known good chain.
-func (d *Driver) validateFork(event TipHeaders, i int, attach *forkAttach,
-	result *driverResult) (*big.Int, bool) {
+// i of the message. If any of the blocks don't pass sanity checks, it fails.
+// Otherwise it returns the work the branch represents, so the store can
+// compare it to the work in the known good chain.
+func (d *Driver) validateFork(event TipHeaders, i int,
+	attach *forkAttach) fn.Result[*big.Int] {
 
 	d.tip.ResetReorg(headerlist.Node{
 		Header: *attach.head,
@@ -464,9 +508,8 @@ func (d *Driver) validateFork(event TipHeaders, i int, attach *forkAttach,
 			log.Warnf("Header doesn't pass sanity"+
 				" check: %s -- disconnecting "+
 				"peer", err)
-			d.disconnectTipPeer(event.PeerID, result)
 
-			return nil, false
+			return fn.Err[*big.Int](err)
 		}
 		totalWork.Add(totalWork, blockchain.CalcWork(reorgHeader.Bits))
 		d.tip.AppendReorg(headerlist.Node{
@@ -475,7 +518,7 @@ func (d *Driver) validateFork(event TipHeaders, i int, attach *forkAttach,
 		})
 	}
 
-	return totalWork, true
+	return fn.Ok(totalWork)
 }
 
 // planReorg asks for a validated fork to be submitted. A branch that crosses a
@@ -484,7 +527,9 @@ func (d *Driver) validateFork(event TipHeaders, i int, attach *forkAttach,
 // checkpoint stops there, so the next one validates against the following
 // checkpoint.
 func (d *Driver) planReorg(peerID string, reorg SerialReorg,
-	headers []*wire.BlockHeader, work *big.Int, result *driverResult) {
+	headers []*wire.BlockHeader, work *big.Int) []DriverEffect {
+
+	var effects []DriverEffect
 
 	var (
 		batch []headerfs.BlockHeader
@@ -503,14 +548,14 @@ func (d *Driver) planReorg(peerID string, reorg SerialReorg,
 				"Reorg header does not match checkpoint at %d",
 				height,
 			)
-			result.Effects = append(result.Effects, CommitReorg{
+			effects = append(effects, CommitReorg{
 				PeerID:   peerID,
 				Reorg:    reorg,
 				Work:     work,
 				Mismatch: height,
 			})
 
-			return
+			return effects
 		}
 		copyHeader := *header
 		batch = append(batch, headerfs.BlockHeader{
@@ -526,41 +571,47 @@ func (d *Driver) planReorg(peerID string, reorg SerialReorg,
 		}
 	}
 
-	result.Effects = append(result.Effects, CommitReorg{
+	effects = append(effects, CommitReorg{
 		PeerID:  peerID,
 		Reorg:   reorg,
 		Headers: batch,
 		Nodes:   nodes,
 		Work:    work,
 	})
+
+	return effects
 }
 
 // planCheckpointRollback asks for the chain to roll back to the last verified
 // checkpoint before the height. A failed lookup of the checkpoint header
 // schedules a retry instead.
-func (d *Driver) planCheckpointRollback(peerID string, height int32,
-	result *driverResult) {
+func (d *Driver) planCheckpointRollback(peerID string,
+	height int32) []DriverEffect {
+
+	var effects []DriverEffect
 
 	checkpoint := d.tip.FindPreviousCheckpoint(height)
 	header, err := d.tip.FetchHeaderByHeight(uint32(checkpoint.Height))
 	if err != nil {
 		log.Warnf("Unable to load checkpoint for rollback: %v", err)
-		result.Effects = append(result.Effects, ScheduleCommitRetry{})
+		effects = append(effects, ScheduleCommitRetry{})
 
-		return
+		return effects
 	}
 	tip := d.tip.Tip()
 	if tip == nil {
-		return
+		return effects
 	}
 
-	result.Effects = append(result.Effects, CheckpointRollback{
+	effects = append(effects, CheckpointRollback{
 		PeerID: peerID,
 		Node: headerlist.Node{
 			Header: *header, Height: checkpoint.Height,
 		},
 		ExpectedTip: nodeStamp(*tip),
 	})
+
+	return effects
 }
 
 // ExtensionCommitted reports that the chain store wrote a serial extension.
@@ -648,7 +699,9 @@ func (ContinueSerial) driverEffect() {}
 // handleExtensionCommitted adopts a written extension and asks for the
 // headers after it.
 func (d *Driver) handleExtensionCommitted(ctx context.Context,
-	event ExtensionCommitted, result *driverResult) {
+	event ExtensionCommitted) []DriverEffect {
+
+	var effects []DriverEffect
 
 	nodes := event.Extension.Nodes
 	d.logProgress(nodes)
@@ -657,7 +710,11 @@ func (d *Driver) handleExtensionCommitted(ctx context.Context,
 	last := nodes[len(nodes)-1]
 	hash := last.Header.BlockHash()
 	d.advanceTip(ctx, uint32(last.Height), hash)
-	d.continueSerial(event.PeerID, hash, last.Height, result)
+	effects = append(effects, d.continueSerial(
+		event.PeerID, hash, last.Height,
+	)...)
+
+	return effects
 }
 
 // handleReorgCommitted acts on the store's verdict: a losing branch costs the
@@ -665,7 +722,9 @@ func (d *Driver) handleExtensionCommitted(ctx context.Context,
 // checkpoint rolls the chain back, and a winning branch rebuilds the cache
 // and makes its sender the sync peer.
 func (d *Driver) handleReorgCommitted(ctx context.Context,
-	event ReorgCommitted, result *driverResult) {
+	event ReorgCommitted) []DriverEffect {
+
+	var effects []DriverEffect
 
 	peerID := event.PeerID
 	switch {
@@ -678,36 +737,38 @@ func (d *Driver) handleReorgCommitted(ctx context.Context,
 		log.Warnf("Reorg attempt that has less work than known chain "+
 			"or fails a checkpoint, from peer %s -- disconnecting",
 			peerID)
-		d.disconnectTipPeer(peerID, result)
-		d.restartSyncIfIdle(result)
+		effects = append(effects, d.disconnectTipPeer(peerID)...)
+		effects = append(effects, d.restartSyncIfIdle()...)
 
-		return
+		return effects
 
 	// A tie changes nothing, and says nothing bad about the peer.
 	case event.Verdict == chainstore.ReorgEqualWork:
-		d.restartSyncIfIdle(result)
+		effects = append(effects, d.restartSyncIfIdle()...)
 
-		return
+		return effects
 
 	// The branch would win, but it failed a checkpoint.
 	case event.Mismatch != 0:
-		d.planCheckpointRollback(peerID, event.Mismatch, result)
+		effects = append(effects, d.planCheckpointRollback(
+			peerID, event.Mismatch,
+		)...)
 
-		return
+		return effects
 	}
 
 	// The branch won. It answered the sync peer's request, and the peer
 	// that delivered it becomes the sync peer, unless it has gone away.
 	nodes := event.Nodes
 	last := nodes[len(nodes)-1]
-	result.Effects = append(result.Effects, UpdatePeerHeight{
+	effects = append(effects, UpdatePeerHeight{
 		PeerID: peerID,
 		Height: last.Height,
 	})
 	if d.runtime.manager.TrustsTipPeer(peerID) {
-		result.Effects = append(result.Effects, DisarmSerialTimeout{})
+		effects = append(effects, DisarmSerialTimeout{})
 	}
-	result.Effects = append(result.Effects, SetSyncPeer{
+	effects = append(effects, SetSyncPeer{
 		PeerID: peerID, UnlessGone: true,
 	})
 
@@ -717,13 +778,19 @@ func (d *Driver) handleReorgCommitted(ctx context.Context,
 
 	hash := last.Header.BlockHash()
 	d.advanceTip(ctx, uint32(last.Height), hash)
-	d.continueSerial(peerID, hash, last.Height, result)
+	effects = append(effects, d.continueSerial(
+		peerID, hash, last.Height,
+	)...)
+
+	return effects
 }
 
 // continueSerial asks for the headers after a durable batch, aimed at the
 // next checkpoint while there is one.
 func (d *Driver) continueSerial(peerID string, finalHash Hash,
-	finalHeight int32, result *driverResult) {
+	finalHeight int32) []DriverEffect {
+
+	var effects []DriverEffect
 
 	effect := ContinueSerial{
 		PeerID:      peerID,
@@ -734,26 +801,34 @@ func (d *Driver) continueSerial(peerID string, finalHash Hash,
 		effect.StopHash = *next.Hash
 	}
 
-	result.Effects = append(result.Effects, effect)
+	effects = append(effects, effect)
+
+	return effects
 }
 
 // handleCheckpointRolledBack resets the cache to the checkpoint and drops the
 // peer whose header failed the next one.
 func (d *Driver) handleCheckpointRolledBack(ctx context.Context,
-	event CheckpointRolledBack, result *driverResult) {
+	event CheckpointRolledBack) []DriverEffect {
+
+	var effects []DriverEffect
 
 	node := event.Node
 	d.tip.Reset(node)
 	d.advanceTip(ctx, uint32(node.Height), node.Header.BlockHash())
 
-	d.rejectCheckpointPeer(event.PeerID, result)
+	effects = append(effects, d.rejectCheckpointPeer(event.PeerID)...)
+
+	return effects
 }
 
 // handleSnapshotAdopted resets the cache to the durable tip after a failed
 // mutation and retries whatever is staged. A snapshot that completed a
 // checkpoint rollback still drops the peer.
 func (d *Driver) handleSnapshotAdopted(ctx context.Context,
-	event SnapshotAdopted, result *driverResult) {
+	event SnapshotAdopted) []DriverEffect {
+
+	var effects []DriverEffect
 
 	node := event.Node
 	d.tip.Reset(node)
@@ -762,26 +837,38 @@ func (d *Driver) handleSnapshotAdopted(ctx context.Context,
 	// The retry wakeup goes before the restart, which may re-enter the
 	// driver and so must be the last effect. Arming the wakeup commutes
 	// with a restart, which never cancels it.
-	result.Effects = append(result.Effects, ScheduleCommitRetry{})
+	effects = append(effects, ScheduleCommitRetry{})
 	if event.CheckpointPeerID != "" {
-		d.rejectCheckpointPeer(event.CheckpointPeerID, result)
+		effects = append(effects, d.rejectCheckpointPeer(
+			event.CheckpointPeerID,
+		)...)
 	}
+
+	return effects
 }
 
 // rejectCheckpointPeer disconnects the peer whose header failed a checkpoint
 // after the rollback completed. If that peer was the sync peer and already
 // went away while the rollback was pending, no peer-done handling restarts
 // sync, so it restarts here.
-func (d *Driver) rejectCheckpointPeer(peerID string, result *driverResult) {
-	d.disconnectTipPeer(peerID, result)
-	d.restartSyncIfIdle(result)
+func (d *Driver) rejectCheckpointPeer(peerID string) []DriverEffect {
+	var effects []DriverEffect
+
+	effects = append(effects, d.disconnectTipPeer(peerID)...)
+	effects = append(effects, d.restartSyncIfIdle()...)
+
+	return effects
 }
 
 // restartSyncIfIdle restarts sync when the sync peer went away while a
 // mutation's outcome was pending. The peer-done handling skips the restart
 // while a commit is pending, so nothing else would.
-func (d *Driver) restartSyncIfIdle(result *driverResult) {
+func (d *Driver) restartSyncIfIdle() []DriverEffect {
+	var effects []DriverEffect
+
 	if d.runtime.manager.TipLease().PeerID == "" {
-		result.Effects = append(result.Effects, StartSync{})
+		effects = append(effects, StartSync{})
 	}
+
+	return effects
 }

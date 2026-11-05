@@ -30,8 +30,11 @@ client, the tip feed and the quit signals.
 
 Both sync paths split decisions from I/O the same way. A state machine
 (`headersync.Driver` for headers, `filtersync.Syncer` for filter headers)
-takes one event and returns the effects to perform, and an executor goroutine
-performs them and feeds each outcome back as the next event. Every store
+takes one event and returns the effects to perform, and an executor performs
+them and feeds each outcome back as the next event. The block handler is an
+actor with one mailbox, and the filter-header executor is a goroutine. Both
+state machines, and the per-peer scheduling machines in `headersync` and
+`querysync`, are `protofsm` state machines with one state type per state. Every store
 write goes through the chain store actor, which publishes the new tips on the
 tip feed.
 
@@ -45,7 +48,7 @@ flowchart TB
 
     subgraph BM["blockManager (blockmanager*.go)"]
         direction TB
-        bh["blockHandler goroutine<br/>runs DriverEffects"]
+        bh["block handler actor<br/>one mailbox, runs DriverEffects"]
     end
 
     subgraph CST["chainstore"]
@@ -83,7 +86,7 @@ flowchart TB
     peers -- "headers, inv" --> bh
     peers -- "cfheaders, cfilter, block" --> wk
     api --> disp
-    bh -- "ProcessEvent with a View" --> drv
+    bh -- "ProcessEvent(Inbound or event, View)" --> drv
     drv -- "effects" --> bh
     drv --> parts
     bh -- "BlockCommit, Reorg" --> csa
@@ -113,17 +116,17 @@ interfaces is the same for both.
 
 | Package or type | Owns | Does not own |
 | --- | --- | --- |
-| `blockManager` | The `blockHandler` goroutine that executes the driver's effects: peer I/O for headers, timers, chain store submissions, and starting both executors | Sync decisions and header validation (in `headersync.Driver`), filter-header sync (in `cfHeaderSync`), store writes and block notifications (in `chainstore`) |
-| `headersync.Driver` | Every header sync decision: request and timer bookkeeping, staged payloads, peer cooldowns, range IDs, and `TipState` (the `headerList` validation cache and checkpoint cursor). A one-state `protofsm` machine whose outbox is the list of `DriverEffect`s | Goroutines, I/O, and the executor's state, which arrives as a `View` with each event |
+| `blockManager` | The block handler actor (`blockmanager_actor.go`), whose single mailbox takes every peer message, deadline, timer and chain store result, and which executes the driver's effects: peer I/O for headers, timers, chain store submissions, and starting both executors | Sync decisions and header validation (in `headersync.Driver`), filter-header sync (in `cfHeaderSync`), store writes and block notifications (in `chainstore`) |
+| `headersync.Driver` | Every header sync decision: request and timer bookkeeping, staged payloads, peer cooldowns, range IDs, and `TipState` (the `headerList` validation cache and checkpoint cursor). A two-state `protofsm` machine (idle and commit pending) whose outbox is the list of `DriverEffect`s; in the commit pending state it holds back peer messages and request deadlines until the chain store answers | Goroutines, I/O, and the executor's state, which arrives as a `View` with each event |
 | `cfHeaderSync` | The `filtersync.Syncer` loop and its effects: tip feed waits, retries, the checkpointed and uncheckpointed cfheader rounds, conflict resolution, and banning peers that send bad filter headers | Header sync, block notifications, store writes (submitted to `chainstore`) |
 | `headersync.HeaderSyncFSM` | Anchors, header ranges and their lease epochs, per-peer range queues, the committed tip known to the scheduler | Goroutines, timers, I/O, header payloads |
 | `headersync.Manager` | The FSM, run on the caller's goroutine; mirrors peer and range changes into the dispatch controller | Policy decisions, which live in the FSM and `Controller` |
-| `headersync.Peer` | One peer's scheduling state (ready, busy, blocked, quarantined, down), RTT, rank, and active range | The wire request itself, which `blockManager` sends |
+| `headersync.Peer` | One peer's scheduling state (ready, busy, blocked, quarantined, down) as a `protofsm` machine, with RTT, rank, and active range | The wire request itself, which `blockManager` sends |
 | `headersync.Controller` | Planning policy: checkpoint and frontier ranges, anchor discovery spans, hedged peer choice, invalidation fan-out, replanning | Any state of its own |
 | `headersync.Session` | In-flight range and anchor requests with their timers, stale requests, staged header payloads, peer cooldowns, range ID allocation | Range state, which lives in the FSM |
 | `headersync.Runtime` | Construction and shutdown of the driver, manager and peers, and the peer map under its own mutex | Message routing; `blockManager` reaches the parts through the driver |
 | `chainstore` | Serializing every write to the block and filter header stores on one actor, retaining a rollback until it finishes, verifying ambiguous writes, and the `TipFeed` of published block and filter tips | Header validation, sync policy |
-| `filtersync.Syncer` | The filter-header sync phase and every decision of a pass: when to wait, fetch checkpoints, resolve conflicts, fetch headers, or retry | Network rounds, store writes, and bans, which `cfHeaderSync` performs as effects |
+| `filtersync.Syncer` | The filter-header sync phase, as a `protofsm` machine with one state type per `Phase`, and every decision of a pass: when to wait, fetch checkpoints, resolve conflicts, fetch headers, or retry | Network rounds, store writes, and bans, which `cfHeaderSync` performs as effects |
 | `headersync/querydispatch` | Adapting a private querysync scheduler to choose range owners and steal unstarted ranges | Header validation, leases, commit order |
 | `querysync/workmanager` | The production `query.WorkManager`: the job heap, per-peer workers, retries, timeouts, cooldowns, quarantine, and a `querysync.Scheduler` consulted only from its dispatcher goroutine | Message encoding and response matching, which each `query.Request` supplies |
 | `querysync.SchedulerFSM` | Pure peer scheduling state: per-peer snapshots, owner selection, steal selection | Concrete jobs, which the dispatcher keeps |
@@ -169,7 +172,7 @@ sequenceDiagram
     end
     CS->>BM: Start()
     BM->>RT: Start() manager, peers, dispatch
-    Note over BM: blockHandler starts, cfHeaderSync's filterSyncLoop waits for first peer
+    Note over BM: block handler actor starts, cfHeaderSync's filterSyncLoop waits for first peer
     CS->>WM: Start()
     Note over CS: connection manager and peerHandler start last
 ```
@@ -301,11 +304,12 @@ flowchart LR
 6. **Commit.** The driver's commit step takes the chain of Staged ranges
    that connects to the committed tip, runs the contextual checks in
    `TipState.PrepareRangeHeaders` (proof of work, difficulty, timestamps,
-   checkpoints), and emits a `SubmitRangeCommit` effect; `blockHandler`
-   submits it to the chain store actor, which writes the batch to
-   `BlockHeaderStore` and reports back as a `RangesCommitted` event. While
-   the commit is in flight, anchor discovery keeps working on the rest of
-   its span. Only this step makes headers
+   checkpoints), and emits a `SubmitRangeCommit` effect, which moves the
+   driver to its commit pending state. The block handler submits the batch to
+   the chain store actor, which writes it to `BlockHeaderStore` and posts the
+   result to the handler's mailbox, where it becomes a `RangesCommitted`
+   event. While the commit is in flight, the driver defers peer messages and
+   deadlines, and anchor discovery keeps working on the rest of its span. Only this step makes headers
    visible to the rest of neutrino.
 7. **Acknowledge.** `Controller.CommitReadyRanges` advances the FSM tip,
    prunes anchor requests at or below it, and the staged payloads are
@@ -591,20 +595,21 @@ Each piece of mutable sync state has one owner goroutine.
 
 | Goroutine | Owns |
 | --- | --- |
-| `blockHandler` | The driver, `TipState`, `Session`, the sync peer, header request timers, and through the driver the headersync manager (`HeaderSyncFSM`, the private dispatch `querysync.Scheduler`) and every peer's scheduling state; none of them takes a lock or runs a goroutine of its own |
+| Block handler actor | The driver, `TipState`, `Session`, the sync peer, header request timers, and through the driver the headersync manager (`HeaderSyncFSM`, the private dispatch `querysync.Scheduler`) and every peer's scheduling state; none of them takes a lock or runs a goroutine of its own |
 | chain store actor | The header stores' write side, the retained rollback, and the published tips |
 | `cfHeaderSync.filterSyncLoop` | The `filtersync.Syncer`: filter-header sync progress and phase |
 | querysync dispatcher | The job heap, batches, `activeWorker` map, and the query `querysync.Scheduler` |
 | query worker, one per peer | The job it is running |
 
 Timers created with `time.AfterFunc` for range timeouts, anchor timeouts,
-commit retries, and the bootstrap delay only post a message to
-`blockHandler`. They never touch sync state directly.
+commit retries, and the bootstrap delay only post a message to the block
+handler's mailbox. So does the chain store's reply to a header mutation. They never touch sync state directly.
 
-Every driver event from `blockHandler` uses a five-second deadline. The
-headersync manager and peers run on `blockHandler` without a lock and don't
+Every driver event from the block handler uses a five-second deadline,
+including each follow-up event of an effect. The
+headersync manager and peers run on the block handler without a lock and don't
 check the deadline, so a deadline can't split an event's messages or expire
 between a message applying and its reply arriving. A driver event handler
 never calls `Driver.ProcessEvent` itself, since the machine's lock is not
-reentrant; a handler that needs a follow-up emits a `Then` effect, which
-`blockHandler` runs last in the batch.
+reentrant; a handler that needs a follow-up emits a `Then` effect, which the
+block handler runs from an agenda loop after the effects before it.

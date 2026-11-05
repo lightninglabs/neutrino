@@ -64,48 +64,59 @@ func (NoProgressReply) driverEffect() {}
 
 // handleHeadersReceived finds the request a headers message answers.
 func (d *Driver) handleHeadersReceived(ctx context.Context,
-	event HeadersReceived, view View, result *driverResult) {
+	event HeadersReceived, view View) []DriverEffect {
+
+	var effects []DriverEffect
 
 	peerID := event.PeerID
 	headers := event.Headers
-	if d.handleAnchorHeaders(ctx, view, peerID, headers, result) {
-		return
+	anchorEffects, handled := d.handleAnchorHeaders(
+		ctx, view, peerID, headers,
+	)
+	effects = append(effects, anchorEffects...)
+	if handled {
+		return effects
 	}
 
-	handled := d.handleRangeReply(ctx, rangeReply{
+	rangeEffects, handled := d.handleRangeReply(ctx, rangeReply{
 		peerID:        peerID,
 		peerHeight:    event.PeerHeight,
 		headers:       headers,
 		anchorTimeout: d.cfg.RequestTimeout(),
-	}, view, result)
+	}, view)
+	effects = append(effects, rangeEffects...)
 	if handled {
-		return
+		return effects
 	}
 
 	// Nothing to do for an empty headers message, beyond settling the
 	// sync peer's outstanding request, which the executor does.
 	if len(headers) == 0 {
-		result.Effects = append(result.Effects, NoProgressReply{
+		effects = append(effects, NoProgressReply{
 			PeerID: peerID,
 		})
 
-		return
+		return effects
 	}
 
 	// The headers follow the tip: an extension, known headers, a reorg, a
 	// checkpoint failure or garbage.
-	d.handleTipHeaders(TipHeaders{
+	effects = append(effects, d.handleTipHeaders(TipHeaders{
 		PeerID:        peerID,
 		Headers:       headers,
 		HeadersSynced: event.HeadersSynced,
-	}, result)
+	})...)
+
+	return effects
 }
 
 // handleRangeReply judges a headers message against the range request of the
 // peer, if it has one. It reports whether the message was the driver's to
 // take, as a range reply or as the late answer to a request that timed out.
 func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
-	view View, result *driverResult) bool {
+	view View) ([]DriverEffect, bool) {
+
+	var effects []DriverEffect
 
 	peerID := event.peerID
 	headers := event.headers
@@ -115,10 +126,10 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			log.Debugf("headersync unmatched_range_reply peer=%s",
 				peerID)
 
-			return true
+			return effects, true
 		}
 
-		return d.handleStaleRangeReply(peerID, result)
+		return d.handleStaleRangeReply(peerID)
 	}
 
 	assignment := request.Assignment
@@ -127,7 +138,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 	if err != nil {
 		log.Warnf("headersync unable to snapshot range_id=%d: %v",
 			assignment.RangeID, err)
-		return true
+		return effects, true
 	}
 	if !ok {
 		log.Warnf(
@@ -136,7 +147,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 			assignment.RangeID,
 			peerID,
 		)
-		return true
+		return effects, true
 	}
 
 	// The lease may have ended while the reply was in flight, for example
@@ -150,8 +161,8 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, rng.State)
-		then(result, Continue{})
-		return true
+		effects = append(effects, then(Continue{}))
+		return effects, true
 	}
 
 	// Replies are matched by their first parent hash, so a late answer to
@@ -223,16 +234,22 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
 			"peer_height=%d stop_height=%d", peerID,
 			assignment.RangeID, event.peerHeight, rng.StopHeight)
-		d.setPeerState(ctx, peerID, PeerBlocked, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerBlocked,
+		)...)
 
 	case contradicted:
 		log.Warnf("headersync stop_anchor_contradicted peer=%s "+
 			"range_id=%d stop_height=%d stop_hash=%s", peerID,
 			assignment.RangeID, rng.StopHeight, rng.StopHash)
-		d.setPeerState(ctx, peerID, PeerBlocked, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerBlocked,
+		)...)
 
 	case !valid:
-		d.rejectRangePeer(ctx, peerID, assignment.RangeID, result)
+		effects = append(effects, d.rejectRangePeer(
+			ctx, peerID, assignment.RangeID,
+		)...)
 	}
 
 	var complete CompleteResult
@@ -259,20 +276,20 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		// The completion didn't apply, which leaves the range active
 		// with its request already consumed. Blocking the peer lets the
 		// steal of blocked owners recover it.
-		result.Effects = append(
-			result.Effects, ScheduleCommitRetry{},
-		)
-		d.setPeerState(ctx, peerID, PeerBlocked, result)
-		then(result, Continue{})
-		return true
+		effects = append(effects, ScheduleCommitRetry{})
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerBlocked,
+		)...)
+		effects = append(effects, then(Continue{}))
+		return effects, true
 	}
 
 	if complete.Stale {
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, complete.RangeState)
-		then(result, Continue{})
-		return true
+		effects = append(effects, then(Continue{}))
+		return effects, true
 	}
 	if !complete.Accepted || !valid {
 		switch {
@@ -286,8 +303,8 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		case !valid:
 			d.replanRange(ctx, rng)
 		}
-		then(result, Continue{})
-		return true
+		effects = append(effects, then(Continue{}))
+		return effects, true
 	}
 
 	d.session.StageRange(assignment.RangeID, headers, peerID)
@@ -309,20 +326,20 @@ func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
 		)
 	}
 
-	d.commitAndContinue(ctx, view, result)
+	effects = append(effects, d.commitAndContinue(ctx, view)...)
 
-	return true
+	return effects, true
 }
 
 // handleStaleRangeReply classifies a reply from a peer that has no range
 // request in flight. It reports whether the reply answered a request that
 // timed out. Any other reply is not the driver's.
-func (d *Driver) handleStaleRangeReply(peerID string,
-	result *driverResult) bool {
+func (d *Driver) handleStaleRangeReply(peerID string) ([]DriverEffect, bool) {
+	var effects []DriverEffect
 
 	staleRequest, ok := d.session.PopStale(peerID)
 	if !ok {
-		return false
+		return effects, false
 	}
 
 	if time.Now().After(staleRequest.ExpiresAt) {
@@ -332,10 +349,10 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 			staleRequest.Assignment.LeaseEpoch)
 
 		if !d.session.HasActiveWork() {
-			then(result, Continue{})
+			effects = append(effects, then(Continue{}))
 		}
 
-		return true
+		return effects, true
 	}
 
 	assignment := staleRequest.Assignment
@@ -346,20 +363,24 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 		"epoch=%d stale=true", peerID, assignment.RangeID,
 		assignment.LeaseEpoch)
 
-	then(result, Continue{})
+	effects = append(effects, then(Continue{}))
 
-	return true
+	return effects, true
 }
 
 // rejectRangePeer punishes a peer that answered a range with invalid headers.
 func (d *Driver) rejectRangePeer(ctx context.Context, peerID string,
-	rangeID RangeID, result *driverResult) {
+	rangeID RangeID) []DriverEffect {
+
+	var effects []DriverEffect
 
 	log.Warnf("headersync peer_rejected peer=%s range_id=%d reason=%s",
 		peerID, rangeID, banman.InvalidBlock)
 
-	d.quarantinePeer(ctx, peerID, result)
-	result.Effects = append(result.Effects, DisconnectPeer{PeerID: peerID})
+	effects = append(effects, d.quarantinePeer(ctx, peerID)...)
+	effects = append(effects, DisconnectPeer{PeerID: peerID})
+
+	return effects
 }
 
 // rejectUntrustedAnchor rejects an untrusted anchor and the unstaged work

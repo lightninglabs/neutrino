@@ -174,8 +174,7 @@ func testCFHeaderWriteRollback(
 			}
 		}
 	}()
-	bm.wg.Add(1)
-	go bm.blockHandler()
+	bm.startBlockHandler()
 	defer func() { require.NoError(t, bm.Stop()) }()
 	var hashes []chainhash.Hash
 	for height := uint32(dstReorgFork + 1); height <= oldTip; height++ {
@@ -540,8 +539,7 @@ func TestCFHeaderSubscriptionWhilePublishing(t *testing.T) {
 			),
 			release: make(chan struct{}),
 		}
-		bm.wg.Add(1)
-		go bm.blockHandler()
+		bm.startBlockHandler()
 		defer func() { require.NoError(t, bm.Stop()) }()
 		manager := blockntfns.NewSubscriptionManager(
 			source,
@@ -651,6 +649,7 @@ func newCFHeaderTestManager(t *testing.T, blocks headerfs.BlockHeaderStore,
 		},
 	})
 	require.NoError(t, err)
+	collectInbox(bm)
 	t.Cleanup(func() { _ = bm.Stop() })
 
 	return bm
@@ -764,8 +763,7 @@ func testCFHeaderWatermark(t *testing.T, published bool, target uint32,
 		_, ok := n.(*blockntfns.Disconnected)
 		require.True(t, ok)
 	}
-	bm.wg.Add(1)
-	go bm.blockHandler()
+	bm.startBlockHandler()
 	defer func() { require.NoError(t, bm.Stop()) }()
 	_, err = bm.cfSync.submitCFHeaderReconciliation()
 	require.NoError(t, err)

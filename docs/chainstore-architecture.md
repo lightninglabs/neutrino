@@ -31,8 +31,8 @@ published tips and wakes goroutines that wait on them.
 flowchart TB
     subgraph BM["blockManager (blockmanager*.go)"]
         direction TB
-        bh["blockHandler goroutine<br/>submitRangeCommit, submitSerialExtension,<br/>submitSerialHeaderReorg, submitCheckpointRollback"]
-        fin["finishAsyncHeaderCommit<br/>reads chainStoreResult"]
+        bh["block handler actor<br/>submitRangeCommit, submitSerialExtension,<br/>submitSerialHeaderReorg, submitCheckpointRollback"]
+        fin["finishAsyncHeaderCommit<br/>reads the chainstore.Result from the mailbox"]
     end
 
     subgraph CF["cfHeaderSync (filter_sync.go)"]
@@ -41,7 +41,7 @@ flowchart TB
 
     subgraph CL["chainstore.Client (actor.go)"]
         direction TB
-        api["Ask, TryAsk, Stop"]
+        api["Ask, TryAsk, TryAskFunc, Stop"]
         mb["actor chain-store<br/>mailbox, MailboxCapacity = 2"]
         rcv["behavior.Receive"]
     end
@@ -55,7 +55,7 @@ flowchart TB
     hdr["headerfs.BlockHeaderStore,<br/>headerfs.FilterHeaderStore"]
     ntfn["blockNtfnChan to<br/>blockntfns.SubscriptionManager"]
 
-    bh -- "TryAsk(BlockCommit, Reorg,<br/>Rollback, SnapshotRequest)" --> api
+    bh -- "TryAskFunc(BlockCommit, Reorg,<br/>Rollback, SnapshotRequest)" --> api
     cfh -- "Ask(FilterCommit,<br/>SnapshotRequest)" --> api
     api --> mb --> rcv --> st
     rcv -- "Reply on Future" --> fin
@@ -68,9 +68,9 @@ flowchart TB
 ```
 
 Commands enter only through `Client`, and `Store` touches the outside world
-only through `Host`. The block handler submits without waiting (`TryAsk`) and
-reads the reply later from `chainStoreResult`, because it has to keep serving
-peers while a write runs. The filter handler submits with `Ask` and blocks
+only through `Host`. The block handler submits without waiting (`TryAskFunc`) and
+receives the reply later as a message in its own mailbox, because it has to
+keep serving peers while a write runs. The filter handler submits with `Ask` and blocks
 until the reply arrives, since nothing else runs on its goroutine. Both read
 the published tips from the tip feed, never from the actor.
 
@@ -82,7 +82,7 @@ the published tips from the tip feed, never from the actor.
 | `chainstore.Store` | The order and checks of every write to both header stores, the retained rollback (`pending`), verification of ambiguous writes, the decision of what to publish and when | The published tips (written through `Host`), header validation, sync policy, the notification channel |
 | `chainStoreHost` | The mapping from `Host` calls to `blockManager` state: `cfg.BlockHeaders`, `cfg.RegFilterHeaders`, `tipFeed`, `onBlockConnected`, `onBlockDisconnected` | Any decision; it runs on the actor goroutine and does what `Store` asks |
 | `chainstore.TipFeed` | The published `Tips` (block height, hash, time; filter height and the block hash at that height) and the change channel | Durability; it holds only what `Store` has already verified |
-| `blockManager` (`blockHandler`) | `pendingHeaderCommit`, the commit retry timer, the reaction to each reply through the headersync driver | Store writes, which it submits as commands |
+| `blockManager` (block handler actor) | `pendingHeaderCommit`, the commit retry timer, the reaction to each reply through the headersync driver | Store writes, which it submits as commands |
 | `cfHeaderSync` (`filterSyncLoop`) | Filter header download and verification against checkpoints | Filter header writes and the binding of a batch to its blocks, which `Store.CommitFilters` does |
 
 ## Message catalog
@@ -96,11 +96,11 @@ only for an unknown command type.
 
 | Command | Sender | `Store` method | Checks before any write | Reply on success |
 | --- | --- | --- | --- | --- |
-| `BlockCommit{ExpectedParent, Headers}` | `submitRangeCommit` (parallel ranges), `submitSerialExtension` (serial batch), both `TryAsk` | `CommitBlocks` | Batch is non-empty; durable tip equals `ExpectedParent`; first header is at tip height + 1 and its `PrevBlock` is the tip hash | `BlockTip` = last header, `BlockTipValid` |
-| `Rollback{ExpectedTip, Height}` | `submitCheckpointRollback`, `TryAsk` | `Rollback` | Durable tip equals `ExpectedTip`; `Height` is at or below the tip | `BlockTip` = header at `Height`, `BlockTipValid` |
-| `Reorg{ExpectedTip, ForkHeight, Headers, Work, CompareOnly}` | `submitSerialHeaderReorg`, `TryAsk` | `Reorg` | `Work` beats the durable work above `ForkHeight`; then the `Rollback` checks against `ExpectedTip` | `Verdict`; on a winning reorg, `BlockTip` = last replacement header |
+| `BlockCommit{ExpectedParent, Headers}` | `submitRangeCommit` (parallel ranges), `submitSerialExtension` (serial batch), both `TryAskFunc` | `CommitBlocks` | Batch is non-empty; durable tip equals `ExpectedParent`; first header is at tip height + 1 and its `PrevBlock` is the tip hash | `BlockTip` = last header, `BlockTipValid` |
+| `Rollback{ExpectedTip, Height}` | `submitCheckpointRollback`, `TryAskFunc` | `Rollback` | Durable tip equals `ExpectedTip`; `Height` is at or below the tip | `BlockTip` = header at `Height`, `BlockTipValid` |
+| `Reorg{ExpectedTip, ForkHeight, Headers, Work, CompareOnly}` | `submitSerialHeaderReorg`, `TryAskFunc` | `Reorg` | `Work` beats the durable work above `ForkHeight`; then the `Rollback` checks against `ExpectedTip` | `Verdict`; on a winning reorg, `BlockTip` = last replacement header |
 | `FilterCommit{Messages}` | `submitCFHeaders`, `Ask` | `CommitFilters` | `Messages[0].PrevFilterHeader` is the durable filter tip; messages chain to each other; the last `StopHash` is on the block chain | `Filter.FilterTip`, `Filter.FilterHeight` |
-| `SnapshotRequest` | `requestChainStoreSnapshot` (`TryAsk`), `submitCFHeaderReconciliation` (`Ask`) | `Snapshot` | None | `BlockTip`, `BlockHeader`, `BlockTipValid`, and a `FilterSnapshot` |
+| `SnapshotRequest` | `requestChainStoreSnapshot` (`TryAskFunc`), `submitCFHeaderReconciliation` (`Ask`) | `Snapshot` | None | `BlockTip`, `BlockHeader`, `BlockTipValid`, and a `FilterSnapshot` |
 | `barrier` (unexported) | `Client.Stop`, `Ask` | none | None | empty `Reply` |
 
 Every `Store` method begins with `resumePendingRollback`, so a retained
@@ -116,8 +116,7 @@ query. `Store.filterSnapshot` sets the stop block to the block tip, or to the
 block `wire.MaxCFHeadersPerMsg` (2,000) headers past the filter tip when the
 filter tip is further behind than that.
 
-`Result` (`messages.go`) wraps a `Reply` for the block handler's
-`chainStoreResult` channel. `Result.Err` is set when the command never reached
+`Result` (`messages.go`) wraps a `Reply` for the block handler's mailbox. `Result.Err` is set when the command never reached
 the actor or the wait ended early, and `Result.Retry` marks a timer wakeup
 rather than a reply.
 
@@ -149,7 +148,7 @@ sequenceDiagram
     opt cfg.HeadersImport set
         CS->>BM: ResetHeaderState() re-reads both tips into TipFeed
     end
-    CS->>BM: Start(): blockHandler, filterSyncLoop after first peer
+    CS->>BM: Start(): block handler actor, filterSyncLoop after first peer
     Note over CS,AS: shutdown
     CS->>BM: Stop()
     BM->>BM: close(quit), quitCancel(), wg.Wait()
@@ -175,12 +174,12 @@ returns, so every admitted command has finished before the stores close.
 A block header commit starts in the headersync driver, which returns a
 `SubmitRangeCommit` or `CommitExtension` effect to the block manager executor
 (`blockmanager_driver.go`). The executor records the command in
-`pendingHeaderCommit` and submits it with `TryAsk`. The flowchart follows a
+`pendingHeaderCommit` and submits it with `TryAskFunc`. The flowchart follows a
 `BlockCommit` from there to a durable, published tip.
 
 ```mermaid
 flowchart TB
-    sub["submitRangeCommit or submitSerialExtension<br/>pendingHeaderCommit set, TryAsk(BlockCommit)"]
+    sub["submitRangeCommit or submitSerialExtension<br/>pendingHeaderCommit set, TryAskFunc(BlockCommit)"]
     resume["Store.CommitBlocks<br/>resumePendingRollback"]
     check["ChainTip equals ExpectedParent,<br/>Headers[0] extends it"]
     write["BlockHeaders.WriteHeaders(Headers...)"]
@@ -189,7 +188,7 @@ flowchart TB
     verify["verifyBlockWrite<br/>durable tip is parent or batch prefix?"]
     pubp["PublishBlockTip(prefix)<br/>BlockTipValid and Reply.Err"]
     rerr["Reply.Err set<br/>prepared.snapshot = true"]
-    snap["requestChainStoreSnapshot<br/>TryAsk(SnapshotRequest)"]
+    snap["requestChainStoreSnapshot<br/>TryAskFunc(SnapshotRequest)"]
     adopt["finishChainStoreSnapshot<br/>SnapshotAdopted"]
     retry["scheduleHeaderCommitRetry<br/>1 s, headerSyncCommitRetryMsg"]
     sretry["time.AfterFunc 1 s<br/>Result{Retry: true}"]
@@ -211,9 +210,11 @@ block handler's view of the chain unknown, so it reconciles with a snapshot
 before it does anything else.
 
 1. **Submit.** The executor sets `pendingHeaderCommit` and calls
-   `Client.TryAsk`, which never parks the block handler on mailbox admission.
-   An `OnComplete` goroutine delivers the outcome to `chainStoreResult`, which
-   has a buffer of one.
+   `Client.TryAskFunc`, which never parks the block handler on mailbox
+   admission. An `OnComplete` goroutine passes the outcome to
+   `blockManager.postChainResult`, which queues it in the block handler's
+   mailbox. (`Client.TryAsk` wraps `TryAskFunc` and sends the result on a
+   channel; the block handler no longer uses it.)
 2. **Admit or refuse.** If the mailbox refuses the command, `Result.Err` is
    set and `finishAsyncHeaderCommit` treats the command as never run:
    staging is kept and `scheduleHeaderCommitRetry` arms a one-second
@@ -337,7 +338,7 @@ turn and no filter commit can land between them.
 
 ```mermaid
 flowchart TB
-    sub["submitSerialHeaderReorg<br/>TryAsk(Reorg)"]
+    sub["submitSerialHeaderReorg<br/>TryAskFunc(Reorg)"]
     resume["Store.Reorg<br/>resumePendingRollback"]
     work["workAboveFork(ForkHeight)<br/>sum of CalcWork(Bits) above fork"]
     cmp{"known.Cmp(Work)"}
@@ -480,16 +481,17 @@ construction, and the only writer of the tip feed after the handlers start.
 | Goroutine | Owns |
 | --- | --- |
 | `chain-store` actor | `Store` and `Store.pending`; every `WriteHeaders` and `RollbackLastBlock` call; every `Host` call, so every tip feed update and every block notification |
-| `blockHandler` | `pendingHeaderCommit`, the commit retry timer, the reaction to each `Result`; at most one command outstanding |
+| Block handler actor | `pendingHeaderCommit`, the commit retry timer, the reaction to each `Result`; at most one command outstanding |
 | `filterSyncLoop` | Its `Ask`, which blocks it; at most one command outstanding |
-| `OnComplete` goroutine, one per `TryAsk` | Delivering one `Result` to `chainStoreResult`, or dropping it when `quitCtx` ends |
+| `OnComplete` goroutine, one per `TryAskFunc` | Passing one `Result` to `postChainResult`, which waits for room in the block handler's mailbox or gives up when `quitCtx` ends |
 | Any goroutine | `TipFeed.Snapshot`, `Changed`, `Wait`; each takes the feed mutex only to copy a value |
 
 `MailboxCapacity` is 2 because there are exactly two clients and each has at
 most one command outstanding. The block handler sets `pendingHeaderCommit`
-before every `TryAsk`, stops reading `peerChan` and `timeoutChan` while it is
-set, and passes `CommitPending` to the driver in its `View`, so the next
-command waits for the reply. The filter handler blocks inside `Ask`. `TryAsk` therefore never finds the
+before every `TryAskFunc`. While it is set, the headersync driver is in its
+commit pending state and defers peer messages and request deadlines, so the
+next command waits for the reply. The filter handler blocks inside `Ask`.
+`TryAskFunc` therefore never finds the
 mailbox full, which matters because a refused command loses the headers it
 carries. During `Client.Stop`, the barrier takes the second slot: the filter
 handler's ask has drained through `asks.Wait`, and the block handler's last
@@ -498,8 +500,9 @@ the DST harness (`chain_store_dst_test.go`) asserts that it stays zero, and
 production code does not read it.
 
 Timers never touch chain store state. The commit retry timer posts a
-`headerSyncCommitRetryMsg` to `timerChan`, and the snapshot retry timer posts
-`Result{Retry: true}` to `chainStoreResult`, each selecting on `quit`.
+`headerSyncCommitRetryMsg` to the block handler's mailbox, and the snapshot
+retry timer posts `Result{Retry: true}` there too, each through
+`blockManager.post`.
 
 The actor can block on notifications. `onBlockConnected` and
 `onBlockDisconnected` send on the unbuffered `blockNtfnChan` until
@@ -524,7 +527,7 @@ three ways a caller can be wrong about this:
   finish on the next command of any type, including a `FilterCommit` or a
   `SnapshotRequest`.
 
-`Result.Err` from `TryAsk` is the one failure that does mean the command
+`Result.Err` from `TryAskFunc` is the one failure that does mean the command
 never ran: the mailbox refused it or the actor had stopped, and the block
 handler keeps its staged work and retries after one second.
 

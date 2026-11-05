@@ -5,8 +5,10 @@ and when a batch is ready to be written. This document describes the
 package's internals: the `Driver` state machine and its executor in the
 block manager, the `Manager` and the pure `HeaderSyncFSM` behind it, the
 per-peer machines, the `Session` bookkeeping, the planner in `Controller`,
-and the validation cache in `TipState`. It reflects the code at commit
-`485033b` (PR #446, the tip of the driver FSM series).
+and the validation cache in `TipState`. It reflects the code at master
+`2e8b203` (PR #446) plus the five commits of the PR that moves the driver's
+handlers to returned effects, makes a pending commit a driver state, and runs
+the block handler as an actor.
 
 For how header sync fits beside filter sync, the stores and the query work
 manager, see [sync-architecture.md](sync-architecture.md). That document
@@ -23,9 +25,10 @@ deterministic simulation harness that exercises this code, see
 `Driver` is the decision maker, and `blockManager` is its executor. The
 driver takes one event, reads the world through a `View`, updates the
 bookkeeping it owns, and returns a list of effects. The block handler
-goroutine then performs those effects in order: it sends `getheaders`, arms
+actor then performs those effects in order: it sends `getheaders`, arms
 timers, submits writes to the chain store actor, and feeds the outcome of
-each back to the driver as the next event. The driver's policy calls go
+each back to the driver as the next event. The block handler has one mailbox,
+and every input to the block manager is a message in it. The driver's policy calls go
 through `Controller`, which composes the `Manager` (range and anchor state)
 and the `Session` (requests, timers, staged payloads).
 
@@ -33,14 +36,14 @@ and the `Session` (requests, timers, staged payloads).
 flowchart TB
     subgraph BM["blockManager (blockmanager_driver.go, blockmanager_headersync.go, blockmanager_serial.go)"]
         direction TB
-        bh["blockHandler goroutine<br/>peerChan, timerChan, timeoutChan,<br/>donePeerChan, chainStoreResult"]
-        ex["handleDriverEvent<br/>executeDriverEffect"]
+        bh["block handler actor (blockmanager_actor.go)<br/>one mailbox: peer messages, deadlines,<br/>timers, donePeerMsg, chainstore.Result"]
+        ex["handleDriverEvent agenda loop<br/>executeDriverEffect"]
         pend["pendingHeaderCommit<br/>one chain store mutation in flight"]
     end
 
     subgraph DR["headersync.Driver (driver*.go)"]
         direction TB
-        drv["driverState.ProcessEvent<br/>one state, protofsm machine"]
+        drv["driverState and commitPendingState<br/>two states, protofsm machine"]
         tip["TipState (tip_state.go)<br/>headerList, reorgList, nextCheckpoint"]
         sess["Session (session.go)<br/>rangeRequests, anchorRequests,<br/>staleRequests, stagedRanges, cooldowns"]
     end
@@ -62,9 +65,9 @@ flowchart TB
         act["chain store actor<br/>BlockCommit, Reorg, Rollback,<br/>SnapshotRequest"]
     end
 
-    bh -- "DriverEvent + View" --> ex
-    ex -- "ProcessEvent" --> drv
-    drv -- "[]DriverEffect" --> ex
+    bh -- "Inbound, or a direct event" --> ex
+    ex -- "ProcessEvent(event, View)" --> drv
+    drv -- "[]DriverEffect<br/>(Deliver hands an Inbound back)" --> ex
     drv --> tip
     drv --> sess
     drv --> ctl
@@ -76,24 +79,27 @@ flowchart TB
     mgr --> qd
     ex -- "SubmitRangeCommit,<br/>CommitExtension, CommitReorg,<br/>CheckpointRollback" --> pend
     pend -- "TryAsk" --> act
-    act -- "chainstore.Result" --> bh
+    act -- "chainstore.Result,<br/>posted to the mailbox" --> bh
 ```
 
 The driver never calls the chain store, a peer, or a timer. Every arrow out
 of `DR` toward the network or the disk is an effect that `blockManager`
 performs. The arrow back from the chain store actor is a `chainstore.Result`
-on the `chainStoreResult` channel, which the block handler turns into a
-`RangesCommitted`, `ExtensionCommitted`, `ReorgCommitted`,
-`CheckpointRolledBack` or `SnapshotAdopted` event.
+that `postChainResult` puts in the block handler's mailbox (the executor
+passes it as the callback of `chainstore.Client.TryAskFunc`). The block
+handler turns it into a `RangesCommitted`, `ExtensionCommitted`,
+`ReorgCommitted`, `CheckpointRolledBack`, `SnapshotAdopted` or
+`CommitAbandoned` event.
 
 ### Responsibilities
 
 | Type | Owns | Does not own |
 | --- | --- | --- |
-| `Driver` | The `TipState` validation cache, the request ID counter, the current `View` and the per-event error; the sequencing of controller, manager, peer and session calls within one event | A goroutine, timers, peer I/O, the chain store, the candidate peer list and the pending commit (all in `blockManager`); sync phases (none exist in the driver) |
-| `driverState` | Nothing. It is an empty struct that dispatches on the event type and writes through the `*Driver` environment | Any data |
-| `View` | A snapshot of `blockManager` state for one `ProcessEvent` call: `Peers` (the candidate list as `PeerCandidate` values) and `CommitPending` | Persistence across events; the executor rebuilds it per call |
-| `blockManager` | The `blockHandler` goroutine, `candidatePeers`, `pendingHeaderCommit`, every `time.AfterFunc` timer, the serial sync peer, the `getheaders` wire send, and the chain store `TryAsk` | Range, anchor and lease state; validation |
+| `Driver` | The `TipState` validation cache, the request ID counter, the current `View`, the per-event `commitPending` flag and error; the sequencing of controller, manager, peer and session calls within one event | A goroutine, timers, peer I/O, the chain store and the candidate peer list (all in `blockManager`); sync phases (none exist in the driver) |
+| `driverState` | Nothing. It is an empty struct, the driver's idle state: it dispatches on the event type through `Driver.dispatch`, writes through the `*Driver` environment, and moves to `commitPendingState` when the effects submit a chain store mutation | Any data |
+| `commitPendingState` | The `Inbound` events deferred while a mutation is in flight, oldest first. It applies every other event as `driverState` does, defers `Inbound`, and replays the deferred events as a trailing `Then` when it returns to idle | Any bookkeeping; the pending commit itself, which is `pendingHeaderCommit` in `blockManager` |
+| `View` | A snapshot of `blockManager` state for one `ProcessEvent` call: `Peers`, the candidate list as `PeerCandidate` values. It has no other field | Persistence across events; the executor rebuilds it per call; the pending commit, which the driver's state records |
+| `blockManager` | The block handler actor and its mailbox, the candidate peer list (a `list.List` held by the `blockHandler` behavior), `pendingHeaderCommit`, every `time.AfterFunc` timer, the serial sync peer, the `getheaders` wire send, and the chain store `TryAskFunc` | Range, anchor and lease state; validation |
 | `Session` | In-flight `RangeRequest` and `AnchorRequest` per peer with their `*time.Timer`, `StaleRequest` entries, `StagedRange` payloads, peer cooldowns and `nextRangeID` | Range state (in `HeaderSyncFSM`); timer creation (the executor creates timers and the session only stops them) |
 | `TipState` | `headerList` (the validation chain that trails the durable store), `reorgList` (scratch chain for a competing branch) and `nextCheckpoint`; contextual checks through `HeaderValidator` | Durable storage, which it reads through `TipConfig.BlockHeaders` and never writes |
 | `Controller` | Planning and recovery policy: checkpoint and frontier ranges, discovery spans, hedged peer choice, anchor confirmation, invalidation fan-out, replanning | Any state of its own; peer punishment, which the driver emits as effects |
@@ -110,146 +116,226 @@ machine's outbox. The executor runs the effects in order after the call
 returns. Each effect that can fail or that produces a result reports back as
 a further event, so the driver never waits inside a handler.
 
+The block handler is an lnd actor (`blockHandler` in `blockmanager_actor.go`)
+with one mailbox of capacity `MaxPeers*10 + 1`. `blockManager.post` queues a
+`blockInput` message for it, and `Receive` handles one at a time. A
+`newPeerMsg`, `invMsg`, `headersMsg` or `headerSyncTimeoutMsg` goes through
+`dispatchInbound`, which hands the driver an `Inbound{Message}` event. A
+`donePeerMsg` and the bootstrap, cooldown and commit retry timer messages go
+straight to `handlePeerMessage`. A `chainstore.Result` goes to
+`finishAsyncHeaderCommit`. `Receive` runs an event to completion, including
+the follow-ups of its effects, before it reads the next message.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant P as ServerPeer
-    participant BH as blockHandler goroutine
+    participant BH as block handler actor (Receive)
     participant D as Driver.ProcessEvent
-    participant S as driverState.ProcessEvent
+    participant S as driver state ProcessEvent
     participant EX as executeDriverEffect
     participant CS as chain store actor
 
-    P->>BH: headers message on peerChan
-    BH->>BH: handleHeadersMsgWithPeers builds HeadersReceived
-    BH->>D: ProcessEvent(ctx, HeadersReceived, driverView(peers))
+    P->>BH: headersMsg in the mailbox
+    BH->>D: ProcessEvent(ctx, Inbound{headersMsg}, driverView(peers))
     D->>S: machine.ProcessEvent under StateMachine.mu
-    S->>S: handleHeadersReceived: Session, Controller, Manager, TipState
-    S-->>D: NextState = driverState, Outbox = effects, d.err set
+    S-->>D: idle state: Outbox = [Deliver{headersMsg}]
     D-->>BH: effects, d.err
-    loop each effect, in order
+    BH->>EX: Deliver runs handlePeerMessage
+    EX->>BH: handleHeadersMsgWithPeers builds HeadersReceived
+    BH->>D: ProcessEvent(ctx, HeadersReceived, fresh driverView(peers))
+    D->>S: handleHeadersReceived: Session, Controller, Manager, TipState
+    S-->>D: NextState, Outbox = effects, d.err set
+    D-->>BH: effects, d.err
+    loop each agenda item, next item first
         alt Then{Events}
-            BH->>D: ProcessEvent(next, fresh driverView(peers))
+            BH->>BH: push the events on the agenda
         else SendGetHeaders
             BH->>EX: sendHeaderRequest(sp, locator, stopHash)
             EX->>P: getheaders
-            BH->>D: RequestSent or RequestFailed
+            EX-->>BH: RequestSent or RequestFailed, pushed on the agenda
         else ArmRequestTimer
             BH->>EX: time.AfterFunc(headerTimeoutForPeer)
-            BH->>D: TimerArmed{Timer}
+            EX-->>BH: TimerArmed{Timer}, pushed on the agenda
         else SubmitRangeCommit
             BH->>EX: submitRangeCommit sets pendingHeaderCommit
-            EX->>CS: TryAsk(BlockCommit{ExpectedParent, Headers})
+            EX->>CS: TryAskFunc(BlockCommit{ExpectedParent, Headers})
+            Note over D: the driver is now in commitPendingState
         end
     end
-    CS-->>BH: chainstore.Result on chainStoreResult
-    BH->>D: RangesCommitted{Prepared}
+    CS-->>BH: chainstore.Result, posted to the mailbox
+    BH->>D: ProcessEvent(RangesCommitted{Prepared})
+    Note over D: back to idle, deferred Inbound events replay as a Then
 ```
+
+`handleDriverEvent` keeps an agenda, a stack of items, where each item is
+either an event for the driver or an effect to execute. It pops the next
+item. An event is run through `processDriverEvent`, which gives it a fresh
+`View` and its own `headerSyncOpCtx` deadline of five seconds, and pushes its
+effects on the agenda in order. A `Then` effect pushes its events. Any other
+effect is run by `executeDriverEffect`, which returns the events that report
+its outcome (`RequestSent`, `RequestFailed`, `TimerArmed` or
+`CommitAbandoned`), and those are pushed in turn. Everything an event pushed
+runs before whatever followed that event on the agenda. A `Then` therefore
+does not call `handleDriverEvent` again, and the driver is never entered from
+inside one of its handlers or effects. A
+`Deliver` effect is the one case that nests: it calls `handlePeerMessage`,
+which can call `handleDriverEvent` with its own agenda, after the outer
+`ProcessEvent` has returned.
 
 Five rules make this loop safe. The code documents each, and the executor
 enforces none of them at runtime.
 
 **A re-entering effect is the last effect of its batch.** `Then{Events}`,
-`StartSync`, and any effect whose executor re-enters the driver (such as
-`SendGetHeaders`, which reports `RequestSent`, or `SetSyncPeer`, which goes
-through `setSyncPeer` and posts `FollowTip`) runs after the effects before
-it. A nested `ProcessEvent` therefore sees the state those effects produced.
-`handleSnapshotAdopted` emits `ScheduleCommitRetry` before the restart for
-this reason. The driver never uses protofsm's `InternalEvent`; all re-entry
-goes through the executor.
+`StartSync`, `Deliver`, and any effect whose executor re-enters the driver
+(such as `SendGetHeaders`, which reports `RequestSent`, or `SetSyncPeer`,
+which goes through `setSyncPeer` and posts `FollowTip`) runs after the
+effects before it. A later `ProcessEvent` therefore sees the state those
+effects produced. `handleSnapshotAdopted` emits `ScheduleCommitRetry` before
+the restart for this reason. The driver never uses protofsm's
+`InternalEvent`; all re-entry goes through the executor.
 
-**Every `ProcessEvent` call gets a fresh `View`.** `handleDriverEvent` calls
-`driverView(peers)` on every entry, including each event of a `Then`. The
-view holds `Peers` (nil when the caller passed no list, as `PeerConnected`
-and `FollowTip` do) and `CommitPending`, which is `pendingHeaderCommit !=
-nil`. Because `DisconnectPeer` removes the peer from `candidatePeers` and
-`SubmitRangeCommit` sets `pendingHeaderCommit` before the next event runs, a
-follow-up event sees both. The view lives in the `Driver` environment rather
-than in the event, so a replayed event cannot carry a stale one.
+**Every `ProcessEvent` call gets a fresh `View`.** `processDriverEvent` calls
+`driverView(peers)` on every event, including each event of a `Then` and
+each outcome event. The view holds only `Peers` (nil when the caller passed
+no list, as `FollowTip` does). Because `DisconnectPeer` removes the peer from
+the candidate list before the next event runs, a follow-up event sees it. The
+view lives in the `Driver` environment rather than in the event, so a
+replayed event cannot carry a stale one.
 
-**The driver's error travels beside the effects.** `driverState.ProcessEvent`
-stores the handler's error in `d.err` and always returns a nil transition
-error. `Driver.ProcessEvent` returns `effects, d.err`. protofsm discards the
-outbox when a transition fails, and the driver has already dealt with the
-failure by logging it or scheduling a retry, so the effects it emitted must
-still run. Only `PeerConnected`, `PeerDisconnected`, `PeerRTTUpdated`,
-`PlanRanges` and `CommitReady` can set `d.err`, and only
+**The driver's error travels beside the effects.** Each state's
+`ProcessEvent` stores the handler's error in `d.err` and always returns a nil
+transition error. `Driver.ProcessEvent` returns `effects, d.err`. protofsm
+discards the outbox when a transition fails, and the driver has already
+dealt with the failure by logging it or scheduling a retry, so the effects it
+emitted must still run. Only `PeerConnected`, `PeerDisconnected`,
+`PeerRTTUpdated`, `PlanRanges` and `CommitReady` can set `d.err`, and only
 `registerHeaderSyncPeer` reads the outcome's error; every other call site
 discards it.
 
 **A handler never calls `ProcessEvent`.** The machine's `StateMachine.mu` is
 held for the whole call and is not reentrant, so a nested call would
-deadlock. A handler that needs a follow-up emits `Then`. The executor's
-re-entry is safe because it happens after the outer call returned.
+deadlock. A handler that needs a follow-up emits `Then`, and the executor's
+agenda loop runs it after the outer call returned.
 
-**One commit at a time, and nothing reads peers while it is pending.** While
-`pendingHeaderCommit` is set, `blockHandler` sets `peerChan` and
-`timeoutChan` to nil in its `select`, so no reply or deadline reaches the
-driver until the chain store answers. `donePeerChan`, `timerChan` and
-`chainStoreResult` stay open. On the driver side, `resumeWork`,
-`commitReadyRanges` and the anchor handlers check `view.CommitPending` and
-defer anything that would read or move the tip.
+**One commit at a time, and the driver does not read peers while it is
+pending.** The driver enters `commitPendingState` when an event's effects
+include `SubmitRangeCommit`, `CommitExtension`, `CommitReorg` or
+`CheckpointRollback` (`submitsCommit`). It leaves the state on an event that
+says how the mutation ended: `RangesCommitted`, `ExtensionCommitted`,
+`ReorgCommitted`, `CheckpointRolledBack`, `SnapshotAdopted` or
+`CommitAbandoned` (`endsCommit`). While in the state, `Inbound` is the one
+deferred event (`defersWhileCommitPending`), so no peer message or request
+deadline reaches a handler, and nothing reads the header stores that the
+mutation holds, until the chain store answers. Every other event runs, with
+`Driver.commitPending` set for the handlers, so `resumeWork`,
+`commitReadyRanges`, `handlePeerGone`, `handleAnchorPipelined` and
+`handleAnchorHeaders` defer anything that would read or move the tip.
+`donePeerMsg` and the timer messages are not `Inbound` and are never held
+back by the mailbox.
 
-Each `handleDriverEvent` call derives its context from `quitCtx` with
-`headerSyncOpTimeout`, five seconds. The manager and peers run on the
-caller's goroutine and do not check the deadline, so it bounds nothing in
-practice; it exists so the `ask` path has a context to pass through.
+### The driver's two states
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> CommitPending: event emits SubmitRangeCommit,<br/>CommitExtension, CommitReorg<br/>or CheckpointRollback
+    Idle --> Idle: any other event<br/>(Inbound becomes Deliver)
+    CommitPending --> CommitPending: Inbound, appended to deferred
+    CommitPending --> CommitPending: other event<br/>(handlers see commitPending)
+    CommitPending --> CommitPending: ending event that submits<br/>the next commit, deferred kept
+    CommitPending --> Idle: RangesCommitted, ExtensionCommitted,<br/>ReorgCommitted, CheckpointRolledBack,<br/>SnapshotAdopted or CommitAbandoned,<br/>trailing Then{deferred}
+```
+
+Idle is `driverState` and CommitPending is `commitPendingState`. In Idle an
+`Inbound` event becomes a `Deliver{Message}` effect. In CommitPending the same
+event is appended to the state's `deferred` list and produces no effects. An
+ending event runs its handler as an idle driver would (`dispatch` is called
+with the pending flag cleared), because the mutation has ended by then. If
+that handler's effects submit another mutation, which no handler of an ending
+event does today, the driver stays in CommitPending and keeps `deferred`.
+Otherwise it returns to Idle and appends `Then{Events: deferred}` to the
+effects, so each replayed event sees the state the effects before it
+produced. `CommitAbandoned` has no case in `dispatch`; it only ends the state.
+The executor sends it when the chain store refuses a command
+(`Result.Err` in `finishAsyncHeaderCommit`) and when it cannot find the peer
+that a `CommitExtension`, `CommitReorg` or `CheckpointRollback` effect names.
+
+The deferred queue has no bound. The old `peerChan` filled and blocked the
+peer goroutines while a commit was pending; the mailbox keeps draining, so
+the queue holds every reply and message that arrives for as long as the
+mutation does. In practice that is the replies to requests already in flight,
+which grows only while the chain store is down and the snapshot retries.
+
+`continueAnchorSpan` still runs while a commit is pending, because the
+driver's own follow-ups (`anchorPipelined` and the like) are not `Inbound` and
+are not deferred. The handler of the reply that submitted the commit runs in
+Idle, so it learns of the commit from its own `submitted` result rather than
+from `commitPending`.
 
 ## Events and effects
 
-Events are the inputs to `driverState.ProcessEvent`. The table groups them
+Events are the inputs to the `ProcessEvent` of `driverState` and `commitPendingState`. The table groups them
 by who produces them. Types in lowercase are unexported and exist only as
-`Then` follow-ups.
+`Then` follow-ups. The executor sends `Inbound` for every peer message and
+request deadline; the driver turns it into a `Deliver` effect in the idle
+state and defers it while a commit is pending.
 
 | Event | Source | Declared in | Handler |
 | --- | --- | --- | --- |
-| `HeadersReceived{PeerID, PeerHeight, Headers, HeadersSynced}` | Peer reply, built by `handleHeadersMsgWithPeers` | `driver_reply.go:16` | `handleHeadersReceived` |
+| `Inbound{Message}` | `dispatchInbound`, for a `newPeerMsg`, `invMsg`, `headersMsg` or `headerSyncTimeoutMsg` from the mailbox | `driver_inbound.go:9` | Idle: becomes `Deliver{Message}`. Commit pending: appended to `deferred` |
+| `HeadersReceived{PeerID, PeerHeight, Headers, HeadersSynced}` | Peer reply, built by `handleHeadersMsgWithPeers` when `Deliver` runs | `driver_reply.go:16` | `handleHeadersReceived` |
 | `RequestTimedOut{PeerID, Kind, RequestID, StartHeight, RangeID, LeaseEpoch, Timeout, StaleFor}` | Request timer via `handleHeaderSyncTimeoutMsg` | `driver_timeout.go:11` | `handleRequestTimedOut` |
-| `SerialTimedOut{PeerID, StartHeight, Timeout}` | Serial deadline, only when `requestID` matches `serialRequestID` and the peer is the sync peer | `driver_timeout.go:143` | `handleSerialTimedOut` |
+| `SerialTimedOut{PeerID, StartHeight, Timeout}` | Serial deadline, only when `requestID` matches `serialRequestID` and the peer is the sync peer | `driver_timeout.go:154` | `handleSerialTimedOut` |
 | `CooldownElapsed{SerialRequestPending}` | Cooldown wake timer (`headerSyncCooldownMsg`) | `driver_sync.go:55` | `handleCooldownElapsed` |
 | `RetryCommit{}` | Commit retry timer (`headerSyncCommitRetryMsg`) | `driver_commit.go:28` | `handleRetryCommit` |
-| `RequestSent{Request}`, `RequestFailed{Request, Err}` | Outcome of `SendGetHeaders` | `driver_dispatch.go:49`, `:57` | `handleRequestSent`, `handleRequestFailed` |
-| `TimerArmed{PeerID, Kind, RequestID, Timer}` | Outcome of `ArmRequestTimer` | `driver_dispatch.go:66` | `handleTimerArmed` |
+| `RequestSent{Request}`, `RequestFailed{Request, Err}` | Outcome of `SendGetHeaders`, returned by `executeDriverEffect` | `driver_dispatch.go:49`, `:57` | `handleRequestSent`, `handleRequestFailed` |
+| `TimerArmed{PeerID, Kind, RequestID, Timer}` | Outcome of `ArmRequestTimer`, returned by `executeDriverEffect` | `driver_dispatch.go:66` | `handleTimerArmed` |
+| `CommitAbandoned{}` | `finishAsyncHeaderCommit` when the store refused the command (`Result.Err`); `executeDriverEffect` when a commit effect names a peer it cannot find. Ends the commit pending state | `driver_commit.go:45` | No `case` in `dispatch`; the state change is its whole effect |
 | `RangesCommitted{Prepared}` | Chain store result for `SubmitRangeCommit` | `driver_commit.go:34` | `handleRangesCommitted` |
-| `ExtensionCommitted{PeerID, Extension}` | Chain store result for `CommitExtension` | `driver_serial.go:568` | `handleExtensionCommitted` |
-| `ReorgCommitted{PeerID, Reorg, Nodes, Mismatch, Verdict}` | Chain store result for `CommitReorg` | `driver_serial.go:580` | `handleReorgCommitted` |
-| `CheckpointRolledBack{PeerID, Node}` | Chain store result for `CheckpointRollback` | `driver_serial.go:603` | `handleCheckpointRolledBack` |
-| `SnapshotAdopted{Node, CheckpointPeerID}` | `finishChainStoreSnapshot` after a failed mutation | `driver_serial.go:616` | `handleSnapshotAdopted` |
+| `ExtensionCommitted{PeerID, Extension}` | Chain store result for `CommitExtension` | `driver_serial.go:613` | `handleExtensionCommitted` |
+| `ReorgCommitted{PeerID, Reorg, Nodes, Mismatch, Verdict}` | Chain store result for `CommitReorg` | `driver_serial.go:625` | `handleReorgCommitted` |
+| `CheckpointRolledBack{PeerID, Node}` | Chain store result for `CheckpointRollback` | `driver_serial.go:648` | `handleCheckpointRolledBack` |
+| `SnapshotAdopted{Node, CheckpointPeerID}` | `finishChainStoreSnapshot` after a failed mutation | `driver_serial.go:661` | `handleSnapshotAdopted` |
 | `PeerConnected{Peer}` | `registerHeaderSyncPeer` from `handleNewPeerMsg` | `driver_peers.go:19` | `handlePeerConnected` |
-| `PeerGone{PeerID}` | `handleDonePeerMsg` | `driver_peers.go:238` | `handlePeerGone` |
+| `PeerGone{PeerID}` | `handleDonePeerMsg` | `driver_peers.go:270` | `handlePeerGone` |
 | `BeginSync{BestPeerID, BestHeight, TipHeight}` | `blockManager.startSync` after choosing the best peer | `driver_sync.go:15` | `handleBeginSync` |
 | `Continue{}` | `handleNewPeerMsg` while a sync peer is set; also a `Then` follow-up | `driver_sync.go:34` | `resumeWork(startWhenIdle=true)` |
-| `FollowTip{PeerID}` | `blockManager.setSyncPeer` | `driver_serial.go:46` | `handleFollowTip` |
+| `FollowTip{PeerID}` | `blockManager.setSyncPeer` | `driver_serial.go:47` | `handleFollowTip` |
 | `ResumeWork{}`, `DispatchWork{}`, `DispatchPeer{PeerID}`, `CooldownWakeDue{}` | `Then` follow-ups | `driver_sync.go:42`, `:50`, `driver_dispatch.go:41`, `driver_peers.go:64` | `resumeWork(false)`, `handleDispatchWork`, `handleDispatchPeer`, `handleCooldownWakeDue` |
 | `syncDiscovered`, `syncDispatched`, `continueDiscover`, `continueDiscovered` | `Then` follow-ups of sync start and resume | `driver_sync.go:112` to `:140` | `handleSyncDiscovered`, `handleSyncDispatched`, `handleContinueDiscover`, `handleContinueDiscovered` |
 | `anchorPipelined`, `anchorPlanned`, `anchorWaiting`, `anchorReplanned`, `anchorTimedOut` | `Then` follow-ups of anchor discovery | `driver_anchor.go:25` to `:54`, `driver_timeout.go:47` | `handleAnchorPipelined`, `handleAnchorPlanned`, `handleAnchorWaiting`, `handleAnchorReplanned`, `handleAnchorTimedOut` |
-| `PeerStateChanged`, `PeerDisconnected`, `PeerRTTUpdated`, `RecoverPeers`, `PeerDone`, `PlanRanges`, `CommitReady`, `TipHeaders` | Declared events with a `case` arm, but produced only by tests or called as plain functions from other handlers | `driver_peers.go`, `driver_dispatch.go:24`, `driver_commit.go:22`, `driver_serial.go:26` | As named |
+| `PeerStateChanged`, `PeerDisconnected`, `PeerRTTUpdated`, `RecoverPeers`, `PeerDone`, `PlanRanges`, `CommitReady`, `TipHeaders` | Declared events with a `case` arm, but produced only by tests or called as plain functions from other handlers | `driver_peers.go`, `driver_dispatch.go:24`, `driver_commit.go:22`, `driver_serial.go:27` | As named |
 | `AssignRanges{PeerCount}` | Declared at `driver_dispatch.go:32`; no `case` arm, so it is a no-op if sent as an event | | `handleAssignRanges` is called directly from `handleDispatchWork` |
 
-Effects are the outbox. `executeDriverEffect` in `blockmanager_driver.go`
-switches over every one; an unknown type is logged and dropped.
+Effects are the outbox. `handleDriverEvent` expands `Then` itself, and
+`executeDriverEffect` in `blockmanager_driver.go` switches over every other
+one; an unknown type is logged and dropped. The four commit effects
+(`SubmitRangeCommit`, `CommitExtension`, `CommitReorg`, `CheckpointRollback`)
+also move the driver to the commit pending state.
 
 | Effect | Executor action | Declared in |
 | --- | --- | --- |
-| `Then{Events}` | Recursive `handleDriverEvent` per event, each with a fresh view | `driver_executor.go:75` |
+| `Then{Events}` | `handleDriverEvent` pushes the events on its agenda; each runs in order with a fresh view, before whatever followed the `Then` | `driver_executor.go:70` |
+| `Deliver{Message}` | `handlePeerMessage(peers, Message)`, which handles the message and may start a nested `handleDriverEvent` | `driver_inbound.go:18` |
 | `StartSync{}` | `blockManager.startSync(peers)`, which may emit `BeginSync` | `driver_sync.go:79` |
 | `SendGetHeaders{PeerID, Kind, Range, StartHeight, StartHash, StopHeight, StopHash}` | One-hash locator `[StartHash]`, `sendHeaderRequest`, then `RequestSent` or `RequestFailed` | `driver_dispatch.go:78` |
 | `ArmRequestTimer{PeerID, Kind, RequestID, StartHeight, RangeID, LeaseEpoch}` | `armHeaderSyncRequestTimer` with `headerTimeoutForPeer`, then `TimerArmed` | `driver_dispatch.go:98` |
 | `ArmCooldownWake{Until}` | `armHeaderCooldownWake`, a single timer, no-op if armed | `driver_peers.go:73` |
-| `ScheduleCommitRetry{}`, `CancelCommitRetry{}` | One `time.Second` timer with a generation counter | `driver_reply.go:49`, `driver_commit.go:54` |
-| `DisarmSerialTimeout{}` | `disarmHeaderSyncTimeout`, which bumps `serialRequestID` | `driver_serial.go:82` |
+| `ScheduleCommitRetry{}`, `CancelCommitRetry{}` | One `time.Second` timer with a generation counter | `driver_reply.go:49`, `driver_commit.go:62` |
+| `DisarmSerialTimeout{}` | `disarmHeaderSyncTimeout`, which bumps `serialRequestID` | `driver_serial.go:83` |
 | `QuarantinePeer{PeerID}` | `cfg.QuarantinePeer` for `defaultHeaderPeerQueryQuarantine`, ten seconds | `driver_timeout.go:31` |
 | `DisconnectPeer{PeerID}` | `removeSyncCandidate` and `sp.Disconnect()` | `driver_timeout.go:39` |
 | `DropCandidate{PeerID}` | `removeSyncCandidate` only | `driver_anchor.go:16` |
-| `DisconnectTipPeer{PeerID}` | `sp.Disconnect()` only | `driver_serial.go:61` |
-| `UpdatePeerHeight{PeerID, Height}` | `sp.UpdateLastBlockHeight` | `driver_serial.go:70` |
-| `SubmitRangeCommit{Prepared}` | `submitRangeCommit`: `pendingHeaderCommit.ranges`, `TryAsk(chainstore.BlockCommit)` | `driver_commit.go:45` |
-| `CommitExtension{PeerID, Extension}` | `submitSerialExtension`: `pendingHeaderCommit.serial`, `TryAsk(chainstore.BlockCommit)` | `driver_serial.go:89` |
-| `CommitReorg{PeerID, Reorg, Headers, Nodes, Work, Mismatch}` | `submitSerialHeaderReorg`: `TryAsk(chainstore.Reorg)`, `CompareOnly` when `Mismatch` is set | `driver_serial.go:103` |
-| `CheckpointRollback{PeerID, Node, ExpectedTip}` | `submitCheckpointRollback`: `TryAsk(chainstore.Rollback)` | `driver_serial.go:131` |
+| `DisconnectTipPeer{PeerID}` | `sp.Disconnect()` only | `driver_serial.go:62` |
+| `UpdatePeerHeight{PeerID, Height}` | `sp.UpdateLastBlockHeight` | `driver_serial.go:71` |
+| `SubmitRangeCommit{Prepared}` | `submitRangeCommit`: `pendingHeaderCommit.ranges`, `TryAskFunc(chainstore.BlockCommit, postChainResult)` | `driver_commit.go:53` |
+| `CommitExtension{PeerID, Extension}` | `submitSerialExtension`: `pendingHeaderCommit.serial`, `TryAskFunc(chainstore.BlockCommit, postChainResult)`; returns `CommitAbandoned` if the peer is unknown | `driver_serial.go:90` |
+| `CommitReorg{PeerID, Reorg, Headers, Nodes, Work, Mismatch}` | `submitSerialHeaderReorg`: `TryAskFunc(chainstore.Reorg)`, `CompareOnly` when `Mismatch` is set; returns `CommitAbandoned` if the peer is unknown | `driver_serial.go:104` |
+| `CheckpointRollback{PeerID, Node, ExpectedTip}` | `submitCheckpointRollback`: `TryAskFunc(chainstore.Rollback)`; returns `CommitAbandoned` if the peer is unknown | `driver_serial.go:132` |
 | `SetSyncPeer{PeerID, UnlessGone}` | `setSyncPeer(nil)` for an empty ID, else `setSyncPeer(sp)`, skipped if `UnlessGone` and the peer disconnected; `setSyncPeer` posts `FollowTip` | `driver_sync.go:65` |
 | `StartSerialSync{PeerID, StartHeight, StopHash, StopHeight}` | `blockManager.startSerialSync` | `driver_sync.go:86` |
-| `ContinueSerial{PeerID, FinalHash, FinalHeight, StopHash}` | `finishSerialHeaderFollowup` | `driver_serial.go:631` |
+| `ContinueSerial{PeerID, FinalHash, FinalHeight, StopHash}` | `finishSerialHeaderFollowup` | `driver_serial.go:676` |
 | `NoProgressReply{PeerID}` | `handleNoProgressReply`; the only effect of its event because it can call `startSync` | `driver_reply.go:58` |
 | `ClearBootstrapDelay{}` | `clearHeaderSyncBootstrapDelay` | `driver_sync.go:106` |
 
@@ -373,7 +459,7 @@ no-progress reply. `Epoch` is written but has no reader outside tests.
 `blockManager.startSync` picks the best candidate (height, then RTT, then
 address), applies the bootstrap delay (`headerSyncBootstrapMinPeers`, three
 peers, or `headerSyncBootstrapMaxWait`, two seconds, before the first
-lease), and emits `BeginSync`. It returns at once if a commit is pending or
+lease), and emits `BeginSync`. It returns at once if `pendingHeaderCommit` is set or
 a sync peer is already set. The driver then chooses between the parallel
 and serial paths.
 
@@ -431,8 +517,8 @@ flowchart TB
    the `*time.Timer` through `AttachRangeTimer`, or stops it if the request
    is already gone. `RequestFailed` blocks the peer.
 
-`Continue` and `ResumeWork` run `resumeWork`, which returns at once while a
-commit is pending, otherwise plans from `view.bestHeight()` and emits
+`Continue` and `ResumeWork` run `resumeWork`, which returns at once while
+`Driver.commitPending` is set, otherwise plans from `view.bestHeight()` and emits
 `Then{DispatchWork, continueDiscover}`. With `Continue`, `continueDiscovered`
 also calls `restartSync` (`SetSyncPeer{}` then `StartSync`) when nothing is
 in flight, so a stalled sync picks a new peer. `CooldownElapsed` chooses
@@ -479,12 +565,12 @@ flowchart TB
     recv -- "Height <= store tip" --> stale
     recv -- "Staged" --> staged
     staged -- "confirmed, no checkpoint ahead" --> pipe
-    staged -- "CommitPending or submitted" --> cont
+    staged -- "commitPending or submitted" --> cont
     staged --> plan
     recv -- "not staged" --> plan
     plan -- "not confirmed" --> wait
     plan --> fin
-    pipe -- "CommitPending" --> cont
+    pipe -- "commitPending" --> cont
     pipe --> plan
 ```
 
@@ -499,12 +585,17 @@ work; an existing Queued, Owned or Active range for the same span is
 converted to Staged with an epoch bump.
 
 `continueAnchorSpan` is what keeps discovery moving while a commit is
-pending. When the reply stopped short of `StopHeight`, it calls
+pending or has just been submitted. When the reply stopped short of `StopHeight`, it calls
 `waitForAnchor` from the reply's last header to the same stop and returns
 true. It reads no tip and plans nothing, so it is safe to run while
-`CommitPending` is set, and `handleAnchorHeaders` runs only it in that case.
-Planning waits for the commit result: `Continue` runs once `RangesCommitted`
-lands and plans then. Without this, the rest of the span would be left to
+`Driver.commitPending` is set, and `handleAnchorHeaders` and
+`handleAnchorPipelined` run only it in that case. The reply that staged the
+range and submitted the commit was handled in the idle state, where
+`commitPending` is false, so `handleAnchorHeaders` also takes this branch when
+`commitReadyRanges` reports `submitted`. The `anchorPipelined` follow-up runs
+in the commit pending state and sees the flag. The driver's own follow-ups
+are not `Inbound`, so the state does not defer them. Planning waits for the
+commit result: `Continue` runs once `RangesCommitted` lands and plans then. Without this, the rest of the span would be left to
 the range planned after the commit, which is often assigned to a peer whose
 hedged request for the same span is still in flight.
 
@@ -567,7 +658,7 @@ flowchart TB
     snapshot["SnapshotRequest, retry each 1 s<br/>SnapshotAdopted: TipState.Reset,<br/>AdvanceCommittedTip"]
     landed["RangesCommitted<br/>TipState.FinishRange,<br/>Controller.CommitReadyRanges,<br/>DeleteStagedRange, Then Continue"]
 
-    ready -- "CommitPending or none" --> wait
+    ready -- "commit pending or none" --> wait
     ready --> prep
     prep -- "ValidationError" --> inval
     prep -- "other error" --> retry
@@ -607,7 +698,7 @@ flowchart TB
    commit retry and blocks the peer.
 5. **Stage.** `Session.StageRange` keeps the header pointers under the range
    ID. Ranges stage out of order, because peers answer at different speeds.
-6. **Commit.** `commitReadyRanges` returns at once if `view.CommitPending`.
+6. **Commit.** `commitReadyRanges` returns at once if `Driver.commitPending`.
    It calls `TipState.ReconcileWithStore` so a write that reported an error
    but landed is picked up, then `Manager.ReadyRanges`, which walks the
    contiguous Staged ranges from `committedTip`. With nothing ready it prunes
@@ -620,20 +711,26 @@ flowchart TB
    `TimeSource`) and compares the hash at `nextCheckpoint`. A
    `ValidationError` names the range and peer at fault; any other error is
    a store or lookup failure.
-7. **Submit.** On success the driver emits `SubmitRangeCommit{Prepared}`.
-   The executor sets `pendingHeaderCommit.ranges` and calls
-   `chainStore.TryAsk(chainstore.BlockCommit{ExpectedParent, Headers})`.
+7. **Submit.** On success the driver emits `SubmitRangeCommit{Prepared}` and
+   moves to the commit pending state. The executor sets
+   `pendingHeaderCommit.ranges` and calls
+   `chainStore.TryAskFunc(chainstore.BlockCommit{ExpectedParent, Headers},
+   postChainResult)`, which returns at once.
    `PreparedCommit` holds value copies of the headers, so the chain store
    actor can read them on its own goroutine.
-8. **Land.** `finishAsyncHeaderCommit` reads the `chainstore.Result`. A
-   `Result.Err` means the command never ran; the pending commit is cleared
-   and a retry is scheduled. A `Reply.Err` means the write may have applied
+8. **Land.** `Receive` passes the `chainstore.Result` from the mailbox to
+   `finishAsyncHeaderCommit`. A `Result.Err` means the command never ran; the
+   pending commit is cleared, a retry is scheduled, and the executor sends
+   `CommitAbandoned` so the driver leaves the commit pending state. A `Reply.Err` means the write may have applied
    in part; the executor marks the pending commit `snapshot` and sends
    `chainstore.SnapshotRequest`, retrying every second until the store
    reports a valid block tip, then posts `SnapshotAdopted`, whose handler
-   resets `TipState`, advances the FSM tip and schedules a commit retry. On
-   success the executor clears the pending commit and posts
-   `RangesCommitted{Prepared}`.
+   resets `TipState`, advances the FSM tip and schedules a commit retry. The
+   snapshot retry is a `time.AfterFunc` that posts `chainstore.Result{Retry:
+   true}` to the mailbox. On
+   success the executor clears the pending commit and runs
+   `RangesCommitted{Prepared}` (or the event for the serial, reorg or
+   rollback command that was in flight) through `handleDriverEvent`.
 9. **Acknowledge.** `handleRangesCommitted` calls `TipState.FinishRange`
    (pushes the nodes into `headerList` and moves the checkpoint cursor) and
    `Controller.CommitReadyRanges`. The FSM drains every contiguous Staged
@@ -704,8 +801,12 @@ flowchart TB
     verdict --> lost
 ```
 
-`handleTipHeaders` first checks `HeadersConnected`, then tries
-`extendSerialTip`. `headersAfterTip` drops the leading headers the cache
+`handleTipHeaders` is a chain of `fn.Result` steps: `requireConnected` checks
+`HeadersConnected`, then `applyTipHeaders` tries `extendSerialTip` and falls
+through to `followSerialFork` when the batch does not extend the tip.
+`tipFailureEffects` is the one place an error becomes effects: a
+`SerialCheckpointMismatch` plans a checkpoint rollback, `errIgnoreTipHeaders`
+produces nothing, and any other error is `DisconnectTipPeer`. `headersAfterTip` drops the leading headers the cache
 already holds, and `TipState.PrepareSerialExtension` validates the rest over
 a `ValidationChain` overlay, stopping at `nextCheckpoint` so headers beyond
 the checkpoint in the same message are re-requested by `ContinueSerial`. The
@@ -715,9 +816,10 @@ deadline belongs to that peer's request. `SerialExtension` holds its own
 header copies because the write completes on the chain store goroutine.
 
 A batch that does not extend the tip goes to `followSerialFork`.
-`locateFork` ignores the message when the sender holds no lease and the
-node is not synced, disconnects the peer when the parent is unknown or
-below `FindPreviousCheckpoint(tip)`, and otherwise `validateFork` checks each
+`locateFork` fails with `errIgnoreTipHeaders` when the sender holds no lease
+and the node is not synced, and fails with an error that disconnects the peer
+when the parent is unknown or below `FindPreviousCheckpoint(tip)`.
+Otherwise `validateFork` checks each
 header against `reorgList` while summing `blockchain.CalcWork`. `planReorg`
 emits `CommitReorg` with the branch up to and including the next checkpoint,
 or with `Mismatch` set and no headers when the branch has the wrong hash at
@@ -742,50 +844,52 @@ The serial deadline is armed by `requestHeaders` with
 The same function sizes range and anchor request timers. A
 `headerSyncTimeoutMsg` becomes `SerialTimedOut` only when its `requestID`
 equals `serialRequestID`, the peer is the sync peer and the node is not
-synced. `handleSerialTimedOut` ignores it if the store tip (or the published
-tip while a commit is pending) has moved past `StartHeight`; otherwise it
-quarantines and disconnects the peer, releases the lease if held, and,
-unless a commit is pending, resets the cache to the store and emits
-`StartSync`.
+synced. `handleSerialTimedOut` ignores it if the store tip has moved past
+`StartHeight`; otherwise it quarantines and disconnects the peer, releases
+the lease if held, resets the cache to the store and emits `StartSync`. It
+has no commit pending branch, because a `SerialTimedOut` reaches the driver
+as an `Inbound` message and waits while a commit is in flight.
 
 ## Concurrency
 
 Every piece of mutable state in this package has one owner. Timers and the
-chain store actor run on other goroutines and reach the driver only through
-channels the block handler reads.
+chain store actor run on other goroutines and reach the driver only as
+messages in the block handler's mailbox.
 
 | Goroutine | Owns |
 | --- | --- |
-| `blockHandler` | `candidatePeers`, `pendingHeaderCommit`, `headerSyncTimer`, `serialRequestID`, the commit retry, cooldown and bootstrap timers with their generation counters; the only caller of `Driver.ProcessEvent` |
-| `blockHandler`, through the driver | `TipState`, `Session` (all maps and `nextRangeID`), `Driver.requestID`, `Driver.view`, `Driver.err`; `HeaderSyncFSM` through `Manager.ask`; each `Peer` machine; the `querysync.Scheduler` inside `querydispatch.Controller` |
-| `time.AfterFunc` callbacks | Nothing. A request timer posts a `headerSyncTimeoutMsg` on `timeoutChan`; the cooldown, commit retry and bootstrap timers post on `timerChan`; the snapshot retry posts a `chainstore.Result{Retry: true}` on `chainStoreResult` |
-| Chain store actor | The durable headers and the published tip. It reads value copies in `PreparedCommit` and `SerialExtension` and answers on `chainStoreResult`, capacity 1 |
+| Block handler actor (`blockHandler.Receive`) | The candidate peer list, `pendingHeaderCommit`, `headerSyncTimer`, `serialRequestID`, the commit retry, cooldown and bootstrap timers with their generation counters; the only caller of `Driver.ProcessEvent` |
+| Block handler actor, through the driver | `TipState`, `Session` (all maps and `nextRangeID`), `Driver.requestID`, `Driver.view`, `Driver.commitPending`, `Driver.err`, the state's `deferred` list; `HeaderSyncFSM` through `Manager.ask`; each `Peer` machine; the `querysync.Scheduler` inside `querydispatch.Controller` |
+| `time.AfterFunc` callbacks | Nothing. A request timer posts a `headerSyncTimeoutMsg`; the cooldown, commit retry and bootstrap timers post their timer messages; the snapshot retry posts a `chainstore.Result{Retry: true}`. All go through `blockManager.post` into the mailbox |
+| Chain store actor | The durable headers and the published tip. It reads value copies in `PreparedCommit` and `SerialExtension` and answers through the `TryAskFunc` callback, which calls `postChainResult` |
 | Other goroutines | `blockManager.syncPeer` as an atomic snapshot through `SyncPeer()`; `TipState` through test-only accessors (`SessionForTest`, `TipForTest`), which race with `ProcessEvent` and are not for production |
 
 `Session` has no mutex, `Manager` takes no lock of its own, and `TipState`
 has none either; the comment on each names the block handler as the one
 goroutine that touches it. `Runtime.mu` guards only the `peers` map and is
-held across every `Peer.Stop` in `Runtime.Stop`, which runs after
-`blockManager.wg.Wait()` so the handler has already exited. The
-`StateMachine.mu` inside the driver, the manager and each peer serializes
-one `ProcessEvent` at a time, and the recursive re-entry on the executor
-side always happens after the outer call returned.
+held across every `Peer.Stop` in `Runtime.Stop`, which runs after the block
+handler has stopped. The `StateMachine.mu` inside the driver, the manager and
+each peer serializes one `ProcessEvent` at a time, and the executor's
+re-entry always happens after the outer call returned.
 
-A request deadline is delivered to the handler only after the peer messages
-that were queued before it have been drained (`queuedBeforeTimeout`) and
-while no commit is pending, so a reply that arrives just after the deadline
-is handled before the peer is punished. A fired timer that was cancelled or
-superseded is voided by the generation counter it carries, or by
+The mailbox is first in, first out, so a reply that was queued before a
+request deadline is handled before it. The old bookkeeping that held a
+deadline behind queued peer messages (`queuedBeforeTimeout`) no longer
+exists. While a commit is pending, the driver defers the `Inbound` messages
+that reach it, so a reply that arrives just after a deadline is still handled
+before the peer is punished, in arrival order. A fired timer that was
+cancelled or superseded is voided by the generation counter it carries, or by
 `serialRequestID` for the serial deadline, so the driver never acts on a
 timeout for a request it does not track. `Session.TimeoutRange` and
 `TimeoutAnchor` match on request ID (and range ID and epoch for ranges)
 before they consume anything.
 
-`View.CommitPending` is the driver's only knowledge of the pending commit.
-Any handler that would plan from the tip, read the store tip, or submit a
-second write checks it and defers. A `Then` follow-up cannot be used to get
-around this, because each follow-up gets a fresh view that reflects the
-`SubmitRangeCommit` executed before it.
+The commit pending state is the driver's only knowledge of the pending
+commit. Any handler that would plan from the tip, read the store tip, or
+submit a second write checks `Driver.commitPending` and defers. A `Then`
+follow-up cannot be used to get around this, because each follow-up is a
+separate `ProcessEvent` call that runs in whichever state the effects before
+it left the driver.
 
 ## Known gaps
 
@@ -803,9 +907,10 @@ around this, because each follow-up gets a fresh view that reflects the
   another path clears this was not confirmed.
 - `Controller.CommitReadyRanges` drains every contiguous Staged range, not
   only the ranges in the `PreparedCommit` that was written. This is correct
-  only because no range can be staged while `CommitPending` is set, which
-  rests on `blockHandler` gating `peerChan`; nothing in the package checks
-  it.
+  only because no range can be staged while the driver is in the commit
+  pending state, which rests on the state deferring `Inbound` (a range reply
+  is staged only from a `HeadersReceived` that `Deliver` produces); nothing
+  in `Controller` or `Manager` checks it.
 - The `ErrRangeStartMismatch` branch of `handleAnchorHeaders` appears
   unreachable, because `Session.FinishAnchorHeaders` already requires the
   same first-parent match before the controller validates the reply.
@@ -813,7 +918,8 @@ around this, because each follow-up gets a fresh view that reflects the
   set, and `handleBeginSync` never takes the parallel path in that case, so
   the branch may be unreachable in production.
 - `planCheckpointRollback` on a fetch failure, and a serial admission
-  failure (`Result.Err`), schedule only a commit retry. The recovery path
+  failure (`Result.Err`, which also sends `CommitAbandoned`), schedule only a
+  commit retry. The recovery path
   from there (`RetryCommit`, `Continue`, `restartSync` when idle) was not
   traced end to end.
 - Several comments name an older division of labour: `ValidateHeaderRange`

@@ -1,16 +1,21 @@
 package filtersync
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/chainstore"
+	"github.com/lightninglabs/neutrino/protofsm"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 // Phase is where the Syncer is in filter header sync. Every phase but Idle
-// and Stopped waits for exactly one event.
+// and Stopped waits for exactly one event. Each phase is a state of the
+// Syncer's protofsm machine.
 type Phase uint8
 
 const (
@@ -105,15 +110,17 @@ type Config struct {
 	RetryDelay time.Duration
 }
 
-// Syncer decides what regular filter header sync does next. It owns the
-// progress of the sync: the checkpoints each peer served and the height they
-// were fetched for, the checkpoints the peers and the store agree on, the
-// block header tip the current pass syncs up to, and the phase. It does no
-// I/O, reads no clock and starts no goroutine: Handle takes one event and
-// returns the effects the run loop performs in return.
+// Syncer decides what regular filter header sync does next. It runs a protofsm
+// state machine with one state per phase, and it is the machine's environment:
+// it owns the progress of the sync that outlives a phase, which is the
+// checkpoints each peer served and the height they were fetched for, the
+// checkpoints the peers and the store agree on, and the block header tip the
+// current pass syncs up to. It does no I/O, reads no clock and starts no
+// goroutine: Handle takes one event and returns the effects the run loop
+// performs in return.
 //
-// A Syncer has no lock. The run loop is its only caller, and it calls Handle
-// from one goroutine.
+// A Syncer has no lock beyond the machine's. The run loop is its only caller,
+// and it calls Handle from one goroutine.
 type Syncer struct {
 	// cfg is the fixed configuration.
 	cfg Config
@@ -126,12 +133,9 @@ type Syncer struct {
 	// zero checkpoint when the chain has none.
 	lastCp chaincfg.Checkpoint
 
-	// phase is the current phase.
-	phase Phase
-
-	// resume is where the Syncer continues after the retry delay. It is
-	// only meaningful in PhaseRetrying.
-	resume resumePoint
+	// machine holds the phase. Each state decides what its phase does with
+	// an event and which phase comes next.
+	machine *protofsm.StateMachine[Event, Effect, *Syncer]
 
 	// allCheckpoints maps each peer to the checkpoints it served the last
 	// time they were fetched. It persists across passes, so a pass whose
@@ -167,12 +171,37 @@ func NewSyncer(cfg Config) *Syncer {
 		s.lastCp = cfg.BlockCheckpoints[len(cfg.BlockCheckpoints)-1]
 	}
 
+	machine, err := protofsm.NewStateMachine[Event, Effect](
+		protofsm.StateMachineCfg[Event, Effect, *Syncer]{
+			InitialState: idleState{},
+			Env:          s,
+		},
+	)
+	if err != nil {
+		// The machine only refuses a nil initial state.
+		panic(fmt.Sprintf("unable to create filter sync FSM: %v", err))
+	}
+	s.machine = machine
+
+	// The machine has no lifecycle beyond the Syncer's: it starts with it
+	// and runs on its caller's goroutine with nothing of its own to wind
+	// down.
+	machine.Start(context.Background())
+
 	return s
+}
+
+// syncState is a state of the Syncer: a phase and what it does with an event.
+type syncState interface {
+	protofsm.State[Event, Effect, *Syncer]
+
+	// phase returns the phase the state stands for.
+	phase() Phase
 }
 
 // Phase returns the current phase.
 func (s *Syncer) Phase() Phase {
-	return s.phase
+	return s.machine.CurrentState().(syncState).phase()
 }
 
 // Handle applies one event and returns the effects the run loop performs in
@@ -183,100 +212,298 @@ func (s *Syncer) Phase() Phase {
 // one, so an event that does not fit the phase cannot happen. If one does, it
 // is logged and dropped, and the empty result ends the run loop.
 func (s *Syncer) Handle(event Event) []Effect {
-	if _, ok := event.(Quit); ok {
-		s.phase = PhaseStopped
+	effects, err := s.machine.ProcessEvent(context.Background(), event)
+	if err != nil {
+		// No state returns an error.
+		log.Errorf("Filter sync unable to handle %T: %v", event, err)
+
 		return nil
 	}
 
-	switch s.phase {
-	case PhaseIdle:
-		if e, ok := event.(Start); ok {
-			return s.waitForHeaders(e.Tips)
-		}
+	return effects
+}
 
-	case PhaseWaitingForHeaders:
-		if _, ok := event.(TipsChanged); ok {
-			s.phase = PhaseReadingTip
-			return []Effect{ReadBlockTip{}}
-		}
+// move returns the transition to the next state with the effects as the
+// machine's outbox.
+func move(next syncState, effects ...Effect) (*protofsm.StateTransition[
+	Event, Effect, *Syncer], error) {
 
-	case PhaseReadingTip:
-		if e, ok := event.(BlockTipRead); ok {
-			return s.handleBlockTipRead(e)
-		}
+	return &protofsm.StateTransition[Event, Effect, *Syncer]{
+		NextState: next,
+		NewEvents: fn.Some(protofsm.EmittedEvent[Event, Effect]{
+			Outbox: effects,
+		}),
+	}, nil
+}
 
-	case PhaseFetchingCheckpoints:
-		if e, ok := event.(CheckpointsFetched); ok {
-			return s.handleCheckpointsFetched(e)
-		}
+// moveWith returns the transition for a next state and its batch of effects.
+func moveWith(next syncState, effects []Effect) (*protofsm.StateTransition[
+	Event, Effect, *Syncer], error) {
 
-	case PhaseResolvingConflict:
-		if e, ok := event.(ConflictResolved); ok {
-			return s.handleConflictResolved(e)
-		}
+	return move(next, effects...)
+}
 
-	case PhaseFetchingCheckpointed:
-		if e, ok := event.(CheckpointedFetched); ok {
-			return s.handleCheckpointedFetched(e)
-		}
+// unexpected answers an event that the state does not wait for. Quit stops
+// the Syncer in any phase, with no effects. Anything else is logged and
+// dropped, and the Syncer stays where it is.
+func unexpected(state syncState, event Event) (*protofsm.StateTransition[
+	Event, Effect, *Syncer], error) {
 
-	case PhaseWaitingAtTip:
-		if _, ok := event.(TipsChanged); ok {
-			s.phase = PhaseFetchingUncheckpointed
-			return []Effect{
-				FetchUncheckpointed{FilterType: s.fType},
-			}
-		}
-
-	case PhaseFetchingUncheckpointed:
-		if e, ok := event.(UncheckpointedFetched); ok {
-			return s.handleUncheckpointedFetched(e)
-		}
-
-	case PhaseRetrying:
-		if e, ok := event.(RetryElapsed); ok {
-			return s.handleRetryElapsed(e)
-		}
-
-	case PhaseStopped:
+	if _, ok := event.(Quit); ok {
+		return move(stoppedState{})
 	}
 
-	log.Errorf("Filter sync dropped %T in phase %v", event, s.phase)
+	log.Errorf("Filter sync dropped %T in phase %v", event, state.phase())
 
-	return nil
+	return move(state)
+}
+
+// idleState is the phase before Start.
+type idleState struct{}
+
+func (idleState) phase() Phase     { return PhaseIdle }
+func (idleState) String() string   { return PhaseIdle.String() }
+func (idleState) IsTerminal() bool { return false }
+
+// ProcessEvent starts the first pass on Start.
+func (s idleState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if e, ok := event.(Start); ok {
+		return move(
+			waitingForHeadersState{}, env.waitForHeaders(e.Tips),
+		)
+	}
+
+	return unexpected(s, event)
+}
+
+// waitingForHeadersState waits for the filter header tip to lag the block
+// header tip by a checkpoint interval, or for the block header sync to be
+// current.
+type waitingForHeadersState struct{}
+
+func (waitingForHeadersState) phase() Phase {
+	return PhaseWaitingForHeaders
+}
+func (waitingForHeadersState) String() string {
+	return PhaseWaitingForHeaders.String()
+}
+func (waitingForHeadersState) IsTerminal() bool { return false }
+
+// ProcessEvent reads the block header tip once the wait is over.
+func (s waitingForHeadersState) ProcessEvent(_ context.Context, event Event,
+	_ *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if _, ok := event.(TipsChanged); ok {
+		return move(readingTipState{}, ReadBlockTip{})
+	}
+
+	return unexpected(s, event)
+}
+
+// readingTipState waits for the block header tip read.
+type readingTipState struct{}
+
+func (readingTipState) phase() Phase     { return PhaseReadingTip }
+func (readingTipState) String() string   { return PhaseReadingTip.String() }
+func (readingTipState) IsTerminal() bool { return false }
+
+// ProcessEvent records the tip and starts the checkpoint loop.
+func (s readingTipState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if e, ok := event.(BlockTipRead); ok {
+		return moveWith(env.handleBlockTipRead(e))
+	}
+
+	return unexpected(s, event)
+}
+
+// fetchingCheckpointsState waits for the peers' checkpoints.
+type fetchingCheckpointsState struct{}
+
+func (fetchingCheckpointsState) phase() Phase {
+	return PhaseFetchingCheckpoints
+}
+func (fetchingCheckpointsState) String() string {
+	return PhaseFetchingCheckpoints.String()
+}
+func (fetchingCheckpointsState) IsTerminal() bool { return false }
+
+// ProcessEvent records the checkpoints the peers served.
+func (s fetchingCheckpointsState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if e, ok := event.(CheckpointsFetched); ok {
+		return moveWith(env.handleCheckpointsFetched(e))
+	}
+
+	return unexpected(s, event)
+}
+
+// resolvingConflictState waits for the checkpoint resolution.
+type resolvingConflictState struct{}
+
+func (resolvingConflictState) phase() Phase {
+	return PhaseResolvingConflict
+}
+func (resolvingConflictState) String() string {
+	return PhaseResolvingConflict.String()
+}
+func (resolvingConflictState) IsTerminal() bool { return false }
+
+// ProcessEvent records the agreed checkpoints.
+func (s resolvingConflictState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if e, ok := event.(ConflictResolved); ok {
+		return moveWith(env.handleConflictResolved(e))
+	}
+
+	return unexpected(s, event)
+}
+
+// fetchingCheckpointedState waits for the checkpointed fetch.
+type fetchingCheckpointedState struct{}
+
+func (fetchingCheckpointedState) phase() Phase {
+	return PhaseFetchingCheckpointed
+}
+func (fetchingCheckpointedState) String() string {
+	return PhaseFetchingCheckpointed.String()
+}
+func (fetchingCheckpointedState) IsTerminal() bool { return false }
+
+// ProcessEvent decides whether the pass is done.
+func (s fetchingCheckpointedState) ProcessEvent(_ context.Context,
+	event Event, env *Syncer) (*protofsm.StateTransition[Event, Effect,
+	*Syncer], error) {
+
+	if e, ok := event.(CheckpointedFetched); ok {
+		return moveWith(env.handleCheckpointedFetched(e))
+	}
+
+	return unexpected(s, event)
+}
+
+// waitingAtTipState waits for the filter header tip hash to differ from the
+// block header tip hash.
+type waitingAtTipState struct{}
+
+func (waitingAtTipState) phase() Phase     { return PhaseWaitingAtTip }
+func (waitingAtTipState) String() string   { return PhaseWaitingAtTip.String() }
+func (waitingAtTipState) IsTerminal() bool { return false }
+
+// ProcessEvent fetches the uncheckpointed headers once the tips differ.
+func (s waitingAtTipState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if _, ok := event.(TipsChanged); ok {
+		return move(
+			fetchingUncheckpointedState{},
+			FetchUncheckpointed{FilterType: env.fType},
+		)
+	}
+
+	return unexpected(s, event)
+}
+
+// fetchingUncheckpointedState waits for the uncheckpointed fetch.
+type fetchingUncheckpointedState struct{}
+
+func (fetchingUncheckpointedState) phase() Phase {
+	return PhaseFetchingUncheckpointed
+}
+func (fetchingUncheckpointedState) String() string {
+	return PhaseFetchingUncheckpointed.String()
+}
+func (fetchingUncheckpointedState) IsTerminal() bool { return false }
+
+// ProcessEvent goes back to waiting at the tip.
+func (s fetchingUncheckpointedState) ProcessEvent(_ context.Context,
+	event Event, env *Syncer) (*protofsm.StateTransition[Event, Effect,
+	*Syncer], error) {
+
+	if e, ok := event.(UncheckpointedFetched); ok {
+		return moveWith(env.handleUncheckpointedFetched(e))
+	}
+
+	return unexpected(s, event)
+}
+
+// retryingState waits for the retry delay to pass. It remembers where to
+// continue, which is meaningful in no other phase.
+type retryingState struct {
+	// resume is where the Syncer continues once the delay has passed.
+	resume resumePoint
+}
+
+func (retryingState) phase() Phase     { return PhaseRetrying }
+func (retryingState) String() string   { return PhaseRetrying.String() }
+func (retryingState) IsTerminal() bool { return false }
+
+// ProcessEvent continues where the retry left off.
+func (s retryingState) ProcessEvent(_ context.Context, event Event,
+	env *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	if e, ok := event.(RetryElapsed); ok {
+		return moveWith(env.handleRetryElapsed(s.resume, e))
+	}
+
+	return unexpected(s, event)
+}
+
+// stoppedState is the phase after Quit. No event leaves it.
+type stoppedState struct{}
+
+func (stoppedState) phase() Phase     { return PhaseStopped }
+func (stoppedState) String() string   { return PhaseStopped.String() }
+func (stoppedState) IsTerminal() bool { return true }
+
+// ProcessEvent drops every event, since nothing leaves the state.
+func (s stoppedState) ProcessEvent(_ context.Context, event Event,
+	_ *Syncer) (*protofsm.StateTransition[Event, Effect, *Syncer],
+	error) {
+
+	return unexpected(s, event)
 }
 
 // waitForHeaders starts a new pass. We'll wait until the main header sync is
 // either finished or the filter headers are lagging at least a checkpoint
 // interval behind the block headers, before we actually start to sync the set
 // of cfheaders.
-func (s *Syncer) waitForHeaders(tips chainstore.Tips) []Effect {
+func (s *Syncer) waitForHeaders(tips chainstore.Tips) Effect {
 	s.goodCheckpoints = nil
-	s.phase = PhaseWaitingForHeaders
 
 	log.Infof("Waiting for more block headers, then will start "+
 		"cfheaders sync from height %v...", tips.FilterHeight)
 
-	return []Effect{WaitForTips{Condition: WaitLagOrSynced}}
+	return WaitForTips{Condition: WaitLagOrSynced}
 }
 
 // retryAfter sleeps for the retry delay, then continues at the given point.
-func (s *Syncer) retryAfter(resume resumePoint) []Effect {
-	s.phase = PhaseRetrying
-	s.resume = resume
-
-	return []Effect{RetryAfter{Delay: s.cfg.RetryDelay}}
+func (s *Syncer) retryAfter(resume resumePoint) (syncState, Effect) {
+	return retryingState{resume: resume},
+		RetryAfter{Delay: s.cfg.RetryDelay}
 }
 
 // handleBlockTipRead records the block header tip the pass syncs up to and
 // starts the checkpoint loop. A store read can fail transiently with the SQL
 // backends. Retry rather than end filter header sync until restart.
-func (s *Syncer) handleBlockTipRead(e BlockTipRead) []Effect {
+func (s *Syncer) handleBlockTipRead(e BlockTipRead) (syncState, []Effect) {
 	if e.Err != nil {
 		log.Errorf("Unable to read block header tip for cfheaders "+
 			"sync, retrying: %v", e.Err)
 
-		return s.retryAfter(resumeWaitForHeaders)
+		return one(s.retryAfter(resumeWaitForHeaders))
 	}
 
 	s.lastHash = e.Hash
@@ -295,11 +522,13 @@ func (s *Syncer) handleBlockTipRead(e BlockTipRead) []Effect {
 // checkpoints. If we have less than a full checkpoint's worth of blocks, such
 // as on simnet, we don't really need to request checkpoints as we'll get 0
 // from all peers. We can go on and just request the cfheaders.
-func (s *Syncer) stepCheckpointLoop() []Effect {
+func (s *Syncer) stepCheckpointLoop() (syncState, []Effect) {
 	if len(s.goodCheckpoints) != 0 ||
 		s.lastHeight < wire.CFCheckptInterval {
 
-		return s.fetchCheckpointed()
+		return fetchingCheckpointedState{}, []Effect{
+			s.fetchCheckpointed(),
+		}
 	}
 
 	// If the height now exceeds the height at which we fetched the
@@ -322,9 +551,7 @@ func (s *Syncer) stepCheckpointLoop() []Effect {
 		log.Debugf("Getting filter checkpoints up to height=%v, "+
 			"hash=%v", bestHeight, bestHash)
 
-		s.phase = PhaseFetchingCheckpoints
-
-		return []Effect{
+		return fetchingCheckpointsState{}, []Effect{
 			PollQuit{},
 			FetchCheckpoints{
 				FilterType: s.fType,
@@ -333,18 +560,22 @@ func (s *Syncer) stepCheckpointLoop() []Effect {
 		}
 	}
 
-	return append([]Effect{PollQuit{}}, s.resolveConflict()...)
+	next, effects := s.resolveConflict()
+
+	return next, append([]Effect{PollQuit{}}, effects...)
 }
 
 // handleCheckpointsFetched records the checkpoints the peers served and
 // resolves them, or retries the fetch when no peer answered.
-func (s *Syncer) handleCheckpointsFetched(e CheckpointsFetched) []Effect {
+func (s *Syncer) handleCheckpointsFetched(
+	e CheckpointsFetched) (syncState, []Effect) {
+
 	s.allCheckpoints = e.ByPeer
 	if len(s.allCheckpoints) == 0 {
 		log.Warnf("Unable to fetch set of candidate checkpoints, " +
 			"trying again...")
 
-		return s.retryAfter(resumeCheckpointLoop)
+		return one(s.retryAfter(resumeCheckpointLoop))
 	}
 
 	return s.resolveConflict()
@@ -353,7 +584,7 @@ func (s *Syncer) handleCheckpointsFetched(e CheckpointsFetched) []Effect {
 // resolveConflict caps the received checkpoints at the current height, as we
 // can only verify checkpoints up to the height we have block headers for,
 // and asks the run loop to detect which checkpoint list is correct.
-func (s *Syncer) resolveConflict() []Effect {
+func (s *Syncer) resolveConflict() (syncState, []Effect) {
 	checkpoints := make(map[string][]*chainhash.Hash)
 	for p, cps := range s.allCheckpoints {
 		for i, cp := range cps {
@@ -365,9 +596,7 @@ func (s *Syncer) resolveConflict() []Effect {
 		}
 	}
 
-	s.phase = PhaseResolvingConflict
-
-	return []Effect{ResolveConflict{
+	return resolvingConflictState{}, []Effect{ResolveConflict{
 		FilterType:  s.fType,
 		Checkpoints: checkpoints,
 	}}
@@ -375,7 +604,9 @@ func (s *Syncer) resolveConflict() []Effect {
 
 // handleConflictResolved records the agreed checkpoints and fetches the
 // headers up to them. If no list was agreed on, we will cycle again.
-func (s *Syncer) handleConflictResolved(e ConflictResolved) []Effect {
+func (s *Syncer) handleConflictResolved(
+	e ConflictResolved) (syncState, []Effect) {
+
 	if e.Err != nil {
 		log.Warnf("got error attempting to determine correct "+
 			"cfheader checkpoints: %v, trying again", e.Err)
@@ -383,7 +614,7 @@ func (s *Syncer) handleConflictResolved(e ConflictResolved) []Effect {
 
 	s.goodCheckpoints = e.Good
 	if len(s.goodCheckpoints) == 0 {
-		return s.retryAfter(resumeCheckpointLoop)
+		return one(s.retryAfter(resumeCheckpointLoop))
 	}
 
 	return s.stepCheckpointLoop()
@@ -391,29 +622,29 @@ func (s *Syncer) handleConflictResolved(e ConflictResolved) []Effect {
 
 // fetchCheckpointed gets all the headers up to the last known good
 // checkpoint.
-func (s *Syncer) fetchCheckpointed() []Effect {
-	s.phase = PhaseFetchingCheckpointed
-
-	return []Effect{FetchCheckpointed{
+func (s *Syncer) fetchCheckpointed() Effect {
+	return FetchCheckpointed{
 		FilterType:  s.fType,
 		Checkpoints: s.goodCheckpoints,
-	}}
+	}
 }
 
 // handleCheckpointedFetched decides whether the pass is done. A store failure
 // is retried from the top rather than crashing the process.
-func (s *Syncer) handleCheckpointedFetched(e CheckpointedFetched) []Effect {
+func (s *Syncer) handleCheckpointedFetched(
+	e CheckpointedFetched) (syncState, []Effect) {
+
 	if e.Err != nil {
 		log.Errorf("Unable to fetch checkpointed cfheaders, "+
 			"retrying: %v", e.Err)
 
-		return s.retryAfter(resumeWaitForHeaders)
+		return one(s.retryAfter(resumeWaitForHeaders))
 	}
 
 	// Now we check the headers again. If the block headers are not yet
 	// current, then we go back to the loop waiting for them to finish.
 	if !e.HeadersSynced {
-		return s.waitForHeaders(e.Tips)
+		return inWaitingForHeaders(s.waitForHeaders(e.Tips))
 	}
 
 	// If block headers are current, but the filter header tip is still
@@ -421,48 +652,58 @@ func (s *Syncer) handleCheckpointedFetched(e CheckpointedFetched) []Effect {
 	// we also go back to the loop to utilize the faster check pointed
 	// fetching.
 	if e.Tips.FilterHeight+wire.CFCheckptInterval <= e.Tips.BlockHeight {
-		return s.waitForHeaders(e.Tips)
+		return inWaitingForHeaders(s.waitForHeaders(e.Tips))
 	}
 
 	log.Infof("Fully caught up with cfheaders at height "+
 		"%v, waiting at tip for new blocks", s.lastHeight)
 
-	return s.waitAtTip()
+	return waitingAtTipState{}, []Effect{waitAtTip()}
 }
 
 // waitAtTip waits for a signal that more blocks have been connected. If this
 // happens then we'll do another round to fetch the new set of filter headers.
-func (s *Syncer) waitAtTip() []Effect {
-	s.phase = PhaseWaitingAtTip
-
-	return []Effect{WaitForTips{Condition: WaitTipMismatch}}
+func waitAtTip() Effect {
+	return WaitForTips{Condition: WaitTipMismatch}
 }
 
 // handleUncheckpointedFetched goes back to waiting at the tip, after the
 // retry delay if the fetch failed.
 func (s *Syncer) handleUncheckpointedFetched(
-	e UncheckpointedFetched) []Effect {
+	e UncheckpointedFetched) (syncState, []Effect) {
 
 	if e.Err != nil {
 		log.Debugf("couldn't get uncheckpointed headers for "+
 			"%v: %v", s.fType, e.Err)
 
-		return s.retryAfter(resumeWaitAtTip)
+		return one(s.retryAfter(resumeWaitAtTip))
 	}
 
-	return append([]Effect{PollQuit{}}, s.waitAtTip()...)
+	return waitingAtTipState{}, []Effect{PollQuit{}, waitAtTip()}
 }
 
 // handleRetryElapsed continues where the retry left off.
-func (s *Syncer) handleRetryElapsed(e RetryElapsed) []Effect {
-	switch s.resume {
+func (s *Syncer) handleRetryElapsed(resume resumePoint,
+	e RetryElapsed) (syncState, []Effect) {
+
+	switch resume {
 	case resumeWaitForHeaders:
-		return s.waitForHeaders(e.Tips)
+		return inWaitingForHeaders(s.waitForHeaders(e.Tips))
 
 	case resumeCheckpointLoop:
 		return s.stepCheckpointLoop()
 
 	default:
-		return append([]Effect{PollQuit{}}, s.waitAtTip()...)
+		return waitingAtTipState{}, []Effect{PollQuit{}, waitAtTip()}
 	}
+}
+
+// inWaitingForHeaders pairs the wait for headers with its state.
+func inWaitingForHeaders(effect Effect) (syncState, []Effect) {
+	return waitingForHeadersState{}, []Effect{effect}
+}
+
+// one lifts a next state with a single effect to a next state with a batch.
+func one(next syncState, effect Effect) (syncState, []Effect) {
+	return next, []Effect{effect}
 }
