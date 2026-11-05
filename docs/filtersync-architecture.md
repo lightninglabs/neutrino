@@ -29,7 +29,9 @@ fetching checkpoints from every peer.
 
 The `Syncer` in `filtersync/syncer.go` is a pure state machine: it takes an
 event and returns effects, and does no I/O, reads no clock, and starts no
-goroutine. `cfHeaderSync.filterSyncLoop` owns the `Syncer` and performs each
+goroutine. It wraps a `protofsm` machine that has one state type per `Phase`
+(`idleState`, `waitingForHeadersState` and so on), with the `Syncer` as the
+machine's environment. `cfHeaderSync.filterSyncLoop` owns the `Syncer` and performs each
 effect on its own goroutine. The effects reach three neighbours: the
 `chainstore.TipFeed` for tip waits and snapshots, the query work manager for
 network rounds, and the chain store actor for writes.
@@ -38,7 +40,7 @@ network rounds, and the chain store actor for writes.
 flowchart TB
     subgraph FS["filtersync (syncer.go, events.go, effects.go)"]
         direction TB
-        syn["Syncer<br/>phase, allCheckpoints,<br/>goodCheckpoints, lastHash/lastHeight"]
+        syn["Syncer<br/>protofsm machine, one state per Phase,<br/>allCheckpoints, goodCheckpoints,<br/>lastHash/lastHeight"]
     end
 
     subgraph CK["filtersync (checkpoints.go)"]
@@ -90,7 +92,7 @@ outcome into the next event.
 
 | Package or type | Owns | Does not own |
 | --- | --- | --- |
-| `filtersync.Syncer` | The phase, the resume point after a retry, the checkpoints each peer served (`allCheckpoints`), the agreed checkpoints for the current pass (`goodCheckpoints`), and the block header tip the pass syncs up to | Any I/O, timers, or goroutines; the stores; which peers are banned |
+| `filtersync.Syncer` | The `protofsm` machine whose current state is the phase (`Phase()` reads it from the state), the resume point after a retry (held by `retryingState`), the checkpoints each peer served (`allCheckpoints`), the agreed checkpoints for the current pass (`goodCheckpoints`), and the block header tip the pass syncs up to | Any I/O, timers, or goroutines; the stores; which peers are banned |
 | `filtersync` checks (`checkpoints.go`) | Checkpoint agreement, checkpoint verification of a `cfheaders` reply, per-height mismatch detection, block-based reconciliation of disputed filters, and the batch timeout policy | Network access; banning; the store (except the reads in `CheckCFCheckptSanity`) |
 | `cfHeaderSync` | The `filterSyncLoop` goroutine, every network round, banning and disconnecting peers that send bad filter data, and buffering out-of-order checkpointed replies | Block header sync; filter header writes and tip publication, which go through `chainstore`; the tip feed, which the `blockManager` owns |
 | `chainstore.TipFeed` | The visible block and filter tips and the change channel | The durable stores; deciding when sync runs |
@@ -121,9 +123,9 @@ sequenceDiagram
     BM->>CA: chainstore.NewClient(storeOps)
     BM->>CF: &cfHeaderSync{cfg, chainStore, &tipFeed,<br/>BlockHeadersSynced, genesis, quit, quitCtx}
     CS->>BM: Start()
-    BM->>BM: go blockHandler()
+    BM->>BM: startBlockHandler() starts the block handler actor
     alt quit closes first
-        BM->>BM: goroutine returns
+        BM->>BM: filter sync goroutine returns
     else firstPeerSignal
         BM->>CF: filterSyncLoop()
         CF->>SY: NewSyncer(Config{ChainParams.Checkpoints, retryTimeout})
@@ -147,7 +149,11 @@ stopped actor.
 
 ## The Syncer state machine
 
-`Syncer.Handle` takes one event and returns a batch of effects. Every phase
+`Syncer.Handle` takes one event, runs it through the machine and returns the
+batch of effects the state emitted as its outbox. Each `Phase` is a state
+type whose `ProcessEvent` names the one event it accepts; `Phase()` returns
+the phase of the current state, and `Handle` and `Phase` are the only API the
+loop uses. Every phase
 but `PhaseIdle` and `PhaseStopped` waits for exactly one event type, and
 `runFilterSyncEffect` yields exactly that type for the effect the phase
 requested. An event that does not fit the phase is logged and dropped, and
@@ -181,8 +187,8 @@ stateDiagram-v2
 ```
 
 The diagram draws one `Quit` edge, but every phase moves to `Stopped` on
-`Quit`, and `Stopped` has no exit. `Retrying` leaves through the resume point it
-stored on entry: `resumeWaitForHeaders` starts a new pass, `resumeWaitAtTip`
+`Quit`, and `Stopped` has no exit. `Retrying` is `retryingState{resume}`, and it leaves through the resume point
+it carries: `resumeWaitForHeaders` starts a new pass, `resumeWaitAtTip`
 goes back to waiting at the tip, and `resumeCheckpointLoop` reruns
 `stepCheckpointLoop`. A retry in the checkpoint loop only happens with no
 agreed list and a tip at or above 1,000, so it leads to a checkpoint fetch
@@ -525,7 +531,7 @@ published before the pass ends.
 
 | Goroutine | Owns |
 | --- | --- |
-| `filterSyncLoop` | The `filtersync.Syncer` and all its state; the `checkpointedCFHeadersQuery` buffers (`queryResponses`, `stopHashes`) of the running batch; the response maps built inside each broadcast |
+| `filterSyncLoop` | The `filtersync.Syncer`, its machine and all its state; the `checkpointedCFHeadersQuery` buffers (`queryResponses`, `stopHashes`) of the running batch; the response maps built inside each broadcast |
 | Work manager dispatcher and workers | The checkpointed batch's jobs; `handleResponse` runs here and touches only `headerChan`, the read-only query fields, and `BanPeer` |
 | Chain store actor | Every filter header store write and every filter tip publication, through `chainStoreHost` |
 | Any goroutine | `TipFeed`, which takes its own mutex only to copy or replace a value |

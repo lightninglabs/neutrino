@@ -683,11 +683,7 @@ func (peerMessage) MessageType() string {
 }
 
 // PeerEvent is applied by PeerFSM and also sent through PeerActor.
-type PeerEvent interface {
-	PeerMsg
-
-	apply(*PeerFSM) error
-}
+type PeerEvent = PeerMsg
 
 // PeerReadyEvent marks the peer as ready for more work.
 type PeerReadyEvent struct {
@@ -795,6 +791,12 @@ func (s peerReadyState) IsTerminal() bool {
 	return false
 }
 
+// peerState returns the scheduling state the state stands for, and the latest
+// RTT sample.
+func (s peerReadyState) peerState() (PeerState, time.Duration) {
+	return PeerReady, s.rtt
+}
+
 func (s peerReadyState) ProcessEvent(_ context.Context, msg PeerMsg,
 	env *peerEnv) (*protofsm.StateTransition[
 	PeerMsg, peerOutbox, *peerEnv], error) {
@@ -865,6 +867,12 @@ func (s peerBusyState) String() string {
 
 func (s peerBusyState) IsTerminal() bool {
 	return false
+}
+
+// peerState returns the scheduling state the state stands for, and the latest
+// RTT sample.
+func (s peerBusyState) peerState() (PeerState, time.Duration) {
+	return PeerBusy, s.rtt
 }
 
 func (s peerBusyState) ProcessEvent(_ context.Context, msg PeerMsg,
@@ -938,6 +946,12 @@ func (s peerBlockedState) IsTerminal() bool {
 	return false
 }
 
+// peerState returns the scheduling state the state stands for, and the latest
+// RTT sample.
+func (s peerBlockedState) peerState() (PeerState, time.Duration) {
+	return PeerBlocked, s.rtt
+}
+
 func (s peerBlockedState) ProcessEvent(_ context.Context, msg PeerMsg,
 	env *peerEnv) (*protofsm.StateTransition[
 	PeerMsg, peerOutbox, *peerEnv], error) {
@@ -1003,6 +1017,12 @@ func (s peerQuarantinedState) String() string {
 
 func (s peerQuarantinedState) IsTerminal() bool {
 	return false
+}
+
+// peerState returns the scheduling state the state stands for, and the latest
+// RTT sample.
+func (s peerQuarantinedState) peerState() (PeerState, time.Duration) {
+	return PeerQuarantined, s.rtt
 }
 
 func (s peerQuarantinedState) ProcessEvent(_ context.Context, msg PeerMsg,
@@ -1078,6 +1098,12 @@ func (s peerDownState) String() string {
 
 func (s peerDownState) IsTerminal() bool {
 	return false
+}
+
+// peerState returns the scheduling state the state stands for, and the latest
+// RTT sample.
+func (s peerDownState) peerState() (PeerState, time.Duration) {
+	return PeerDown, s.rtt
 }
 
 func (s peerDownState) ProcessEvent(_ context.Context, msg PeerMsg,

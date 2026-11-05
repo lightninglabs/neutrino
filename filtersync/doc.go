@@ -1,12 +1,13 @@
 // Package filtersync decides what regular filter header sync does next, and
 // holds the checks it runs on what peers serve.
 //
-// The Syncer is a state machine. It owns the progress of the sync: the
-// checkpoints each peer served and the height they were fetched for, the
-// checkpoints the peers and the store agree on, the block header tip the
-// current pass syncs up to, and the phase. It does no I/O, reads no clock and
-// starts no goroutine. Handle takes one Event and returns the Effects the
-// caller performs in return: wait on the tip feed, read the block header tip,
+// The Syncer is a protofsm state machine with one state per phase. It owns
+// the progress of the sync: the checkpoints each peer served and the height
+// they were fetched for, the checkpoints the peers and the store agree on, and
+// the block header tip the current pass syncs up to. It does no I/O, reads no
+// clock and starts no goroutine. Handle takes one Event and returns the
+// Effects the caller performs in return: wait on the tip feed, read the block
+// header tip,
 // fetch checkpoints, resolve a conflict, fetch checkpointed or uncheckpointed
 // headers, sleep before a retry, or poll the quit channel.
 //
