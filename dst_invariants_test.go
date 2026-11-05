@@ -9,7 +9,6 @@ import (
 
 	"github.com/btcsuite/btclog"
 
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headersync"
@@ -328,15 +327,6 @@ func (v *dstInvariants) honestImmunity(event string) {
 			continue
 		}
 
-		// Known policy gap (F12): when a lying peer answers anchor
-		// discovery first, the honest reporter of the conflicting
-		// anchor is the one quarantined. Count exactly that case
-		// instead of failing, so the run can still find other bugs.
-		if d.anchorConflicts[addr] {
-			d.faulted[addr] = "anchor_conflict"
-			d.conflictPunishments++
-			continue
-		}
 		v.fail(event, "honest peer %s punished: %s", addr, reason)
 	}
 	nonResponsive := fmt.Sprintf(":%v", banman.NonResponsivePeer)
@@ -410,81 +400,6 @@ func (d *dstRun) quiescent() error {
 		}
 	}
 	return nil
-}
-
-// poisonedAnchor reports whether the FSM holds a confirmed untrusted anchor
-// off the honest chain. Under the one-observation policy, a liar's discovery
-// reply confirms its own boundary. When its payload is never staged (an
-// overlap kept it out), commit-time validation never runs, nothing rejects the
-// anchor, and honest replies for the span fail its stop hash (known gap F13).
-//
-// Only a run stuck exactly there is excused: the durable tip must sit at the
-// start of a range that ends at the poisoned anchor.
-func (d *dstRun) poisonedAnchor() bool {
-	if !d.anchorLiar || !d.cfg.mode.discovery() {
-		return false
-	}
-	ctx := d.t.Context()
-	manager := d.bm.headerSync.Manager()
-	anchors, err := manager.Anchors(ctx)
-	require.NoError(d.t, err)
-	honest := dstChains().honest
-	poisoned := make(map[uint32]bool)
-	for _, anchor := range anchors {
-		if anchor.Trusted || int(anchor.Height) >= len(honest) {
-			continue
-		}
-		if anchor.Hash != honest[anchor.Height].BlockHash() &&
-			d.bm.headerSync.Controller().AnchorConfirmed(anchor) {
-
-			poisoned[anchor.Height] = true
-		}
-	}
-	nextID := d.rangeIDLimit()
-	for id := headersync.RangeID(1); id < nextID; id++ {
-		rng, ok, err := manager.SnapshotRange(ctx, id)
-		require.NoError(d.t, err)
-		if ok && poisoned[rng.StopHeight] &&
-			rng.StartHeight == d.inv.lastTip {
-
-			return true
-		}
-	}
-	return false
-}
-
-// conflictsWithAnchor reports whether an honest reply from peer covering
-// (start, stop] can meet a liar's boundary: an anchor known in that span, or
-// the stop hash of a range the peer owns there.
-func (d *dstRun) conflictsWithAnchor(peer *ServerPeer, start,
-	stop uint32) bool {
-
-	honest := dstChains().honest
-	liar := func(height uint32, hash chainhash.Hash) bool {
-		return height > start && height <= stop &&
-			int(height) < len(honest) &&
-			hash != honest[height].BlockHash()
-	}
-	ctx := d.t.Context()
-	manager := d.bm.headerSync.Manager()
-	nextID := d.rangeIDLimit()
-	for id := headersync.RangeID(1); id < nextID; id++ {
-		rng, ok, err := manager.SnapshotRange(ctx, id)
-		require.NoError(d.t, err)
-		if ok && rng.OwnerPeer == peer.Addr() &&
-			liar(rng.StopHeight, rng.StopHash) {
-
-			return true
-		}
-	}
-	anchors, err := manager.Anchors(ctx)
-	require.NoError(d.t, err)
-	for _, anchor := range anchors {
-		if liar(anchor.Height, anchor.Hash) {
-			return true
-		}
-	}
-	return false
 }
 
 // rangeIDLimit bounds scans of the FSM range table. The session's next ID can
