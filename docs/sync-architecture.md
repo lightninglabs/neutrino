@@ -62,11 +62,7 @@ flowchart TB
     subgraph HS["headersync.Runtime"]
         direction TB
         drv["Driver<br/>protofsm machine"]
-        ctl["Controller<br/>planning policy"]
-        sess["Session<br/>requests, staging, cooldowns"]
-        mgr["Manager<br/>owns HeaderSyncFSM"]
-        pa["Peer per peer"]
-        qd["querydispatch.Controller<br/>private querysync scheduler"]
+        parts["Controller, Session,<br/>Manager with HeaderSyncFSM,<br/>Peer per peer, querydispatch"]
     end
 
     subgraph QS["querysync/workmanager"]
@@ -87,14 +83,9 @@ flowchart TB
     peers -- "headers, inv" --> bh
     peers -- "cfheaders, cfilter, block" --> wk
     api --> disp
-    bh -- "ProcessEvent(event, View)" --> drv
+    bh -- "ProcessEvent with a View" --> drv
     drv -- "effects" --> bh
-    drv --> ctl
-    ctl --> mgr
-    ctl --> sess
-    drv --> pa
-    pa --> mgr
-    mgr --> qd
+    drv --> parts
     bh -- "BlockCommit, Reorg" --> csa
     cfh -- "FilterCommit" --> csa
     csa --> bhs
@@ -105,8 +96,11 @@ flowchart TB
     disp --> qsched
     disp --> wk
     api --> fdb
-    CS --> ban
+    peers -- "BanPeer" --> ban
 ```
+
+The headersync parts behind the driver are mapped in
+[headersync-architecture.md](headersync-architecture.md#components).
 
 The stores have two interchangeable backends. The legacy backend keeps block
 headers and filter headers in append-only flat files indexed by a bbolt
