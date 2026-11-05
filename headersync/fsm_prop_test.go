@@ -180,11 +180,6 @@ func (m *fsmModel) Commit(t *rapid.T) {
 	}
 }
 
-// Requeue returns a staged range to the queue, as after a failed commit.
-func (m *fsmModel) Requeue(t *rapid.T) {
-	m.fsm.RequeueStagedRange(m.rangeID(t))
-}
-
 // Invalidate rejects a staged range.
 func (m *fsmModel) Invalidate(t *rapid.T) {
 	_, _ = m.fsm.InvalidateRange(m.rangeID(t))

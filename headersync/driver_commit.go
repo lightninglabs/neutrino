@@ -68,9 +68,9 @@ func (d *Driver) handleAdvanceTip(ctx context.Context,
 	return d.runtime.controller.AdvanceCommittedTip(ctx, event.Tip)
 }
 
-// handleListReadyRanges reports the ready ranges. With none, a commit that
-// applied but reported an error may have left payloads behind, with nothing
-// left to commit them, so we prune those.
+// handleListReadyRanges reports the ready ranges. With none, an ambiguous store
+// write may have left payloads behind that the durable tip has passed, so we
+// prune those.
 func (d *Driver) handleListReadyRanges(ctx context.Context,
 	result *DriverResult) error {
 
@@ -94,22 +94,16 @@ func (d *Driver) handleListReadyRanges(ctx context.Context,
 	return nil
 }
 
-// handleSnapshotReadyRange fetches one ready range and its headers. If the FSM
-// staged the range but its headers never reached the session, because the
-// completion applied and then reported an error, we requeue the range so that
-// it's fetched again, and report it missing.
+// handleSnapshotReadyRange fetches one ready range and its headers. A range's
+// headers are stored right after the FSM stages it, on the same goroutine and
+// before any commit can run, so a ready range always has them.
 func (d *Driver) handleSnapshotReadyRange(ctx context.Context,
 	event SnapshotReadyRange, result *DriverResult) error {
 
 	staged, ok := d.session.StagedRange(event.RangeID)
 	if !ok {
-		_, err := d.runtime.manager.RequeueStagedRange(
-			ctx, event.RangeID,
-		)
-		log.Warnf("headersync range_id=%d ready without staged "+
-			"headers, requeued: %v", event.RangeID, err)
-
-		return nil
+		return fmt.Errorf("headersync range_id=%d ready without "+
+			"staged headers", event.RangeID)
 	}
 
 	rng, ok, err := d.runtime.manager.SnapshotRange(ctx, event.RangeID)
@@ -121,7 +115,7 @@ func (d *Driver) handleSnapshotReadyRange(ctx context.Context,
 			event.RangeID)
 	}
 
-	result.ReadyRange = &ReadyRange{Range: rng, Staged: staged}
+	result.ReadyRange = ReadyRange{Range: rng, Staged: staged}
 
 	return nil
 }

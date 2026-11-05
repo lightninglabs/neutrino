@@ -186,49 +186,8 @@ func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
 		log.Infof("headersync peer_recovered peer=%s "+
 			"cooldown_until=%s",
 			peerID, until.Format(time.RFC3339))
-		d.releaseOrphanedRange(ctx, peerID)
 		d.setPeerState(ctx, peerID, PeerReady, result)
 	}
-}
-
-// releaseOrphanedRange returns the active range of a peer that has no request
-// outstanding to the queue. A dispatch mirror call that applied but reported an
-// error can leave such a lease behind. While the peer was blocked, another peer
-// could steal it; with no other peer, recovering the peer to ready would
-// otherwise leave the range active forever with nothing running it.
-func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
-	manager := d.runtime.manager
-	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
-	if err != nil || !ok || peer.ActiveRange == NoRange {
-		return
-	}
-	rng, ok, err := manager.SnapshotRange(ctx, peer.ActiveRange)
-	if err != nil || !ok || rng.State != RangeActive ||
-		rng.OwnerPeer != peerID {
-
-		return
-	}
-
-	// Fail the lease under its current epoch, then plan the span again.
-	// Go through the peer when there is one: it still holds the
-	// range as active, and failing it only in the manager would leave the
-	// peer busy forever, answering every later request with nothing.
-	var result CompleteResult
-	if peerActor, ok := d.runtime.Peer(peerID); ok {
-		result, err = peerActor.CompleteRange(
-			ctx, rng.ID, rng.LeaseEpoch, false, time.Now(),
-		)
-	} else {
-		result, err = manager.CompleteRange(
-			ctx, peerID, rng.ID, rng.LeaseEpoch, false, time.Now(),
-		)
-	}
-	if err != nil || !result.Accepted {
-		return
-	}
-	log.Infof("headersync orphaned_range_released peer=%s range_id=%d",
-		peerID, rng.ID)
-	d.replanRange(ctx, rng)
 }
 
 // replanRange plans a failed range again.

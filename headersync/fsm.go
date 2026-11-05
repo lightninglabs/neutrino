@@ -524,26 +524,12 @@ func (h *HeaderSyncFSM) StageDiscoveredRange(
 		return HeaderRange{}, false, nil
 	}
 
-	rng, ok, err := h.PlanRange(
-		h.unusedRangeID(id), startHeight, stopHeight,
-	)
+	rng, ok, err := h.PlanRange(id, startHeight, stopHeight)
 	if err != nil || !ok {
 		return rng, ok, err
 	}
 
 	return h.stageRangeFromDiscovery(rng, peerID, now), true, nil
-}
-
-// unusedRangeID returns the first range ID at or after id that no range uses.
-// Range IDs are allocated by the caller's session, which should never fall
-// behind the FSM. This check is defensive, not an expected path.
-func (h *HeaderSyncFSM) unusedRangeID(id RangeID) RangeID {
-	for {
-		if _, used := h.ranges[id]; !used && id != NoRange {
-			return id
-		}
-		id++
-	}
 }
 
 func (h *HeaderSyncFSM) stageRangeFromDiscovery(rng HeaderRange,
@@ -1227,27 +1213,6 @@ func (h *HeaderSyncFSM) RejectAnchor(height uint32,
 	}
 
 	return result
-}
-
-// RequeueStagedRange returns a staged range to the queue under a new lease
-// epoch. The FSM stages a range before the caller stores its headers, so a
-// dispatch mirror call that applies but reports an error to the caller can
-// leave a staged range with no headers. Ordered commit
-// would then stop at it forever; requeueing fetches the span again.
-func (h *HeaderSyncFSM) RequeueStagedRange(id RangeID) bool {
-	rng, ok := h.ranges[id]
-	if !ok || rng.State != RangeStaged {
-		return false
-	}
-
-	rng.LeaseEpoch++
-	rng.OwnerPeer = NoPeer
-	rng.State = RangeQueued
-	rng.Valid = false
-	rng.StagedAt = time.Time{}
-	h.ranges[id] = rng
-
-	return true
 }
 
 // CommitReadyRanges drains all staged ranges that connect to the visible tip.
