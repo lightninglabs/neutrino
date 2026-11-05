@@ -351,7 +351,7 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 	}
 
 	b.syncPeerMutex.Lock()
-	b.syncPeer = bestPeer
+	b.setSyncPeerLocked(bestPeer)
 	b.syncPeerMutex.Unlock()
 
 	started := b.dispatchHeaderSyncWork(peers)
@@ -362,7 +362,7 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 
 	b.syncPeerMutex.Lock()
 	if b.syncPeer == bestPeer {
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 	}
 	b.syncPeerMutex.Unlock()
 
@@ -416,7 +416,7 @@ func (b *blockManager) continueHeaderSync(peers *list.List) {
 	}
 
 	b.syncPeerMutex.Lock()
-	b.syncPeer = nil
+	b.setSyncPeerLocked(nil)
 	b.syncPeerMutex.Unlock()
 
 	b.startSync(peers)
@@ -539,7 +539,7 @@ func (b *blockManager) handleHeaderSyncTimeoutMsg(peers *list.List,
 
 	b.syncPeerMutex.Lock()
 	if b.syncPeer == msg.peer {
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 	}
 	b.syncPeerMutex.Unlock()
 
@@ -581,7 +581,7 @@ func (b *blockManager) handleHeaderSyncAnchorTimeoutMsg(peers *list.List,
 	if b.syncPeer == msg.peer ||
 		b.headerSync.Driver().Activity().Anchors == 0 {
 
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 	}
 	b.syncPeerMutex.Unlock()
 
@@ -690,7 +690,7 @@ func (b *blockManager) replanHeaderSyncAnchor(peers *list.List,
 
 	b.syncPeerMutex.Lock()
 	if b.headerSync.Driver().Activity().Anchors == 0 {
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 	}
 	b.syncPeerMutex.Unlock()
 
@@ -718,7 +718,7 @@ func (b *blockManager) maybeContinueHeaderAnchorDiscovery(peers *list.List,
 	}
 
 	b.syncPeerMutex.Lock()
-	b.syncPeer = nil
+	b.setSyncPeerLocked(nil)
 	b.syncPeerMutex.Unlock()
 
 	if b.allowSerialHeaderFallback() {
@@ -864,7 +864,7 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 
 	if planned == 0 && !b.headerSync.Driver().Activity().HasWork() {
 		b.syncPeerMutex.Lock()
-		b.syncPeer = nil
+		b.setSyncPeerLocked(nil)
 		b.syncPeerMutex.Unlock()
 		b.startSync(peers)
 	}
@@ -1217,7 +1217,7 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	}
 	if !peerDisconnected(peer) {
 		b.syncPeerMutex.Lock()
-		b.syncPeer = peer
+		b.setSyncPeerLocked(peer)
 		b.syncPeerMutex.Unlock()
 	}
 

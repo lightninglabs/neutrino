@@ -162,7 +162,7 @@ func testCFHeaderWriteRollback(
 	})
 	require.NoError(t, err)
 	peer := newTestServerPeer(t, "127.0.0.1:18444", int32(oldTip+1))
-	bm.syncPeer = peer
+	bm.setSyncPeerLocked(peer)
 	notifications := make(chan blockntfns.BlockNtfn, 32)
 	go func() {
 		for {

@@ -87,7 +87,10 @@ func newSerialTestDriver(chain []*wire.BlockHeader) *Driver {
 	tip := NewTipState(TipConfig{Params: &chaincfg.SimNetParams})
 	tip.Reset(headerlist.Node{Header: *chain[0], Height: 0})
 
-	return newDriver(nil, nil, tip)
+	fsm := NewHeaderSyncFSM(0, chain[0].BlockHash(), DefaultConfig())
+	runtime := &Runtime{manager: NewManager(fsm)}
+
+	return newDriver(runtime, NewSession(), tip)
 }
 
 // TestTipHeadersDisconnectsUnconnected checks that a message whose headers do
@@ -107,6 +110,33 @@ func TestTipHeadersDisconnectsUnconnected(t *testing.T) {
 		t, []DriverEffect{DisconnectTipPeer{PeerID: "peer"}},
 		result.Effects,
 	)
+}
+
+// TestTipLeaseFollowsTheSyncPeer checks that the lease names the peer the
+// executor last reported, that granting it again keeps the epoch, and that only
+// the holder is trusted.
+func TestTipLeaseFollowsTheSyncPeer(t *testing.T) {
+	t.Parallel()
+
+	chain := serialHeaderChain(3)
+	driver := newSerialTestDriver(chain)
+	manager := driver.runtime.manager
+
+	_, err := driver.Handle(t.Context(), FollowTip{PeerID: "a"})
+	require.NoError(t, err)
+	first := manager.TipLease()
+	require.Equal(t, "a", first.PeerID)
+
+	_, err = driver.Handle(t.Context(), FollowTip{PeerID: "a"})
+	require.NoError(t, err)
+	require.Equal(t, first, manager.TipLease())
+
+	_, err = driver.Handle(t.Context(), FollowTip{PeerID: ""})
+	require.NoError(t, err)
+	released := manager.TipLease()
+	require.Empty(t, released.PeerID)
+	require.Greater(t, released.Epoch, first.Epoch)
+	require.False(t, manager.fsm.TrustsTipPeer(""))
 }
 
 // TestTipHeadersIgnoresForeignPeerWhileSyncing checks that headers which do

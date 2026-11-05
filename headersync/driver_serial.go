@@ -29,8 +29,9 @@ type TipHeaders struct {
 	// empty.
 	Headers []*wire.BlockHeader
 
-	// IsSyncPeer is set when the sender is the current sync peer.
-	IsSyncPeer bool
+	// holdsLease is set by the driver when the sender holds the
+	// tip-following lease.
+	holdsLease bool
 
 	// HeadersSynced is set when the node believes it is current.
 	HeadersSynced bool
@@ -50,6 +51,20 @@ type RollbackToCheckpoint struct {
 }
 
 func (RollbackToCheckpoint) driverEvent() {}
+
+// FollowTip moves the tip-following lease to the executor's new sync peer, or
+// releases it when PeerID is empty.
+type FollowTip struct {
+	// PeerID is the new sync peer, or empty for none.
+	PeerID string
+}
+
+func (FollowTip) driverEvent() {}
+
+// handleFollowTip moves the tip-following lease.
+func (d *Driver) handleFollowTip(event FollowTip) {
+	d.runtime.manager.SetTipLease(event.PeerID)
+}
 
 // DisconnectTipPeer asks the executor to disconnect a peer that sent invalid
 // serial headers. Unlike DisconnectPeer it leaves the sync candidates alone,
@@ -177,6 +192,9 @@ func NewSerialReorg(tip headerlist.Node, fork wire.BlockHeader,
 
 // handleTipHeaders decides what a headers message that follows the tip means.
 func (d *Driver) handleTipHeaders(event TipHeaders, result *DriverResult) {
+	// The lease decides whose headers we trust before we're synced.
+	event.holdsLease = d.runtime.manager.TipLease().PeerID == event.PeerID
+
 	// Explicitly check that each header in the message builds off of the
 	// previous one. This is a quick sanity check to avoid doing the more
 	// expensive checks below if we know the headers are invalid.
@@ -235,7 +253,7 @@ func (d *Driver) extendSerialTip(event TipHeaders,
 		PeerID: event.PeerID,
 		Height: last.Height,
 	})
-	if event.IsSyncPeer {
+	if event.holdsLease {
 		result.Effects = append(result.Effects, DisarmSerialTimeout{})
 	}
 	result.Effects = append(result.Effects, CommitExtension{
@@ -362,7 +380,7 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 	// reorg, in which case we'll either change our sync
 	// peer or disconnect the peer that sent us these bad
 	// headers.
-	if !event.IsSyncPeer && !event.HeadersSynced {
+	if !event.holdsLease && !event.HeadersSynced {
 		return nil, true
 	}
 

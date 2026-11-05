@@ -521,7 +521,7 @@ func runSwarmPipeline(t *testing.T, seed int64, connected *ServerPeer) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(dstChainHeight), height)
 	peer := newTestServerPeer(t, "127.0.0.1:18444", dstChainHeight+1)
-	bm.syncPeer = peer
+	bm.setSyncPeerLocked(peer)
 	msg := wire.NewMsgHeaders()
 	require.NoError(t, msg.AddBlockHeader(fixture.honest[dstChainHeight+1]))
 	if seed == 10 {
@@ -586,7 +586,7 @@ func runSwarmPipeline(t *testing.T, seed int64, connected *ServerPeer) {
 	if seed == 13 {
 		replacement = connected
 	}
-	bm.syncPeer = replacement
+	bm.setSyncPeerLocked(replacement)
 	reorg := wire.NewMsgHeaders()
 	for _, block := range fixture.reorg[dstReorgFork+1:] {
 		require.NoError(t, reorg.AddBlockHeader(block))
@@ -1042,7 +1042,7 @@ func runSwarmCheckpointNoWork(t *testing.T) {
 		"127.0.0.1:18446",
 		int32(wire.CFCheckptInterval+1),
 	)
-	bm.syncPeer = peer
+	bm.setSyncPeerLocked(peer)
 	message := wire.NewMsgHeaders()
 	require.NoError(t, message.AddBlockHeader(next))
 	bm.QueueHeaders(message, peer)

@@ -253,6 +253,9 @@ func (d *Driver) Handle(ctx context.Context,
 	case TipHeaders:
 		d.handleTipHeaders(event, &result)
 
+	case FollowTip:
+		d.handleFollowTip(event)
+
 	case RollbackToCheckpoint:
 		d.planCheckpointRollback(event.PeerID, event.Height, &result)
 	}
