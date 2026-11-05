@@ -60,41 +60,6 @@ func (m *mockDispatcher) Query(requests []*querysyncwm.Request,
 	return m.query(requests, options...)
 }
 
-func TestHeaderSyncValidationChain(t *testing.T) {
-	t.Parallel()
-
-	base := headerlist.NewBoundedMemoryChain(4)
-	base.ResetHeaderState(headerlist.Node{
-		Height: 10,
-		Header: wire.BlockHeader{Nonce: 10},
-	})
-	baseTip := base.PushBack(headerlist.Node{
-		Height: 11,
-		Header: wire.BlockHeader{Nonce: 11},
-	})
-
-	validationChain := newHeaderSyncValidationChain(base, *baseTip)
-	pendingTip := validationChain.PushBack(headerlist.Node{
-		Height: 12,
-		Header: wire.BlockHeader{Nonce: 12},
-	})
-
-	require.Equal(t, int32(12), validationChain.Back().Height)
-	require.Equal(t, uint32(12), validationChain.Back().Header.Nonce)
-	require.Equal(t, pendingTip, validationChain.Back())
-
-	pending, ok := validationChain.AtHeight(12)
-	require.True(t, ok)
-	require.Equal(t, uint32(12), pending.Header.Nonce)
-
-	cached, ok := validationChain.AtHeight(10)
-	require.True(t, ok)
-	require.Equal(t, uint32(10), cached.Header.Nonce)
-
-	_, ok = validationChain.AtHeight(9)
-	require.False(t, ok)
-}
-
 // setupBlockManager initialises a blockManager to be used in tests.
 func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 	headerfs.FilterHeaderStore, error) {
@@ -529,10 +494,10 @@ func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
 	// genesis. A request must take both boundary fields from the store.
 	require.Equal(t, genesis.BlockHash(), bm.headerTipHash)
 	stopHash := chainhash.Hash{1}
-	bm.nextCheckpoint = &chaincfg.Checkpoint{
+	bm.tip.SetNextCheckpointForTest(&chaincfg.Checkpoint{
 		Height: 3001,
 		Hash:   &stopHash,
-	}
+	})
 	sp := newTestServerPeer(t, "127.0.0.1:18333", 3001)
 	peers := list.New()
 	peers.PushBack(sp)
@@ -567,12 +532,14 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 		headerfs.BlockHeader{BlockHeader: &first, Height: 1},
 		headerfs.BlockHeader{BlockHeader: &second, Height: 2},
 	))
-	bm.headerList.PushBack(headerlist.Node{Header: first, Height: 1})
-	bm.headerList.PushBack(headerlist.Node{Header: second, Height: 2})
+	bm.tip.PushBackForTest(headerlist.Node{Header: first, Height: 1})
+	bm.tip.PushBackForTest(headerlist.Node{Header: second, Height: 2})
 	bm.headerTip = 2
 	bm.headerTipHash = second.BlockHash()
 	stopHash := chainhash.Hash{1}
-	bm.nextCheckpoint = &chaincfg.Checkpoint{Height: 3002, Hash: &stopHash}
+	bm.tip.SetNextCheckpointForTest(
+		&chaincfg.Checkpoint{Height: 3002, Hash: &stopHash},
+	)
 	sp := newTestServerPeer(t, "127.0.0.1:18333", 3002)
 	bm.syncPeer = sp
 	peers := list.New()

@@ -1,4 +1,4 @@
-package neutrino
+package headersync
 
 // This file holds contextual block header validation, and the header contexts
 // that the blockchain package's difficulty checks read from.
@@ -14,9 +14,9 @@ import (
 	"github.com/lightninglabs/neutrino/headerlist"
 )
 
-// areHeadersConnected returns true if the passed block headers are connected
-// to each other correctly.
-func areHeadersConnected(headers []*wire.BlockHeader) bool {
+// HeadersConnected returns true if the passed block headers are connected to
+// each other correctly.
+func HeadersConnected(headers []*wire.BlockHeader) bool {
 	var (
 		lastHeader chainhash.Hash
 		emptyHash  chainhash.Hash
@@ -42,38 +42,48 @@ func areHeadersConnected(headers []*wire.BlockHeader) bool {
 	return true
 }
 
-// checkHeaderSanity performs contextual and context-less checks on the passed
-// wire.BlockHeader. This function calls blockchain.CheckBlockHeaderContext for
-// the contextual check and blockchain.CheckBlockHeaderSanity for context-less
-// checks.
-func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
-	reorgAttempt bool, prevNodeHeight int32,
-	prevNodeHeader *wire.BlockHeader, headerChain headerlist.Chain) error {
+// HeaderValidator checks block headers against the consensus rules that a
+// light client can apply: proof of work, difficulty, and timestamps.
+type HeaderValidator struct {
+	// Params are the chain's consensus parameters.
+	Params *chaincfg.Params
 
-	// Create the lightHeaderCtx for the blockHeader's parent.
-	hList := b.headerList
-	if reorgAttempt {
-		hList = b.reorgList
-	}
-	if headerChain != nil {
-		hList = headerChain
-	}
+	// BlocksPerRetarget is the length of a difficulty period.
+	BlocksPerRetarget int32
 
-	parentHeaderCtx := newLightHeaderCtx(
-		prevNodeHeight, prevNodeHeader, b.cfg.BlockHeaders, hList,
-	)
+	// MinRetargetTimespan is the shortest timespan a retarget adjusts for.
+	MinRetargetTimespan int64
+
+	// MaxRetargetTimespan is the longest timespan a retarget adjusts for.
+	MaxRetargetTimespan int64
+
+	// TimeSource is the median time source for the future timestamp check.
+	TimeSource blockchain.MedianTimeSource
+
+	// Store serves ancestors that have left the validation chain.
+	Store headerfs.BlockHeaderStore
+}
+
+// Check performs contextual and context-less checks on header, whose parent is
+// prevHeader at prevHeight. The chain supplies recent ancestors, and the store
+// supplies the rest. A failure to read an ancestor is reported as such, since
+// it says nothing about the header.
+func (v *HeaderValidator) Check(header *wire.BlockHeader, prevHeight int32,
+	prevHeader *wire.BlockHeader, chain headerlist.Chain) error {
+
+	parent := newLightHeaderCtx(prevHeight, prevHeader, v.Store, chain)
+
 	var ancestorErr error
-	parentHeaderCtx.ancestorErr = &ancestorErr
+	parent.ancestorErr = &ancestorErr
 
-	// Create a lightChainCtx as well.
 	chainCtx := newLightChainCtx(
-		&b.cfg.ChainParams, b.blocksPerRetarget, b.minRetargetTimespan,
-		b.maxRetargetTimespan,
+		v.Params, v.BlocksPerRetarget, v.MinRetargetTimespan,
+		v.MaxRetargetTimespan,
 	)
 
 	var emptyFlags blockchain.BehaviorFlags
 	err := blockchain.CheckBlockHeaderContext(
-		blockHeader, parentHeaderCtx, emptyFlags, chainCtx, true,
+		header, parent, emptyFlags, chainCtx, true,
 	)
 	if ancestorErr != nil {
 		return fmt.Errorf("unable to read header ancestor: %w",
@@ -84,8 +94,7 @@ func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
 	}
 
 	return blockchain.CheckBlockHeaderSanity(
-		blockHeader, b.cfg.ChainParams.PowLimit, b.cfg.TimeSource,
-		emptyFlags,
+		header, v.Params.PowLimit, v.TimeSource, emptyFlags,
 	)
 }
 

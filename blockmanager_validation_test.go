@@ -88,9 +88,9 @@ func TestInvalidDiscoveryRecovers(t *testing.T) {
 	rng := stageDiscovery(t, bm, "bad", request,
 		[]*wire.BlockHeader{bad})
 	err = bm.commitReadyHeaderSyncRanges()
-	var invalid *headerSyncValidationError
+	var invalid *headersync.ValidationError
 	require.ErrorAs(t, err, &invalid)
-	require.Equal(t, rng.ID, invalid.rangeID)
+	require.Equal(t, rng.ID, invalid.RangeID)
 	_, height, err := store.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
@@ -209,7 +209,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 		}))
 	}
 	parent := history[10]
-	bm.headerList.ResetHeaderState(headerlist.Node{
+	bm.tip.Reset(headerlist.Node{
 		Height: 11, Header: *parent,
 	})
 	bm.headerTip, bm.headerTipHash = 11, parent.BlockHash()
@@ -236,7 +236,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 	bm.cfg.BlockHeaders = failing
 	err = bm.commitReadyHeaderSyncRanges()
 	require.ErrorIs(t, err, readErr)
-	var invalid *headerSyncValidationError
+	var invalid *headersync.ValidationError
 	require.False(t, errors.As(err, &invalid))
 	_, staged := bm.sessionForTest().StagedRange(rng.ID)
 	require.True(t, staged)

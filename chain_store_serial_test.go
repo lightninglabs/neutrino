@@ -30,17 +30,17 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	bm := newCFHeaderTestManager(t, blocks, filters)
 	fixture := dstChains()
 	header := *fixture.honest[1]
-	prepared, handled, err := bm.prepareSerialHeaderExtension(
+	prepared, handled, err := bm.tip.PrepareSerialExtension(
 		[]*wire.BlockHeader{&header},
 	)
 	require.True(t, handled)
 	require.NoError(t, err)
-	require.Equal(t, int32(0), prepared.parent.Height)
-	require.Equal(t, params.GenesisBlock.BlockHash(), prepared.parent.Hash)
-	require.Len(t, prepared.nodes, 1)
+	require.Equal(t, int32(0), prepared.Parent.Height)
+	require.Equal(t, params.GenesisBlock.BlockHash(), prepared.Parent.Hash)
+	require.Len(t, prepared.Nodes, 1)
 
 	// Neither the in-memory list nor the store has changed.
-	require.Equal(t, int32(0), bm.headerList.Back().Height)
+	require.Equal(t, int32(0), bm.tip.Tip().Height)
 	_, height, err := blocks.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
@@ -48,8 +48,8 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	// Mutating the peer's header leaves the prepared copy intact.
 	original := header.BlockHash()
 	header.Nonce++
-	require.Equal(t, original, prepared.headers[0].BlockHash())
-	require.Equal(t, original, prepared.nodes[0].Header.BlockHash())
+	require.Equal(t, original, prepared.Headers[0].BlockHash())
+	require.Equal(t, original, prepared.Nodes[0].Header.BlockHash())
 }
 
 // TestSerialHeaderAmbiguousWriteReconciles verifies that a failed serial
@@ -98,12 +98,12 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 				require.Equal(
 					t,
 					tc.height,
-					d.bm.headerList.Back().Height,
+					d.bm.tip.Tip().Height,
 				)
 				require.Equal(
 					t,
 					header.BlockHash(),
-					d.bm.headerList.Back().Header.
+					d.bm.tip.Tip().Header.
 						BlockHash(),
 				)
 				visible := d.bm.publishedBlockTip.Load()
@@ -251,7 +251,9 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		bm.cfg.ChainParams.Checkpoints = []chaincfg.Checkpoint{{
 			Height: 2, Hash: &wrong,
 		}}
-		bm.nextCheckpoint = &bm.cfg.ChainParams.Checkpoints[0]
+		bm.tip.SetNextCheckpointForTest(
+			&bm.cfg.ChainParams.Checkpoints[0],
+		)
 		bm.cfg.TimeSource = dstMedianTime{
 			MedianTimeSource: bm.cfg.TimeSource,
 			offset: time.Until(
@@ -286,7 +288,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Zero(t, height)
-		require.Equal(t, int32(0), bm.headerList.Back().Height)
+		require.Equal(t, int32(0), bm.tip.Tip().Height)
 		require.True(t, peerDisconnected(peer))
 		require.Len(t, notifications, 1)
 		event := <-notifications
@@ -425,7 +427,7 @@ func TestChainStoreSerialLostWriteAckReconciles(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), height)
-		require.Equal(t, int32(1), bm.headerList.Back().Height)
+		require.Equal(t, int32(1), bm.tip.Tip().Height)
 		require.Equal(t, int32(1), bm.publishedBlockTip.Load().Height)
 		require.Nil(t, bm.pendingHeaderCommit)
 		require.NotNil(t, bm.headerCommitRetryTimer)
@@ -707,7 +709,7 @@ func TestSnapshotFilterFailureKeepsHeaderIntake(t *testing.T) {
 		bm.finishAsyncHeaderCommit(peers, result)
 		require.Nil(t, bm.pendingHeaderCommit,
 			"header intake stayed frozen")
-		require.EqualValues(t, 3, bm.headerList.Back().Height)
+		require.EqualValues(t, 3, bm.tip.Tip().Height)
 	})
 }
 

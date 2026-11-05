@@ -27,14 +27,6 @@ import (
 )
 
 const (
-	// numMaxMemHeaders is the max number of headers to store in memory for
-	// a particular peer. By bounding this value, we're able to closely
-	// control our effective memory usage during initial sync and re-org
-	// handling. This value should be set a "sane" re-org size, such that
-	// we're able to properly handle re-orgs in size strictly less than
-	// this value.
-	numMaxMemHeaders = 10000
-
 	// retryTimeout is the time we'll wait between failed queries to fetch
 	// filter checkpoints and headers.
 	retryTimeout = 3 * time.Second
@@ -324,10 +316,11 @@ type blockManager struct { // nolint:maligned
 	quitCtx    context.Context
 	quitCancel context.CancelFunc
 
-	headerList     headerlist.Chain
-	reorgList      headerlist.Chain
-	nextCheckpoint *chaincfg.Checkpoint
-	lastRequested  chainhash.Hash
+	// tip owns the header validation cache, the reorg scratch chain and
+	// the checkpoint cursor.
+	tip *headersync.TipState
+
+	lastRequested chainhash.Hash
 
 	headerSyncTimeout time.Duration
 
@@ -376,12 +369,21 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 		fltrHeaderProgessLogger: newBlockProgressLogger(
 			"Verified", "filter header", log,
 		),
-		headerList: headerlist.NewBoundedMemoryChain(
-			numMaxMemHeaders,
-		),
-		reorgList: headerlist.NewBoundedMemoryChain(
-			numMaxMemHeaders,
-		),
+		tip: headersync.NewTipState(headersync.TipConfig{
+			Params:              &cfg.ChainParams,
+			BlocksPerRetarget:   retarget.BlocksPerRetarget,
+			MinRetargetTimespan: retarget.MinRetargetTimespan,
+			MaxRetargetTimespan: retarget.MaxRetargetTimespan,
+
+			// The stores and the time source can be replaced after
+			// construction, so validation reads them on each use.
+			TimeSource: func() blockchain.MedianTimeSource {
+				return cfg.TimeSource
+			},
+			BlockHeaders: func() headerfs.BlockHeaderStore {
+				return cfg.BlockHeaders
+			},
+		}),
 		headerSyncTimeout:   cfg.HeaderSyncTimeout,
 		quit:                make(chan struct{}),
 		blocksPerRetarget:   retarget.BlocksPerRetarget,
@@ -413,8 +415,7 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	bm.nextCheckpoint = bm.findNextHeaderCheckpoint(int32(height))
-	bm.headerList.ResetHeaderState(headerlist.Node{
+	bm.tip.Reset(headerlist.Node{
 		Header: *header,
 		Height: int32(height),
 	})
@@ -493,8 +494,7 @@ func (b *blockManager) ResetHeaderState() error {
 		return fmt.Errorf("failed to read block header chain "+
 			"tip: %w", err)
 	}
-	b.nextCheckpoint = b.findNextHeaderCheckpoint(int32(height))
-	b.headerList.ResetHeaderState(headerlist.Node{
+	b.tip.Reset(headerlist.Node{
 		Header: *header,
 		Height: int32(height),
 	})
@@ -905,66 +905,6 @@ func (b *blockManager) isSyncCandidate(sp *ServerPeer) bool {
 	return sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork
 }
 
-// findNextHeaderCheckpoint returns the next checkpoint after the passed
-// height. It returns nil when there is not one either because the height is
-// already later than the final checkpoint or there are none for the current
-// network.
-func (b *blockManager) findNextHeaderCheckpoint(
-	height int32,
-) *chaincfg.Checkpoint {
-	// There is no next checkpoint if there are none for this current
-	// network.
-	checkpoints := b.cfg.ChainParams.Checkpoints
-	if len(checkpoints) == 0 {
-		return nil
-	}
-
-	// There is no next checkpoint if the height is already after the final
-	// checkpoint.
-	finalCheckpoint := &checkpoints[len(checkpoints)-1]
-	if height >= finalCheckpoint.Height {
-		return nil
-	}
-
-	// Find the next checkpoint.
-	nextCheckpoint := finalCheckpoint
-	for i := len(checkpoints) - 2; i >= 0; i-- {
-		if height >= checkpoints[i].Height {
-			break
-		}
-		nextCheckpoint = &checkpoints[i]
-	}
-	return nextCheckpoint
-}
-
-// findPreviousHeaderCheckpoint returns the last checkpoint before the passed
-// height. It returns a checkpoint matching the genesis block when the height
-// is earlier than the first checkpoint or there are no checkpoints for the
-// current network. This is used for resetting state when a malicious peer
-// sends us headers that don't lead up to a known checkpoint.
-func (b *blockManager) findPreviousHeaderCheckpoint(
-	height int32,
-) *chaincfg.Checkpoint {
-	// Start with the genesis block - earliest checkpoint to which our code
-	// will want to reset
-	prevCheckpoint := &chaincfg.Checkpoint{
-		Height: 0,
-		Hash:   b.cfg.ChainParams.GenesisHash,
-	}
-
-	// Find the latest checkpoint lower than height or return genesis block
-	// if there are none.
-	checkpoints := b.cfg.ChainParams.Checkpoints
-	for i := 0; i < len(checkpoints); i++ {
-		if height <= checkpoints[i].Height {
-			break
-		}
-		prevCheckpoint = &checkpoints[i]
-	}
-
-	return prevCheckpoint
-}
-
 type syncPeerCandidate struct {
 	peer   *ServerPeer
 	height int32
@@ -1122,7 +1062,7 @@ func (b *blockManager) requestHeaders(peer *ServerPeer,
 func (b *blockManager) shouldDeferHeaderSyncBootstrap(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync == nil || b.nextCheckpoint == nil ||
+	if b.headerSync == nil || b.tip.NextCheckpoint() == nil ||
 		b.headerSync.Driver().Activity().HasWork() || bestHeight == 0 {
 
 		return false
@@ -1262,14 +1202,13 @@ func (b *blockManager) startSync(peers *list.List) {
 		// If we're still within the range of the set checkpoints, then
 		// we'll use the next checkpoint to guide the set of headers we
 		// fetch, setting our stop hash to the next checkpoint hash.
-		if b.nextCheckpoint != nil &&
-			int32(bestHeight) < b.nextCheckpoint.Height {
-
+		next := b.tip.NextCheckpoint()
+		if next != nil && int32(bestHeight) < next.Height {
 			log.Infof("Downloading headers for blocks %d to "+
 				"%d from peer %s", bestHeight+1,
-				b.nextCheckpoint.Height, bestPeer.Addr())
+				next.Height, bestPeer.Addr())
 
-			stopHash = b.nextCheckpoint.Hash
+			stopHash = next.Hash
 		} else {
 			log.Infof("Fetching set of headers from tip "+
 				"(height=%v) from peer %s", bestHeight,
