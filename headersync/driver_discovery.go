@@ -21,8 +21,8 @@ type DiscoveryOutcome struct {
 // discoverAnchors plans the discovery of the next checkpoint's anchors in the
 // span between the durable tip and the checkpoint.
 func (d *Driver) discoverAnchors(ctx context.Context, tip, stop ChainPoint,
-	bestHeight uint32, peers []PeerCandidate,
-	result *driverResult) DiscoveryOutcome {
+	bestHeight uint32,
+	peers []PeerCandidate) ([]DriverEffect, DiscoveryOutcome) {
 
 	span, ok, err := d.runtime.controller.AnchorDiscoverySpan(
 		ctx, tip, stop, bestHeight,
@@ -30,20 +30,20 @@ func (d *Driver) discoverAnchors(ctx context.Context, tip, stop ChainPoint,
 	if err != nil {
 		log.Warnf("headersync unable to plan anchor discovery: %v", err)
 
-		return DiscoveryOutcome{Settled: true}
+		return nil, DiscoveryOutcome{Settled: true}
 	}
 	if !ok {
-		return DiscoveryOutcome{Settled: true}
+		return nil, DiscoveryOutcome{Settled: true}
 	}
 
-	return d.discoverFrom(span, peers, nil, result)
+	return d.discoverFrom(span, peers, nil)
 }
 
 // discoverFrontier plans the discovery of the next boundary above the durable
 // tip, once there is no checkpoint left to aim at.
 func (d *Driver) discoverFrontier(ctx context.Context, tip ChainPoint,
-	bestHeight uint32, peers []PeerCandidate,
-	result *driverResult) DiscoveryOutcome {
+	bestHeight uint32,
+	peers []PeerCandidate) ([]DriverEffect, DiscoveryOutcome) {
 
 	span, ok, err := d.runtime.controller.FrontierDiscoverySpan(
 		ctx, tip, bestHeight,
@@ -54,44 +54,46 @@ func (d *Driver) discoverFrontier(ctx context.Context, tip ChainPoint,
 			err,
 		)
 
-		return DiscoveryOutcome{Settled: true}
+		return nil, DiscoveryOutcome{Settled: true}
 	}
 	if !ok {
-		return DiscoveryOutcome{Settled: true}
+		return nil, DiscoveryOutcome{Settled: true}
 	}
 
 	log.Debugf("headersync frontier_discovery_needed height=%d "+
 		"target_height=%d start_height=%d stop_height=%d",
 		tip.Height, bestHeight, span.StartHeight, span.StopHeight)
 
-	return d.discoverFrom(span, peers, nil, result)
+	return d.discoverFrom(span, peers, nil)
 }
 
 // pipelineFrontier plans the discovery of the span above a boundary that was
 // just learned, overlapping that discovery with the commit of the span below
 // it.
-func (d *Driver) pipelineFrontier(view View, after AnchorResponse,
-	result *driverResult) DiscoveryOutcome {
+func (d *Driver) pipelineFrontier(view View,
+	after AnchorResponse) ([]DriverEffect, DiscoveryOutcome) {
 
 	bestHeight := view.bestHeight()
 	span, ok := d.runtime.controller.FrontierLookaheadSpan(
 		ChainPoint{Height: after.Height, Hash: after.Hash}, bestHeight,
 	)
 	if !ok {
-		return DiscoveryOutcome{Settled: true}
+		return nil, DiscoveryOutcome{Settled: true}
 	}
 
 	log.Debugf("headersync frontier_discovery_pipelined "+
 		"start_height=%d stop_height=%d target_height=%d",
 		span.StartHeight, span.StopHeight, bestHeight)
 
-	return d.discoverFrom(span, view.Peers, nil, result)
+	return d.discoverFrom(span, view.Peers, nil)
 }
 
 // discoverFrom asks every peer the plan selects for the anchor at the end of
 // the span, leaving the excluded peers out of the round.
 func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
-	excluded []string, result *driverResult) DiscoveryOutcome {
+	excluded []string) ([]DriverEffect, DiscoveryOutcome) {
+
+	var effects []DriverEffect
 
 	plan := d.runtime.controller.PlanAnchorRequests(
 		span, peers, excluded...,
@@ -110,14 +112,14 @@ func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
 			span.StopHeight,
 		)
 
-		return DiscoveryOutcome{
+		return effects, DiscoveryOutcome{
 			Settled: true,
 			Active:  plan.Active(),
 		}
 	}
 
 	for _, peer := range plan.Peers {
-		result.Effects = append(result.Effects, SendGetHeaders{
+		effects = append(effects, SendGetHeaders{
 			PeerID:      peer.ID,
 			Kind:        RequestAnchor,
 			StartHeight: span.StartHeight,
@@ -127,7 +129,7 @@ func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
 		})
 	}
 
-	return DiscoveryOutcome{
+	return effects, DiscoveryOutcome{
 		ActivePeers: plan.ActivePeers,
 		Span:        span,
 	}

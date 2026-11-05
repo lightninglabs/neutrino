@@ -201,25 +201,28 @@ func (d *Driver) handleAssignRanges(ctx context.Context,
 }
 
 // handleDispatchPeer starts the next range for one peer.
-func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
-	result *driverResult) {
+func (d *Driver) handleDispatchPeer(ctx context.Context,
+	event DispatchPeer) []DriverEffect {
+
+	var effects []DriverEffect
 
 	peerID := event.PeerID
 	if d.session.RangeActive(peerID) {
-		return
+		return effects
 	}
 	if d.session.AnchorActive(peerID) {
-		return
+		return effects
 	}
 
 	peerActor, ok := d.runtime.Peer(peerID)
 	if !ok {
-		return
+		return effects
 	}
 
-	assignment, ok, err := d.requestPeerRange(
-		ctx, peerID, peerActor, result,
+	requestEffects, assignment, ok, err := d.requestPeerRange(
+		ctx, peerID, peerActor,
 	)
+	effects = append(effects, requestEffects...)
 	if err != nil {
 		log.Warnf(
 			"headersync peer %s failed to request range: "+
@@ -227,7 +230,7 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 			peerID,
 			err,
 		)
-		return
+		return effects
 	}
 	if !ok {
 		steal, stealOK, err := peerActor.RequestStolenRange(ctx)
@@ -248,22 +251,24 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 				steal.LeaseEpoch, steal.Reason)
 			d.markRangeStolen(ctx, steal)
 
-			assignment, ok, err = d.requestPeerRange(
-				ctx, peerID, peerActor, result,
+			var stealEffects []DriverEffect
+			stealEffects, assignment, ok, err = d.requestPeerRange(
+				ctx, peerID, peerActor,
 			)
+			effects = append(effects, stealEffects...)
 			if err != nil {
 				log.Warnf("headersync peer %s failed "+
 					"to start "+
 					"stolen range: %v", peerID, err)
-				return
+				return effects
 			}
 		}
 	}
 	if !ok {
-		return
+		return effects
 	}
 
-	result.Effects = append(result.Effects, SendGetHeaders{
+	effects = append(effects, SendGetHeaders{
 		PeerID:      peerID,
 		Kind:        RequestRange,
 		Range:       assignment,
@@ -272,21 +277,26 @@ func (d *Driver) handleDispatchPeer(ctx context.Context, event DispatchPeer,
 		StopHeight:  assignment.StopHeight,
 		StopHash:    assignment.StopHash,
 	})
+
+	return effects
 }
 
 // requestPeerRange asks a peer to start its next range. On an error, which
 // means the manager is stopped or the event's deadline passed, the peer is
 // blocked until its cooldown ends.
 func (d *Driver) requestPeerRange(ctx context.Context, peerID string,
-	peerActor *Peer, result *driverResult) (RangeAssignment, bool,
-	error) {
+	peerActor *Peer) ([]DriverEffect, RangeAssignment, bool, error) {
+
+	var effects []DriverEffect
 
 	assignment, ok, err := peerActor.RequestRange(ctx)
 	if err != nil {
-		d.setPeerState(ctx, peerID, PeerBlocked, result)
+		effects = append(effects, d.setPeerState(
+			ctx, peerID, PeerBlocked,
+		)...)
 	}
 
-	return assignment, ok, err
+	return effects, assignment, ok, err
 }
 
 // markRangeStolen tells the donor of a stolen range that it lost the lease.
@@ -316,7 +326,9 @@ func (d *Driver) markRangeStolen(ctx context.Context, steal StealResult) {
 
 // handleRequestSent starts tracking a request that went out, and asks for its
 // deadline.
-func (d *Driver) handleRequestSent(event RequestSent, result *driverResult) {
+func (d *Driver) handleRequestSent(event RequestSent) []DriverEffect {
+	var effects []DriverEffect
+
 	request := event.Request
 	d.requestID++
 	requestID := d.requestID
@@ -358,12 +370,16 @@ func (d *Driver) handleRequestSent(event RequestSent, result *driverResult) {
 			request.StopHash)
 	}
 
-	result.Effects = append(result.Effects, arm)
+	effects = append(effects, arm)
+
+	return effects
 }
 
 // handleRequestFailed blocks a peer that a request could not be written to.
 func (d *Driver) handleRequestFailed(ctx context.Context,
-	event RequestFailed, result *driverResult) {
+	event RequestFailed) []DriverEffect {
+
+	var effects []DriverEffect
 
 	request := event.Request
 	switch request.Kind {
@@ -378,7 +394,11 @@ func (d *Driver) handleRequestFailed(ctx context.Context,
 			"from peer=%s: %v", request.PeerID, event.Err)
 	}
 
-	d.setPeerState(ctx, request.PeerID, PeerBlocked, result)
+	effects = append(effects, d.setPeerState(
+		ctx, request.PeerID, PeerBlocked,
+	)...)
+
+	return effects
 }
 
 // handleTimerArmed hands the deadline timer to the request it belongs to. A

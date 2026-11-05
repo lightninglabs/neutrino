@@ -51,13 +51,6 @@ func (a Activity) HasWork() bool {
 	return a.Ranges > 0 || a.Anchors > 0
 }
 
-// driverResult collects the effects of one event, in order. The state hands
-// them to the machine as its outbox.
-type driverResult struct {
-	// Effects are the side effects to perform, in order.
-	Effects []DriverEffect
-}
-
 // Driver is the header-sync decision maker. It owns the request and timer
 // bookkeeping, the staged payloads, the peer cooldowns and the range ID
 // allocation, and it drives the controller, the manager and the peers. It is
@@ -190,16 +183,16 @@ func (s driverState) ProcessEvent(ctx context.Context, event DriverEvent,
 	DriverEvent, DriverEffect, *Driver], error) {
 
 	var (
-		result driverResult
-		err    error
-		view   = d.view
+		effects []DriverEffect
+		err     error
+		view    = d.view
 	)
 	switch event := event.(type) {
 	case PeerStateChanged:
-		d.handlePeerStateChanged(ctx, event, &result)
+		effects = d.handlePeerStateChanged(ctx, event)
 
 	case PeerConnected:
-		err = d.handlePeerConnected(ctx, event, &result)
+		effects, err = d.handlePeerConnected(ctx, event)
 
 	case PeerDisconnected:
 		err = d.handlePeerDisconnected(ctx, event)
@@ -208,106 +201,106 @@ func (s driverState) ProcessEvent(ctx context.Context, event DriverEvent,
 		err = d.handlePeerRTTUpdated(ctx, event)
 
 	case CooldownWakeDue:
-		d.handleCooldownWakeDue(&result)
+		effects = d.handleCooldownWakeDue()
 
 	case RecoverPeers:
-		d.handleRecoverPeers(ctx, event, &result)
+		effects = d.handleRecoverPeers(ctx, event)
 
 	case PeerDone:
-		d.handlePeerDone(ctx, event, &result)
+		effects, _ = d.handlePeerDone(ctx, event)
 
 	case BeginSync:
-		d.handleBeginSync(ctx, event, view, &result)
+		effects = d.handleBeginSync(ctx, event, view)
 
 	case syncDiscovered:
-		d.handleSyncDiscovered(event, &result)
+		effects = d.handleSyncDiscovered(event)
 
 	case syncDispatched:
-		d.handleSyncDispatched(event, &result)
+		effects = d.handleSyncDispatched(event)
 
 	case Continue:
-		d.resumeWork(ctx, view, true, &result)
+		effects = d.resumeWork(ctx, view, true)
 
 	case ResumeWork:
-		d.resumeWork(ctx, view, false, &result)
+		effects = d.resumeWork(ctx, view, false)
 
 	case continueDiscover:
-		d.handleContinueDiscover(ctx, event, view, &result)
+		effects = d.handleContinueDiscover(ctx, event, view)
 
 	case continueDiscovered:
-		d.handleContinueDiscovered(event, &result)
+		effects = d.handleContinueDiscovered(event)
 
 	case CooldownElapsed:
-		d.handleCooldownElapsed(event, &result)
+		effects = d.handleCooldownElapsed(event)
 
 	case PlanRanges:
 		_, err = d.planRanges(ctx, event.BestHeight)
 
 	case DispatchWork:
-		d.handleDispatchWork(ctx, view, &result)
+		effects = d.handleDispatchWork(ctx, view)
 
 	case DispatchPeer:
-		d.handleDispatchPeer(ctx, event, &result)
+		effects = d.handleDispatchPeer(ctx, event)
 
 	case RequestSent:
-		d.handleRequestSent(event, &result)
+		effects = d.handleRequestSent(event)
 
 	case RequestFailed:
-		d.handleRequestFailed(ctx, event, &result)
+		effects = d.handleRequestFailed(ctx, event)
 
 	case TimerArmed:
 		d.handleTimerArmed(event)
 
 	case RequestTimedOut:
-		d.handleRequestTimedOut(ctx, event, view, &result)
+		effects = d.handleRequestTimedOut(ctx, event, view)
 
 	case anchorTimedOut:
-		d.handleAnchorTimedOut(event, &result)
+		effects = d.handleAnchorTimedOut(event)
 
 	case HeadersReceived:
-		d.handleHeadersReceived(ctx, event, view, &result)
+		effects = d.handleHeadersReceived(ctx, event, view)
 
 	case anchorPipelined:
-		d.handleAnchorPipelined(ctx, event, view, &result)
+		effects = d.handleAnchorPipelined(ctx, event, view)
 
 	case anchorPlanned:
-		d.handleAnchorPlanned(event, view, &result)
+		effects = d.handleAnchorPlanned(event, view)
 
 	case anchorWaiting:
-		d.handleAnchorWaiting(event, &result)
+		effects = d.handleAnchorWaiting(event)
 
 	case anchorReplanned:
-		d.handleAnchorReplanned(event, &result)
+		effects = d.handleAnchorReplanned(event)
 
 	case CommitReady:
-		_, err = d.commitReadyRanges(ctx, view, &result)
+		effects, _, err = d.commitReadyRanges(ctx, view)
 
 	case RetryCommit:
-		d.handleRetryCommit(ctx, view, &result)
+		effects = d.handleRetryCommit(ctx, view)
 
 	case RangesCommitted:
-		d.handleRangesCommitted(ctx, event, &result)
+		effects = d.handleRangesCommitted(ctx, event)
 
 	case ExtensionCommitted:
-		d.handleExtensionCommitted(ctx, event, &result)
+		effects = d.handleExtensionCommitted(ctx, event)
 
 	case ReorgCommitted:
-		d.handleReorgCommitted(ctx, event, &result)
+		effects = d.handleReorgCommitted(ctx, event)
 
 	case CheckpointRolledBack:
-		d.handleCheckpointRolledBack(ctx, event, &result)
+		effects = d.handleCheckpointRolledBack(ctx, event)
 
 	case SnapshotAdopted:
-		d.handleSnapshotAdopted(ctx, event, &result)
+		effects = d.handleSnapshotAdopted(ctx, event)
 
 	case PeerGone:
-		d.handlePeerGone(ctx, event, view, &result)
+		effects = d.handlePeerGone(ctx, event, view)
 
 	case SerialTimedOut:
-		d.handleSerialTimedOut(ctx, event, view, &result)
+		effects = d.handleSerialTimedOut(ctx, event, view)
 
 	case TipHeaders:
-		d.handleTipHeaders(event, &result)
+		effects = d.handleTipHeaders(event)
 
 	case FollowTip:
 		d.handleFollowTip(event)
@@ -320,7 +313,7 @@ func (s driverState) ProcessEvent(ctx context.Context, event DriverEvent,
 		NewEvents: fn.Some(protofsm.EmittedEvent[
 			DriverEvent, DriverEffect,
 		]{
-			Outbox: result.Effects,
+			Outbox: effects,
 		}),
 	}, nil
 }

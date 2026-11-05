@@ -61,7 +61,9 @@ func (anchorReplanned) driverEvent() {}
 // and carries on from what the reply named. It reports whether the message
 // was for anchor discovery.
 func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
-	peerID string, headers []*wire.BlockHeader, result *driverResult) bool {
+	peerID string, headers []*wire.BlockHeader) ([]DriverEffect, bool) {
+
+	var effects []DriverEffect
 
 	finished, ok, err := d.runtime.controller.FinishAnchorHeaders(
 		ctx, peerID, headers, DefaultMaxRangeHeaders,
@@ -78,15 +80,15 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 			finished.Response.Height, finished.Response.Hash, err)
 
 		// The reply is consumed, so keep sync moving.
-		result.Effects = append(result.Effects, ScheduleCommitRetry{})
-		then(result, Continue{})
+		effects = append(effects, ScheduleCommitRetry{})
+		effects = append(effects, then(Continue{}))
 
-		return true
+		return effects, true
 	}
 	if !ok {
 		// Keep unmatched replies out of the compatibility path while
 		// discovery waits for a different locator response.
-		return d.session.AnchorActive(peerID)
+		return effects, d.session.AnchorActive(peerID)
 	}
 
 	request := finished.Request
@@ -97,28 +99,27 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 				peerID, request.StartHeight, request.StopHeight,
 				finished.Reason)
 
-			d.waitForAnchor(
+			effects = append(effects, d.waitForAnchor(
 				view, request, request.StartHeight,
-				request.StartHash, "", result,
-			)
+				request.StartHash, "",
+			)...)
 
-			return true
+			return effects, true
 		}
 
 		if finished.Conflict {
-			d.conflictAnchor(
+			effects = append(effects, d.conflictAnchor(
 				ctx, view, peerID, request, finished.Anchor,
-				result,
-			)
+			)...)
 
-			return true
+			return effects, true
 		}
 
-		d.rejectAnchor(
-			ctx, view, peerID, request, finished.Reason, result,
-		)
+		effects = append(effects, d.rejectAnchor(
+			ctx, view, peerID, request, finished.Reason,
+		)...)
 
-		return true
+		return effects, true
 	}
 
 	_, tipHeight, tipErr := d.tip.StoreTip()
@@ -136,10 +137,10 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 			request.StopHeight, tipHeight, pruned)
 
 		if !d.session.HasActiveWork() {
-			then(result, Continue{})
+			effects = append(effects, then(Continue{}))
 		}
 
-		return true
+		return effects, true
 	}
 
 	log.Infof("headersync anchor_discovered peer=%s height=%d hash=%s "+
@@ -157,28 +158,35 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 			finished.Range.StartHeight, finished.Range.StopHeight,
 			len(headers))
 
-		submitted, err := d.commitReadyRanges(ctx, view, result)
+		commitEffects, submitted, err := d.commitReadyRanges(ctx, view)
+		effects = append(effects, commitEffects...)
 		if err != nil {
 			log.Warnf("headersync failed to commit anchor-backed "+
 				"range_id=%d: %v", finished.Range.ID, err)
-			if d.rejectInvalidCommit(ctx, view, err, result) {
-				return true
+
+			rejectEffects, rejected := d.rejectInvalidCommit(
+				ctx, view, err,
+			)
+			effects = append(effects, rejectEffects...)
+			if rejected {
+				return effects, true
 			}
 		}
 
 		// Discover the span above the boundary while the span below
 		// it commits, once the chain is past its checkpoints.
 		if finished.Confirmed && d.tip.NextCheckpoint() == nil {
-			round := d.pipelineFrontier(
-				view, finished.Response, result,
+			pipeEffects, round := d.pipelineFrontier(
+				view, finished.Response,
 			)
-			then(result, anchorPipelined{
+			effects = append(effects, pipeEffects...)
+			effects = append(effects, then(anchorPipelined{
 				PeerID:   peerID,
 				Finished: finished,
 				Round:    round,
-			})
+			}))
 
-			return true
+			return effects, true
 		}
 
 		// The commit in flight owns the durable tip, so planning waits
@@ -190,15 +198,18 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 		// flight, and sits there until that request answers or times
 		// out.
 		if view.CommitPending || submitted {
-			d.continueAnchorSpan(view, finished, result)
+			spanEffects, _ := d.continueAnchorSpan(view, finished)
+			effects = append(effects, spanEffects...)
 
-			return true
+			return effects, true
 		}
 	}
 
-	d.planAfterAnchor(ctx, view, peerID, finished, result)
+	effects = append(effects, d.planAfterAnchor(
+		ctx, view, peerID, finished,
+	)...)
 
-	return true
+	return effects, true
 }
 
 // handleAnchorPipelined notes the overlapped discovery, then plans the ranges
@@ -206,7 +217,9 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 // of the staged range is in flight: planning then waits for its result, and
 // only the rest of the span is discovered.
 func (d *Driver) handleAnchorPipelined(ctx context.Context,
-	event anchorPipelined, view View, result *driverResult) {
+	event anchorPipelined, view View) []DriverEffect {
+
+	var effects []DriverEffect
 
 	if d.discoveryActive(event.Round) {
 		log.Debugf("headersync frontier_discovery_overlapped "+
@@ -215,28 +228,35 @@ func (d *Driver) handleAnchorPipelined(ctx context.Context,
 	}
 
 	if view.CommitPending {
-		d.continueAnchorSpan(view, event.Finished, result)
+		spanEffects, _ := d.continueAnchorSpan(view, event.Finished)
+		effects = append(effects, spanEffects...)
 
-		return
+		return effects
 	}
 
-	d.planAfterAnchor(ctx, view, event.PeerID, event.Finished, result)
+	effects = append(effects, d.planAfterAnchor(
+		ctx, view, event.PeerID, event.Finished,
+	)...)
+
+	return effects
 }
 
 // planAfterAnchor plans the ranges a confirmed anchor made possible and
 // dispatches them, or keeps discovering while the anchor waits for
 // confirmation.
-func (d *Driver) planAfterAnchor(ctx context.Context, view View,
-	peerID string, finished AnchorHeadersResult, result *driverResult) {
+func (d *Driver) planAfterAnchor(ctx context.Context, view View, peerID string,
+	finished AnchorHeadersResult) []DriverEffect {
+
+	var effects []DriverEffect
 
 	request := finished.Request
 	if !finished.Confirmed {
-		d.waitForAnchor(
+		effects = append(effects, d.waitForAnchor(
 			view, request, request.StartHeight, request.StartHash,
-			peerID, result,
-		)
+			peerID,
+		)...)
 
-		return
+		return effects
 	}
 
 	planned, err := d.planRanges(ctx, request.StopHeight)
@@ -244,61 +264,81 @@ func (d *Driver) planAfterAnchor(ctx context.Context, view View,
 		log.Warnf("headersync unable to plan ranges after anchor "+
 			"height=%d: %v", finished.Response.Height, err)
 	} else if planned > 0 {
-		then(result, DispatchWork{}, anchorPlanned{
+		effects = append(effects, then(DispatchWork{}, anchorPlanned{
 			PeerID: peerID, Finished: finished, Planned: planned,
-		})
+		}))
 
-		return
+		return effects
 	}
 
-	d.finishAnchorPlan(view, finished, planned, result)
+	effects = append(effects, d.finishAnchorPlan(
+		view, finished, planned,
+	)...)
+
+	return effects
 }
 
 // handleAnchorPlanned carries on once the planned ranges are dispatched.
-func (d *Driver) handleAnchorPlanned(event anchorPlanned, view View,
-	result *driverResult) {
+func (d *Driver) handleAnchorPlanned(event anchorPlanned,
+	view View) []DriverEffect {
 
-	d.finishAnchorPlan(view, event.Finished, event.Planned, result)
+	var effects []DriverEffect
+
+	effects = append(effects, d.finishAnchorPlan(
+		view, event.Finished, event.Planned,
+	)...)
+
+	return effects
 }
 
 // finishAnchorPlan keeps discovering the rest of the span, or starts over
 // when the anchor finished the span and nothing is in flight.
 func (d *Driver) finishAnchorPlan(view View, finished AnchorHeadersResult,
-	planned int, result *driverResult) {
+	planned int) []DriverEffect {
 
-	if d.continueAnchorSpan(view, finished, result) {
-		return
+	var effects []DriverEffect
+
+	spanEffects, more := d.continueAnchorSpan(view, finished)
+	effects = append(effects, spanEffects...)
+	if more {
+		return effects
 	}
 
 	if planned == 0 && !d.session.HasActiveWork() {
-		d.restartSync(result)
+		effects = append(effects, d.restartSync()...)
 	}
+
+	return effects
 }
 
 // continueAnchorSpan discovers the rest of the request's span when the reply
 // stopped short of it, from the boundary the reply named. It reports whether
 // there was anything left to discover.
-func (d *Driver) continueAnchorSpan(view View, finished AnchorHeadersResult,
-	result *driverResult) bool {
+func (d *Driver) continueAnchorSpan(view View,
+	finished AnchorHeadersResult) ([]DriverEffect, bool) {
+
+	var effects []DriverEffect
 
 	request := finished.Request
 	response := finished.Response
 	if response.Height >= request.StopHeight {
-		return false
+		return effects, false
 	}
 
-	d.waitForAnchor(
-		view, request, response.Height, response.Hash, "", result,
-	)
+	effects = append(effects, d.waitForAnchor(
+		view, request, response.Height, response.Hash, "",
+	)...)
 
-	return true
+	return effects, true
 }
 
 // waitForAnchor discovers the rest of the span from the start, leaving the
 // excluded peer out of the round.
 func (d *Driver) waitForAnchor(view View, request AnchorRequest,
-	startHeight uint32, startHash Hash, excludePeerID string,
-	result *driverResult) {
+	startHeight uint32, startHash Hash,
+	excludePeerID string) []DriverEffect {
+
+	var effects []DriverEffect
 
 	span := AnchorRequest{
 		StartHeight: startHeight,
@@ -311,52 +351,63 @@ func (d *Driver) waitForAnchor(view View, request AnchorRequest,
 		excluded = []string{excludePeerID}
 	}
 
-	round := d.discoverFrom(span, view.Peers, excluded, result)
-	then(result, anchorWaiting{
+	discoverEffects, round := d.discoverFrom(span, view.Peers, excluded)
+	effects = append(effects, discoverEffects...)
+	effects = append(effects, then(anchorWaiting{
 		Round: round, Span: span, Excluded: excludePeerID,
-	})
+	}))
+
+	return effects
 }
 
 // handleAnchorWaiting gives the sync peer up when the span has nothing in
 // flight. The serial networks start over; the others wait for a peer that
 // can answer.
-func (d *Driver) handleAnchorWaiting(event anchorWaiting,
-	result *driverResult) {
+func (d *Driver) handleAnchorWaiting(event anchorWaiting) []DriverEffect {
+	var effects []DriverEffect
 
 	if d.discoveryActive(event.Round) {
-		return
+		return effects
 	}
 
 	if d.session.HasActiveWork() {
-		return
+		return effects
 	}
 
-	result.Effects = append(result.Effects, SetSyncPeer{})
+	effects = append(effects, SetSyncPeer{})
 
 	if d.cfg.SerialFallback {
-		result.Effects = append(result.Effects, StartSync{})
+		effects = append(effects, StartSync{})
 
-		return
+		return effects
 	}
 
 	log.Debugf("headersync anchor_discovery_waiting start_height=%d "+
 		"stop_height=%d excluded_peer=%s", event.Span.StartHeight,
 		event.Span.StopHeight, event.Excluded)
+
+	return effects
 }
 
 // rejectAnchor punishes a peer whose discovery reply was malformed, and
 // discovers the span again without it.
 func (d *Driver) rejectAnchor(ctx context.Context, view View, peerID string,
-	request AnchorRequest, reason string, result *driverResult) {
+	request AnchorRequest, reason string) []DriverEffect {
+
+	var effects []DriverEffect
 
 	log.Warnf("headersync anchor_rejected peer=%s start_height=%d "+
 		"stop_height=%d reason=%s", peerID, request.StartHeight,
 		request.StopHeight, reason)
 
-	d.quarantinePeer(ctx, peerID, result)
-	result.Effects = append(result.Effects, DropCandidate{PeerID: peerID})
+	effects = append(effects, d.quarantinePeer(ctx, peerID)...)
+	effects = append(effects, DropCandidate{PeerID: peerID})
 
-	d.replanAnchor(view, request, []string{peerID}, result)
+	effects = append(effects, d.replanAnchor(
+		view, request, []string{peerID},
+	)...)
+
+	return effects
 }
 
 // conflictAnchor handles a well formed discovery reply that names a different
@@ -376,9 +427,10 @@ func (d *Driver) rejectAnchor(ctx context.Context, view View, peerID string,
 // The production policy needs one, so the first reply for a span is staged
 // and committed whatever a later conflict does to the anchor, and the loop
 // cannot stall it. We accept the loop for the stricter test-only policy.
-func (d *Driver) conflictAnchor(ctx context.Context, view View,
-	peerID string, request AnchorRequest, anchor Anchor,
-	result *driverResult) {
+func (d *Driver) conflictAnchor(ctx context.Context, view View, peerID string,
+	request AnchorRequest, anchor Anchor) []DriverEffect {
+
+	var effects []DriverEffect
 
 	log.Warnf("headersync anchor_conflict peer=%s start_height=%d "+
 		"stop_height=%d anchor_height=%d recorded_hash=%s",
@@ -391,36 +443,47 @@ func (d *Driver) conflictAnchor(ctx context.Context, view View,
 	)
 	if !rejected {
 		if !d.session.HasActiveWork() {
-			then(result, Continue{})
+			effects = append(effects, then(Continue{}))
 		}
 
-		return
+		return effects
 	}
 
-	d.replanAnchor(view, request, nil, result)
+	effects = append(effects, d.replanAnchor(view, request, nil)...)
+
+	return effects
 }
 
 // replanAnchor discovers the span of a rejected anchor reply again, leaving
 // the excluded peers out of the new round, and falls back to the regular sync
 // start when no other peer can answer.
 func (d *Driver) replanAnchor(view View, request AnchorRequest,
-	excluded []string, result *driverResult) {
+	excluded []string) []DriverEffect {
 
-	round := d.discoverFrom(request, view.Peers, excluded, result)
-	then(result, anchorReplanned{Round: round})
+	var effects []DriverEffect
+
+	discoverEffects, round := d.discoverFrom(
+		request, view.Peers, excluded,
+	)
+	effects = append(effects, discoverEffects...)
+	effects = append(effects, then(anchorReplanned{Round: round}))
+
+	return effects
 }
 
 // handleAnchorReplanned starts over when no peer took the span.
-func (d *Driver) handleAnchorReplanned(event anchorReplanned,
-	result *driverResult) {
+func (d *Driver) handleAnchorReplanned(event anchorReplanned) []DriverEffect {
+	var effects []DriverEffect
 
 	if d.discoveryActive(event.Round) {
-		return
+		return effects
 	}
 
 	if d.session.ActiveAnchorCount() == 0 {
-		result.Effects = append(result.Effects, SetSyncPeer{})
+		effects = append(effects, SetSyncPeer{})
 	}
 
-	result.Effects = append(result.Effects, StartSync{})
+	effects = append(effects, StartSync{})
+
+	return effects
 }
