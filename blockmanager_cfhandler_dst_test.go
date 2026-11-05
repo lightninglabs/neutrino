@@ -184,8 +184,8 @@ func testCFHeaderReadFailure(
 	require.ErrorIs(t, err, errDSTWrite)
 	require.ErrorIs(t, err, errCFHeaderRead)
 
-	// This is cfHandler's next normal iteration. Equal durable heights
-	// must not hide unpublished committed work.
+	// This is the filter sync loop's next normal iteration. Equal durable
+	// heights must not hide unpublished committed work.
 	if suffix {
 		previous, _, err := underlying.ChainTip()
 		require.NoError(t, err)

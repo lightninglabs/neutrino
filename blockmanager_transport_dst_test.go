@@ -1546,8 +1546,8 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 }
 
 // flakyTipStore fails one ChainTip call and counts calls. The count is
-// atomic because cfHandler reads the tip on its own goroutine while the test
-// inspects it.
+// atomic because the filter sync loop reads the tip on its own goroutine
+// while the test inspects it.
 type flakyTipStore struct {
 	*memBlockHeaderStore
 	failAt int32
@@ -1563,7 +1563,7 @@ func (s *flakyTipStore) ChainTip() (*wire.BlockHeader, uint32, error) {
 }
 
 // TestCFHandlerRetriesTipError checks that a failed block header tip read
-// does not end filter header sync. cfHandler used to log it as critical and
+// does not end filter header sync. The loop used to log it as critical and
 // return, which stopped filter sync until restart; with the SQL backends that
 // read can fail transiently.
 func TestCFHandlerRetriesTipError(t *testing.T) {
@@ -1575,14 +1575,14 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 			offset:           time.Until(genesis.Timestamp),
 		}
 		// The first read is the synced check in the wait loop; fail
-		// the second, cfHandler's own tip read.
+		// the second, the loop's own tip read.
 		flaky := &flakyTipStore{memBlockHeaderStore: store, failAt: 2}
 		bm.cfg.BlockHeaders = flaky
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			bm.cfHandler()
+			bm.filterSyncLoop()
 		}()
 		synctest.Wait()
 		calls := flaky.calls.Load()
@@ -1592,13 +1592,13 @@ func TestCFHandlerRetriesTipError(t *testing.T) {
 
 		select {
 		case <-done:
-			t.Fatal("cfHandler exited after a tip read error")
+			t.Fatal("filter sync exited after a tip read error")
 		default:
 		}
 		time.Sleep(retryTimeout)
 		synctest.Wait()
 		require.Greater(t, flaky.calls.Load(), calls,
-			"cfHandler never read the tip again")
+			"filter sync never read the tip again")
 
 		require.NoError(t, bm.Stop())
 		<-done
