@@ -2,13 +2,14 @@ package headersync
 
 import "context"
 
-// DiscoveryOutcome is the result of an event that plans anchor discovery.
+// DiscoveryOutcome is what a discovery round leaves for the follow-up that
+// judges it once its requests are written.
 type DiscoveryOutcome struct {
-	// Settled is set when the event decided the outcome without asking for
+	// Settled is set when the round decided the outcome without asking for
 	// any request. Active then tells whether discovery is running or
 	// waiting on peers that are. Otherwise the effects hold the requests
 	// to send, and ActivePeers counts the requests already in flight, so
-	// that the executor can tell once it knows how many sends succeeded.
+	// that the follow-up can tell once it knows how many sends succeeded.
 	Settled     bool
 	Active      bool
 	ActivePeers int
@@ -17,121 +18,80 @@ type DiscoveryOutcome struct {
 	Span AnchorRequest
 }
 
-// DiscoverAnchors asks the driver to discover the anchors of the span between
-// the durable tip and the next checkpoint.
-type DiscoverAnchors struct {
-	Tip        ChainPoint
-	Stop       ChainPoint
-	BestHeight uint32
-	Peers      []PeerCandidate
-}
-
-func (DiscoverAnchors) driverEvent() {}
-
-// DiscoverFrontier asks the driver to discover the next boundary above the
-// durable tip when there is no checkpoint left to aim at.
-type DiscoverFrontier struct {
-	Tip        ChainPoint
-	BestHeight uint32
-	Peers      []PeerCandidate
-}
-
-func (DiscoverFrontier) driverEvent() {}
-
-// PipelineFrontier asks the driver to discover the span above a boundary that
-// was just learned, overlapping that discovery with the commit of the span
-// below it.
-type PipelineFrontier struct {
-	After      ChainPoint
-	BestHeight uint32
-	Peers      []PeerCandidate
-}
-
-func (PipelineFrontier) driverEvent() {}
-
-// DiscoverFrom asks the driver to discover the anchor at the end of a span
-// again, leaving the excluded peers out of the round.
-type DiscoverFrom struct {
-	Span     AnchorRequest
-	Peers    []PeerCandidate
-	Excluded []string
-}
-
-func (DiscoverFrom) driverEvent() {}
-
-// handleDiscoverAnchors plans the discovery of the next checkpoint's anchors.
-func (d *Driver) handleDiscoverAnchors(ctx context.Context,
-	event DiscoverAnchors, result *DriverResult) {
+// discoverAnchors plans the discovery of the next checkpoint's anchors in the
+// span between the durable tip and the checkpoint.
+func (d *Driver) discoverAnchors(ctx context.Context, tip, stop ChainPoint,
+	bestHeight uint32, peers []PeerCandidate,
+	result *DriverResult) DiscoveryOutcome {
 
 	span, ok, err := d.runtime.controller.AnchorDiscoverySpan(
-		ctx, event.Tip, event.Stop, event.BestHeight,
+		ctx, tip, stop, bestHeight,
 	)
 	if err != nil {
 		log.Warnf("headersync unable to plan anchor discovery: %v", err)
-		result.Discovery = DiscoveryOutcome{Settled: true}
-		return
+
+		return DiscoveryOutcome{Settled: true}
 	}
 	if !ok {
-		result.Discovery = DiscoveryOutcome{Settled: true}
-		return
+		return DiscoveryOutcome{Settled: true}
 	}
 
-	d.discoverFrom(span, event.Peers, nil, result)
+	return d.discoverFrom(span, peers, nil, result)
 }
 
-// handleDiscoverFrontier plans the discovery of the next boundary above the
-// tip.
-func (d *Driver) handleDiscoverFrontier(ctx context.Context,
-	event DiscoverFrontier, result *DriverResult) {
+// discoverFrontier plans the discovery of the next boundary above the durable
+// tip, once there is no checkpoint left to aim at.
+func (d *Driver) discoverFrontier(ctx context.Context, tip ChainPoint,
+	bestHeight uint32, peers []PeerCandidate,
+	result *DriverResult) DiscoveryOutcome {
 
 	span, ok, err := d.runtime.controller.FrontierDiscoverySpan(
-		ctx, event.Tip, event.BestHeight,
+		ctx, tip, bestHeight,
 	)
 	if err != nil {
 		log.Warnf(
 			"headersync unable to plan frontier discovery: %v",
 			err,
 		)
-		result.Discovery = DiscoveryOutcome{Settled: true}
-		return
+
+		return DiscoveryOutcome{Settled: true}
 	}
 	if !ok {
-		result.Discovery = DiscoveryOutcome{Settled: true}
-		return
+		return DiscoveryOutcome{Settled: true}
 	}
 
 	log.Debugf("headersync frontier_discovery_needed height=%d "+
 		"target_height=%d start_height=%d stop_height=%d",
-		event.Tip.Height, event.BestHeight, span.StartHeight,
-		span.StopHeight)
+		tip.Height, bestHeight, span.StartHeight, span.StopHeight)
 
-	d.discoverFrom(span, event.Peers, nil, result)
+	return d.discoverFrom(span, peers, nil, result)
 }
 
-// handlePipelineFrontier plans the discovery of the span above a boundary
-// that was just learned.
-func (d *Driver) handlePipelineFrontier(event PipelineFrontier,
-	result *DriverResult) {
+// pipelineFrontier plans the discovery of the span above a boundary that was
+// just learned, overlapping that discovery with the commit of the span below
+// it.
+func (d *Driver) pipelineFrontier(view View, after AnchorResponse,
+	result *DriverResult) DiscoveryOutcome {
 
+	bestHeight := view.bestHeight()
 	span, ok := d.runtime.controller.FrontierLookaheadSpan(
-		event.After, event.BestHeight,
+		ChainPoint{Height: after.Height, Hash: after.Hash}, bestHeight,
 	)
 	if !ok {
-		result.Discovery = DiscoveryOutcome{Settled: true}
-		return
+		return DiscoveryOutcome{Settled: true}
 	}
 
 	log.Debugf("headersync frontier_discovery_pipelined "+
 		"start_height=%d stop_height=%d target_height=%d",
-		span.StartHeight, span.StopHeight, event.BestHeight)
+		span.StartHeight, span.StopHeight, bestHeight)
 
-	d.discoverFrom(span, event.Peers, nil, result)
+	return d.discoverFrom(span, view.Peers, nil, result)
 }
 
 // discoverFrom asks every peer the plan selects for the anchor at the end of
-// the span.
+// the span, leaving the excluded peers out of the round.
 func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
-	excluded []string, result *DriverResult) {
+	excluded []string, result *DriverResult) DiscoveryOutcome {
 
 	plan := d.runtime.controller.PlanAnchorRequests(
 		span, peers, excluded...,
@@ -150,11 +110,10 @@ func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
 			span.StopHeight,
 		)
 
-		result.Discovery = DiscoveryOutcome{
+		return DiscoveryOutcome{
 			Settled: true,
 			Active:  plan.Active(),
 		}
-		return
 	}
 
 	for _, peer := range plan.Peers {
@@ -167,7 +126,8 @@ func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
 			StopHash:    span.StopHash,
 		})
 	}
-	result.Discovery = DiscoveryOutcome{
+
+	return DiscoveryOutcome{
 		ActivePeers: plan.ActivePeers,
 		Span:        span,
 	}

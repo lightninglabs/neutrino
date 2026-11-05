@@ -377,22 +377,37 @@ func newBlockManager(cfg *blockManagerCfg) (*blockManager, error) {
 	return &bm, nil
 }
 
-// tipConfig returns what the driver's validation cache needs from the block
-// manager.
-func (b *blockManager) tipConfig() headersync.TipConfig {
-	return headersync.TipConfig{
-		Params:              &b.cfg.ChainParams,
-		BlocksPerRetarget:   b.blocksPerRetarget,
-		MinRetargetTimespan: b.minRetargetTimespan,
-		MaxRetargetTimespan: b.maxRetargetTimespan,
+// driverConfig returns what the header sync driver needs from the block
+// manager: the validation cache's dependencies, the network's path choice,
+// and readers of the state the block manager keeps changing.
+func (b *blockManager) driverConfig() headersync.DriverConfig {
+	return headersync.DriverConfig{
+		Tip: headersync.TipConfig{
+			Params:              &b.cfg.ChainParams,
+			BlocksPerRetarget:   b.blocksPerRetarget,
+			MinRetargetTimespan: b.minRetargetTimespan,
+			MaxRetargetTimespan: b.maxRetargetTimespan,
 
-		// The stores and the time source can be replaced after
-		// construction, so validation reads them on each use.
-		TimeSource: func() blockchain.MedianTimeSource {
-			return b.cfg.TimeSource
+			// The stores and the time source can be replaced after
+			// construction, so validation reads them on each use.
+			TimeSource: func() blockchain.MedianTimeSource {
+				return b.cfg.TimeSource
+			},
+			BlockHeaders: func() headerfs.BlockHeaderStore {
+				return b.cfg.BlockHeaders
+			},
 		},
-		BlockHeaders: func() headerfs.BlockHeaderStore {
-			return b.cfg.BlockHeaders
+		SerialFallback: b.allowSerialHeaderFallback(),
+		PublishedTip: func() uint32 {
+			return b.tipFeed.Snapshot().BlockHeight
+		},
+		RequestTimeout: func() time.Duration {
+			return b.headerSyncTimeout
+		},
+		LogProgress: func(timestamp time.Time, height int32) {
+			b.blkHeaderProgressLogger.LogBlockHeight(
+				timestamp, height,
+			)
 		},
 	}
 }
@@ -414,7 +429,7 @@ func (b *blockManager) initHeaderSyncManager(node headerlist.Node) error {
 			Hash:   hash,
 		},
 		b.cfg.ChainParams.Checkpoints,
-		b.tipConfig(),
+		b.driverConfig(),
 	)
 	runtime.Driver().ResetTip(node)
 	b.headerSync = runtime
@@ -603,7 +618,7 @@ func (b *blockManager) handleNewPeerMsg(peers *list.List, sp *ServerPeer) {
 	// peers are all blocked, with no request or timer outstanding, never
 	// schedules anything again: a new peer is the event that unsticks it.
 	if b.SyncPeer() != nil && !b.allowSerialHeaderFallback() {
-		b.continueHeaderSync(peers)
+		b.handleDriverEvent(peers, headersync.Continue{})
 		return
 	}
 
@@ -639,31 +654,10 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *ServerPeer) {
 	}
 
 	log.Infof("Lost peer %s", sp)
-	done := b.handleDriverEvent(
-		nil, headersync.PeerDone{PeerID: sp.Addr()},
-	)
-	hadHeaderSyncWork := done.result.HadWork
-	b.unregisterHeaderSyncPeer(sp)
 
-	// Attempt to find a new peer to sync from if the quitting peer is the
-	// sync peer. Also, reset the header state.
-	if b.SyncPeer() != nil && b.SyncPeer() == sp {
-		b.setSyncPeer(nil)
-		if b.pendingHeaderCommit != nil {
-			return
-		}
-		// Reset the cache and the visible tip together, so they keep
-		// describing the same header.
-		if err := b.resetHeaderListToTip(); err != nil {
-			return
-		}
-		b.startSync(peers)
-		return
-	}
-
-	if hadHeaderSyncWork && b.pendingHeaderCommit == nil {
-		b.continueHeaderSync(peers)
-	}
+	// The driver abandons the peer's requests and decides what the loss
+	// means: a lost sync peer starts sync over, a lost worker carries on.
+	b.handleDriverEvent(peers, headersync.PeerGone{PeerID: sp.Addr()}, sp)
 }
 
 // sendHeaderTimeout keeps timeout decisions behind queued peer responses
@@ -759,30 +753,18 @@ func (b *blockManager) handlePeerMessage(peers *list.List, message any) {
 		}
 		b.headerCooldownTimer = nil
 
-		// Dispatch recovers every peer whose cooldown expired; arm
-		// the next wakeup for any still cooling down. While a serial
-		// request is in flight, resume the planned work and discovery
-		// but do not start the serial path: continuing sync could
-		// reselect the sync peer under that request. Dispatch alone
-		// would leave a span that waited on the cooling peers without
-		// any discovery to restart it.
-		if b.headerSyncTimer != nil {
-			b.resumeHeaderSyncWork(peers)
-		} else {
-			b.continueHeaderSync(peers)
-		}
-		b.handleDriverEvent(nil, headersync.CooldownWakeDue{})
+		// Dispatch recovers every peer whose cooldown expired; the
+		// driver then arms the next wakeup for any still cooling
+		// down. A serial request in flight rules out a fresh start.
+		b.handleDriverEvent(peers, headersync.CooldownElapsed{
+			SerialRequestPending: b.headerSyncTimer != nil,
+		})
 	case *headerSyncCommitRetryMsg:
 		if msg.generation != b.headerCommitRetryID {
 			return
 		}
 		b.headerCommitRetryTimer = nil
-		if err := b.commitReadyHeaderSyncRanges(); err != nil {
-			log.Warnf("headersync commit_retry_failed: %v", err)
-			b.rejectInvalidHeaderCommit(peers, err)
-			return
-		}
-		b.continueHeaderSync(peers)
+		b.handleDriverEvent(peers, headersync.RetryCommit{})
 	case *donePeerMsg:
 		b.handleDonePeerMsg(peers, msg.peer)
 	default:
@@ -908,20 +890,6 @@ func (b *blockManager) armHeaderSyncTimeout(peer *ServerPeer,
 			timeout:     timeout,
 		})
 	})
-}
-
-// advanceHeaderSyncTip reconciles the headersync FSM with a durable tip that
-// the serial writer persisted, and drops the staging of ranges it retired.
-func (b *blockManager) advanceHeaderSyncTip(height uint32,
-	hash chainhash.Hash) {
-
-	outcome := b.handleDriverEvent(nil, headersync.AdvanceTip{
-		Tip: headersync.ChainPoint{Height: height, Hash: hash},
-	})
-	if outcome.err != nil {
-		log.Warnf("headersync unable to advance to serial tip "+
-			"height=%d: %v", height, outcome.err)
-	}
 }
 
 // handleNoProgressReply settles an empty serial reply. From a peer that is
@@ -1090,72 +1058,83 @@ func (b *blockManager) startSync(peers *list.List) {
 		}
 	}
 
-	// Start syncing from the best peer if one was selected.
-	if bestPeer != nil {
-		if bestPeer.LastBlock() > 0 {
-			bestHeight := uint32(bestPeer.LastBlock())
-			if b.shouldDeferHeaderSyncBootstrap(peers, bestHeight) {
-				return
-			}
-			if b.startHeaderSync(peers, bestPeer, bestHeight) {
-				b.clearHeaderSyncBootstrapDelay()
-				return
-			}
-		}
+	if bestPeer == nil {
+		log.Warnf("No sync peer candidates available")
+		return
+	}
 
-		locator, err := b.cfg.BlockHeaders.LatestBlockLocator()
-		if err != nil {
-			log.Errorf("Failed to get block locator for the "+
-				"latest block: %s", err)
+	// Start syncing from the best peer. The driver takes the parallel path
+	// when the network and the peer's height allow it, and asks for the
+	// serial path through StartSerialSync otherwise.
+	var peerHeight uint32
+	if bestPeer.LastBlock() > 0 {
+		peerHeight = uint32(bestPeer.LastBlock())
+		if b.shouldDeferHeaderSyncBootstrap(peers, peerHeight) {
 			return
 		}
+	}
 
-		log.Infof("Syncing to block height %d from peer %s",
-			bestPeer.LastBlock(), bestPeer.Addr())
+	b.handleDriverEvent(peers, headersync.BeginSync{
+		BestPeerID: bestPeer.Addr(),
+		BestHeight: peerHeight,
+		TipHeight:  bestHeight,
+	}, bestPeer)
+}
 
-		// Now that we know we have a new sync peer, we'll lock it in
-		// within the proper attribute.
-		b.setSyncPeer(bestPeer)
+// startSerialSync starts the serial path from the peer: it becomes the sync
+// peer and is asked for the headers after our locator, up to the stop hash the
+// driver chose.
+func (b *blockManager) startSerialSync(peers *list.List, bestPeer *ServerPeer,
+	effect headersync.StartSerialSync) {
 
-		// By default will use the zero hash as our stop hash to query
-		// for all the headers beyond our view of the network based on
-		// our latest block locator.
-		stopHash := &zeroHash
+	locator, err := b.cfg.BlockHeaders.LatestBlockLocator()
+	if err != nil {
+		log.Errorf("Failed to get block locator for the "+
+			"latest block: %s", err)
+		return
+	}
 
-		// If we're still within the range of the set checkpoints, then
-		// we'll use the next checkpoint to guide the set of headers we
-		// fetch, setting our stop hash to the next checkpoint hash.
-		next := b.driver().NextCheckpoint()
-		if next != nil && int32(bestHeight) < next.Height {
-			log.Infof("Downloading headers for blocks %d to "+
-				"%d from peer %s", bestHeight+1,
-				next.Height, bestPeer.Addr())
+	log.Infof("Syncing to block height %d from peer %s",
+		bestPeer.LastBlock(), bestPeer.Addr())
 
-			stopHash = next.Hash
-		} else {
-			log.Infof("Fetching set of headers from tip "+
-				"(height=%v) from peer %s", bestHeight,
-				bestPeer.Addr())
-		}
+	// Now that we know we have a new sync peer, we'll lock it in
+	// within the proper attribute.
+	b.setSyncPeer(bestPeer)
 
-		// With our stop hash selected, we'll kick off the sync from
-		// this peer with an initial GetHeaders message.
-		if err := b.requestHeaders(
-			bestPeer, locator, stopHash, bestHeight,
-		); err != nil {
-			log.Warnf("Failed to send getheaders message to "+
-				"peer %s: %s", bestPeer.Addr(), err)
+	// By default will use the zero hash as our stop hash to query
+	// for all the headers beyond our view of the network based on
+	// our latest block locator.
+	stopHash := &zeroHash
 
-			removeSyncCandidate(peers, bestPeer)
+	// If we're still within the range of the set checkpoints, then
+	// we'll use the next checkpoint to guide the set of headers we
+	// fetch, setting our stop hash to the next checkpoint hash.
+	if effect.StopHeight > 0 {
+		log.Infof("Downloading headers for blocks %d to "+
+			"%d from peer %s", effect.StartHeight+1,
+			effect.StopHeight, bestPeer.Addr())
 
-			if b.syncPeer.Load() == bestPeer {
-				b.setSyncPeer(nil)
-			}
-
-			b.startSync(peers)
-		}
+		stopHash = &effect.StopHash
 	} else {
-		log.Warnf("No sync peer candidates available")
+		log.Infof("Fetching set of headers from tip "+
+			"(height=%v) from peer %s", effect.StartHeight,
+			bestPeer.Addr())
+	}
+
+	// With our stop hash selected, we'll kick off the sync from
+	// this peer with an initial GetHeaders message.
+	err = b.requestHeaders(bestPeer, locator, stopHash, effect.StartHeight)
+	if err != nil {
+		log.Warnf("Failed to send getheaders message to "+
+			"peer %s: %s", bestPeer.Addr(), err)
+
+		removeSyncCandidate(peers, bestPeer)
+
+		if b.syncPeer.Load() == bestPeer {
+			b.setSyncPeer(nil)
+		}
+
+		b.startSync(peers)
 	}
 }
 

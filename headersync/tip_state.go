@@ -98,6 +98,11 @@ func (t *TipState) FetchHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 	return t.cfg.BlockHeaders().FetchHeader(hash)
 }
 
+// StoreTip returns the durable block header tip and its height.
+func (t *TipState) StoreTip() (*wire.BlockHeader, uint32, error) {
+	return t.cfg.BlockHeaders().ChainTip()
+}
+
 // FetchHeaderByHeight returns the header at a height of the block header
 // store.
 func (t *TipState) FetchHeaderByHeight(height uint32) (*wire.BlockHeader,

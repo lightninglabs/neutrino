@@ -17,12 +17,10 @@ const (
 )
 
 // PlanRanges asks the driver to plan the ranges between the durable tip and
-// the next boundary. Checkpoint is the next checkpoint the chain must reach,
-// or nil once the chain is past its last checkpoint and ranges are planned
-// against the best peer height alone.
+// the next boundary: the next checkpoint the chain must reach, or the best
+// peer height once the chain is past its last checkpoint. The number of
+// ranges planned is the Planned field of the result.
 type PlanRanges struct {
-	Tip        ChainPoint
-	Checkpoint *ChainPoint
 	BestHeight uint32
 }
 
@@ -107,10 +105,10 @@ type ArmRequestTimer struct {
 
 func (ArmRequestTimer) driverEffect() {}
 
-// handlePlanRanges plans ranges against the next checkpoint, or against the
-// best peer height when there is none.
-func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
-	result *DriverResult) error {
+// planRangesFrom plans ranges from the tip against the checkpoint, or against
+// the best peer height when there is none, and reports how many it planned.
+func (d *Driver) planRangesFrom(ctx context.Context, tip ChainPoint,
+	checkpoint *ChainPoint, bestHeight uint32) (int, error) {
 
 	var (
 		ranges     []HeaderRange
@@ -119,31 +117,31 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 		wait       bool
 	)
 	controller := d.runtime.controller
-	height := event.Tip.Height
+	height := tip.Height
 
-	if event.Checkpoint == nil {
-		if height >= event.BestHeight {
-			return nil
+	if checkpoint == nil {
+		if height >= bestHeight {
+			return 0, nil
 		}
 
 		plan, err := controller.PlanFrontierRanges(
-			ctx, event.Tip, event.BestHeight,
+			ctx, tip, bestHeight,
 		)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		ranges = plan.Ranges
 	} else {
-		stopHeight := event.Checkpoint.Height
-		if height >= stopHeight || event.BestHeight < stopHeight {
-			return nil
+		stopHeight := checkpoint.Height
+		if height >= stopHeight || bestHeight < stopHeight {
+			return 0, nil
 		}
 
 		plan, err := controller.PlanCheckpointRanges(
-			ctx, event.Tip, *event.Checkpoint, event.BestHeight,
+			ctx, tip, *checkpoint, bestHeight,
 		)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		ranges = plan.Ranges
@@ -159,12 +157,12 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 					"height=%d checkpoint=%d span=%d "+
 					"max_headers=%d",
 				height,
-				event.Checkpoint.Height,
+				checkpoint.Height,
 				span,
 				maxHeaders,
 			)
 		}
-		return nil
+		return 0, nil
 	}
 
 	for _, rng := range ranges {
@@ -178,9 +176,8 @@ func (d *Driver) handlePlanRanges(ctx context.Context, event PlanRanges,
 			rng.StopHash,
 		)
 	}
-	result.Planned = len(ranges)
 
-	return nil
+	return len(ranges), nil
 }
 
 // handleAssignRanges hands queued ranges to the peers.

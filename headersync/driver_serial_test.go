@@ -90,7 +90,7 @@ func newSerialTestDriver(chain []*wire.BlockHeader) *Driver {
 	fsm := NewHeaderSyncFSM(0, chain[0].BlockHash(), DefaultConfig())
 	runtime := &Runtime{manager: NewManager(fsm)}
 
-	return newDriver(runtime, NewSession(), tip)
+	return newDriver(runtime, NewSession(), tip, DriverConfig{})
 }
 
 // TestTipHeadersDisconnectsUnconnected checks that a message whose headers do
@@ -104,7 +104,7 @@ func TestTipHeadersDisconnectsUnconnected(t *testing.T) {
 	result, err := driver.Handle(t.Context(), TipHeaders{
 		PeerID:  "peer",
 		Headers: []*wire.BlockHeader{chain[1], chain[0]},
-	})
+	}, View{})
 	require.NoError(t, err)
 	require.Equal(
 		t, []DriverEffect{DisconnectTipPeer{PeerID: "peer"}},
@@ -122,16 +122,16 @@ func TestTipLeaseFollowsTheSyncPeer(t *testing.T) {
 	driver := newSerialTestDriver(chain)
 	manager := driver.runtime.manager
 
-	_, err := driver.Handle(t.Context(), FollowTip{PeerID: "a"})
+	_, err := driver.Handle(t.Context(), FollowTip{PeerID: "a"}, View{})
 	require.NoError(t, err)
 	first := manager.TipLease()
 	require.Equal(t, "a", first.PeerID)
 
-	_, err = driver.Handle(t.Context(), FollowTip{PeerID: "a"})
+	_, err = driver.Handle(t.Context(), FollowTip{PeerID: "a"}, View{})
 	require.NoError(t, err)
 	require.Equal(t, first, manager.TipLease())
 
-	_, err = driver.Handle(t.Context(), FollowTip{PeerID: ""})
+	_, err = driver.Handle(t.Context(), FollowTip{PeerID: ""}, View{})
 	require.NoError(t, err)
 	released := manager.TipLease()
 	require.Empty(t, released.PeerID)
@@ -151,7 +151,7 @@ func TestTipHeadersIgnoresForeignPeerWhileSyncing(t *testing.T) {
 	result, err := driver.Handle(t.Context(), TipHeaders{
 		PeerID:  "peer",
 		Headers: chain[:1],
-	})
+	}, View{})
 	require.NoError(t, err)
 	require.Empty(t, result.Effects)
 }

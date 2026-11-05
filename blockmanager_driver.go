@@ -45,15 +45,39 @@ func (b *blockManager) handleDriverEvent(peers *list.List,
 	defer cancel()
 
 	var outcome driverOutcome
-	outcome.result, outcome.err = b.headerSync.Driver().Handle(ctx, event)
+	outcome.result, outcome.err = b.headerSync.Driver().Handle(
+		ctx, event, b.driverView(peers),
+	)
 
 	for _, effect := range outcome.result.Effects {
+		if then, ok := effect.(headersync.Then); ok {
+			for _, next := range then.Events {
+				nested := b.handleDriverEvent(
+					peers, next, known...,
+				)
+				outcome.sent += nested.sent
+			}
+
+			continue
+		}
 		if b.executeDriverEffect(peers, known, effect) {
 			outcome.sent++
 		}
 	}
 
 	return outcome
+}
+
+// driverView snapshots the state the driver reads but the block manager owns.
+func (b *blockManager) driverView(peers *list.List) headersync.View {
+	view := headersync.View{
+		CommitPending: b.pendingHeaderCommit != nil,
+	}
+	if peers != nil {
+		view.Peers = headerSyncPeerCandidates(peers)
+	}
+
+	return view
 }
 
 // driverPeer finds the peer an effect is about.
@@ -138,6 +162,13 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 		removeSyncCandidate(peers, sp)
 		sp.Disconnect()
 
+	case headersync.DropCandidate:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		removeSyncCandidate(peers, sp)
+
 	case headersync.DisconnectTipPeer:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
@@ -182,18 +213,46 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.CancelCommitRetry:
 		b.cancelHeaderCommitRetry()
 
-	case headersync.ContinueSync:
-		b.continueHeaderSync(peers)
-
-	case headersync.CommitReadyRanges:
-		if err := b.commitReadyHeaderSyncRanges(); err != nil {
-			log.Warnf("headersync failed to commit ready ranges: "+
-				"%v", err)
-			if b.rejectInvalidHeaderCommit(peers, err) {
-				return false
-			}
+	case headersync.SetSyncPeer:
+		if effect.PeerID == "" {
+			b.setSyncPeer(nil)
+			return false
 		}
-		b.continueHeaderSync(peers)
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			log.Warnf("headersync driver named unknown sync "+
+				"peer %s", effect.PeerID)
+			return false
+		}
+		if effect.UnlessGone && peerDisconnected(sp) {
+			return false
+		}
+		b.setSyncPeer(sp)
+
+	case headersync.ContinueSerial:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			return false
+		}
+		b.finishSerialHeaderFollowup(peers, sp, effect)
+
+	case headersync.SubmitRangeCommit:
+		b.submitRangeCommit(effect.Prepared)
+
+	case headersync.StartSync:
+		b.startSync(peers)
+
+	case headersync.StartSerialSync:
+		sp := driverPeer(peers, known, effect.PeerID)
+		if sp == nil {
+			log.Warnf("headersync driver named unknown serial "+
+				"sync peer %s", effect.PeerID)
+			return false
+		}
+		b.startSerialSync(peers, sp, effect)
+
+	case headersync.ClearBootstrapDelay:
+		b.clearHeaderSyncBootstrapDelay()
 
 	default:
 		log.Warnf("headersync driver emitted unknown effect %T", effect)

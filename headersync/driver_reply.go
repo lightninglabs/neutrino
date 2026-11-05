@@ -8,34 +8,40 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 )
 
-// RangeReply delivers a headers message to the driver to see whether it
-// answers a range request. The driver judges the reply against the range it
-// was asked for, completes the range, and stages the headers of a valid one.
-type RangeReply struct {
+// HeadersReceived delivers a headers message. The driver matches it against
+// the peer's anchor request, then its range request, and otherwise reads it
+// as headers that follow the tip. An empty message that answers no request
+// depends on the executor's serial deadline, so the driver leaves it
+// unhandled and the executor settles it.
+type HeadersReceived struct {
+	// PeerID is the address of the peer that sent the headers.
 	PeerID string
 
 	// PeerHeight is the height the peer advertises.
 	PeerHeight int32
 
+	// Headers are the headers of the message.
 	Headers []*wire.BlockHeader
 
-	// AnchorTimeout is how long the rejection of an anchor that the
-	// reply refutes stays recorded.
-	AnchorTimeout time.Duration
+	// HeadersSynced is set when the node believes it is current.
+	HeadersSynced bool
 }
 
-func (RangeReply) driverEvent() {}
+func (HeadersReceived) driverEvent() {}
 
-// RejectUntrustedAnchor asks the driver to reject an untrusted anchor and the
-// unstaged work built on it. Tag names the reason in the log.
-type RejectUntrustedAnchor struct {
-	Tag     string
-	Height  uint32
-	Hash    Hash
-	Timeout time.Duration
+// rangeReply is a headers message judged against the peer's range request.
+type rangeReply struct {
+	peerID string
+
+	// peerHeight is the height the peer advertises.
+	peerHeight int32
+
+	headers []*wire.BlockHeader
+
+	// anchorTimeout is how long the rejection of an anchor that the reply
+	// refutes stays recorded.
+	anchorTimeout time.Duration
 }
-
-func (RejectUntrustedAnchor) driverEvent() {}
 
 // ScheduleCommitRetry asks the executor to keep one wakeup while staging
 // waits for storage. A recovered store must not need another network
@@ -44,26 +50,51 @@ type ScheduleCommitRetry struct{}
 
 func (ScheduleCommitRetry) driverEffect() {}
 
-// ContinueSync asks the executor to plan, dispatch and, if nothing is left to
-// run, start syncing from the best peer again.
-type ContinueSync struct{}
-
-func (ContinueSync) driverEffect() {}
-
-// CommitReadyRanges asks the executor to commit the staged ranges that are
-// ready, and then to continue syncing, unless the commit failed on a range
-// that was invalid and the executor already dealt with it.
-type CommitReadyRanges struct{}
-
-func (CommitReadyRanges) driverEffect() {}
-
-// handleRangeReply judges a headers message against the range request of the
-// peer, if it has one.
-func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
-	result *DriverResult) {
+// handleHeadersReceived finds the request a headers message answers.
+func (d *Driver) handleHeadersReceived(ctx context.Context,
+	event HeadersReceived, view View, result *DriverResult) {
 
 	peerID := event.PeerID
 	headers := event.Headers
+	if d.handleAnchorHeaders(ctx, view, peerID, headers, result) {
+		result.Handled = true
+
+		return
+	}
+
+	d.handleRangeReply(ctx, rangeReply{
+		peerID:        peerID,
+		peerHeight:    event.PeerHeight,
+		headers:       headers,
+		anchorTimeout: d.cfg.RequestTimeout(),
+	}, view, result)
+	if result.Handled {
+		return
+	}
+
+	// Nothing to do for an empty headers message, beyond settling the
+	// sync peer's outstanding request, which the executor does.
+	if len(headers) == 0 {
+		return
+	}
+
+	// The headers follow the tip: an extension, known headers, a reorg, a
+	// checkpoint failure or garbage.
+	d.handleTipHeaders(TipHeaders{
+		PeerID:        peerID,
+		Headers:       headers,
+		HeadersSynced: event.HeadersSynced,
+	}, result)
+	result.Handled = true
+}
+
+// handleRangeReply judges a headers message against the range request of the
+// peer, if it has one.
+func (d *Driver) handleRangeReply(ctx context.Context, event rangeReply,
+	view View, result *DriverResult) {
+
+	peerID := event.peerID
+	headers := event.headers
 	request, ok := d.session.FinishRangeHeaders(peerID, headers)
 	if !ok {
 		if d.session.RangeActive(peerID) {
@@ -106,7 +137,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, rng.State)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -144,7 +175,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 	// quarantining and disconnecting it; the range is replanned either
 	// way.
 	lagging := len(headers) == 0 &&
-		event.PeerHeight < int32(rng.StopHeight)
+		event.peerHeight < int32(rng.StopHeight)
 
 	// A well formed reply that holds a different header at the range's
 	// stop height refutes the stop hash. When only an unvalidated
@@ -178,7 +209,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 	case !valid && lagging:
 		log.Infof("headersync range_unavailable peer=%s range_id=%d "+
 			"peer_height=%d stop_height=%d", peerID,
-			assignment.RangeID, event.PeerHeight, rng.StopHeight)
+			assignment.RangeID, event.peerHeight, rng.StopHeight)
 		d.setPeerState(ctx, peerID, PeerBlocked, result)
 
 	case contradicted:
@@ -219,7 +250,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 			result.Effects, ScheduleCommitRetry{},
 		)
 		d.setPeerState(ctx, peerID, PeerBlocked, result)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -227,7 +258,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		log.Infof("headersync stale_completion peer=%s range_id=%d "+
 			"epoch=%d state=%s", peerID, assignment.RangeID,
 			assignment.LeaseEpoch, complete.RangeState)
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 	if !complete.Accepted || !valid {
@@ -236,13 +267,13 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 			d.rejectUntrustedAnchor(
 				ctx, "anchor_rejected_by_replies",
 				rng.StopHeight, rng.StopHash,
-				event.AnchorTimeout,
+				event.anchorTimeout,
 			)
 
 		case !valid:
 			d.replanRange(ctx, rng)
 		}
-		result.Effects = append(result.Effects, ContinueSync{})
+		then(result, Continue{})
 		return
 	}
 
@@ -265,7 +296,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 		)
 	}
 
-	result.Effects = append(result.Effects, CommitReadyRanges{})
+	d.commitAndContinue(ctx, view, result)
 }
 
 // handleStaleRangeReply classifies a reply from a peer that has no range
@@ -286,7 +317,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 			staleRequest.Assignment.LeaseEpoch)
 
 		if !d.session.HasActiveWork() {
-			result.Effects = append(result.Effects, ContinueSync{})
+			then(result, Continue{})
 		}
 
 		return true
@@ -300,7 +331,7 @@ func (d *Driver) handleStaleRangeReply(peerID string,
 		"epoch=%d stale=true", peerID, assignment.RangeID,
 		assignment.LeaseEpoch)
 
-	result.Effects = append(result.Effects, ContinueSync{})
+	then(result, Continue{})
 
 	return true
 }
@@ -314,15 +345,6 @@ func (d *Driver) rejectRangePeer(ctx context.Context, peerID string,
 
 	d.quarantinePeer(ctx, peerID, result)
 	result.Effects = append(result.Effects, DisconnectPeer{PeerID: peerID})
-}
-
-// handleRejectUntrustedAnchor rejects an untrusted anchor on request.
-func (d *Driver) handleRejectUntrustedAnchor(ctx context.Context,
-	event RejectUntrustedAnchor, result *DriverResult) {
-
-	result.AnchorRejected = d.rejectUntrustedAnchor(
-		ctx, event.Tag, event.Height, event.Hash, event.Timeout,
-	)
 }
 
 // rejectUntrustedAnchor rejects an untrusted anchor and the unstaged work

@@ -224,3 +224,54 @@ func (d *Driver) handlePeerDone(ctx context.Context, event PeerDone,
 		result.HadWork = true
 	}
 }
+
+// PeerGone tells the driver that a peer disconnected and the executor dropped
+// it from the candidates. The driver abandons its requests, removes it, and
+// when it was the sync peer, resets the cache to the durable tip and asks for
+// a fresh start.
+type PeerGone struct {
+	// PeerID is the peer's address.
+	PeerID string
+}
+
+func (PeerGone) driverEvent() {}
+
+// handlePeerGone abandons a disconnected peer's requests and removes it, then
+// decides what the loss means for the sync.
+func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
+	view View, result *DriverResult) {
+
+	peerID := event.PeerID
+	d.handlePeerDone(ctx, PeerDone{PeerID: peerID}, result)
+	hadWork := result.HadWork
+
+	err := d.runtime.UnregisterPeer(ctx, peerID)
+	if err != nil {
+		log.Warnf("Unable to remove headersync peer %s: %v", peerID,
+			err)
+	} else {
+		log.Debugf("Unregistered headersync peer peer=%s", peerID)
+	}
+
+	// Attempt to find a new peer to sync from if the quitting peer is the
+	// sync peer. Also, reset the header state.
+	if d.runtime.manager.TrustsTipPeer(peerID) {
+		result.Effects = append(result.Effects, SetSyncPeer{})
+		if view.CommitPending {
+			return
+		}
+
+		// Reset the cache and the visible tip together, so they keep
+		// describing the same header.
+		if err := d.resetTipToStore(ctx); err != nil {
+			return
+		}
+		result.Effects = append(result.Effects, StartSync{})
+
+		return
+	}
+
+	if hadWork && !view.CommitPending {
+		then(result, Continue{})
+	}
+}
