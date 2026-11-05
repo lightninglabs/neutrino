@@ -166,10 +166,6 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 			}
 		}
 
-		if view.CommitPending || submitted {
-			return true
-		}
-
 		// Discover the span above the boundary while the span below
 		// it commits, once the chain is past its checkpoints.
 		if finished.Confirmed && d.tip.NextCheckpoint() == nil {
@@ -184,6 +180,20 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 
 			return true
 		}
+
+		// The commit in flight owns the durable tip, so planning waits
+		// for its result and Continue plans once it lands. Discovery of
+		// the rest of the span reads no tip, so it goes on now. Waiting
+		// for the commit instead leaves the rest of the span to the
+		// range planned after it, which is often assigned to a peer
+		// whose hedged anchor request for this span is still in
+		// flight, and sits there until that request answers or times
+		// out.
+		if view.CommitPending || submitted {
+			d.continueAnchorSpan(view, finished, result)
+
+			return true
+		}
 	}
 
 	d.planAfterAnchor(ctx, view, peerID, finished, result)
@@ -192,7 +202,9 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 }
 
 // handleAnchorPipelined notes the overlapped discovery, then plans the ranges
-// the anchor made possible.
+// the anchor made possible. The view is fresh, so it tells whether the commit
+// of the staged range is in flight: planning then waits for its result, and
+// only the rest of the span is discovered.
 func (d *Driver) handleAnchorPipelined(ctx context.Context,
 	event anchorPipelined, view View, result *DriverResult) {
 
@@ -200,6 +212,12 @@ func (d *Driver) handleAnchorPipelined(ctx context.Context,
 		log.Debugf("headersync frontier_discovery_overlapped "+
 			"range_id=%d stop_height=%d", event.Finished.Range.ID,
 			event.Finished.Range.StopHeight)
+	}
+
+	if view.CommitPending {
+		d.continueAnchorSpan(view, event.Finished, result)
+
+		return
 	}
 
 	d.planAfterAnchor(ctx, view, event.PeerID, event.Finished, result)
@@ -248,20 +266,32 @@ func (d *Driver) handleAnchorPlanned(event anchorPlanned, view View,
 func (d *Driver) finishAnchorPlan(view View, finished AnchorHeadersResult,
 	planned int, result *DriverResult) {
 
-	request := finished.Request
-	response := finished.Response
-	if response.Height < request.StopHeight {
-		d.waitForAnchor(
-			view, request, response.Height, response.Hash, "",
-			result,
-		)
-
+	if d.continueAnchorSpan(view, finished, result) {
 		return
 	}
 
 	if planned == 0 && !d.session.HasActiveWork() {
 		d.restartSync(result)
 	}
+}
+
+// continueAnchorSpan discovers the rest of the request's span when the reply
+// stopped short of it, from the boundary the reply named. It reports whether
+// there was anything left to discover.
+func (d *Driver) continueAnchorSpan(view View, finished AnchorHeadersResult,
+	result *DriverResult) bool {
+
+	request := finished.Request
+	response := finished.Response
+	if response.Height >= request.StopHeight {
+		return false
+	}
+
+	d.waitForAnchor(
+		view, request, response.Height, response.Hash, "", result,
+	)
+
+	return true
 }
 
 // waitForAnchor discovers the rest of the span from the start, leaving the
