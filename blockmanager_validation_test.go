@@ -209,7 +209,7 @@ func TestHeaderAncestorReadFailurePreservesStaging(t *testing.T) {
 		}))
 	}
 	parent := history[10]
-	bm.tip.Reset(headerlist.Node{
+	bm.tipForTest().Reset(headerlist.Node{
 		Height: 11, Header: *parent,
 	})
 	bm.headerTip, bm.headerTipHash = 11, parent.BlockHash()

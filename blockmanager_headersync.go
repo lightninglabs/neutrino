@@ -138,7 +138,7 @@ func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 	// Planning moves the FSM to the durable tip, so bring the cache and
 	// the next checkpoint along first. Otherwise a write that landed but
 	// reported an error leaves planning aimed at a stale checkpoint.
-	if err := b.tip.ReconcileWithStore(); err != nil {
+	if err := b.reconcileTip(); err != nil {
 		return 0, err
 	}
 
@@ -166,7 +166,7 @@ func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
 // nextCheckpointPoint returns the next checkpoint as a chain point, or nil
 // when the chain is past its last checkpoint.
 func (b *blockManager) nextCheckpointPoint() *headersync.ChainPoint {
-	next := b.tip.NextCheckpoint()
+	next := b.driver().NextCheckpoint()
 	if next == nil {
 		return nil
 	}
@@ -205,7 +205,7 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync == nil || b.tip.NextCheckpoint() == nil {
+	if b.headerSync == nil || b.driver().NextCheckpoint() == nil {
 		return false
 	}
 	b.recoverHeaderSyncPeers(peers)
@@ -262,7 +262,7 @@ func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 func (b *blockManager) pipelineHeaderFrontierDiscovery(peers *list.List,
 	response headersync.AnchorResponse) bool {
 
-	if b.headerSync == nil || b.tip.NextCheckpoint() != nil {
+	if b.headerSync == nil || b.driver().NextCheckpoint() != nil {
 		return false
 	}
 
@@ -334,7 +334,7 @@ func (b *blockManager) startHeaderSync(peers *list.List,
 	}
 	if planned == 0 {
 		var started bool
-		if b.tip.NextCheckpoint() != nil {
+		if b.driver().NextCheckpoint() != nil {
 			started = b.startHeaderAnchorDiscovery(
 				peers,
 				bestHeight,
@@ -440,7 +440,7 @@ func (b *blockManager) resumeHeaderSyncWork(peers *list.List) bool {
 
 	started := b.dispatchHeaderSyncWork(peers)
 	var discoveryActive bool
-	if b.tip.NextCheckpoint() != nil {
+	if b.driver().NextCheckpoint() != nil {
 		discoveryActive = b.startHeaderAnchorDiscovery(
 			peers,
 			bestHeight,
@@ -469,7 +469,7 @@ func (b *blockManager) resetHeaderListToTip() error {
 
 	// The visible tip must describe the same header as the validation
 	// cache, or a later write can start from one and report the other.
-	b.tip.Reset(headerlist.Node{
+	b.resetTip(headerlist.Node{
 		Header: *header,
 		Height: int32(height),
 	})
@@ -896,13 +896,28 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	return outcome.result.Handled
 }
 
+// reconcileTip fast-forwards the validation cache to the durable tip.
+func (b *blockManager) reconcileTip() error {
+	return b.handleDriverEvent(nil, headersync.ReconcileTip{}).err
+}
+
+// resetTip replaces the validation cache with a single node.
+func (b *blockManager) resetTip(node headerlist.Node) {
+	b.handleDriverEvent(nil, headersync.ResetTip{Node: node})
+}
+
+// extendTip appends durable nodes to the validation cache.
+func (b *blockManager) extendTip(nodes []headerlist.Node) {
+	b.handleDriverEvent(nil, headersync.ExtendTip{Nodes: nodes})
+}
+
 func (b *blockManager) commitReadyHeaderSyncRanges() error {
 	if b.pendingHeaderCommit != nil {
 		return nil
 	}
 	// A write that reported an error may still have landed, so the store,
 	// not the validation cache, decides where the next write starts.
-	if err := b.tip.ReconcileWithStore(); err != nil {
+	if err := b.reconcileTip(); err != nil {
 		b.scheduleHeaderCommitRetry()
 		return err
 	}
@@ -946,7 +961,10 @@ func (b *blockManager) commitReadyHeaderSyncRanges() error {
 	if len(commitRanges) == 0 {
 		return b.finishReadyHeaderSyncRanges()
 	}
-	prepared, commitErr := b.tip.PrepareRangeHeaders(commitRanges)
+	preparing := b.handleDriverEvent(nil, headersync.PrepareRanges{
+		Ranges: commitRanges,
+	})
+	prepared, commitErr := preparing.result.Prepared, preparing.err
 	if commitErr == nil {
 		b.pendingHeaderCommit = &pendingChainHeaderCommit{
 			ranges: &prepared,
@@ -998,7 +1016,7 @@ type pendingChainHeaderCommit struct {
 
 	// reorg is set for a serial reorg, with reorgNodes holding the headers
 	// of the new branch for the validation cache.
-	reorg      *serialHeaderReorg
+	reorg      *headersync.SerialReorg
 	reorgNodes []headerlist.Node
 
 	// reorgMismatch is the height of a checkpoint the reorg's branch
@@ -1013,9 +1031,9 @@ type pendingChainHeaderCommit struct {
 	// from then on, so we're waiting on a snapshot instead of its reply.
 	snapshot bool
 
-	// message is the headers message that caused a serial, reorg or
-	// checkpoint mutation.
-	message *headersMsg
+	// peer is the peer whose headers caused a serial, reorg or checkpoint
+	// mutation.
+	peer *ServerPeer
 }
 
 // requestChainStoreSnapshot asks the actor to finish any retained rollback and
@@ -1081,7 +1099,7 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 
 	case prepared.serial != nil:
 		b.finishSerialHeaderExtension(
-			peers, prepared.message, *prepared.serial,
+			peers, prepared.peer, *prepared.serial,
 		)
 
 	default:
@@ -1130,11 +1148,11 @@ func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
 		Header: result.Reply.BlockHeader,
 		Height: result.Reply.BlockTip.Height,
 	}
-	b.tip.Reset(node)
+	b.resetTip(node)
 	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
 
 	if prepared.checkpoint != nil {
-		b.rejectCheckpointPeer(peers, prepared.message.peer)
+		b.rejectCheckpointPeer(peers, prepared.peer)
 	}
 
 	b.scheduleHeaderCommitRetry()
@@ -1146,10 +1164,10 @@ func (b *blockManager) finishCheckpointRollback(peers *list.List,
 	prepared *pendingChainHeaderCommit) {
 
 	node := *prepared.checkpoint
-	b.tip.Reset(node)
+	b.resetTip(node)
 	b.advanceHeaderSyncTip(uint32(node.Height), node.Header.BlockHash())
 
-	b.rejectCheckpointPeer(peers, prepared.message.peer)
+	b.rejectCheckpointPeer(peers, prepared.peer)
 }
 
 // finishSerialHeaderReorg rebuilds the validation cache on the new branch, then
@@ -1157,7 +1175,7 @@ func (b *blockManager) finishCheckpointRollback(peers *list.List,
 func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	prepared *pendingChainHeaderCommit, verdict chainstore.ReorgVerdict) {
 
-	peer := prepared.message.peer
+	peer := prepared.peer
 
 	switch {
 	// A branch with less work is an invalid claim, and so is a tie that
@@ -1182,9 +1200,10 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 
 	// The branch would win, but it failed a checkpoint.
 	case prepared.reorgMismatch != 0:
-		b.submitCheckpointRollback(
-			prepared.message, prepared.reorgMismatch,
-		)
+		b.handleDriverEvent(peers, headersync.RollbackToCheckpoint{
+			PeerID: peer.Addr(),
+			Height: prepared.reorgMismatch,
+		}, peer)
 
 		return
 	}
@@ -1202,8 +1221,8 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 		b.syncPeerMutex.Unlock()
 	}
 
-	b.tip.Reset(prepared.reorg.fork)
-	b.tip.Extend(prepared.reorgNodes)
+	b.resetTip(prepared.reorg.Fork)
+	b.extendTip(prepared.reorgNodes)
 	for _, node := range prepared.reorgNodes {
 		b.blkHeaderProgressLogger.LogBlockHeight(
 			node.Header.Timestamp, node.Height,
@@ -1214,7 +1233,7 @@ func (b *blockManager) finishSerialHeaderReorg(peers *list.List,
 	b.advanceHeaderSyncTip(uint32(last.Height), hash)
 
 	b.finishSerialHeaderFollowup(
-		peers, prepared.message, &hash, last.Height,
+		peers, peer, &hash, last.Height,
 	)
 }
 
@@ -1375,5 +1394,5 @@ func (b *blockManager) finishHeaderSyncRangeHeaders(
 		)
 	}
 
-	b.tip.FinishRange(prepared)
+	b.handleDriverEvent(nil, headersync.FinishRange{Prepared: prepared})
 }

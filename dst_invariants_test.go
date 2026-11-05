@@ -103,7 +103,7 @@ func (v *dstInvariants) durableChain(event string) {
 	// be honest and never drop below the last checkpoint it verified.
 	if height < v.lastTip && !v.reorg {
 		v.rollbacks++
-		checkpoint := v.d.bm.tip.FindPreviousCheckpoint(
+		checkpoint := v.d.bm.tipForTest().FindPreviousCheckpoint(
 			int32(v.lastTip),
 		)
 		if height < uint32(checkpoint.Height) {
@@ -158,7 +158,7 @@ func (v *dstInvariants) durableChain(event string) {
 func (v *dstInvariants) memoryMatchesDisk(event string) {
 	d := v.d
 	bm := d.bm
-	if back := bm.tip.Tip(); back == nil ||
+	if back := bm.tipForTest().Tip(); back == nil ||
 		uint32(back.Height) != bm.headerTip {
 
 		v.fail(event, "validation cache %v disagrees with tip %d",
@@ -174,7 +174,7 @@ func (v *dstInvariants) memoryMatchesDisk(event string) {
 	}
 	// The next checkpoint is always above the visible tip, or a serial
 	// batch past it would never be checked against it.
-	if next := bm.tip.NextCheckpoint(); next != nil &&
+	if next := bm.tipForTest().NextCheckpoint(); next != nil &&
 		uint32(next.Height) <= bm.headerTip {
 
 		v.fail(event, "next checkpoint %d at or below visible tip %d",

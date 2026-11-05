@@ -494,7 +494,7 @@ func TestHeaderAnchorDiscoveryUsesDurableTip(t *testing.T) {
 	// genesis. A request must take both boundary fields from the store.
 	require.Equal(t, genesis.BlockHash(), bm.headerTipHash)
 	stopHash := chainhash.Hash{1}
-	bm.tip.SetNextCheckpointForTest(&chaincfg.Checkpoint{
+	bm.tipForTest().SetNextCheckpointForTest(&chaincfg.Checkpoint{
 		Height: 3001,
 		Hash:   &stopHash,
 	})
@@ -532,12 +532,13 @@ func TestPrunedAnchorResponseKeepsTip(t *testing.T) {
 		headerfs.BlockHeader{BlockHeader: &first, Height: 1},
 		headerfs.BlockHeader{BlockHeader: &second, Height: 2},
 	))
-	bm.tip.PushBackForTest(headerlist.Node{Header: first, Height: 1})
-	bm.tip.PushBackForTest(headerlist.Node{Header: second, Height: 2})
+	cache := bm.tipForTest()
+	cache.PushBackForTest(headerlist.Node{Header: first, Height: 1})
+	cache.PushBackForTest(headerlist.Node{Header: second, Height: 2})
 	bm.headerTip = 2
 	bm.headerTipHash = second.BlockHash()
 	stopHash := chainhash.Hash{1}
-	bm.tip.SetNextCheckpointForTest(
+	bm.tipForTest().SetNextCheckpointForTest(
 		&chaincfg.Checkpoint{Height: 3002, Hash: &stopHash},
 	)
 	sp := newTestServerPeer(t, "127.0.0.1:18333", 3002)

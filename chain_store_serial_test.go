@@ -30,7 +30,7 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	bm := newCFHeaderTestManager(t, blocks, filters)
 	fixture := dstChains()
 	header := *fixture.honest[1]
-	prepared, handled, err := bm.tip.PrepareSerialExtension(
+	prepared, handled, err := bm.tipForTest().PrepareSerialExtension(
 		[]*wire.BlockHeader{&header},
 	)
 	require.True(t, handled)
@@ -40,7 +40,7 @@ func TestSerialHeaderPreparationDoesNotPublish(t *testing.T) {
 	require.Len(t, prepared.Nodes, 1)
 
 	// Neither the in-memory list nor the store has changed.
-	require.Equal(t, int32(0), bm.tip.Tip().Height)
+	require.Equal(t, int32(0), bm.tipForTest().Tip().Height)
 	_, height, err := blocks.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
@@ -98,12 +98,12 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 				require.Equal(
 					t,
 					tc.height,
-					d.bm.tip.Tip().Height,
+					d.bm.tipForTest().Tip().Height,
 				)
 				require.Equal(
 					t,
 					header.BlockHash(),
-					d.bm.tip.Tip().Header.
+					d.bm.tipForTest().Tip().Header.
 						BlockHash(),
 				)
 				visible := d.bm.publishedBlockTip.Load()
@@ -117,30 +117,6 @@ func TestSerialHeaderAmbiguousWriteReconciles(t *testing.T) {
 			})
 		})
 	}
-}
-
-// TestSerialReorgPreparationCopiesHeaders binds the fork and replacement to
-// the observed tip without retaining the caller's mutable headers. The bound
-// tip lets the store owner reject a reorg that was prepared against a stale
-// chain, and the copies keep a later mutation of the peer's message from
-// changing what is written.
-func TestSerialReorgPreparationCopiesHeaders(t *testing.T) {
-	fixture := dstChains()
-	tip := headerlist.Node{Header: *fixture.honest[3], Height: 3}
-	fork := *fixture.honest[1]
-	replacement := *fixture.fork[1][0]
-	forkHash, replacementHash := fork.BlockHash(), replacement.BlockHash()
-	prepared := prepareSerialHeaderReorg(tip, fork, 1, replacement)
-
-	// The request is bound to the observed tip.
-	require.Equal(t, tip.Header.BlockHash(), prepared.expectedTip.Hash)
-	require.Equal(t, int32(3), prepared.expectedTip.Height)
-
-	// Mutating the inputs leaves the prepared copies intact.
-	fork.Nonce++
-	replacement.Nonce++
-	require.Equal(t, forkHash, prepared.fork.Header.BlockHash())
-	require.Equal(t, replacementHash, prepared.replacement.BlockHash())
 }
 
 // chainStoreGatedWrite blocks the first block header write until release is
@@ -251,7 +227,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		bm.cfg.ChainParams.Checkpoints = []chaincfg.Checkpoint{{
 			Height: 2, Hash: &wrong,
 		}}
-		bm.tip.SetNextCheckpointForTest(
+		bm.tipForTest().SetNextCheckpointForTest(
 			&bm.cfg.ChainParams.Checkpoints[0],
 		)
 		bm.cfg.TimeSource = dstMedianTime{
@@ -288,7 +264,7 @@ func TestChainStoreCheckpointMismatchRollsBack(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Zero(t, height)
-		require.Equal(t, int32(0), bm.tip.Tip().Height)
+		require.Equal(t, int32(0), bm.tipForTest().Tip().Height)
 		require.True(t, peerDisconnected(peer))
 		require.Len(t, notifications, 1)
 		event := <-notifications
@@ -427,7 +403,7 @@ func TestChainStoreSerialLostWriteAckReconciles(t *testing.T) {
 		_, height, err := blocks.ChainTip()
 		require.NoError(t, err)
 		require.Equal(t, uint32(1), height)
-		require.Equal(t, int32(1), bm.tip.Tip().Height)
+		require.Equal(t, int32(1), bm.tipForTest().Tip().Height)
 		require.Equal(t, int32(1), bm.publishedBlockTip.Load().Height)
 		require.Nil(t, bm.pendingHeaderCommit)
 		require.NotNil(t, bm.headerCommitRetryTimer)
@@ -733,9 +709,7 @@ func TestCheckpointRollbackSnapshotDisconnectsPeer(t *testing.T) {
 				bm.pendingHeaderCommit =
 					&pendingChainHeaderCommit{
 						checkpoint: &node,
-						message: &headersMsg{
-							peer: peer,
-						},
+						peer:       peer,
 					}
 				failed := chainstore.Result{
 					Reply: chainstore.Reply{
@@ -781,7 +755,7 @@ func TestSnapshotFilterFailureKeepsHeaderIntake(t *testing.T) {
 		bm.finishAsyncHeaderCommit(peers, result)
 		require.Nil(t, bm.pendingHeaderCommit,
 			"header intake stayed frozen")
-		require.EqualValues(t, 3, bm.tip.Tip().Height)
+		require.EqualValues(t, 3, bm.tipForTest().Tip().Height)
 	})
 }
 

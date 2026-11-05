@@ -13,6 +13,13 @@ func (d *Driver) SessionForTest() *Session {
 	return d.session
 }
 
+// TipForTest returns the driver's validation cache. Tests use it to seed and
+// inspect the cache. Production code goes through the driver's events and
+// accessors.
+func (d *Driver) TipForTest() *TipState {
+	return d.tip
+}
+
 // ManagerForTest returns the manager. Tests use it to seed and inspect
 // FSM state. Production code goes through the driver.
 func (r *Runtime) ManagerForTest() *Manager {
