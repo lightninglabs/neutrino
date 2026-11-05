@@ -276,8 +276,8 @@ func (PeerGone) driverEvent() {}
 
 // handlePeerGone abandons a disconnected peer's requests and removes it, then
 // decides what the loss means for the sync.
-func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
-	view View) []DriverEffect {
+func (d *Driver) handlePeerGone(ctx context.Context,
+	event PeerGone) []DriverEffect {
 
 	var effects []DriverEffect
 
@@ -297,7 +297,7 @@ func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
 	// sync peer. Also, reset the header state.
 	if d.runtime.manager.TrustsTipPeer(peerID) {
 		effects = append(effects, SetSyncPeer{})
-		if view.CommitPending {
+		if d.commitPending {
 			return effects
 		}
 
@@ -311,7 +311,7 @@ func (d *Driver) handlePeerGone(ctx context.Context, event PeerGone,
 		return effects
 	}
 
-	if hadWork && !view.CommitPending {
+	if hadWork && !d.commitPending {
 		effects = append(effects, then(Continue{}))
 	}
 

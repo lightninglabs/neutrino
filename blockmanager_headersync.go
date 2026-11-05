@@ -246,6 +246,9 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 		log.Warnf("headersync chain store admission failed: %v",
 			result.Err)
 		b.scheduleHeaderCommitRetry()
+		b.handleDriverEvent(
+			peers, headersync.CommitAbandoned{}, prepared.peer,
+		)
 
 		return
 	}

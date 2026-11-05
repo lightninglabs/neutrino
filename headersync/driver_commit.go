@@ -38,6 +38,14 @@ type RangesCommitted struct {
 
 func (RangesCommitted) driverEvent() {}
 
+// CommitAbandoned reports that a chain store mutation the driver submitted
+// ended without a result for it to adopt: the store refused the command, or the
+// executor had no peer to attribute it to. Nothing changed, and the executor
+// retries the commit if one is due.
+type CommitAbandoned struct{}
+
+func (CommitAbandoned) driverEvent() {}
+
 // SubmitRangeCommit asks the executor to write a prepared batch through the
 // chain store, without waiting for the write. The executor reports the
 // outcome with RangesCommitted, or through its reconciliation snapshot when
@@ -103,7 +111,7 @@ func (d *Driver) handleRetryCommit(ctx context.Context,
 
 	var effects []DriverEffect
 
-	commitEffects, _, err := d.commitReadyRanges(ctx, view)
+	commitEffects, _, err := d.commitReadyRanges(ctx)
 	effects = append(effects, commitEffects...)
 	if err != nil {
 		log.Warnf("headersync commit_retry_failed: %v", err)
@@ -126,7 +134,7 @@ func (d *Driver) commitAndContinue(ctx context.Context,
 
 	var effects []DriverEffect
 
-	commitEffects, _, err := d.commitReadyRanges(ctx, view)
+	commitEffects, _, err := d.commitReadyRanges(ctx)
 	effects = append(effects, commitEffects...)
 	if err != nil {
 		log.Warnf("headersync failed to commit ready ranges: %v", err)
@@ -147,12 +155,12 @@ func (d *Driver) commitAndContinue(ctx context.Context,
 // executor to write it. It reports whether a write was submitted. A failure
 // that is not the peer's fault schedules a retry; one that is invalidates the
 // range and is returned as a ValidationError.
-func (d *Driver) commitReadyRanges(ctx context.Context,
-	view View) ([]DriverEffect, bool, error) {
+func (d *Driver) commitReadyRanges(ctx context.Context) ([]DriverEffect,
+	bool, error) {
 
 	var effects []DriverEffect
 
-	if view.CommitPending {
+	if d.commitPending {
 		return effects, false, nil
 	}
 

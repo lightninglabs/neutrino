@@ -73,9 +73,7 @@ func (b *blockManager) handleDriverEvent(peers *list.List,
 
 // driverView snapshots the state the driver reads but the block manager owns.
 func (b *blockManager) driverView(peers *list.List) headersync.View {
-	view := headersync.View{
-		CommitPending: b.pendingHeaderCommit != nil,
-	}
+	var view headersync.View
 	if peers != nil {
 		view.Peers = headerSyncPeerCandidates(peers)
 	}
@@ -110,6 +108,9 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	known []*ServerPeer, effect headersync.DriverEffect) bool {
 
 	switch effect := effect.(type) {
+	case headersync.Deliver:
+		b.handlePeerMessage(peers, effect.Message)
+
 	case headersync.ArmCooldownWake:
 		b.armHeaderCooldownWake(effect.Until)
 
@@ -199,6 +200,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.CommitExtension:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
+			b.abandonCommit(peers, known)
 			return false
 		}
 		b.submitSerialExtension(sp, effect)
@@ -206,6 +208,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.CommitReorg:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
+			b.abandonCommit(peers, known)
 			return false
 		}
 		b.submitSerialHeaderReorg(sp, effect)
@@ -213,6 +216,7 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.CheckpointRollback:
 		sp := driverPeer(peers, known, effect.PeerID)
 		if sp == nil {
+			b.abandonCommit(peers, known)
 			return false
 		}
 		b.submitCheckpointRollback(sp, effect)
@@ -269,6 +273,14 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	}
 
 	return false
+}
+
+// abandonCommit tells the driver that a mutation it asked for was never
+// submitted, so it stops waiting on a result that will not come.
+func (b *blockManager) abandonCommit(peers *list.List, known []*ServerPeer) {
+	log.Warnf("headersync driver asked for a commit from an unknown peer")
+
+	b.handleDriverEvent(peers, headersync.CommitAbandoned{}, known...)
 }
 
 // armHeaderSyncRequestTimer arms the deadline of a tracked request. When it

@@ -270,7 +270,7 @@ func (d *Driver) resumeWork(ctx context.Context, view View,
 
 	// The asynchronous commit in flight owns the header tip, and planning
 	// before it settles would build on a stale tip.
-	if view.CommitPending {
+	if d.commitPending {
 		return effects
 	}
 
@@ -353,7 +353,7 @@ func (d *Driver) handleDispatchWork(ctx context.Context,
 	var effects []DriverEffect
 
 	effects = append(effects, d.handleRecoverPeers(
-		ctx, RecoverPeers{Peers: view.Peers},
+		ctx, RecoverPeers{Peers: view.Peers}, //nolint:gosimple
 	)...)
 	d.handleAssignRanges(ctx, AssignRanges{PeerCount: len(view.Peers)})
 
@@ -416,7 +416,7 @@ func (d *Driver) startDiscovery(ctx context.Context, view View,
 	var effects []DriverEffect
 
 	effects = append(effects, d.handleRecoverPeers(
-		ctx, RecoverPeers{Peers: view.Peers},
+		ctx, RecoverPeers{Peers: view.Peers}, //nolint:gosimple
 	)...)
 
 	checkpoint := d.nextCheckpointPoint()

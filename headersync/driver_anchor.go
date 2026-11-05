@@ -158,7 +158,7 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 			finished.Range.StartHeight, finished.Range.StopHeight,
 			len(headers))
 
-		commitEffects, submitted, err := d.commitReadyRanges(ctx, view)
+		commitEffects, submitted, err := d.commitReadyRanges(ctx)
 		effects = append(effects, commitEffects...)
 		if err != nil {
 			log.Warnf("headersync failed to commit anchor-backed "+
@@ -197,7 +197,7 @@ func (d *Driver) handleAnchorHeaders(ctx context.Context, view View,
 		// whose hedged anchor request for this span is still in
 		// flight, and sits there until that request answers or times
 		// out.
-		if view.CommitPending || submitted {
+		if d.commitPending || submitted {
 			spanEffects, _ := d.continueAnchorSpan(view, finished)
 			effects = append(effects, spanEffects...)
 
@@ -227,7 +227,7 @@ func (d *Driver) handleAnchorPipelined(ctx context.Context,
 			event.Finished.Range.StopHeight)
 	}
 
-	if view.CommitPending {
+	if d.commitPending {
 		spanEffects, _ := d.continueAnchorSpan(view, event.Finished)
 		effects = append(effects, spanEffects...)
 

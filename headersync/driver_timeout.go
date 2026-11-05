@@ -166,22 +166,16 @@ func (SerialTimedOut) driverEvent() {}
 
 // handleSerialTimedOut drops a stalled sync peer and starts over, unless the
 // chain moved past the request in the meantime.
-func (d *Driver) handleSerialTimedOut(ctx context.Context, event SerialTimedOut,
-	view View) []DriverEffect {
+func (d *Driver) handleSerialTimedOut(ctx context.Context,
+	event SerialTimedOut) []DriverEffect {
 
 	var effects []DriverEffect
 
-	var height uint32
-	if view.CommitPending {
-		height = d.cfg.PublishedTip()
-	} else {
-		_, currentHeight, err := d.tip.StoreTip()
-		if err != nil {
-			log.Errorf("Failed to get block header chain tip "+
-				"while handling header sync timeout: %v", err)
-			return effects
-		}
-		height = currentHeight
+	_, height, err := d.tip.StoreTip()
+	if err != nil {
+		log.Errorf("Failed to get block header chain tip "+
+			"while handling header sync timeout: %v", err)
+		return effects
 	}
 	if height > event.StartHeight {
 		return effects
@@ -199,10 +193,6 @@ func (d *Driver) handleSerialTimedOut(ctx context.Context, event SerialTimedOut,
 
 	if d.runtime.manager.TrustsTipPeer(peerID) {
 		effects = append(effects, SetSyncPeer{})
-	}
-
-	if view.CommitPending {
-		return effects
 	}
 
 	if err := d.resetTipToStore(ctx); err != nil {

@@ -684,24 +684,18 @@ func (b *blockManager) blockHandler() {
 	var queuedBeforeTimeout int
 out:
 	for {
-		if timeout != nil && queuedBeforeTimeout == 0 &&
-			b.pendingHeaderCommit == nil {
-
-			b.handleHeaderSyncTimeoutMsg(candidatePeers, timeout)
+		if timeout != nil && queuedBeforeTimeout == 0 {
+			b.dispatchInbound(candidatePeers, timeout)
 			timeout = nil
 			continue
 		}
-		peerChan := b.peerChan
 		timeoutChan := b.timeoutChan
-		if b.pendingHeaderCommit != nil {
-			peerChan, timeoutChan = nil, nil
-		}
 		if timeout != nil {
 			timeoutChan = nil
 		}
 		select {
-		case m := <-peerChan:
-			b.handlePeerMessage(candidatePeers, m)
+		case m := <-b.peerChan:
+			b.dispatchInbound(candidatePeers, m)
 			if timeout != nil && queuedBeforeTimeout > 0 {
 				queuedBeforeTimeout--
 			}
@@ -720,6 +714,19 @@ out:
 	}
 
 	log.Trace("Block handler done")
+}
+
+// dispatchInbound hands a message from a peer, or an expired deadline, to the
+// driver. The driver holds it back while a chain store mutation is in flight,
+// since handling it reads the header stores that the mutation holds, and
+// otherwise returns it as a Deliver effect for the executor to handle.
+func (b *blockManager) dispatchInbound(peers *list.List, message any) {
+	if b.headerSync == nil {
+		b.handlePeerMessage(peers, message)
+		return
+	}
+
+	b.handleDriverEvent(peers, headersync.Inbound{Message: message})
 }
 
 // handlePeerMessage is the serialized peer-event entry point. Keeping dispatch
