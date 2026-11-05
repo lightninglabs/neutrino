@@ -86,76 +86,19 @@ type AnchorHeadersResult struct {
 }
 
 // Controller owns production header-sync orchestration policy that is
-// independent of blockmanager's storage and peer I/O. It composes the actor FSM
-// with request/session bookkeeping.
+// independent of blockmanager's storage and peer I/O. It composes the manager
+// FSM with request/session bookkeeping.
 type Controller struct {
-	manager *ManagerActor
+	manager *Manager
 	session *Session
 	cfg     Config
 
-	peerLookup func(string) (*PeerActor, bool)
-
-	// askFault is the test-only fault seam from RuntimeConfig.AskFault.
-	askFault func(AskOp) AskFault
+	peerLookup func(string) (*Peer, bool)
 }
 
-// AskOp names a controller ask that deterministic tests can fault.
-type AskOp uint8
-
-const (
-	// AskPlanRanges is the ask that plans confirmed anchor ranges.
-	AskPlanRanges AskOp = iota
-
-	// AskStageDiscovered is the ask that stages a discovered range.
-	AskStageDiscovered
-
-	// AskAddAnchor is the ask that records a discovered anchor.
-	AskAddAnchor
-
-	// AskOps is the number of faultable controller asks.
-	AskOps
-)
-
-// AskFault selects how a faulted controller ask reports its outcome.
-type AskFault uint8
-
-const (
-	// AskOK runs the ask normally.
-	AskOK AskFault = iota
-
-	// AskFailBefore reports a caller deadline without sending the ask.
-	AskFailBefore
-
-	// AskFailAfter runs the ask, then reports a caller deadline. An lnd
-	// actor applies a request on its own context, so this happens in
-	// production when the caller's deadline fires after the send.
-	AskFailAfter
-)
-
-// ErrAskFault is the error a faulted controller ask reports.
-var ErrAskFault = errors.New("simulated headersync ask deadline")
-
-// ask runs one manager ask through the test fault seam.
-func (c *Controller) ask(op AskOp, fn func() error) error {
-	fault := AskOK
-	if c.askFault != nil {
-		fault = c.askFault(op)
-	}
-	if fault == AskFailBefore {
-		return ErrAskFault
-	}
-	if err := fn(); err != nil {
-		return err
-	}
-	if fault == AskFailAfter {
-		return ErrAskFault
-	}
-	return nil
-}
-
-// NewController creates a production controller around the manager actor and
-// session. The caller remains responsible for starting the manager actor.
-func NewController(manager *ManagerActor, session *Session,
+// NewController creates a production controller around the manager and
+// session. The caller remains responsible for starting the manager.
+func NewController(manager *Manager, session *Session,
 	cfg Config) *Controller {
 
 	if session == nil {
@@ -194,14 +137,9 @@ func (c *Controller) PlanCheckpointRanges(ctx context.Context,
 		return CheckpointRangePlan{}, nil
 	}
 
-	var result PlanRangesResult
-	err := c.ask(AskPlanRanges, func() error {
-		var err error
-		result, err = c.manager.PlanConfirmedAnchorRanges(
-			ctx, c.session.NextRangeID(), tip.Height, stop.Height,
-		)
-		return err
-	})
+	result, err := c.manager.PlanConfirmedAnchorRanges(
+		ctx, c.session.NextRangeID(), tip.Height, stop.Height,
+	)
 	if err != nil {
 		return CheckpointRangePlan{}, err
 	}
@@ -241,7 +179,7 @@ func (c *Controller) AdvanceCommittedTip(ctx context.Context,
 // PruneRetiredStaging drops staged payloads whose range the FSM no longer
 // treats as staged. A range can leave the staged state without its payload
 // being deleted when the durable tip moves outside the staged commit path, or
-// when a commit ask applies in the actor but reports an error to its caller.
+// when a commit applies in the manager but reports an error to its caller.
 // The sweep costs one snapshot per staged payload, which is bounded by the
 // outstanding range limit.
 func (c *Controller) PruneRetiredStaging(ctx context.Context) error {
@@ -280,14 +218,9 @@ func (c *Controller) PlanFrontierRanges(ctx context.Context,
 		return PlanRangesResult{}, err
 	}
 
-	var result PlanRangesResult
-	err := c.ask(AskPlanRanges, func() error {
-		var err error
-		result, err = c.manager.PlanConfirmedAnchorRanges(
-			ctx, c.session.NextRangeID(), tip.Height, bestHeight,
-		)
-		return err
-	})
+	result, err := c.manager.PlanConfirmedAnchorRanges(
+		ctx, c.session.NextRangeID(), tip.Height, bestHeight,
+	)
 	if err != nil {
 		return result, err
 	}
@@ -531,14 +464,9 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	}
 	result.Response = response
 
-	var anchor Anchor
-	err = c.ask(AskAddAnchor, func() error {
-		var err error
-		anchor, ok, err = c.manager.AddAnchor(
-			ctx, response.Height, response.Hash, response.Trusted,
-		)
-		return err
-	})
+	anchor, ok, err := c.manager.AddAnchor(
+		ctx, response.Height, response.Hash, response.Trusted,
+	)
 	if err != nil {
 		return result, true, err
 	}
@@ -557,19 +485,10 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 
 	result.Confirmed = c.AnchorConfirmed(anchor)
 	if result.Confirmed {
-		var (
-			rng    HeaderRange
-			staged bool
+		rng, staged, err := c.manager.StageDiscoveredRange(
+			ctx, c.session.NextRangeID(), peerID,
+			request.StartHeight, response.Height, time.Now(),
 		)
-		err := c.ask(AskStageDiscovered, func() error {
-			var err error
-			rng, staged, err = c.manager.StageDiscoveredRange(
-				ctx, c.session.NextRangeID(), peerID,
-				request.StartHeight, response.Height,
-				time.Now(),
-			)
-			return err
-		})
 		if err != nil {
 			return result, true, err
 		}
@@ -585,8 +504,9 @@ func (c *Controller) FinishAnchorHeaders(ctx context.Context,
 	return result, true, nil
 }
 
-// InvalidateRange removes permanently invalid work from the actor and session.
-// Cancel dependent requests before discovering again from a surviving anchor.
+// InvalidateRange removes permanently invalid work from the manager and
+// session. Cancel dependent requests before discovering again from a
+// surviving anchor.
 func (c *Controller) InvalidateRange(ctx context.Context, id RangeID,
 	staleUntil time.Time) (InvalidationResult, error) {
 
@@ -755,8 +675,8 @@ func (c *Controller) ReplanRange(ctx context.Context,
 			ErrInvalidRange)
 	}
 
-	// Skip IDs the FSM already uses: the session falls behind it when an
-	// ask applies but reports an error.
+	// Skip IDs the FSM already uses. This is a defensive check, not an
+	// expected path, since the session and the FSM share one ID sequence.
 	var (
 		retryID RangeID
 		retry   HeaderRange

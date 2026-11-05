@@ -31,10 +31,10 @@ func (s dstMedianTime) AdjustedTime() time.Time {
 	return s.MedianTimeSource.AdjustedTime().Add(s.offset)
 }
 
-// runHeaderDST drives the production actor graph, structural/contextual
+// runHeaderDST drives the production manager and peers, structural/contextual
 // validation, and ordered store commit. The simulated transport supplies only
 // responses and faults; it does not reimplement scheduling or ownership.
-// synctest controls time and actor quiescence, while bytes select fault order.
+// synctest controls time and quiescence, while bytes select fault order.
 func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 	t.Helper()
 	var result headerDSTResult
@@ -119,7 +119,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		require.NoError(t, err)
 		require.True(t, ok)
 
-		deliver := func(peer *headersync.PeerActor,
+		deliver := func(peer *headersync.Peer,
 			assignment headersync.RangeAssignment,
 			data []*wire.BlockHeader) {
 

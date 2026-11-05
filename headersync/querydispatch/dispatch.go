@@ -40,7 +40,6 @@ func NewRuntime(tip headersync.ChainPoint,
 
 	return headersync.NewRuntime(tip, checkpoints, headersync.RuntimeConfig{
 		Config:        headersync.ProductionConfig(),
-		MailboxSize:   mailboxSize,
 		Dispatch:      New(dispatchActor),
 		DispatchActor: dispatchActor,
 	})

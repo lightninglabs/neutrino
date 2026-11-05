@@ -8,9 +8,9 @@ func (d *Driver) SessionForTest() *Session {
 	return d.session
 }
 
-// ManagerForTest returns the manager actor. Tests use it to seed and inspect
+// ManagerForTest returns the manager. Tests use it to seed and inspect
 // FSM state. Production code goes through the driver.
-func (r *Runtime) ManagerForTest() *ManagerActor {
+func (r *Runtime) ManagerForTest() *Manager {
 	return r.manager
 }
 

@@ -11,7 +11,7 @@ production code under test, see
 | --- | --- | --- | --- |
 | P models | Nothing from Go; a model of the scheduler | Header contents, validation, storage | `p-models/scripts/check.sh` |
 | FSM property test | `headersync.HeaderSyncFSM` | Actors, peers, blockManager, stores | `TestHeaderSyncFSMProperties` |
-| Header-sync DST | blockManager message handling, headersync and querysync actors, production timers, contextual validation | Network (scripted peers), stores (in memory), time (virtual) | `TestHeaderTransportDST`, `TestHeaderTransportDSTSwarm` |
+| Header-sync DST | blockManager message handling, headersync manager and peers, the querysync dispatch actor, production timers, contextual validation | Network (scripted peers), stores (in memory), time (virtual) | `TestHeaderTransportDST`, `TestHeaderTransportDSTSwarm` |
 | Store tests | The SQL and flat-file stores | Everything above the store interface | `go test ./headerfs/... ./sqldb/...` |
 
 ## Run and replay
@@ -87,8 +87,8 @@ flowchart TB
         subgraph PROD["production code"]
             direction TB
             bm["blockManager<br/>handlePeerMessage, commit paths"]
-            hs["headersync.Runtime<br/>Controller, ManagerActor, PeerActors"]
-            qs["querysync ManagerActor<br/>range dispatch"]
+            hs["headersync.Runtime<br/>Controller, Manager, Peers"]
+            qs["querysync Manager<br/>range dispatch"]
             timers["production timers<br/>request timeout, commit retry,<br/>cooldown, bootstrap"]
         end
         drain["blockNtfnChan drain goroutine"]
@@ -124,7 +124,7 @@ goroutine.
 | Component | Runs for real | Simulated by the harness |
 | --- | --- | --- |
 | `blockManager` | `handlePeerMessage`, header validation, ordered commit, the serial path, reorg rollback, timers | Its event loop; the runner plays `blockHandler` |
-| headersync and querysync actors | All of them, with production planning, leases, stealing and commit | Configuration: range cap and confirmation policy per mode |
+| headersync manager and peers, querysync actor | All of them, with production planning, leases, stealing and commit | Configuration: range cap and confirmation policy per mode |
 | Peers | `ServerPeer` records, the new-peer and done-peer handlers | Three peer slots that reply from mined chains, honestly or not |
 | Network | Wire encoding and decoding of every reply | Delivery: no sockets; replies go through `QueueHeaders` |
 | Block header store | The `headerfs.BlockHeaderStore` contract, including contiguous writes and rollback | Storage: `memBlockHeaderStore` in memory, wrapped by `dstHeaderStore` for faults |
@@ -161,7 +161,7 @@ flowchart TB
     pump["pump: synctest.Wait,<br/>drain peerChan, sort, shuffle"]
     handle["handle: handlePeerMessage,<br/>reapRemoved"]
     check{"dstInvariants.check"}
-    heal["heal(): restore store and asks,<br/>refill empty slots, honest replies"]
+    heal["heal(): restore store,<br/>refill empty slots, honest replies"]
     tip["tipPhase(): extend tip,<br/>reorg in frontier modes"]
     quiet{"quiescent()"}
     snap["snapshot()<br/>compared across two runs"]
@@ -244,7 +244,7 @@ what existing seeds decode to; check the regression corpus when adding one.
 | 6 | churn | Connect a peer in an empty slot |
 | 7 | block | Toggle blocked outbound sends for the slot's peer |
 | 8 | store | Arm a store fault: down, ack lost, or torn; repeating a mode clears it |
-| 9 | ask | Arm a one-shot actor ask fault, before or after apply, at one of six sites |
+| 9 | none | Unused, so that saved seeds keep their meaning |
 | 10, 11 | byzantine | Faulty reply: corrupt, partial, empty, overlong, reordered, fork, stale timestamp, wrong difficulty, gapped, or unsolicited |
 | 12 | restart | Stop the block manager and rebuild it over the same stores |
 | 13 | shutdown | Stop the block manager and end the run |
@@ -287,8 +287,8 @@ runner sleeps 6 s of virtual time and requires that no callback reached
 
 The heal phase removes faults without hiding the bugs they caused:
 
-- **Faults off.** The store returns to normal, and pending ask faults and
-  blocked sends are cleared.
+- **Faults off.** The store returns to normal, and blocked sends are
+  cleared.
 - **Only empty slots are refilled.** A faulted peer that is still connected
   stays connected. Replacing it would run the done-peer reset, which restarts
   sync and would hide a stall the peer left behind.
@@ -318,32 +318,15 @@ flowchart LR
         send["sendHeaderRequest<br/>headerTransport.SendGetHeaders"]
         queue["QueueHeaders<br/>reply content and timing"]
         write["BlockHeaders.WriteHeaders"]
-        bmask["headerSyncAsk<br/>CommitReadyRanges, CompleteRange,<br/>RequestRange"]
-        ctlask["Controller.ask<br/>PlanRanges, StageDiscovered,<br/>AddAnchor"]
         life["newPeerMsg, donePeerMsg,<br/>Stop, newBlockManager"]
         rtt["Runtime.UpdatePeerRTT"]
     end
     ops -- "op 7 block" --> send
     ops -- "ops 3, 4, 10, 11" --> queue
     ops -- "op 8 store" --> write
-    ops -- "op 9 ask, sites 0 to 2" --> bmask
-    ops -- "op 9 ask, sites 3 to 5" --> ctlask
     ops -- "ops 5, 6, 12, 13" --> life
     ops -- "op 14" --> rtt
 ```
-
-The two ask seams model the same failure: an actor call that returns a
-deadline error. `headerSyncAsk` wraps the three asks that blockManager makes,
-through the unexported `blockManagerCfg.headerSyncAskFault` hook.
-`Controller.ask` wraps the controller's own asks, through
-`RuntimeConfig.AskFault`. Production leaves both hooks nil, and a nil hook
-makes the wrapper call the ask directly. Each armed fault is one-shot:
-
-- **Fail before.** The caller sees the deadline error and the actor is
-  unchanged.
-- **Fail after.** The actor applies the request, and the caller still sees
-  the deadline error. This is the case production must recover from, because
-  an ask timeout does not mean the actor's state is unchanged.
 
 The store has four modes, and three of them fault the next write.
 
@@ -479,8 +462,8 @@ Header contents and contextual validity are abstract inputs to P, and the
 model treats storage as atomic; the DST covers both.
 
 `TestHeaderSyncDSTExhaustive` runs a fixed recovery story through the
-headersync actors over all 1,024 combinations of four fault flags, eight
-latencies and eight deadlines. Querysync's JSON trace recorder preserves
+headersync manager and peers over all 1,024 combinations of four fault flags,
+eight latencies and eight deadlines. Querysync's JSON trace recorder preserves
 nanosecond RTTs, so replays keep peer ordering when samples differ by less
 than a millisecond. Those are Go scheduler traces, not P checker schedules.
 

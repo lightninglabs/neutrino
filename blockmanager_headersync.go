@@ -46,7 +46,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 		},
 	)
 	if err != nil {
-		log.Warnf("Unable to start headersync peer actor for %s: %v",
+		log.Warnf("Unable to start headersync peer for %s: %v",
 			peerID, err)
 		return
 	}
@@ -57,7 +57,7 @@ func (b *blockManager) registerHeaderSyncPeer(sp *ServerPeer) {
 
 	b.handleDriverEvent(nil, headersync.PeerRegistered{PeerID: peerID})
 
-	log.Debugf("Registered headersync peer actor peer=%s rank=%d "+
+	log.Debugf("Registered headersync peer peer=%s rank=%d "+
 		"last_block=%d rtt=%v", peerID, headerSyncPeerRank(sp),
 		sp.LastBlock(), time.Duration(sp.LastPingMicros())*
 			time.Microsecond)
@@ -78,7 +78,7 @@ func (b *blockManager) unregisterHeaderSyncPeer(sp *ServerPeer) {
 		return
 	}
 
-	log.Debugf("Unregistered headersync peer actor peer=%s", peerID)
+	log.Debugf("Unregistered headersync peer peer=%s", peerID)
 }
 
 func (b *blockManager) updateHeaderSyncPeerRTT(sp *ServerPeer) {
@@ -340,7 +340,7 @@ func (b *blockManager) finishHeaderAnchorDiscovery(
 func (b *blockManager) startHeaderSync(peers *list.List,
 	bestPeer *ServerPeer, bestHeight uint32) bool {
 
-	// The actor-backed scheduler needs multiple independent peers to
+	// The multi-peer scheduler needs multiple independent peers to
 	// confirm discovered anchors. The local sim/reg test harnesses often
 	// run with a single peer, so keep those networks on the serial path.
 	if b.allowSerialHeaderFallback() {
@@ -688,8 +688,8 @@ func (b *blockManager) conflictHeaderSyncAnchor(peers *list.List,
 
 // rejectUntrustedHeaderSyncAnchor rejects an untrusted anchor and the unstaged
 // work built on it, and logs the outcome under tag. It reports false only when
-// the anchor was trusted, replaced or unknown, so nothing changed. A failed ask
-// reports true, since the anchor may have been rejected.
+// the anchor was trusted, replaced or unknown, so nothing changed. A failed
+// call reports true, since the anchor may have been rejected.
 func (b *blockManager) rejectUntrustedHeaderSyncAnchor(tag string,
 	height uint32, hash chainhash.Hash) bool {
 
@@ -1054,8 +1054,8 @@ func (b *blockManager) requestChainStoreSnapshot() {
 
 // finishAsyncHeaderCommit applies the outcome of the pending chain store
 // mutation to the state the block handler owns: the validation cache, the
-// checkpoint cursor and the FSM's committed tip. The actor has already updated
-// the durable and published state by the time we get here.
+// checkpoint cursor and the FSM's committed tip. The chain store actor has
+// already updated the durable and published state by the time we get here.
 func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 	result chainstore.Result) {
 
@@ -1076,9 +1076,9 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 
 		return
 
-	// The mutation may have applied, fully or in part. We reconcile on the
-	// actor before reading or publishing any durable state. This covers
-	// range, serial, reorg and checkpoint rollback commits alike.
+	// The mutation may have applied, fully or in part. We reconcile with
+	// the chain store before reading or publishing any durable state. This
+	// covers range, serial, reorg and checkpoint rollback commits alike.
 	case result.Reply.Err != nil:
 		prepared.snapshot = true
 		b.requestChainStoreSnapshot()
@@ -1091,7 +1091,8 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 	// The command never ran, so nothing changed and the staged work is
 	// still there for the retry.
 	if result.Err != nil {
-		log.Warnf("headersync actor admission failed: %v", result.Err)
+		log.Warnf("headersync chain store admission failed: %v",
+			result.Err)
 		b.scheduleHeaderCommitRetry()
 
 		return
@@ -1127,8 +1128,8 @@ func (b *blockManager) finishAsyncHeaderCommit(peers *list.List,
 // view of the chain is unknown until a snapshot succeeds, so this is the one
 // thing that retries by itself: every other failure reconciles through it.
 //
-// BlockTipValid means the actor finished any retained rollback and read the
-// block tip. A failure on the filter side leaves Err set, but we can still
+// BlockTipValid means the chain store finished any retained rollback and read
+// the block tip. A failure on the filter side leaves Err set, but we can still
 // adopt the block tip.
 func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
 	prepared *pendingChainHeaderCommit, result chainstore.Result) {
@@ -1219,11 +1220,8 @@ func (b *blockManager) rejectCheckpointPeer(peers *list.List,
 
 // finishReadyHeaderSyncRanges retires staged ranges after durable completion.
 func (b *blockManager) finishReadyHeaderSyncRanges() error {
-	// Persistence and header validation can legitimately consume the short
-	// actor-operation deadline under heavy sqlite write pressure. Once the
-	// headers are durably written and the visible tip has advanced, each
-	// driver event has its own deadline, so the FSM can't lag behind the
-	// block manager because a pre-write context expired.
+	// Each driver event has its own deadline, so a slow write can't expire
+	// the commit.
 	outcome := b.handleDriverEvent(nil, headersync.CommitDurableRanges{})
 	if outcome.err != nil {
 		b.scheduleHeaderCommitRetry()

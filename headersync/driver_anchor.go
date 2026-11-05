@@ -68,7 +68,7 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 		ctx, peerID, event.Headers, DefaultMaxRangeHeaders,
 	)
 
-	// Check the error before the match flag, so an actor failure is never
+	// Check the error before the match flag, so a manager failure is never
 	// mistaken for an unmatched reply. The request is already finished, so
 	// keep sync moving: otherwise nothing is in flight and nothing ever
 	// schedules the next request.
@@ -78,8 +78,8 @@ func (d *Driver) handleAnchorReply(ctx context.Context, event AnchorReply,
 			"height=%d hash=%s: %v", peerID,
 			finished.Response.Height, finished.Response.Hash, err)
 
-		// The ask may have staged a discovered range without its
-		// headers. The commit retry requeues such a range.
+		// The dispatch mirror call may have staged a discovered range
+		// without its headers. The commit retry requeues such a range.
 		result.Effects = append(
 			result.Effects, ScheduleCommitRetry{}, ContinueSync{},
 		)

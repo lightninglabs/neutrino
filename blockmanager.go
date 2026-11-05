@@ -44,8 +44,8 @@ const (
 	// to another candidate.
 	defaultHeaderSyncTimeout = 30 * time.Second
 
-	// headerSyncOpTimeout bounds one headersync actor ask from the block
-	// handler. Shutdown cancels it early.
+	// headerSyncOpTimeout bounds one driver event from the block handler.
+	// Shutdown cancels it early.
 	headerSyncOpTimeout = 5 * time.Second
 
 	// maxHeaderSyncTimeout caps RTT-derived header sync timeouts. This
@@ -69,7 +69,8 @@ const (
 	// still happen promptly when that peer's chain later becomes best.
 	defaultHeaderPeerQueryQuarantine = 10 * time.Second
 
-	// headerSyncActorMailboxSize bounds headersync actor mailboxes.
+	// headerSyncActorMailboxSize sizes the mailbox of the querysync
+	// dispatch actor that headersync uses.
 	headerSyncActorMailboxSize = 128
 
 	// headerSyncBootstrapMinPeers is the minimum candidate peer set we try
@@ -221,11 +222,6 @@ type blockManagerCfg struct {
 	// collects their responses. It backs the all-peer checks used to
 	// sanity check compact filter headers and checkpoints.
 	Broadcaster querysyncwm.Broadcaster
-
-	// headerSyncAskFault lets deterministic tests report a caller-side
-	// deadline before or after selected headersync actor asks apply.
-	// Production leaves it nil.
-	headerSyncAskFault func(headerSyncAskOp) headerSyncAskFault
 }
 
 // blockManager provides a concurrency safe block manager for handling all
@@ -327,7 +323,7 @@ type blockManager struct { // nolint:maligned
 	wg   sync.WaitGroup
 	quit chan struct{}
 
-	// quitCtx is cancelled on shutdown, so pending headersync actor asks
+	// quitCtx is cancelled on shutdown, so pending headersync driver events
 	// return at once instead of waiting out their deadline.
 	quitCtx    context.Context
 	quitCancel context.CancelFunc
@@ -480,7 +476,6 @@ func (b *blockManager) initHeaderSyncManager(height uint32,
 		b.cfg.ChainParams.Checkpoints,
 		headerSyncActorMailboxSize,
 	)
-	runtime.Driver().SetAskHook(b.driverAsk)
 	b.headerSync = runtime
 
 	log.Infof("Initialized headersync manager at tip height=%d "+
@@ -626,7 +621,7 @@ func (b *blockManager) startHeaderSyncActors() {
 	}
 
 	b.headerSync.Start(context.Background())
-	log.Infof("Started headersync actor manager with querysync-backed " +
+	log.Infof("Started headersync manager with querysync-backed " +
 		"dispatch")
 }
 

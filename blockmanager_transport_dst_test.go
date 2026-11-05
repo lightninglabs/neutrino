@@ -118,7 +118,11 @@ const (
 	dstFaultChurn
 	dstFaultBlock
 	dstFaultStore
-	dstFaultAsk
+
+	// This bit used to enable ask faults on the old actors. It stays
+	// reserved so that saved seeds keep decoding to the same fault set.
+	_
+
 	dstFaultByzantine
 	dstFaultRestart
 	dstFaultShutdown
@@ -271,14 +275,6 @@ type dstRun struct {
 	// bans records every BanPeer call as "addr:reason".
 	bans []string
 
-	// askFaults holds one-shot actor ask faults at blockmanager call
-	// sites.
-	askFaults map[headerSyncAskOp]headerSyncAskFault
-
-	// controllerFaults holds one-shot faults for asks the headersync
-	// controller makes itself.
-	controllerFaults map[headersync.AskOp]headersync.AskFault
-
 	// ntfns records every block notification in delivery order.
 	ntfns   []string
 	ntfnMtx sync.Mutex
@@ -352,14 +348,10 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 				&chaincfg.SimNetParams,
 			),
 		},
-		peers:     list.New(),
-		faulted:   make(map[string]string),
-		punished:  make(map[string]string),
-		askFaults: make(map[headerSyncAskOp]headerSyncAskFault),
-		controllerFaults: make(
-			map[headersync.AskOp]headersync.AskFault,
-		),
-		target: dstChainHeight,
+		peers:    list.New(),
+		faulted:  make(map[string]string),
+		punished: make(map[string]string),
+		target:   dstChainHeight,
 	}
 	filters, err := newMemFilterHeaderStore(&chaincfg.SimNetParams)
 	require.NoError(t, err)
@@ -400,7 +392,7 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 
 // params returns the chain parameters for the run's mode. SimNet proof of
 // work stays cheap while the TestNet3 network ID enables the production
-// actor path instead of the serial SimNet compatibility path.
+// multi-peer path instead of the serial SimNet compatibility path.
 func (d *dstRun) params() chaincfg.Params {
 	params := chaincfg.SimNetParams
 	params.Net = chaincfg.TestNet3Params.Net
@@ -468,7 +460,6 @@ func (d *dstRun) build() {
 		QuarantinePeer: func(addr string, _ time.Duration) {
 			d.punished[addr] = "quarantine"
 		},
-		headerSyncAskFault: d.askFault,
 	})
 	require.NoError(t, err)
 
@@ -489,13 +480,10 @@ func (d *dstRun) build() {
 		bm.cfg.ChainParams.Checkpoints,
 		headersync.RuntimeConfig{
 			Config:        d.headerConfig(),
-			MailboxSize:   headerSyncActorMailboxSize,
 			Dispatch:      querydispatch.New(dispatchActor),
 			DispatchActor: dispatchActor,
-			AskFault:      d.controllerFault,
 		},
 	)
-	bm.headerSync.Driver().SetAskHook(bm.driverAsk)
 	d.recorder = &headersync.EventRecorder{}
 	bm.headerSync.ManagerForTest().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
@@ -530,28 +518,6 @@ func (d *dstRun) build() {
 			}
 		}
 	}(bm)
-}
-
-// controllerFault consumes a one-shot controller ask fault.
-func (d *dstRun) controllerFault(
-	op headersync.AskOp) headersync.AskFault {
-
-	fault, ok := d.controllerFaults[op]
-	if !ok {
-		return headersync.AskOK
-	}
-	delete(d.controllerFaults, op)
-	return fault
-}
-
-// askFault consumes a one-shot blockmanager ask fault armed by the script.
-func (d *dstRun) askFault(op headerSyncAskOp) headerSyncAskFault {
-	fault, ok := d.askFaults[op]
-	if !ok {
-		return headerSyncAskOK
-	}
-	delete(d.askFaults, op)
-	return fault
 }
 
 // slotOf returns the slot holding peer, or -1.
@@ -955,26 +921,6 @@ func (d *dstRun) step(value byte) {
 		d.store.mode = mode
 		label += " store=" + mode.String()
 
-	case op == 9 && d.enabled(dstFaultAsk):
-		// Faults land at a blockmanager call site or at an ask the
-		// controller makes itself, before or after it applies.
-		ops := int(headerSyncAskOps) + int(headersync.AskOps)
-		target, after := arg%ops, (arg/ops)%2 == 1
-		if target < int(headerSyncAskOps) {
-			fault := headerSyncAskFailBefore
-			if after {
-				fault = headerSyncAskFailAfter
-			}
-			d.askFaults[headerSyncAskOp(target)] = fault
-			break
-		}
-		fault := headersync.AskFailBefore
-		if after {
-			fault = headersync.AskFailAfter
-		}
-		op := headersync.AskOp(target - int(headerSyncAskOps))
-		d.controllerFaults[op] = fault
-
 	case (op == 10 || op == 11) && d.enabled(dstFaultByzantine):
 		kind := 1 + dstReplyKind(
 			(int(op-10)*6+sub)%int(dstReplyKinds-1),
@@ -1075,8 +1021,6 @@ func (d *dstRun) shutdown() {
 func (d *dstRun) heal() {
 	d.t.Helper()
 	d.store.mode = dstStoreOK
-	clear(d.askFaults)
-	clear(d.controllerFaults)
 	clear(d.transport.blocked)
 	// Only empty slots get a fresh peer. Replacing a faulted peer that is
 	// still connected would run the done-peer path, which resets the
@@ -1324,7 +1268,8 @@ var dstRegressionSeeds = []string{
 	// Serial path cache and tip consistency.
 	"4a1de7e96a0717c39ab32fbf0d1277596fb8b7a39d", "c4eb4a04faf7f3c5",
 	"0e1b043680dbd3cd07e0df85e4b36d6ac7f867a544f1d718fd25941b",
-	// F1 asks that apply then fail, and the new-peer dispatch stall.
+	// F1 dispatch mirror calls that apply then fail, and the new-peer
+	// dispatch stall.
 	"7a6fa024c529a8e9abc0eb2e03b0b23f8c233fae580d45",
 	"05baceae8c60fb040cf599bcb6a96b9296187a1b84081bf190f7120a25c4d67ab2ca",
 	"4b68e926ec48d9f1cfc8d123e73b08af8001434a9e289865",
@@ -1596,60 +1541,6 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 		require.True(t, ok)
 		require.NotEqual(t, headersync.PeerBlocked, snapshot.State,
 			"cooldown expired without recovering the peer")
-	})
-}
-
-// TestHeaderOrphanedRangeReleased checks that a peer recovering from its
-// cooldown gives back an active range it holds with no request behind it, as
-// a RequestRange ask that applied but reported an error leaves. With no other
-// peer to steal it, the lease used to stay active with nothing running it;
-// only a serial batch that happened to cover the span retired it.
-func TestHeaderOrphanedRangeReleased(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
-		d.disconnect(1)
-		d.disconnect(2)
-		d.askFaults[headerSyncAskRequestRange] = headerSyncAskFailAfter
-		require.True(t, d.reply(0, dstReplyHonest))
-		require.Empty(t, d.askFaults, "fault never fired")
-
-		// Expire the peer's cooldown and run the recovery pass at once,
-		// before any timeout or serial batch can retire the lease.
-		peerID := d.current[0].Addr()
-		session := d.bm.sessionForTest()
-		session.TrackPeerCooldown(
-			peerID, headersync.PeerBlocked,
-			time.Now().Add(-time.Second), 0,
-		)
-		d.bm.recoverHeaderSyncPeers(d.peers)
-		synctest.Wait()
-
-		manager := d.bm.headerSync.ManagerForTest()
-		peer, ok, err := manager.SnapshotPeer(t.Context(), peerID)
-		require.NoError(t, err)
-		require.True(t, ok)
-
-		// The released span must be startable again by the same
-		// peer: a peer actor left busy would never take new work.
-		d.bm.dispatchHeaderSyncWork(d.peers)
-		synctest.Wait()
-		require.True(t, session.RangeActive(peerID),
-			"recovered peer never started new work")
-
-		nextID := session.NextRangeID()
-		for id := headersync.RangeID(1); id < nextID; id++ {
-			rng, ok, err := manager.SnapshotRange(t.Context(), id)
-			require.NoError(t, err)
-			if !ok || rng.State != headersync.RangeActive ||
-				rng.OwnerPeer != peerID {
-
-				continue
-			}
-			require.True(t, session.RangeActive(peerID) ||
-				peer.State == headersync.PeerBlocked,
-				"range %d active on a ready peer with no "+
-					"request", id)
-		}
 	})
 }
 
@@ -1927,8 +1818,8 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 }
 
 // TestHeaderSyncOpCtxCancelledOnStop checks that shutdown cancels headersync
-// actor asks. The op context used to derive from context.Background, so Stop
-// could wait out the full deadline for every ask still pending.
+// driver events. The op context used to derive from context.Background, so
+// Stop could wait out the full deadline for every event still pending.
 func TestHeaderSyncOpCtxCancelledOnStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
@@ -1944,19 +1835,16 @@ func TestHeaderSyncOpCtxCancelledOnStop(t *testing.T) {
 
 // TestHeaderTransportAmbiguousCommit is the regression for an ambiguous header
 // commit. A write that lands but reports an error, a write that lands in part,
-// or a CommitReadyRanges ask that fails after a successful write all used to
+// or a CommitReadyRanges call that fails after a successful write all used to
 // leave memory behind disk, after which the commit retry never connected and
 // header sync stalled until restart.
 func TestHeaderTransportAmbiguousCommit(t *testing.T) {
 	cases := []struct {
 		name  string
 		store dstStoreMode
-		ask   headerSyncAskFault
 	}{
 		{name: "ack_lost", store: dstStoreAckLost},
 		{name: "torn", store: dstStoreTorn},
-		{name: "commit_ask_after_write", ask: headerSyncAskFailAfter},
-		{name: "commit_ask_before", ask: headerSyncAskFailBefore},
 	}
 	modes := []dstMode{
 		dstModeCheckpointAll, dstModeCheckpoint, dstModeFrontier1,
@@ -1965,7 +1853,7 @@ func TestHeaderTransportAmbiguousCommit(t *testing.T) {
 		for _, mode := range modes {
 			name := tc.name + "/" + mode.String()
 			t.Run(name, func(t *testing.T) {
-				runAmbiguousCommit(t, mode, tc.store, tc.ask)
+				runAmbiguousCommit(t, mode, tc.store)
 			})
 		}
 	}
@@ -1973,15 +1861,10 @@ func TestHeaderTransportAmbiguousCommit(t *testing.T) {
 
 // runAmbiguousCommit arms one ambiguous fault for the first commit, heals,
 // and requires the run to reach the honest tip with nothing left over.
-func runAmbiguousCommit(t *testing.T, mode dstMode, store dstStoreMode,
-	ask headerSyncAskFault) {
-
+func runAmbiguousCommit(t *testing.T, mode dstMode, store dstStoreMode) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: mode})
 		d.store.mode = store
-		if ask != headerSyncAskOK {
-			d.askFaults[headerSyncAskCommitReady] = ask
-		}
 
 		// Let the first replies hit the fault before healing clears
 		// it. The bootstrap window may hold discovery back, so give it
@@ -1993,13 +1876,10 @@ func runAmbiguousCommit(t *testing.T, mode dstMode, store dstStoreMode,
 			time.Sleep(headerSyncBootstrapMaxWait)
 			d.pump()
 		}
-		// Each case's fault must actually have fired: a store fault
-		// reports one ambiguous write, an ask fault is consumed.
-		if store != dstStoreOK {
-			require.Equal(t, 1, d.store.ambiguous,
-				"store fault never fired")
-		}
-		require.Empty(t, d.askFaults, "ask fault never fired")
+		// The fault must actually have fired, which a store reports as
+		// one ambiguous write.
+		require.Equal(t, 1, d.store.ambiguous,
+			"store fault never fired")
 		d.heal()
 		require.NoError(t, d.quiescent(), d.describe())
 	})

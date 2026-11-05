@@ -175,24 +175,3 @@ func (b *blockManager) armHeaderSyncRequestTimer(sp *ServerPeer,
 		})
 	})
 }
-
-// driverAsk runs one of the driver's peer actor asks through the block
-// manager's test fault seam, which the deterministic tests use to make an ask
-// apply and then report a deadline.
-func (b *blockManager) driverAsk(op headersync.DriverAskOp,
-	fn func() error) error {
-
-	switch op {
-	case headersync.DriverAskRequestRange:
-		return b.headerSyncAsk(headerSyncAskRequestRange, fn)
-
-	case headersync.DriverAskCompleteRange:
-		return b.headerSyncAsk(headerSyncAskCompleteRange, fn)
-
-	case headersync.DriverAskCommitReady:
-		return b.headerSyncAsk(headerSyncAskCommitReady, fn)
-
-	default:
-		return fn()
-	}
-}

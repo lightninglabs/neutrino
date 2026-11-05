@@ -245,7 +245,7 @@ func TestInvalidationClearsSharedOwnership(t *testing.T) {
 }
 
 func newManagers(t *testing.T, ctx context.Context) (
-	*headersync.ManagerActor, *querysync.ManagerActor) {
+	*headersync.Manager, *querysync.ManagerActor) {
 
 	t.Helper()
 
@@ -255,9 +255,9 @@ func newManagers(t *testing.T, ctx context.Context) (
 	queryManager.Start(ctx)
 	t.Cleanup(queryManager.Stop)
 
-	headerManager := headersync.NewManagerActor(
+	headerManager := headersync.NewManager(
 		headersync.NewHeaderSyncFSM(0, testHash(100),
-			headersync.DefaultConfig()), 8,
+			headersync.DefaultConfig()),
 	)
 	headerManager.SetDispatchController(New(queryManager))
 	headerManager.Start(ctx)
@@ -267,7 +267,7 @@ func newManagers(t *testing.T, ctx context.Context) (
 }
 
 func addAnchor(t *testing.T, ctx context.Context,
-	manager *headersync.ManagerActor, height uint32, hashByte byte) {
+	manager *headersync.Manager, height uint32, hashByte byte) {
 
 	t.Helper()
 
@@ -277,7 +277,7 @@ func addAnchor(t *testing.T, ctx context.Context,
 }
 
 func planRange(t *testing.T, ctx context.Context,
-	manager *headersync.ManagerActor, id headersync.RangeID,
+	manager *headersync.Manager, id headersync.RangeID,
 	startHeight, stopHeight uint32) {
 
 	t.Helper()

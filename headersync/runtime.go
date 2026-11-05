@@ -17,42 +17,35 @@ type ActorLifecycle interface {
 	Stop()
 }
 
-// RuntimeConfig contains the production actor/runtime dependencies.
+// RuntimeConfig contains the production runtime dependencies.
 type RuntimeConfig struct {
 	Config Config
 
-	MailboxSize int
-
 	Dispatch      DispatchController
 	DispatchActor ActorLifecycle
-
-	// AskFault is a test-only seam that makes selected controller asks
-	// report a caller deadline before or after they apply. Production
-	// leaves it nil.
-	AskFault func(AskOp) AskFault
 }
 
-// Runtime owns the headersync actor graph and production request bookkeeping.
+// Runtime owns the headersync manager, its peers and production request
+// bookkeeping.
 // Blockmanager remains responsible for peer I/O and header storage, while this
-// type owns the manager actor, peer actors, controller, driver, and session
+// type owns the manager, peers, controller, driver, and session
 // state. The session is private to the package: the driver is its only user
 // outside of it.
 type Runtime struct {
-	cfg         Config
-	mailboxSize int
+	cfg Config
 
 	dispatchActor ActorLifecycle
-	manager       *ManagerActor
+	manager       *Manager
 	session       *Session
 	controller    *Controller
 	driver        *Driver
 
-	peers map[string]*PeerActor
+	peers map[string]*Peer
 
 	mu sync.Mutex
 }
 
-// NewRuntime creates a headersync actor runtime at the current durable chain
+// NewRuntime creates a headersync runtime at the current durable chain
 // tip and seeds all known chain checkpoints as trusted anchors.
 func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	cfg RuntimeConfig) (*Runtime, int) {
@@ -67,12 +60,7 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 	fsm.SeedCommittedAnchor()
 	seeded := fsm.AddCheckpointAnchors(checkpoints)
 
-	mailboxSize := cfg.MailboxSize
-	if mailboxSize <= 0 {
-		mailboxSize = 1
-	}
-
-	manager := NewManagerActor(fsm, mailboxSize)
+	manager := NewManager(fsm)
 	if cfg.Dispatch != nil {
 		manager.SetDispatchController(cfg.Dispatch)
 	}
@@ -81,22 +69,20 @@ func NewRuntime(tip ChainPoint, checkpoints []chaincfg.Checkpoint,
 
 	runtime := &Runtime{
 		cfg:           headerCfg,
-		mailboxSize:   mailboxSize,
 		dispatchActor: cfg.DispatchActor,
 		manager:       manager,
 		session:       session,
 		controller: NewController(
 			manager, session, headerCfg,
 		),
-		peers: make(map[string]*PeerActor),
+		peers: make(map[string]*Peer),
 	}
 	runtime.controller.peerLookup = runtime.Peer
-	runtime.controller.askFault = cfg.AskFault
 	runtime.driver = newDriver(runtime, session)
 	return runtime, seeded
 }
 
-// Start starts the actor graph.
+// Start starts the manager and peers.
 func (r *Runtime) Start(ctx context.Context) {
 	if r == nil {
 		return
@@ -109,7 +95,8 @@ func (r *Runtime) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops all actors and request timers owned by the runtime.
+// Stop stops the manager, the peers, the dispatch actor and the request
+// timers owned by the runtime.
 func (r *Runtime) Stop() {
 	if r == nil {
 		return
@@ -142,8 +129,8 @@ func (r *Runtime) Driver() *Driver {
 	return r.driver
 }
 
-// Peer returns a peer actor by ID.
-func (r *Runtime) Peer(id string) (*PeerActor, bool) {
+// Peer returns a peer by ID.
+func (r *Runtime) Peer(id string) (*Peer, bool) {
 	if r == nil {
 		return nil, false
 	}
@@ -155,9 +142,9 @@ func (r *Runtime) Peer(id string) (*PeerActor, bool) {
 	return peer, ok
 }
 
-// RegisterPeer creates and starts a peer actor if it doesn't already exist.
+// RegisterPeer creates and starts a peer if it doesn't already exist.
 func (r *Runtime) RegisterPeer(ctx context.Context,
-	peer PeerSnapshot) (*PeerActor, bool, error) {
+	peer PeerSnapshot) (*Peer, bool, error) {
 
 	if r == nil || r.manager == nil {
 		return nil, false, ErrActorStopped
@@ -170,9 +157,7 @@ func (r *Runtime) RegisterPeer(ctx context.Context,
 	}
 	r.mu.Unlock()
 
-	actor := NewPeerActor(
-		peer.ID, peer.Rank, r.manager, r.mailboxSize,
-	)
+	actor := NewPeer(peer.ID, peer.Rank, r.manager)
 	if err := actor.Start(ctx); err != nil {
 		return nil, false, err
 	}
@@ -208,7 +193,7 @@ func (r *Runtime) RegisterPeer(ctx context.Context,
 	return actor, true, nil
 }
 
-// UnregisterPeer stops a peer actor and removes it from the manager.
+// UnregisterPeer stops a peer and removes it from the manager.
 func (r *Runtime) UnregisterPeer(ctx context.Context, id string) error {
 	if r == nil || r.manager == nil {
 		return nil
@@ -228,7 +213,7 @@ func (r *Runtime) UnregisterPeer(ctx context.Context, id string) error {
 	return r.manager.RemovePeer(ctx, id)
 }
 
-// UpdatePeerRTT updates a peer actor when present, falling back to the manager
+// UpdatePeerRTT updates a peer when present, falling back to the manager
 // snapshot when only manager state exists.
 func (r *Runtime) UpdatePeerRTT(ctx context.Context, id string,
 	rtt time.Duration) error {
@@ -247,7 +232,7 @@ func (r *Runtime) UpdatePeerRTT(ctx context.Context, id string,
 	return r.manager.UpdatePeerRTT(ctx, id, rtt)
 }
 
-// UpdatePeerState updates a peer actor when present, falling back to the
+// UpdatePeerState updates a peer when present, falling back to the
 // manager snapshot when only manager state exists.
 func (r *Runtime) UpdatePeerState(ctx context.Context, id string,
 	state PeerState) error {
