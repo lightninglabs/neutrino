@@ -133,14 +133,14 @@ func (b *blockManager) executeDriverEffect(peers *list.List,
 	case headersync.ScheduleCommitRetry:
 		b.scheduleHeaderCommitRetry()
 
+	case headersync.CancelCommitRetry:
+		b.cancelHeaderCommitRetry()
+
 	case headersync.ContinueSync:
 		b.continueHeaderSync(peers)
 
 	case headersync.CommitReadyRanges:
-		ctx, cancel := b.headerSyncOpCtx()
-		defer cancel()
-
-		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+		if err := b.commitReadyHeaderSyncRanges(); err != nil {
 			log.Warnf("headersync failed to commit ready ranges: "+
 				"%v", err)
 			if b.rejectInvalidHeaderCommit(peers, err) {
@@ -188,6 +188,9 @@ func (b *blockManager) driverAsk(op headersync.DriverAskOp,
 
 	case headersync.DriverAskCompleteRange:
 		return b.headerSyncAsk(headerSyncAskCompleteRange, fn)
+
+	case headersync.DriverAskCommitReady:
+		return b.headerSyncAsk(headerSyncAskCommitReady, fn)
 
 	default:
 		return fn()

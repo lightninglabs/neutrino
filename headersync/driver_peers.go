@@ -147,7 +147,7 @@ func (d *Driver) handleRecoverPeers(ctx context.Context, event RecoverPeers,
 // with no other peer, recovering the peer to ready would otherwise leave the
 // range active forever with nothing running it.
 func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
-	manager := d.runtime.Manager()
+	manager := d.runtime.manager
 	peer, ok, err := manager.SnapshotPeer(ctx, peerID)
 	if err != nil || !ok || peer.ActiveRange == NoRange {
 		return
@@ -183,7 +183,7 @@ func (d *Driver) releaseOrphanedRange(ctx context.Context, peerID string) {
 
 // replanRange plans a failed range again.
 func (d *Driver) replanRange(ctx context.Context, rng HeaderRange) {
-	result, err := d.runtime.Controller().ReplanRange(ctx, rng)
+	result, err := d.runtime.controller.ReplanRange(ctx, rng)
 	if err != nil {
 		log.Warnf("headersync unable to replan failed range_id=%d: %v",
 			rng.ID, err)

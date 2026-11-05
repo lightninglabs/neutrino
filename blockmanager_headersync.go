@@ -155,7 +155,7 @@ func headerSyncPeerRank(sp *ServerPeer) int {
 }
 
 func (b *blockManager) planHeaderSyncRanges(bestHeight uint32) (int, error) {
-	if b.headerSync.Controller() == nil {
+	if b.headerSync == nil {
 		return 0, nil
 	}
 
@@ -201,7 +201,7 @@ func (b *blockManager) nextCheckpointPoint() *headersync.ChainPoint {
 }
 
 func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
-	if b.headerSync.Controller() == nil {
+	if b.headerSync == nil {
 		return false
 	}
 
@@ -228,7 +228,7 @@ func (b *blockManager) dispatchHeaderSyncWork(peers *list.List) bool {
 func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync.Controller() == nil || b.nextCheckpoint == nil {
+	if b.headerSync == nil || b.nextCheckpoint == nil {
 		return false
 	}
 	b.recoverHeaderSyncPeers(peers)
@@ -257,7 +257,7 @@ func (b *blockManager) startHeaderAnchorDiscovery(peers *list.List,
 func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 	bestHeight uint32) bool {
 
-	if b.headerSync.Controller() == nil {
+	if b.headerSync == nil {
 		return false
 	}
 	b.recoverHeaderSyncPeers(peers)
@@ -285,7 +285,7 @@ func (b *blockManager) startHeaderFrontierDiscovery(peers *list.List,
 func (b *blockManager) pipelineHeaderFrontierDiscovery(peers *list.List,
 	response headersync.AnchorResponse) bool {
 
-	if b.headerSync.Controller() == nil || b.nextCheckpoint != nil {
+	if b.headerSync == nil || b.nextCheckpoint != nil {
 		return false
 	}
 
@@ -760,8 +760,6 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 	hmsg *headersMsg) bool {
 
 	peerID := hmsg.peer.Addr()
-	ctx, cancel := b.headerSyncOpCtx()
-	defer cancel()
 
 	reply := b.handleDriverEvent(peers, headersync.AnchorReply{
 		PeerID:  peerID,
@@ -843,7 +841,7 @@ func (b *blockManager) handleHeaderSyncAnchorHeaders(peers *list.List,
 			result.Range.StartHeight, result.Range.StopHeight,
 			len(hmsg.headers.Headers))
 
-		if err := b.commitReadyHeaderSyncRanges(ctx); err != nil {
+		if err := b.commitReadyHeaderSyncRanges(); err != nil {
 			log.Warnf("headersync failed to commit anchor-backed "+
 				"range_id=%d: %v", result.Range.ID, err)
 			if b.rejectInvalidHeaderCommit(peers, err) {
@@ -923,7 +921,7 @@ func (b *blockManager) handleHeaderSyncRangeHeaders(peers *list.List,
 	return outcome.result.Handled
 }
 
-func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
+func (b *blockManager) commitReadyHeaderSyncRanges() error {
 	if b.pendingHeaderCommit != nil {
 		return nil
 	}
@@ -934,46 +932,30 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 		return err
 	}
 
-	ready, err := b.headerSync.Manager().ReadyRanges(ctx)
-	if err != nil {
-		return err
+	listed := b.handleDriverEvent(nil, headersync.ListReadyRanges{})
+	if listed.err != nil {
+		return listed.err
 	}
+	ready := listed.result.Ready
 	if len(ready) == 0 {
-		// A commit ask that applied but reported an error leaves its
-		// payloads behind with nothing left to commit them.
-		err := b.headerSync.Controller().PruneRetiredStaging(ctx)
-		if err != nil {
-			b.scheduleHeaderCommitRetry()
-			return err
-		}
-		b.cancelHeaderCommitRetry()
 		return nil
 	}
 
 	commitRanges := make([]headerSyncRangeCommit, 0, len(ready))
 	for _, rangeID := range ready {
-		// The FSM staged the range but its headers never reached the
-		// session: the completion ask applied and then reported an
-		// error. Fetch the span again rather than stop here forever.
-		staged, ok := b.headerSync.Driver().StagedRange(rangeID)
-		if !ok {
-			_, err := b.headerSync.Manager().RequeueStagedRange(
-				ctx, rangeID,
-			)
-			log.Warnf("headersync range_id=%d ready without "+
-				"staged headers, requeued: %v", rangeID, err)
-			break
+		event := headersync.SnapshotReadyRange{RangeID: rangeID}
+		fetched := b.handleDriverEvent(nil, event)
+		if fetched.err != nil {
+			return fetched.err
 		}
 
-		rng, ok, err := b.headerSync.Manager().
-			SnapshotRange(ctx, rangeID)
-		if err != nil {
-			return err
+		// The driver requeued a range with no headers, so it stops
+		// the batch here.
+		if fetched.result.ReadyRange == nil {
+			break
 		}
-		if !ok {
-			return fmt.Errorf("headersync range_id=%d disappeared",
-				rangeID)
-		}
+		rng := fetched.result.ReadyRange.Range
+		staged := fetched.result.ReadyRange.Staged
 
 		// Skip whatever part of the range is already durable. The
 		// FSM still commits the whole range below.
@@ -1012,13 +994,11 @@ func (b *blockManager) commitReadyHeaderSyncRanges(ctx context.Context) error {
 			b.scheduleHeaderCommitRetry()
 			return err
 		}
-		recoveryCtx, cancel := b.headerSyncOpCtx()
-		defer cancel()
-		controller := b.headerSync.Controller()
-		result, recoveryErr := controller.InvalidateRange(
-			recoveryCtx, invalid.rangeID,
-			time.Now().Add(b.headerSyncTimeout),
-		)
+		outcome := b.handleDriverEvent(nil, headersync.InvalidateRange{
+			RangeID:       invalid.rangeID,
+			CooldownUntil: time.Now().Add(b.headerSyncTimeout),
+		})
+		result, recoveryErr := outcome.result.Invalidated, outcome.err
 		log.Warnf("headersync range_invalidated range_id=%d peer=%s "+
 			"invalidated_ranges=%v invalidated_anchors=%d "+
 			"reason=%v",
@@ -1238,27 +1218,18 @@ func (b *blockManager) rejectCheckpointPeer(peers *list.List,
 }
 
 // finishReadyHeaderSyncRanges retires staged ranges after durable completion.
-// It uses a fresh context because persistence can outlast the original ask.
 func (b *blockManager) finishReadyHeaderSyncRanges() error {
 	// Persistence and header validation can legitimately consume the short
 	// actor-operation deadline under heavy sqlite write pressure. Once the
-	// headers are durably written and the visible tip has advanced, use a
-	// fresh actor context so the FSM cannot lag behind the block manager
-	// just because the pre-write context expired.
-	commitCtx, commitCancel := b.headerSyncOpCtx()
-	defer commitCancel()
-
-	var commitResult headersync.CommitReadyResult
-	err := b.headerSyncAsk(headerSyncAskCommitReady, func() error {
-		var err error
-		commitResult, err = b.headerSync.Controller().
-			CommitReadyRanges(commitCtx)
-		return err
-	})
-	if err != nil {
+	// headers are durably written and the visible tip has advanced, each
+	// driver event has its own deadline, so the FSM can't lag behind the
+	// block manager because a pre-write context expired.
+	outcome := b.handleDriverEvent(nil, headersync.CommitDurableRanges{})
+	if outcome.err != nil {
 		b.scheduleHeaderCommitRetry()
-		return err
+		return outcome.err
 	}
+	commitResult := outcome.result.Commit
 	b.cancelHeaderCommitRetry()
 	commit := commitResult.Commit
 	if commitResult.PrunedAnchors > 0 {

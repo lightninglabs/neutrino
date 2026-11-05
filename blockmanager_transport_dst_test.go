@@ -8,8 +8,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -377,7 +379,7 @@ func newDSTRun(t *testing.T, cfg dstConfig) *dstRun {
 	// The checkpoint-all mode pre-plans every range before peers connect,
 	// so production planning finds the spans already covered.
 	if cfg.mode == dstModeCheckpointAll {
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		plan, err := manager.PlanConfirmedAnchorRanges(
 			t.Context(), 1, 0, dstChainHeight,
 		)
@@ -495,7 +497,7 @@ func (d *dstRun) build() {
 	)
 	bm.headerSync.Driver().SetAskHook(bm.driverAsk)
 	d.recorder = &headersync.EventRecorder{}
-	bm.headerSync.Manager().SetEventSink(d.recorder)
+	bm.headerSync.ManagerForTest().SetEventSink(d.recorder)
 	bm.headerSync.Start(t.Context())
 
 	if d.transport == nil {
@@ -1199,7 +1201,7 @@ func (d *dstRun) snapshot() dstSnapshot {
 	if d.stopped {
 		return snapshot
 	}
-	manager := d.bm.headerSync.Manager()
+	manager := d.bm.headerSync.ManagerForTest()
 	nextID := d.rangeIDLimit()
 	for id := headersync.RangeID(1); id < nextID; id++ {
 		rng, ok, err := manager.SnapshotRange(ctx, id)
@@ -1226,7 +1228,7 @@ func (d *dstRun) describe() string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "mode=%s faults=%#x\n", d.cfg.mode, d.cfg.faults)
 	if !d.stopped {
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		nextID := d.rangeIDLimit()
 		for id := headersync.RangeID(1); id < nextID; id++ {
 			rng, _, _ := manager.SnapshotRange(d.t.Context(), id)
@@ -1433,6 +1435,37 @@ func dstSwarmSeed(rng *rand.Rand) []byte {
 	return seed
 }
 
+// dstDump names a file to receive one line per seed with a digest of the seed's
+// full snapshot. A refactor that claims no behaviour change should produce the
+// same file before and after.
+var dstDump = flag.String("dst.dump", "", "write per-seed snapshot digests")
+
+// TestHeaderTransportDSTDump writes the digest of every corpus and regression
+// seed, plus the swarm that -dst.seed and -dst.swarm select, to -dst.dump.
+func TestHeaderTransportDSTDump(t *testing.T) {
+	if *dstDump == "" {
+		t.Skip("set -dst.dump to write snapshot digests")
+	}
+
+	seeds := dstSeeds(t)
+	rng := rand.New(rand.NewPCG(*dstSwarmSeedFlag, 0))
+	for i := 0; i < *dstSwarmRuns; i++ {
+		seeds = append(seeds, dstSwarmSeed(rng))
+	}
+
+	var out strings.Builder
+	for _, seed := range seeds {
+		t.Run(fmt.Sprintf("%x", seed), func(t *testing.T) {
+			snapshot := runHeaderTransportDST(t, seed)
+			digest := sha256.Sum256(
+				[]byte(fmt.Sprintf("%+v", snapshot)),
+			)
+			fmt.Fprintf(&out, "%x %x\n", seed, digest)
+		})
+	}
+	require.NoError(t, os.WriteFile(*dstDump, []byte(out.String()), 0o644))
+}
+
 // TestHeaderTransportDSTSwarm runs a fixed, reproducible swarm campaign. Each
 // seed draws its own mode and fault set. Set the count with -dst.swarm.
 func TestHeaderTransportDSTSwarm(t *testing.T) {
@@ -1473,7 +1506,7 @@ func TestHeaderTransportDuplicatePreservesRequest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		d := newDSTRun(t, dstConfig{mode: dstModeCheckpointAll})
 		require.True(t, d.reply(0, dstReplyHonest))
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		peerID := d.current[0].Addr()
 		before, ok, err := manager.SnapshotPeer(t.Context(), peerID)
 		require.NoError(t, err)
@@ -1555,7 +1588,8 @@ func TestHeaderCooldownWakeup(t *testing.T) {
 
 		time.Sleep(defaultHeaderPeerCooldown)
 		d.pump()
-		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
+		manager := d.bm.headerSync.ManagerForTest()
+		snapshot, ok, err := manager.SnapshotPeer(
 			t.Context(), peer.Addr(),
 		)
 		require.NoError(t, err)
@@ -1590,7 +1624,7 @@ func TestHeaderOrphanedRangeReleased(t *testing.T) {
 		d.bm.recoverHeaderSyncPeers(d.peers)
 		synctest.Wait()
 
-		manager := d.bm.headerSync.Manager()
+		manager := d.bm.headerSync.ManagerForTest()
 		peer, ok, err := manager.SnapshotPeer(t.Context(), peerID)
 		require.NoError(t, err)
 		require.True(t, ok)

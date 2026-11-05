@@ -63,7 +63,7 @@ func (DiscoverFrom) driverEvent() {}
 func (d *Driver) handleDiscoverAnchors(ctx context.Context,
 	event DiscoverAnchors, result *DriverResult) {
 
-	span, ok, err := d.runtime.Controller().AnchorDiscoverySpan(
+	span, ok, err := d.runtime.controller.AnchorDiscoverySpan(
 		ctx, event.Tip, event.Stop, event.BestHeight,
 	)
 	if err != nil {
@@ -84,7 +84,7 @@ func (d *Driver) handleDiscoverAnchors(ctx context.Context,
 func (d *Driver) handleDiscoverFrontier(ctx context.Context,
 	event DiscoverFrontier, result *DriverResult) {
 
-	span, ok, err := d.runtime.Controller().FrontierDiscoverySpan(
+	span, ok, err := d.runtime.controller.FrontierDiscoverySpan(
 		ctx, event.Tip, event.BestHeight,
 	)
 	if err != nil {
@@ -113,7 +113,7 @@ func (d *Driver) handleDiscoverFrontier(ctx context.Context,
 func (d *Driver) handlePipelineFrontier(event PipelineFrontier,
 	result *DriverResult) {
 
-	span, ok := d.runtime.Controller().FrontierLookaheadSpan(
+	span, ok := d.runtime.controller.FrontierLookaheadSpan(
 		event.After, event.BestHeight,
 	)
 	if !ok {
@@ -133,7 +133,7 @@ func (d *Driver) handlePipelineFrontier(event PipelineFrontier,
 func (d *Driver) discoverFrom(span AnchorRequest, peers []PeerCandidate,
 	excluded []string, result *DriverResult) {
 
-	plan := d.runtime.Controller().PlanAnchorRequests(
+	plan := d.runtime.controller.PlanAnchorRequests(
 		span, peers, excluded...,
 	)
 	if plan.Deferred && len(plan.Peers) == 0 {

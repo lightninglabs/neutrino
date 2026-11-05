@@ -21,6 +21,9 @@ const (
 	// DriverAskCompleteRange is the range completion ask made when a
 	// reply arrives.
 	DriverAskCompleteRange
+
+	// DriverAskCommitReady is the ask that commits durable ranges.
+	DriverAskCommitReady
 )
 
 // DriverEvent is an input to the driver. Events carry everything the driver
@@ -91,6 +94,19 @@ type DriverResult struct {
 	// when the anchor was trusted, replaced or unknown, so that nothing
 	// changed.
 	AnchorRejected bool
+
+	// Ready is the outcome of ListReadyRanges.
+	Ready []RangeID
+
+	// ReadyRange is the outcome of SnapshotReadyRange. It's nil when the
+	// range had no staged headers and was requeued.
+	ReadyRange *ReadyRange
+
+	// Invalidated is the outcome of InvalidateRange.
+	Invalidated InvalidationResult
+
+	// Commit is the outcome of CommitDurableRanges.
+	Commit CommitReadyResult
 }
 
 // Driver is the header-sync decision maker. It owns the request and timer
@@ -223,6 +239,21 @@ func (d *Driver) Handle(ctx context.Context,
 
 	case PruneAnchors:
 		d.handlePruneAnchors(event, &result)
+
+	case AdvanceTip:
+		err = d.handleAdvanceTip(ctx, event)
+
+	case ListReadyRanges:
+		err = d.handleListReadyRanges(ctx, &result)
+
+	case SnapshotReadyRange:
+		err = d.handleSnapshotReadyRange(ctx, event, &result)
+
+	case InvalidateRange:
+		err = d.handleInvalidateRange(ctx, event, &result)
+
+	case CommitDurableRanges:
+		err = d.handleCommitDurableRanges(ctx, &result)
 	}
 
 	return result, err

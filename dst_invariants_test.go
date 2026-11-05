@@ -190,7 +190,7 @@ func (v *dstInvariants) memoryMatchesDisk(event string) {
 func (v *dstInvariants) rangeTable(event string) {
 	d := v.d
 	ctx := d.t.Context()
-	manager := d.bm.headerSync.Manager()
+	manager := d.bm.headerSync.ManagerForTest()
 	session := d.bm.sessionForTest()
 
 	owners := make(map[headersync.RangeID]string)
@@ -290,7 +290,7 @@ func (v *dstInvariants) leases(event string) {
 	d := v.d
 	ctx := d.t.Context()
 	session := d.bm.sessionForTest()
-	manager := d.bm.headerSync.Manager()
+	manager := d.bm.headerSync.ManagerForTest()
 	for _, peer := range d.current {
 		if peer == nil {
 			continue
@@ -342,7 +342,8 @@ func (v *dstInvariants) honestImmunity(event string) {
 		if peer == nil || d.faulted[peer.Addr()] != "" {
 			continue
 		}
-		snapshot, ok, err := d.bm.headerSync.Manager().SnapshotPeer(
+		manager := d.bm.headerSync.ManagerForTest()
+		snapshot, ok, err := manager.SnapshotPeer(
 			ctx, peer.Addr(),
 		)
 		require.NoError(d.t, err)
@@ -374,7 +375,7 @@ func (d *dstRun) quiescent() error {
 	case d.bm.headerCommitRetryTimer != nil:
 		return fmt.Errorf("commit retry still armed")
 	}
-	manager := d.bm.headerSync.Manager()
+	manager := d.bm.headerSync.ManagerForTest()
 	for id := headersync.RangeID(1); id < d.rangeIDLimit(); id++ {
 		if _, ok := session.StagedRange(id); ok {
 			return fmt.Errorf("range %d still staged", id)

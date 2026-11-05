@@ -7,3 +7,14 @@ package headersync
 func (d *Driver) SessionForTest() *Session {
 	return d.session
 }
+
+// ManagerForTest returns the manager actor. Tests use it to seed and inspect
+// FSM state. Production code goes through the driver.
+func (r *Runtime) ManagerForTest() *ManagerActor {
+	return r.manager
+}
+
+// ControllerForTest returns the controller, for the same reason.
+func (r *Runtime) ControllerForTest() *Controller {
+	return r.controller
+}

@@ -54,7 +54,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		runtime := bm.headerSync
 		runtime.Start(ctx)
 		defer runtime.Stop()
-		manager := runtime.Manager()
+		manager := runtime.ManagerForTest()
 		genesis, _, err := store.ChainTip()
 		require.NoError(t, err)
 		offset := time.Until(genesis.Timestamp.Add(time.Hour))
@@ -80,7 +80,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 			}, []*wire.BlockHeader{bad})
 			var invalid *headerSyncValidationError
 			require.ErrorAs(t,
-				bm.commitReadyHeaderSyncRanges(ctx), &invalid)
+				bm.commitReadyHeaderSyncRanges(), &invalid)
 			result.Events = append(result.Events, "invalidated")
 		}
 
@@ -144,7 +144,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 		}
 		time.Sleep(time.Duration(latency%8) * time.Millisecond)
 		deliver(fast, second, headers[2:])
-		require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+		require.NoError(t, bm.commitReadyHeaderSyncRanges())
 		settleHeaderCommit(t, bm, list.New())
 		_, height, err := store.ChainTip()
 		require.NoError(t, err)
@@ -200,7 +200,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 				BlockHeaderStore: store, writeErr: writeErr,
 			}
 			bm.cfg.BlockHeaders = failing
-			require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+			require.NoError(t, bm.commitReadyHeaderSyncRanges())
 			settleHeaderCommit(t, bm, list.New())
 			_, failedHeight, err := store.ChainTip()
 			require.NoError(t, err)
@@ -208,7 +208,7 @@ func runHeaderDST(t *testing.T, script []byte) headerDSTResult {
 			result.Events = append(result.Events, "write_failed")
 			failing.writeErr = nil
 		}
-		require.NoError(t, bm.commitReadyHeaderSyncRanges(ctx))
+		require.NoError(t, bm.commitReadyHeaderSyncRanges())
 		settleHeaderCommit(t, bm, list.New())
 		if flags&8 == 0 {
 			late()

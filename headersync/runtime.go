@@ -133,24 +133,6 @@ func (r *Runtime) Stop() {
 	}
 }
 
-// Manager returns the manager actor.
-func (r *Runtime) Manager() *ManagerActor {
-	if r == nil {
-		return nil
-	}
-
-	return r.manager
-}
-
-// Controller returns the production orchestration controller.
-func (r *Runtime) Controller() *Controller {
-	if r == nil {
-		return nil
-	}
-
-	return r.controller
-}
-
 // Driver returns the header-sync driver.
 func (r *Runtime) Driver() *Driver {
 	if r == nil {

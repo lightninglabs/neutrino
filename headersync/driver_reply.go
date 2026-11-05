@@ -78,7 +78,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 	result.Handled = true
 
 	assignment := request.Assignment
-	manager := d.runtime.Manager()
+	manager := d.runtime.manager
 	rng, ok, err := manager.SnapshotRange(ctx, assignment.RangeID)
 	if err != nil {
 		log.Warnf("headersync unable to snapshot range_id=%d: %v",
@@ -166,7 +166,7 @@ func (d *Driver) handleRangeReply(ctx context.Context, event RangeReply,
 	// the follow-up if this cost matters.
 	var contradicted bool
 	if !valid && !lagging {
-		contradicted, err = d.runtime.Controller().
+		contradicted, err = d.runtime.controller.
 			StopAnchorContradicted(ctx, rng, headers)
 		if err != nil {
 			log.Warnf("headersync unable to check stop anchor "+
@@ -338,7 +338,7 @@ func (d *Driver) handleRejectUntrustedAnchor(ctx context.Context,
 func (d *Driver) rejectUntrustedAnchor(ctx context.Context, tag string,
 	height uint32, hash Hash, timeout time.Duration) bool {
 
-	result, err := d.runtime.Controller().RejectAnchor(
+	result, err := d.runtime.controller.RejectAnchor(
 		ctx, height, hash, time.Now().Add(timeout),
 	)
 	if err != nil {
