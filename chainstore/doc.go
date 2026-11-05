@@ -3,10 +3,9 @@
 //
 // The two stores must agree: a filter header is only valid for the block it
 // was derived from, so a filter batch can't land on a block that a concurrent
-// rollback just removed. Before this package, the block handler and the filter
-// handler each wrote on their own goroutine, and that binding held only by
-// convention. Now both submit commands to a Client, and a Store executes them
-// one at a time.
+// rollback just removed. So the block handler and the filter handler never
+// write to the stores themselves: both submit commands to a Client, and a
+// Store executes them one at a time.
 //
 // Three properties hold across every command:
 //
