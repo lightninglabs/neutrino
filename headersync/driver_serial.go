@@ -16,6 +16,7 @@ import (
 	"github.com/lightninglabs/neutrino/chainstore"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 // TipHeaders reports a non-empty headers message that no parallel range or
@@ -179,35 +180,84 @@ func NewSerialReorg(tip headerlist.Node, fork wire.BlockHeader,
 	}
 }
 
-// handleTipHeaders decides what a headers message that follows the tip means.
-func (d *Driver) handleTipHeaders(event TipHeaders) []DriverEffect {
-	var effects []DriverEffect
+// errHeadersDisconnected is the failure of a message whose headers do not
+// build on each other.
+var errHeadersDisconnected = errors.New("headers do not connect")
 
+// errIgnoreTipHeaders marks a message from a peer we do not follow that does
+// not attach to our tip. It needs no further processing and costs the peer
+// nothing.
+var errIgnoreTipHeaders = errors.New("headers ignored")
+
+// errForkUnattached is the failure of a header that attaches to nothing we
+// know, or to a point that a checkpoint rules out.
+var errForkUnattached = errors.New("fork does not attach to the chain")
+
+// handleTipHeaders decides what a headers message that follows the tip means.
+// Each step that can reject the message fails with an error, and the one place
+// that turns a failure into effects is tipFailureEffects.
+func (d *Driver) handleTipHeaders(event TipHeaders) []DriverEffect {
 	// The lease decides whose headers we trust before we're synced.
 	event.holdsLease = d.runtime.manager.TrustsTipPeer(event.PeerID)
 
-	// Explicitly check that each header in the message builds off of the
-	// previous one. This is a quick sanity check to avoid doing the more
-	// expensive checks below if we know the headers are invalid.
+	return fn.AndThen(
+		requireConnected(event), d.applyTipHeaders,
+	).UnwrapOrElse(func(err error) []DriverEffect {
+		return d.tipFailureEffects(event.PeerID, err)
+	})
+}
+
+// requireConnected explicitly checks that each header in the message builds
+// off of the previous one. This is a quick sanity check to avoid doing the
+// more expensive checks that follow if we know the headers are invalid.
+func requireConnected(event TipHeaders) fn.Result[TipHeaders] {
 	if !HeadersConnected(event.Headers) {
 		log.Warnf("Headers received from peer don't connect")
-		effects = append(effects, d.disconnectTipPeer(event.PeerID)...)
 
-		return effects
+		return fn.Err[TipHeaders](errHeadersDisconnected)
 	}
 
-	// A batch that extends the validation chain is committed through the
-	// chain store actor. What remains are headers that do not connect to
-	// our tip: known headers, a reorg, or garbage.
-	extendEffects, extended := d.extendSerialTip(event)
-	effects = append(effects, extendEffects...)
-	if extended {
-		return effects
+	return fn.Ok(event)
+}
+
+// applyTipHeaders commits a batch that extends the validation chain through
+// the chain store actor. What remains are headers that do not connect to our
+// tip: known headers, a reorg, or garbage.
+func (d *Driver) applyTipHeaders(event TipHeaders) fn.Result[[]DriverEffect] {
+	return fn.FlatMapResult(d.extendSerialTip(event), d.orFollowFork(event))
+}
+
+// orFollowFork returns the step that follows the fork of a message that did not
+// extend the tip, and passes on the effects of one that did.
+func (d *Driver) orFollowFork(event TipHeaders) func(
+	fn.Option[[]DriverEffect]) fn.Result[[]DriverEffect] {
+
+	type effects = []DriverEffect
+
+	return func(extended fn.Option[effects]) fn.Result[effects] {
+		if extended.IsSome() {
+			return fn.Ok(extended.UnsafeFromSome())
+		}
+
+		return d.followSerialFork(event)
 	}
+}
 
-	effects = append(effects, d.followSerialFork(event)...)
+// tipFailureEffects answers a headers message that failed one of the steps
+// above: a checkpoint mismatch rolls the chain back, a message to ignore does
+// nothing, and anything else drops the peer.
+func (d *Driver) tipFailureEffects(peerID string, err error) []DriverEffect {
+	var mismatch *SerialCheckpointMismatch
+	switch {
+	case errors.As(err, &mismatch):
+		return d.planCheckpointRollback(peerID, mismatch.Height)
 
-	return effects
+	case errors.Is(err, errIgnoreTipHeaders):
+		return nil
+
+	default:
+		return d.disconnectTipPeer(peerID)
+	}
 }
 
 // disconnectTipPeer asks for the peer to be disconnected.
@@ -216,32 +266,39 @@ func (d *Driver) disconnectTipPeer(peerID string) []DriverEffect {
 }
 
 // extendSerialTip commits a batch that extends the validation chain, without
-// waiting for the write. It returns false when the batch does not extend the
-// tip, so the caller can treat it as known headers or a reorg.
-func (d *Driver) extendSerialTip(event TipHeaders) ([]DriverEffect, bool) {
-	var effects []DriverEffect
+// waiting for the write. It succeeds with none when the batch does not extend
+// the tip, so the caller can treat it as known headers or a reorg, and fails
+// when the batch is invalid.
+func (d *Driver) extendSerialTip(
+	event TipHeaders) fn.Result[fn.Option[[]DriverEffect]] {
+
+	notExtended := fn.Ok(fn.None[[]DriverEffect]())
 
 	back := d.tip.Tip()
 	if back == nil {
-		return effects, false
+		return notExtended
 	}
 
 	headers, ok := headersAfterTip(back, event.Headers)
 	if !ok {
-		return effects, false
+		return notExtended
 	}
 
 	prepared, handled, err := d.tip.PrepareSerialExtension(headers)
 	if !handled {
-		return effects, false
+		return notExtended
 	}
 	if err != nil {
-		effects = append(effects, d.rejectSerialExtension(
-			event.PeerID, err,
-		)...)
+		var mismatch *SerialCheckpointMismatch
+		if !errors.As(err, &mismatch) {
+			log.Warnf("Header doesn't pass sanity check: %s -- "+
+				"disconnecting peer", err)
+		}
 
-		return effects, true
+		return fn.Err[fn.Option[[]DriverEffect]](err)
 	}
+
+	var effects []DriverEffect
 
 	last := prepared.Nodes[len(prepared.Nodes)-1]
 	effects = append(effects, UpdatePeerHeight{
@@ -256,7 +313,7 @@ func (d *Driver) extendSerialTip(event TipHeaders) ([]DriverEffect, bool) {
 		Extension: prepared,
 	})
 
-	return effects, true
+	return fn.Ok(fn.Some(effects))
 }
 
 // headersAfterTip returns the part of a connected batch that follows the cache
@@ -282,48 +339,6 @@ func headersAfterTip(back *headerlist.Node,
 	return nil, false
 }
 
-// rejectSerialExtension answers a batch that failed validation: a checkpoint
-// mismatch rolls the chain back, and anything else drops the peer.
-func (d *Driver) rejectSerialExtension(peerID string,
-	err error) []DriverEffect {
-
-	var effects []DriverEffect
-
-	var mismatch *SerialCheckpointMismatch
-	if errors.As(err, &mismatch) {
-		effects = append(effects, d.planCheckpointRollback(
-			peerID, mismatch.Height,
-		)...)
-
-		return effects
-	}
-
-	log.Warnf("Header doesn't pass sanity check: %s -- "+
-		"disconnecting peer", err)
-	effects = append(effects, d.disconnectTipPeer(peerID)...)
-
-	return effects
-}
-
-// forkLocation is the outcome of looking for where a header attaches. Attach
-// is nil for a header that is already known, Stop is set once the message
-// needs no further processing, and Effects holds what the lookup asked for on
-// the way, such as the peer's disconnect.
-type forkLocation struct {
-	Attach  *forkAttach
-	Stop    bool
-	Effects []DriverEffect
-}
-
-// forkValidation is the outcome of validating a fork. Work is the work the
-// branch represents and is only set when OK is, and Effects holds what the
-// validation asked for on the way.
-type forkValidation struct {
-	Work    *big.Int
-	OK      bool
-	Effects []DriverEffect
-}
-
 // forkAttach is where a header that does not extend the tip attaches to the
 // chain we know.
 type forkAttach struct {
@@ -342,25 +357,16 @@ type forkAttach struct {
 // publish a new tip or start a request from an old hash, so the loop skips
 // them. Such a reply usually answers an older request, so it says nothing
 // about the outstanding one: its deadline stays armed.
-func (d *Driver) followSerialFork(event TipHeaders) []DriverEffect {
-	var effects []DriverEffect
-
+func (d *Driver) followSerialFork(event TipHeaders) fn.Result[[]DriverEffect] {
 	for i, blockHeader := range event.Headers {
-		located := d.locateFork(event, blockHeader)
-		effects = append(effects, located.Effects...)
-		if located.Stop {
-			return effects
+		located, err := d.locateFork(event, blockHeader).Unpack()
+		if err != nil {
+			return fn.Err[[]DriverEffect](err)
 		}
-		attach := located.Attach
-		if attach == nil {
+		if located.IsNone() {
 			continue
 		}
-
-		validated := d.validateFork(event, i, attach)
-		effects = append(effects, validated.Effects...)
-		if !validated.OK {
-			return effects
-		}
+		attach := located.UnsafeFromSome()
 
 		// Preserve the validated fork and replacement as an immutable
 		// payload for the chain store.
@@ -368,23 +374,23 @@ func (d *Driver) followSerialFork(event TipHeaders) []DriverEffect {
 			*attach.tip, *attach.head, attach.height, *blockHeader,
 		)
 		headers := event.Headers[i:]
-		effects = append(effects, d.planReorg(
-			event.PeerID, reorg, headers, validated.Work,
-		)...)
 
-		return effects
+		return fn.MapOk(func(work *big.Int) []DriverEffect {
+			return d.planReorg(event.PeerID, reorg, headers, work)
+		})(d.validateFork(event, i, attach))
 	}
 
-	return effects
+	return fn.Ok[[]DriverEffect](nil)
 }
 
-// locateFork finds where a header attaches to our chain. It returns nil with
-// stop unset for a header that is already known, and stop set once the
-// message needs no further processing.
+// locateFork finds where a header attaches to our chain. It succeeds with
+// none for a header that is already known, and fails once the message needs
+// no further processing.
 func (d *Driver) locateFork(event TipHeaders,
-	blockHeader *wire.BlockHeader) forkLocation {
+	blockHeader *wire.BlockHeader) fn.Result[fn.Option[*forkAttach]] {
 
-	var effects []DriverEffect
+	unattached := fn.Err[fn.Option[*forkAttach]]
+	known := fn.Ok(fn.None[*forkAttach]())
 
 	blockHash := blockHeader.BlockHash()
 
@@ -393,9 +399,8 @@ func (d *Driver) locateFork(event TipHeaders,
 	if prevNode == nil {
 		log.Warnf("Header list does not contain a previous" +
 			"element as expected -- disconnecting peer")
-		effects = append(effects, d.disconnectTipPeer(event.PeerID)...)
 
-		return forkLocation{Stop: true, Effects: effects}
+		return unattached(errForkUnattached)
 	}
 	prevHash := prevNode.Header.BlockHash()
 
@@ -412,21 +417,21 @@ func (d *Driver) locateFork(event TipHeaders,
 	// peer or disconnect the peer that sent us these bad
 	// headers.
 	if !event.holdsLease && !event.HeadersSynced {
-		return forkLocation{Stop: true, Effects: effects}
+		return unattached(errIgnoreTipHeaders)
 	}
 
 	// Check if this is the last block we know of. This is
 	// a shortcut for sendheaders so that each redundant
 	// header doesn't cause a disk read.
 	if blockHash == prevHash {
-		return forkLocation{}
+		return known
 	}
 
 	// Check if this block is known. If so, we continue to
 	// the next one.
 	_, _, err := d.tip.FetchHeader(&blockHash)
 	if err == nil {
-		return forkLocation{}
+		return known
 	}
 
 	// Check if the previous block is known. If it is, this
@@ -443,9 +448,8 @@ func (d *Driver) locateFork(event TipHeaders,
 			" properly connect to the chain from"+
 			" peer %s (%s) -- disconnecting",
 			event.PeerID, err)
-		effects = append(effects, d.disconnectTipPeer(event.PeerID)...)
 
-		return forkLocation{Stop: true, Effects: effects}
+		return unattached(errForkUnattached)
 	}
 
 	// We've found a branch we weren't aware of. If the
@@ -459,25 +463,21 @@ func (d *Driver) locateFork(event TipHeaders,
 			"checkpoint past which we've already "+
 			"synchronized -- disconnecting peer "+
 			"%s", event.PeerID)
-		effects = append(effects, d.disconnectTipPeer(event.PeerID)...)
 
-		return forkLocation{Stop: true, Effects: effects}
+		return unattached(errForkUnattached)
 	}
 
-	return forkLocation{Attach: &forkAttach{
+	return fn.Ok(fn.Some(&forkAttach{
 		tip: prevNode, head: backHead, height: backHeight,
-	}}
+	}))
 }
 
 // validateFork checks the sanity of the new branch that starts at the header
-// i of the message. If any of the blocks don't pass sanity checks, it asks for
-// the peer to be disconnected and reports false. Otherwise it returns the
-// work the branch represents, so the store can compare it to the work in the
-// known good chain.
+// i of the message. If any of the blocks don't pass sanity checks, it fails.
+// Otherwise it returns the work the branch represents, so the store can
+// compare it to the work in the known good chain.
 func (d *Driver) validateFork(event TipHeaders, i int,
-	attach *forkAttach) forkValidation {
-
-	var effects []DriverEffect
+	attach *forkAttach) fn.Result[*big.Int] {
 
 	d.tip.ResetReorg(headerlist.Node{
 		Header: *attach.head,
@@ -508,11 +508,8 @@ func (d *Driver) validateFork(event TipHeaders, i int,
 			log.Warnf("Header doesn't pass sanity"+
 				" check: %s -- disconnecting "+
 				"peer", err)
-			effects = append(effects, d.disconnectTipPeer(
-				event.PeerID,
-			)...)
 
-			return forkValidation{Effects: effects}
+			return fn.Err[*big.Int](err)
 		}
 		totalWork.Add(totalWork, blockchain.CalcWork(reorgHeader.Bits))
 		d.tip.AppendReorg(headerlist.Node{
@@ -521,7 +518,7 @@ func (d *Driver) validateFork(event TipHeaders, i int,
 		})
 	}
 
-	return forkValidation{Work: totalWork, OK: true}
+	return fn.Ok(totalWork)
 }
 
 // planReorg asks for a validated fork to be submitted. A branch that crosses a
