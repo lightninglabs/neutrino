@@ -221,10 +221,10 @@ func (b *blockManager) submitSerialExtension(sp *ServerPeer,
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		serial: &prepared, peer: sp,
 	}
-	b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
+	b.chainStore.TryAskFunc(b.quitCtx, chainstore.BlockCommit{
 		ExpectedParent: prepared.Parent,
 		Headers:        prepared.Headers,
-	}, b.chainStoreResult)
+	}, b.postChainResult)
 }
 
 // submitSerialHeaderReorg sends a validated fork as one actor mutation, so that
@@ -242,12 +242,12 @@ func (b *blockManager) submitSerialHeaderReorg(sp *ServerPeer,
 			reorgMismatch: effect.Mismatch,
 			peer:          sp,
 		}
-		b.chainStore.TryAsk(b.quitCtx, chainstore.Reorg{
+		b.chainStore.TryAskFunc(b.quitCtx, chainstore.Reorg{
 			ExpectedTip: prepared.ExpectedTip,
 			ForkHeight:  uint32(prepared.Fork.Height),
 			Work:        effect.Work,
 			CompareOnly: true,
-		}, b.chainStoreResult)
+		}, b.postChainResult)
 
 		return
 	}
@@ -257,12 +257,12 @@ func (b *blockManager) submitSerialHeaderReorg(sp *ServerPeer,
 		reorgNodes: effect.Nodes,
 		peer:       sp,
 	}
-	b.chainStore.TryAsk(b.quitCtx, chainstore.Reorg{
+	b.chainStore.TryAskFunc(b.quitCtx, chainstore.Reorg{
 		ExpectedTip: prepared.ExpectedTip,
 		ForkHeight:  uint32(prepared.Fork.Height),
 		Headers:     effect.Headers,
 		Work:        effect.Work,
-	}, b.chainStoreResult)
+	}, b.postChainResult)
 }
 
 // submitCheckpointRollback rolls the chain back to the last verified checkpoint
@@ -279,7 +279,7 @@ func (b *blockManager) submitCheckpointRollback(sp *ServerPeer,
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		checkpoint: &node, peer: sp,
 	}
-	b.chainStore.TryAsk(b.quitCtx, command, b.chainStoreResult)
+	b.chainStore.TryAskFunc(b.quitCtx, command, b.postChainResult)
 }
 
 // submitRangeCommit sends a prepared batch of ranges to the chain store
@@ -288,8 +288,8 @@ func (b *blockManager) submitRangeCommit(prepared headersync.PreparedCommit) {
 	b.pendingHeaderCommit = &pendingChainHeaderCommit{
 		ranges: &prepared,
 	}
-	b.chainStore.TryAsk(b.quitCtx, chainstore.BlockCommit{
+	b.chainStore.TryAskFunc(b.quitCtx, chainstore.BlockCommit{
 		ExpectedParent: prepared.ExpectedParent,
 		Headers:        prepared.Headers,
-	}, b.chainStoreResult)
+	}, b.postChainResult)
 }

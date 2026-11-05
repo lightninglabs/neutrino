@@ -111,6 +111,7 @@ func setupBlockManager(t *testing.T) (*blockManager, headerfs.BlockHeaderStore,
 		return nil, nil, nil, fmt.Errorf("unable to create "+
 			"blockmanager: %v", err)
 	}
+	collectInbox(bm)
 	t.Cleanup(func() { _ = bm.Stop() })
 
 	return bm, hdrStore, cfStore, nil
@@ -1024,8 +1025,7 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 
 		// Call the get checkpointed cf headers method with the
 		// checkpoints we created to start the test.
-		bm.wg.Add(1)
-		go bm.blockHandler()
+		bm.startBlockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		bm.cfSync.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,
@@ -1255,8 +1255,7 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 
 		// Start the test by calling the get checkpointed cf headers
 		// method with the checkpoints we created.
-		bm.wg.Add(1)
-		go bm.blockHandler()
+		bm.startBlockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 		bm.cfSync.getCheckpointedCFHeaders(
 			headers.checkpoints, cfStore, wire.GCSFilterRegular,

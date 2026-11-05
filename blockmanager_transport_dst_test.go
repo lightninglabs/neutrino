@@ -256,6 +256,7 @@ type dstRun struct {
 	rng *rand.Rand
 
 	bm        *blockManager
+	in        *testInbox
 	store     *dstHeaderStore
 	filters   *memFilterHeaderStore
 	transport *dstHeaderTransport
@@ -329,6 +330,7 @@ func setupDSTBlockManager(t *testing.T) (*blockManager,
 		},
 	})
 	require.NoError(t, err)
+	collectInbox(bm)
 	t.Cleanup(func() { _ = bm.Stop() })
 
 	return bm, store
@@ -463,6 +465,7 @@ func (d *dstRun) build() {
 		},
 	})
 	require.NoError(t, err)
+	d.in = collectInbox(bm)
 
 	// Replace the default runtime so discovery modes can use a scaled cap
 	// and the two-observation policy. The dispatch mirror is the same
@@ -581,7 +584,15 @@ func (d *dstRun) handle(message any) {
 		// quarantine it.
 		d.fault(timeout.peer, "timeout")
 	}
-	d.bm.handlePeerMessage(d.peers, message)
+	switch message.(type) {
+	case *newPeerMsg, *invMsg, *headersMsg, *headerSyncTimeoutMsg:
+		// Go through the driver as the actor does, so the messages
+		// take the Inbound and Deliver path.
+		d.bm.dispatchInbound(d.peers, message)
+
+	default:
+		d.bm.handlePeerMessage(d.peers, message)
+	}
 	synctest.Wait()
 
 	// The real loop keeps reading its done-peer and timer channels while a
@@ -590,11 +601,11 @@ func (d *dstRun) handle(message any) {
 	for drained := true; drained; {
 		drained = false
 		select {
-		case peer := <-d.bm.donePeerChan:
+		case peer := <-d.in.done:
 			d.bm.handleDonePeerMsg(d.peers, peer)
 			drained = true
 
-		case timer := <-d.bm.timerChan:
+		case timer := <-d.in.timer:
 			d.bm.handlePeerMessage(d.peers, timer)
 			drained = true
 
@@ -685,11 +696,11 @@ func (d *dstRun) pump() {
 	drain:
 		for {
 			select {
-			case message := <-d.bm.peerChan:
+			case message := <-d.in.peer:
 				messages = append(messages, message)
-			case message := <-d.bm.timerChan:
+			case message := <-d.in.timer:
 				messages = append(messages, message)
-			case message := <-d.bm.timeoutChan:
+			case message := <-d.in.timeout:
 				messages = append(messages, message)
 			default:
 				break drain
@@ -970,14 +981,14 @@ func (d *dstRun) restart() {
 	d.t.Helper()
 	require.NoError(d.t, d.bm.Stop())
 	synctest.Wait()
-	for len(d.bm.peerChan) > 0 {
-		<-d.bm.peerChan
+	for len(d.in.peer) > 0 {
+		<-d.in.peer
 	}
-	for len(d.bm.timerChan) > 0 {
-		<-d.bm.timerChan
+	for len(d.in.timer) > 0 {
+		<-d.in.timer
 	}
-	for len(d.bm.timeoutChan) > 0 {
-		<-d.bm.timeoutChan
+	for len(d.in.timeout) > 0 {
+		<-d.in.timeout
 	}
 	d.restarts++
 	d.transport.queued = nil
@@ -1002,8 +1013,8 @@ func (d *dstRun) shutdown() {
 	d.stopped = true
 	synctest.Wait()
 	queued := func() int {
-		return len(d.bm.peerChan) + len(d.bm.timerChan) +
-			len(d.bm.timeoutChan)
+		return len(d.in.peer) + len(d.in.timer) +
+			len(d.in.timeout)
 	}
 	pending := queued()
 	time.Sleep(3 * dstStall)
@@ -1013,7 +1024,7 @@ func (d *dstRun) shutdown() {
 	require.Zero(d.t, d.bm.sessionForTest().ActiveRangeCount())
 	require.Nil(d.t, d.bm.headerCommitRetryTimer)
 	d.bm.QueueHeaders(wire.NewMsgHeaders(), d.current[0])
-	require.Len(d.t, d.bm.peerChan, pending)
+	require.Len(d.t, d.in.peer, pending)
 }
 
 // heal restores storage and gives every slot a responsive, honest peer. It

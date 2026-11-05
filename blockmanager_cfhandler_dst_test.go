@@ -160,8 +160,7 @@ func testCFHeaderReadFailure(
 			}
 		}
 	}()
-	bm.wg.Add(1)
-	go bm.blockHandler()
+	bm.startBlockHandler()
 	defer func() { require.NoError(t, bm.Stop()) }()
 	tip, _, err := underlying.ChainTip()
 	require.NoError(t, err)
@@ -407,8 +406,7 @@ func TestCFHeaderReorgDoesNotBanHonestPeer(t *testing.T) {
 				}
 			}
 		}()
-		bm.wg.Add(1)
-		go bm.blockHandler()
+		bm.startBlockHandler()
 		defer func() { require.NoError(t, bm.Stop()) }()
 		gate.armed = true
 		done := make(chan error, 1)

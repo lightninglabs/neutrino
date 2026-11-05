@@ -188,7 +188,7 @@ func TestChainStoreDisconnectedPeerQueuedWork(t *testing.T) {
 		bm.QueueHeaders(second, stale)
 		stale.Disconnect()
 		bm.DonePeer(stale)
-		bm.timerChan <- &headerSyncCooldownMsg{generation: 1}
+		bm.post(&headerSyncCooldownMsg{generation: 1})
 		synctest.Wait()
 		require.Nil(t, bm.headerCooldownTimer,
 			"cooldown control must progress while store is held")
@@ -457,7 +457,7 @@ func TestSerialPartialWriteRetainsObservedPeerHeight(t *testing.T) {
 		store.mode = dstStoreOK
 		time.Sleep(time.Second)
 		synctest.Wait()
-		bm.handlePeerMessage(peers, <-bm.timerChan)
+		bm.handlePeerMessage(peers, <-inboxOf(t, bm).timer)
 		require.NotZero(t, peers.Len(),
 			"retry removed peer with the validated missing suffix")
 		require.NotEmpty(
@@ -736,11 +736,11 @@ func TestSnapshotFilterFailureKeepsHeaderIntake(t *testing.T) {
 
 		// Only the filter side fails during the snapshot.
 		filters.fail = true
-		bm.chainStore.TryAsk(
+		bm.chainStore.TryAskFunc(
 			t.Context(), chainstore.SnapshotRequest{},
-			bm.chainStoreResult,
+			bm.postChainResult,
 		)
-		result := <-bm.chainStoreResult
+		result := <-inboxOf(t, bm).result
 		require.True(t, result.Reply.BlockTipValid)
 		require.Error(t, result.Reply.Err)
 

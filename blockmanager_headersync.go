@@ -60,11 +60,7 @@ func (b *blockManager) armHeaderCooldownWake(until time.Time) {
 	b.headerCooldownID++
 	generation := b.headerCooldownID
 	b.headerCooldownTimer = time.AfterFunc(time.Until(until), func() {
-		message := &headerSyncCooldownMsg{generation: generation}
-		select {
-		case b.timerChan <- message:
-		case <-b.quit:
-		}
+		b.post(&headerSyncCooldownMsg{generation: generation})
 	})
 }
 
@@ -197,10 +193,10 @@ type pendingChainHeaderCommit struct {
 }
 
 // requestChainStoreSnapshot asks the actor to finish any retained rollback and
-// report the durable tip. The reply arrives on chainStoreResult.
+// report the durable tip. The reply arrives in the block handler's mailbox.
 func (b *blockManager) requestChainStoreSnapshot() {
-	b.chainStore.TryAsk(
-		b.quitCtx, chainstore.SnapshotRequest{}, b.chainStoreResult,
+	b.chainStore.TryAskFunc(
+		b.quitCtx, chainstore.SnapshotRequest{}, b.postChainResult,
 	)
 }
 
@@ -300,12 +296,7 @@ func (b *blockManager) finishChainStoreSnapshot(peers *list.List,
 			result.Reply.Err)
 
 		time.AfterFunc(time.Second, func() {
-			select {
-			case b.chainStoreResult <- chainstore.Result{
-				Retry: true,
-			}:
-			case <-b.quit:
-			}
+			b.post(chainstore.Result{Retry: true})
 		})
 
 		return
@@ -335,11 +326,7 @@ func (b *blockManager) scheduleHeaderCommitRetry() {
 	b.headerCommitRetryID++
 	generation := b.headerCommitRetryID
 	b.headerCommitRetryTimer = time.AfterFunc(time.Second, func() {
-		message := &headerSyncCommitRetryMsg{generation: generation}
-		select {
-		case b.timerChan <- message:
-		case <-b.quit:
-		}
+		b.post(&headerSyncCommitRetryMsg{generation: generation})
 	})
 }
 
