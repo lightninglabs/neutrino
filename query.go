@@ -607,6 +607,9 @@ func (s *ChainService) prepareCFiltersQuery(blockHash chainhash.Hash,
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	filterType wire.FilterType, options ...QueryOption) (*gcs.Filter,
 	error) {
+	if s.blockDN != nil {
+		return s.blockDN.getFilter(blockHash, filterType, options...)
+	}
 
 	// The only supported filter atm is the regular filter, so we'll reject
 	// all other filters.
@@ -738,6 +741,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 // returned immediately.
 func (s *ChainService) GetBlock(blockHash chainhash.Hash,
 	options ...QueryOption) (*btcutil.Block, error) {
+	if s.blockDN != nil {
+		return s.blockDN.getBlock(blockHash, options...)
+	}
 
 	// Fetch the corresponding block header from the database. If this
 	// isn't found, then we don't have the header for this block so we

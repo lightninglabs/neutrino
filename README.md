@@ -72,7 +72,15 @@ spending input, and block height in which the spending transaction was seen.
 Calling `Stop` on the `ChainService` client allows the user to stop the client;
 the method doesn't return until the `ChainService` is cleanly shut down.
 
+## HTTP synchronization
+
+For synchronization over HTTP without Bitcoin P2P connections, see the
+[block-dn syncing service](examples/blockdn/README.md). The example supports
+mainnet, signet, testnet3 and testnet4, persists chain state in SQLite, and
+follows live tip changes and reorganizations.
+
 ## Storage backends
+
 Neutrino supports two persistent storage backends. The caller selects one when
 calling `NewChainService`: `Config.Database` alone selects `walletdb`, and
 `Config.SQLConfig` selects SQL. Setting both uses SQL and treats the
