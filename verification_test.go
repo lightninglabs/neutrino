@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"testing"
 
@@ -116,16 +117,26 @@ func TestVerifyBlockFilter(t *testing.T) {
 	// We now create a filter from our block that is fully valid and
 	// contains all the entries we require according to BIP-158.
 	utxoSet := []*wire.MsgTx{prevTx}
-	validFilter := filterFromBlock(t, utxoSet, spendBlock, true)
+	validFilter := filterFromBlock(t, utxoSet, spendBlock, true, nil)
 	b := btcutil.NewBlock(spendBlock)
 
 	opReturnValid, err := VerifyBasicBlockFilter(validFilter, b)
 	require.NoError(t, err)
 	require.Equal(t, 1, opReturnValid)
+
+	// A filter that omits a non-OP_RETURN output is invalid according to
+	// BIP-158 and must be rejected.
+	missingOutputFilter := filterFromBlock(
+		t, utxoSet, spendBlock, true, spendTx.TxOut[0].PkScript,
+	)
+
+	_, err = VerifyBasicBlockFilter(missingOutputFilter, b)
+	require.ErrorContains(t, err, "wasn't matched by filter")
 }
 
 func filterFromBlock(t *testing.T, utxoSet []*wire.MsgTx,
-	block *wire.MsgBlock, withInputPrevOut bool) *gcs.Filter {
+	block *wire.MsgBlock, withInputPrevOut bool,
+	omitOutput []byte) *gcs.Filter {
 
 	var filterContent [][]byte
 	for idx, tx := range block.Transactions {
@@ -138,6 +149,10 @@ func filterFromBlock(t *testing.T, utxoSet []*wire.MsgTx,
 		// any OP_RETURNs but for the test we want to make sure they're
 		// counted correctly so we leave them in.
 		for _, out := range tx.TxOut {
+			if bytes.Equal(out.PkScript, omitOutput) {
+				continue
+			}
+
 			filterContent = append(filterContent, out.PkScript)
 		}
 
