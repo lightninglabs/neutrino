@@ -1020,7 +1020,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RetryDuration:  ConnectionRetryInterval,
 		TargetOutbound: uint32(TargetOutbound),
 		OnConnection:   s.outboundPeerConnected,
-		Dial:           dialer,
+		Dial:           dialUntilQuit(dialer, s.quit),
 	}
 	if len(cfg.ConnectPeers) == 0 {
 		cmgrCfg.GetNewAddress = newAddressFunc
@@ -2027,3 +2027,46 @@ func (o *onionAddr) Network() string {
 
 // Ensure onionAddr implements the net.Addr interface.
 var _ net.Addr = (*onionAddr)(nil)
+
+// dialUntilQuit wraps dial so that a pending dial returns as soon as quit is
+// closed, rather than when the underlying dial gives up. The connection
+// manager dials synchronously from goroutines that Stop waits on, and a dial
+// through a proxy can take minutes to time out, so without this an
+// unreachable peer would hold up shutdown for that long (lnd#7349).
+//
+// The underlying dial keeps running in the background until it returns, and
+// any connection it makes after quit has closed is closed right away.
+func dialUntilQuit(dial func(net.Addr) (net.Conn, error),
+	quit <-chan struct{}) func(net.Addr) (net.Conn, error) {
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+
+	return func(addr net.Addr) (net.Conn, error) {
+		// The channel is buffered so the dial goroutine can always
+		// deliver its result and exit, even if nobody is left to
+		// receive it.
+		resultChan := make(chan dialResult, 1)
+		go func() {
+			conn, err := dial(addr)
+			resultChan <- dialResult{conn: conn, err: err}
+		}()
+
+		select {
+		case res := <-resultChan:
+			return res.conn, res.err
+
+		case <-quit:
+			go func() {
+				res := <-resultChan
+				if res.conn != nil {
+					_ = res.conn.Close()
+				}
+			}()
+
+			return nil, ErrShuttingDown
+		}
+	}
+}
