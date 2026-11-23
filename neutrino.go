@@ -917,6 +917,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
+	err = rollBackZeroedFilterTip(s.BlockHeaders, s.RegFilterHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("unable to repair filter header "+
+			"tip: %w", err)
+	}
+
 	bm, err := newBlockManager(&blockManagerCfg{
 		ChainParams:      s.chainParams,
 		BlockHeaders:     s.BlockHeaders,
@@ -2069,4 +2075,59 @@ func dialUntilQuit(dial func(net.Addr) (net.Conn, error),
 			return nil, ErrShuttingDown
 		}
 	}
+}
+
+// rollBackZeroedFilterTip rolls the filter header store back past any
+// all-zero headers at its tip. A filter header is a hash, so an all-zero one
+// is never real: it's what a flat file holds when a power loss drops records
+// the index already points at (neutrino#451), and it can be carried over into
+// the SQL store by the legacy import. Left in place, the un-checkpointed
+// cfheader sync checks every peer's PrevFilterHeader against it and bans them
+// all. Rolling back just re-fetches the lost headers.
+func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
+	filters headerfs.FilterHeaderStore) error {
+
+	var rolledBack uint32
+	for {
+		tip, height, err := filters.ChainTip()
+		if err != nil {
+			return err
+		}
+		if *tip != (chainhash.Hash{}) || height == 0 {
+			break
+		}
+
+		parent, err := blocks.FetchHeaderByHeight(height - 1)
+		if err != nil {
+			return err
+		}
+		parentHash := parent.BlockHash()
+
+		// The same power loss can also zero the block headers below
+		// the tip, in which case the parent read back isn't a real
+		// block. Rolling back onto it would make the filter tip point
+		// at a block the index doesn't know, and the store would then
+		// fail to open on every start. Refuse instead, so the store is
+		// left as it is.
+		parentHeight, err := blocks.HeightFromHash(&parentHash)
+		if err != nil || parentHeight != height-1 {
+			return fmt.Errorf("block header at height %d is "+
+				"corrupt, unable to roll back the zeroed "+
+				"filter header at height %d", height-1, height)
+		}
+
+		_, err = filters.RollbackLastBlock(&parentHash)
+		if err != nil {
+			return err
+		}
+		rolledBack++
+	}
+
+	if rolledBack > 0 {
+		log.Warnf("Rolled back %d zeroed filter headers at the tip of "+
+			"the filter header store, they'll be fetched again",
+			rolledBack)
+	}
+
+	return nil
 }
