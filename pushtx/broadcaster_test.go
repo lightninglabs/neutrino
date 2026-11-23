@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/blockntfns"
+	"github.com/stretchr/testify/require"
 )
 
 // createTx is a helper method to create random transactions that spend
@@ -275,5 +276,89 @@ func TestRebroadcast(t *testing.T) {
 	case tx := <-broadcastChan:
 		t.Fatalf("unexpected rebroadcast of tx %s", tx.TxHash())
 	case <-time.Tick(100 * time.Millisecond):
+	}
+}
+
+// newTestBroadcaster returns a started Broadcaster whose broadcasts are
+// delivered on the returned channel, and whose block notifications are driven
+// by the returned notification channel.
+func newTestBroadcaster(t *testing.T) (*Broadcaster, chan *wire.MsgTx,
+	chan blockntfns.BlockNtfn) {
+
+	t.Helper()
+
+	broadcastChan := make(chan *wire.MsgTx, 10)
+	ntfnChan := make(chan blockntfns.BlockNtfn)
+
+	broadcaster := NewBroadcaster(&Config{
+		Broadcast: func(tx *wire.MsgTx) error {
+			broadcastChan <- tx
+			return nil
+		},
+		SubscribeBlocks: func() (*blockntfns.Subscription, error) {
+			return &blockntfns.Subscription{
+				Notifications: ntfnChan,
+				Cancel:        func() {},
+			}, nil
+		},
+		RebroadcastInterval: DefaultRebroadcastInterval,
+	})
+	require.NoError(t, broadcaster.Start())
+	t.Cleanup(broadcaster.Stop)
+
+	return broadcaster, broadcastChan, ntfnChan
+}
+
+// TestBroadcastOwnsTransaction ensures that the broadcaster keeps its own copy
+// of a transaction, so a caller that modifies its transaction after Broadcast
+// returns can't change, or race with, what gets rebroadcast.
+func TestBroadcastOwnsTransaction(t *testing.T) {
+	t.Parallel()
+
+	broadcaster, broadcastChan, ntfnChan := newTestBroadcaster(t)
+
+	tx := createTx(t, 2)
+	txid := tx.TxHash()
+	require.NoError(t, broadcaster.Broadcast(tx))
+	<-broadcastChan
+
+	// The caller now reuses its transaction: it drops an output and nils
+	// out the slot, the shape that made the rebroadcast copy panic in
+	// lnd#8928.
+	tx.TxOut[1] = nil
+	tx.TxOut = tx.TxOut[:1]
+
+	// A new block triggers a rebroadcast, which must send the transaction
+	// as it was when Broadcast was called.
+	ntfnChan <- &blockntfns.Connected{}
+	select {
+	case rebroadcast := <-broadcastChan:
+		require.Equal(t, txid, rebroadcast.TxHash())
+		require.NotSame(t, tx, rebroadcast)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("transaction was not rebroadcast")
+	}
+}
+
+// TestMarkAsConfirmedAfterStop ensures that MarkAsConfirmed returns once the
+// broadcaster has been stopped, rather than blocking its caller forever.
+func TestMarkAsConfirmedAfterStop(t *testing.T) {
+	t.Parallel()
+
+	broadcaster, _, _ := newTestBroadcaster(t)
+	broadcaster.Stop()
+
+	txid := createTx(t, 1).TxHash()
+	done := make(chan struct{})
+	go func() {
+		broadcaster.MarkAsConfirmed(txid)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("MarkAsConfirmed blocked after Stop")
 	}
 }
