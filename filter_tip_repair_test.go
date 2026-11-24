@@ -377,3 +377,49 @@ func writeRepairChain(t *testing.T, dataDir string, db walletdb.DB,
 	require.NoError(t, blocks.WriteHeaders(blockBatch...))
 	require.NoError(t, filters.WriteHeaders(filterBatch...))
 }
+
+// TestTornBlockBelowTipRefusesToStart zeroes a block header record below a
+// block tip that landed, as a power loss leaves it when a later page of a
+// batch write reached the disk but an earlier one didn't. The tip itself is
+// fine, so only the links below it show the damage, and the start up check
+// must refuse with the recovery hint.
+func TestTornBlockBelowTipRefusesToStart(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
+		true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	params := chaincfg.SimNetParams
+	writeRepairChain(t, dataDir, db, &params, 4)
+
+	// Zero the block header at height 2, under the tip at 4.
+	blockFile, err := os.OpenFile(
+		filepath.Join(dataDir, "block_headers.bin"), os.O_RDWR, 0644,
+	)
+	require.NoError(t, err)
+	_, err = blockFile.WriteAt(make([]byte, 80), 2*80)
+	require.NoError(t, err)
+	require.NoError(t, blockFile.Close())
+
+	blocks, err := headerfs.NewBlockHeaderStore(dataDir, db, &params)
+	require.NoError(t, err)
+	filters, err := headerfs.NewFilterHeaderStore(
+		dataDir, db, headerfs.RegularFilter, &params, nil,
+	)
+	require.NoError(t, err)
+
+	err = rollBackZeroedFilterHeaders(blocks, filters)
+	require.ErrorContains(t, err, "block headers at heights 1 and 2 "+
+		"don't link")
+	require.ErrorContains(t, err, "block_headers.bin")
+
+	// Nothing was rolled back.
+	_, height, err := filters.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(4), height)
+}

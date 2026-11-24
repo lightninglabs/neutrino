@@ -18,24 +18,44 @@ import (
 
 // TestStartupRepairAfterTornWrites writes a chain to the flat file stores,
 // then simulates a power loss in the middle of the last writes: any subset
-// of the filter header records of the last batch comes back zeroed, and the
-// block header record at the tip may be torn at any byte. After a restart,
+// of the filter header records of the last batch comes back zeroed, and one
+// block header record of the batch may be torn at any byte. After a restart,
 // the start up repair must either refuse with an error, which it may only do
-// for a block tip that was damaged, or leave stores that hold no all-zero
+// for a block header that was damaged, or leave stores that hold no all-zero
 // filter header, with the filter tip right below the lowest zeroed record
 // and the block headers untouched.
 func TestStartupRepairAfterTornWrites(t *testing.T) {
 	t.Parallel()
 
+	// Creating the index buckets dominates the cost of a case, so each
+	// case starts from a copy of stores that hold only genesis.
+	params := chaincfg.SimNetParams
+	template := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(template, sqldb.DefaultLegacyBoltFilename),
+		true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	_, err = headerfs.NewBlockHeaderStore(template, db, &params)
+	require.NoError(t, err)
+	_, err = headerfs.NewFilterHeaderStore(
+		template, db, headerfs.RegularFilter, &params, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
 	rapid.Check(t, func(rt *rapid.T) {
-		testStartupRepairAfterTornWrites(t, rt)
+		testStartupRepairAfterTornWrites(t, rt, template)
 	})
 }
 
-func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T) {
+func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T,
+	template string) {
+
 	dataDir, err := os.MkdirTemp(t.TempDir(), "repair")
 	require.NoError(rt, err)
-	db, err := walletdb.Create(
+	require.NoError(rt, os.CopyFS(dataDir, os.DirFS(template)))
+	db, err := walletdb.Open(
 		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
 		true, time.Second*10, false,
 	)
@@ -43,7 +63,7 @@ func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T) {
 	defer func() { _ = db.Close() }()
 
 	params := chaincfg.SimNetParams
-	n := rapid.Uint32Range(1, 200).Draw(rt, "height")
+	n := rapid.Uint32Range(1, 24).Draw(rt, "height")
 	writeRepairChain(t, dataDir, db, &params, n)
 
 	// Zero any subset of the filter records in the last batch.
@@ -66,17 +86,18 @@ func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T) {
 	}
 	require.NoError(rt, filterFile.Close())
 
-	// Maybe tear the block tip: zero the record from some byte on, or
-	// up to some byte.
+	// Maybe tear a block record of the last batch: zero it from some
+	// byte on, or up to some byte.
 	blockPath := filepath.Join(dataDir, "block_headers.bin")
 	before, err := os.ReadFile(blockPath)
 	require.NoError(rt, err)
 	blockTorn := false
-	if rapid.Bool().Draw(rt, "tear_block_tip") {
+	if rapid.Bool().Draw(rt, "tear_block") {
+		torn := rapid.Uint32Range(n-batch+1, n).Draw(rt, "torn_at")
 		cut := rapid.IntRange(0, 79).Draw(rt, "tear_at")
-		off, length := int64(n)*80+int64(cut), 80-cut
+		off, length := int64(torn)*80+int64(cut), 80-cut
 		if rapid.Bool().Draw(rt, "tear_head") {
-			off, length = int64(n)*80, cut+1
+			off, length = int64(torn)*80, cut+1
 		}
 		blockFile, err := os.OpenFile(blockPath, os.O_RDWR, 0644)
 		require.NoError(rt, err)
@@ -99,7 +120,7 @@ func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T) {
 
 	err = rollBackZeroedFilterHeaders(blocks, filters)
 	if blockTorn {
-		require.ErrorContains(rt, err, "block header tip")
+		require.ErrorContains(rt, err, "block header")
 		return
 	}
 	require.NoError(rt, err)

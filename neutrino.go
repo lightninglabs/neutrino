@@ -2134,25 +2134,26 @@ const corruptStoreHint = "the header stores were likely damaged by an " +
 	"unclean shutdown, remove the chain data (block_headers.bin, " +
 	"reg_filter_headers.bin and neutrino.db) to sync it again"
 
-// zeroedFilterScanWindow is how far below the filter header tip the start up
-// repair looks for all-zero filter headers. It's the most headers a single
-// write appends: one batch of cfheaders messages in the checkpointed fetch.
+// tornWriteScanWindow is how far below each tip the start up checks look for
+// records a power loss damaged. It's the most headers a single write appends:
+// one batch of cfheaders messages in the checkpointed fetch.
 //
-// Zeroed records are what a flat file holds when a power loss drops records
-// the index already points at. Since filter writes are fsynced before the
-// index tip moves, that can't happen any more, so only stores written by
-// older releases have them, and there they're the records of the last writes
-// before the power loss. One write's worth is the case we expect: its pages
-// can reach the disk out of order, which zeroes a record below the tip that
-// landed. A hole deeper than this needs a whole batch lost below a later one
-// that was kept, which we accept missing. Reading the window is one range
-// read of about 2 MB, where a scan of a whole mainnet store would read about
-// 30 MB on every start.
-const zeroedFilterScanWindow = maxCFHeadersMsgsPerWriteBatch *
+// Damaged records are what a flat file holds when a power loss drops records
+// the index already points at. Since writes are fsynced before the index tip
+// moves, that can't happen any more, so only stores written by older releases
+// have them. Those never fsynced the flat file while bbolt fsynced the index,
+// so the records lost are the ones the OS hadn't written back yet, which can
+// be more than one batch. We still read only one batch below each tip: the
+// common case is the last write, whose pages reach the disk out of order, and
+// a deeper hole is left to behave as it did before these checks. Reading the
+// window is one range read of about 2 MB of filter headers and 5 MB of block
+// headers on the flat files. On SQL it's one range query of each, which costs
+// more per row, but only once per start.
+const tornWriteScanWindow = maxCFHeadersMsgsPerWriteBatch *
 	wire.MaxCFHeadersPerMsg
 
 // rollBackZeroedFilterHeaders rolls the filter header store back past the
-// lowest all-zero header within zeroedFilterScanWindow of its tip. A filter
+// lowest all-zero header within tornWriteScanWindow of its tip. A filter
 // header is a hash, so an all-zero one is never real: it's what a flat file
 // holds when a power loss drops records the index already points at
 // (neutrino#451), and it can be carried over into the SQL store by the legacy
@@ -2200,6 +2201,11 @@ func rollBackZeroedFilterHeaders(blocks headerfs.BlockHeaderStore,
 				"not in the index (%v): %s", blockHeight, err,
 				corruptStoreHint)
 		}
+
+		err = checkBlockHeaderLinks(blocks, tipHash, blockHeight)
+		if err != nil {
+			return err
+		}
 	}
 
 	lowest, err := lowestZeroedFilterHeader(blocks, filters)
@@ -2230,8 +2236,9 @@ func rollBackZeroedFilterHeaders(blocks headerfs.BlockHeaderStore,
 		// the tip, in which case the parent read back isn't a real
 		// block. Rolling back onto it would make the filter tip point
 		// at a block the index doesn't know, and the store would then
-		// fail to open on every start. Refuse instead, so the store is
-		// left as it is.
+		// fail to open on every start. Refuse instead. The filter
+		// headers rolled back so far stay rolled back, which leaves
+		// the store consistent, only shorter.
 		parentHeight, err := blocks.HeightFromHash(&parentHash)
 		if err != nil || parentHeight != height-1 {
 			return fmt.Errorf("block header at height %d is "+
@@ -2245,6 +2252,14 @@ func rollBackZeroedFilterHeaders(blocks headerfs.BlockHeaderStore,
 			return err
 		}
 		rolledBack++
+
+		// Each rollback is its own fsynced write, so a deep hole can
+		// take a while.
+		if rolledBack%rollbackProgressInterval == 0 {
+			log.Infof("Rolled back %d filter headers, now at "+
+				"height %d, rolling back to height %d",
+				rolledBack, height-1, lowest-1)
+		}
 	}
 
 	log.Warnf("Rolled back %d filter headers down to the zeroed one at "+
@@ -2253,8 +2268,53 @@ func rollBackZeroedFilterHeaders(blocks headerfs.BlockHeaderStore,
 	return nil
 }
 
+// rollbackProgressInterval is how many filter headers the start up repair
+// rolls back between progress logs.
+const rollbackProgressInterval = 5000
+
+// checkBlockHeaderLinks checks that every block header within
+// tornWriteScanWindow of the tip links to the one below it. A record below the
+// tip that a power loss zeroed or tore breaks the link from the record above
+// it, on the flat files and in the rows the legacy SQL import carried over,
+// and syncing on top of it would leave a chain no lookup by hash can walk.
+func checkBlockHeaderLinks(blocks headerfs.BlockHeaderStore,
+	tipHash chainhash.Hash, tipHeight uint32) error {
+
+	start := uint32(1)
+	if tipHeight > tornWriteScanWindow {
+		start = tipHeight - tornWriteScanWindow + 1
+	}
+
+	// The window starts one below start, so the header at start is
+	// checked against its parent too.
+	headers, first, err := blocks.FetchHeaderAncestors(
+		tipHeight-start+1, &tipHash,
+	)
+	if err != nil {
+		return fmt.Errorf("unable to read the block headers below the "+
+			"tip at height %d (%v): %s", tipHeight, err,
+			corruptStoreHint)
+	}
+	if first != start-1 || len(headers) != int(tipHeight-start+2) {
+		return fmt.Errorf("read %d block headers from height %d, "+
+			"want %d from height %d", len(headers), first,
+			tipHeight-start+2, start-1)
+	}
+
+	for i := 1; i < len(headers); i++ {
+		if headers[i].PrevBlock != headers[i-1].BlockHash() {
+			return fmt.Errorf("block headers at heights %d and "+
+				"%d don't link, one of them is corrupt: %s",
+				first+uint32(i-1), first+uint32(i),
+				corruptStoreHint)
+		}
+	}
+
+	return nil
+}
+
 // lowestZeroedFilterHeader returns the height of the lowest all-zero filter
-// header within zeroedFilterScanWindow of the filter header tip, or zero if
+// header within tornWriteScanWindow of the filter header tip, or zero if
 // there's none. The genesis header is never zero, so it isn't read.
 func lowestZeroedFilterHeader(blocks headerfs.BlockHeaderStore,
 	filters headerfs.FilterHeaderStore) (uint32, error) {
@@ -2265,8 +2325,8 @@ func lowestZeroedFilterHeader(blocks headerfs.BlockHeaderStore,
 	}
 
 	start := uint32(1)
-	if tipHeight > zeroedFilterScanWindow {
-		start = tipHeight - zeroedFilterScanWindow + 1
+	if tipHeight > tornWriteScanWindow {
+		start = tipHeight - tornWriteScanWindow + 1
 	}
 
 	// Filter headers are read by the hash of their block, so the window
