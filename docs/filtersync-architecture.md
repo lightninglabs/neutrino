@@ -160,10 +160,10 @@ stateDiagram-v2
     WaitingForHeaders --> ReadingTip: TipsChanged
     ReadingTip --> Retrying: BlockTipRead, Err<br/>(resume wait for headers)
     ReadingTip --> FetchingCheckpointed: BlockTipRead, tip below 1,000
-    ReadingTip --> FetchingCheckpoints: BlockTipRead,<br/>MinCheckpointHeight below tip
+    ReadingTip --> FetchingCheckpoints: BlockTipRead,<br/>held lists below tip<br/>or for another stop hash
     ReadingTip --> ResolvingConflict: BlockTipRead,<br/>held checkpoints cover tip
-    FetchingCheckpoints --> ResolvingConflict: CheckpointsFetched, any peer
-    FetchingCheckpoints --> Retrying: CheckpointsFetched, none<br/>(resume checkpoint loop)
+    FetchingCheckpoints --> ResolvingConflict: CheckpointsFetched,<br/>any reply of the right length
+    FetchingCheckpoints --> Retrying: CheckpointsFetched, none kept<br/>(resume checkpoint loop)
     ResolvingConflict --> FetchingCheckpointed: ConflictResolved, Good set
     ResolvingConflict --> Retrying: ConflictResolved, Good empty<br/>(resume checkpoint loop)
     FetchingCheckpointed --> Retrying: CheckpointedFetched, Err<br/>(resume wait for headers)
@@ -193,10 +193,19 @@ already has agreed checkpoints, or the block tip is below
 `wire.CFCheckptInterval`, it fetches the checkpointed headers (on simnet and
 other short chains, every peer would serve zero checkpoints). Otherwise, if
 the shortest checkpoint list it holds (`MinCheckpointHeight`) ends below the
-block tip, it fetches checkpoints again. The fetch asks for checkpoints up to
-the last hardcoded block checkpoint when that is past the tip, so the list
-does not have to be fetched again each time the block header chain advances.
-If the held lists already reach the tip, it resolves them as they are.
+block tip, or the lists were fetched for a different stop hash than the one
+this pass would ask for (`checkpointsStop`), it fetches checkpoints again. The
+fetch asks for checkpoints up to the last hardcoded block checkpoint when that
+is past the tip, so the list does not have to be fetched again each time the
+block header chain advances. If the held lists already reach the tip and were
+fetched for the same stop block, it resolves them as they are.
+
+`handleCheckpointsFetched` keeps only the replies with exactly one entry per
+checkpoint interval up to the stop height (`CheckpointsForStop`), which is what
+an honest peer serves. Every list that reaches the resolver therefore covers
+the tip, and the checkpointed fetch, which indexes the agreed list by the
+filter tip's interval, also refuses a list that doesn't reach the filter tip
+rather than computing a batch count from it.
 
 `allCheckpoints` survives across passes and `goodCheckpoints` does not.
 `waitForHeaders` clears the agreed list at the start of every pass, so every

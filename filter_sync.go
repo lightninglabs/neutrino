@@ -443,6 +443,14 @@ func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	// maxCFCheckptsPerQuery is not a factor of the number of checkpoint
 	// intervals to fetch, then an additional query will exist that spans
 	// the remaining checkpoint intervals.
+	//
+	// The checkpoints are meant to cover the store's tip. If they don't,
+	// the subtraction below would wrap, so we refuse rather than size the
+	// batch from it.
+	if uint32(len(checkpoints)) < startingInterval {
+		return fmt.Errorf("%d checkpoints don't reach the filter "+
+			"header tip at height %d", len(checkpoints), curHeight)
+	}
 	numCheckpts := uint32(len(checkpoints)) - startingInterval
 	numQueries := (numCheckpts + maxCFCheckptsPerQuery - 1) /
 		maxCFCheckptsPerQuery

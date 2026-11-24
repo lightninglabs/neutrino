@@ -311,62 +311,26 @@ scanToEnd:
 		default:
 		}
 
-		hash, err := s.cfg.GetBlockHash(int64(height))
-		if err != nil {
-			return reporter.FailRemaining(err)
-		}
-
 		// If there are any new requests that can safely be added to this batch,
 		// then try and fetch them.
 		newReqs := s.dequeueAtHeight(height)
 
-		// If an outpoint is created in this block, then fetch it regardless.
-		// Otherwise check to see if the filter matches any of our watched
-		// outpoints.
-		fetch := len(newReqs) > 0
-		if !fetch {
-			options.watchList = reporter.filterEntries
-
-			match, err := s.cfg.BlockFilterMatches(options, hash)
-			if err != nil {
-				return reporter.FailRemaining(err)
-			}
-
-			// If still no match is found, we have no reason to
-			// fetch this block, and can continue to next height.
-			if !match {
-				reporter.NotifyProgress(height)
-				continue
-			}
-		}
-
-		// At this point, we've determined that we either (1) have new
-		// requests which we need the block to scan for originating
-		// UTXOs, or (2) the watchlist triggered a match against the
-		// neutrino filter. Before fetching the block, check to see if
-		// the utxoscanner has been signaled to exit so that we can exit
-		// the rescan before performing an expensive operation.
-		select {
-		case <-s.quit:
-			return reporter.FailRemaining(ErrShuttingDown)
-		default:
-		}
-
-		log.Debugf("Fetching block height=%d hash=%s", height, hash)
-
-		block, err := s.cfg.GetBlock(*hash)
+		block, err := s.fetchActiveBlock(
+			reporter, options, height, newReqs,
+		)
 		if err != nil {
+			// The requests taken for this height aren't in the
+			// reporter yet, so FailRemaining wouldn't reach them.
+			for _, req := range newReqs {
+				req.deliver(nil, err)
+			}
+
 			return reporter.FailRemaining(err)
 		}
-
-		// Check again to see if the utxoscanner has been signaled to exit.
-		select {
-		case <-s.quit:
-			return reporter.FailRemaining(ErrShuttingDown)
-		default:
+		if block == nil {
+			reporter.NotifyProgress(height)
+			continue
 		}
-
-		log.Debugf("Processing block height=%d hash=%s", height, hash)
 
 		reporter.ProcessBlock(block.MsgBlock(), newReqs, height)
 		reporter.NotifyProgress(height)
@@ -438,4 +402,112 @@ func (pq *GetUtxoRequestPQ) Pop() interface{} {
 // IsEmpty returns true if the queue has no elements.
 func (pq *GetUtxoRequestPQ) IsEmpty() bool {
 	return pq.Len() == 0
+}
+
+// fetchActiveBlock returns the block at height that the scan must process,
+// or nil if the block can be skipped: no request starts in it and its filter
+// matches nothing we watch.
+//
+// The block is fetched, or its filter matched, by the hash the height
+// resolved to beforehand, so a reorg in between can leave us looking at a
+// block that is no longer on the active chain. Processing it would report
+// spends that only exist on the abandoned branch, and skipping it could miss
+// a spend in the block that replaced it. We check the height again once we
+// have decided, and if the active block changed, start over at the same
+// height with the new one.
+func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
+	options *rescanOptions, height uint32,
+	newReqs []*GetUtxoRequest) (*btcutil.Block, error) {
+
+	for {
+		hash, err := s.cfg.GetBlockHash(int64(height))
+		if err != nil {
+			return nil, err
+		}
+
+		// If an outpoint is created in this block, then fetch it
+		// regardless. Otherwise check to see if the filter matches
+		// any of our watched outpoints.
+		if len(newReqs) == 0 {
+			options.watchList = reporter.filterEntries
+
+			options.queryOptions = []QueryOption{
+				CancelQuery(s.quit),
+			}
+			match, err := s.cfg.BlockFilterMatches(options, hash)
+			if err != nil {
+				return nil, s.quitOr(err)
+			}
+
+			// If still no match is found, we have no reason to
+			// fetch this block, as long as it is still the active
+			// one: a block that replaced it may spend what we
+			// watch.
+			if !match {
+				active, err := s.cfg.GetBlockHash(
+					int64(height),
+				)
+				if err != nil {
+					return nil, err
+				}
+				if *active == *hash {
+					return nil, nil
+				}
+
+				continue
+			}
+		}
+
+		// Before fetching the block, check to see if the utxoscanner
+		// has been signaled to exit so that we can exit the rescan
+		// before performing an expensive operation.
+		select {
+		case <-s.quit:
+			return nil, ErrShuttingDown
+		default:
+		}
+
+		log.Debugf("Fetching block height=%d hash=%s", height, hash)
+
+		// The fetch is bound to the scanner's quit, so Stop doesn't
+		// wait for a query that can take until its timeout.
+		block, err := s.cfg.GetBlock(*hash, CancelQuery(s.quit))
+		if err != nil {
+			return nil, s.quitOr(err)
+		}
+
+		// Check again to see if the utxoscanner has been signaled to
+		// exit.
+		select {
+		case <-s.quit:
+			return nil, ErrShuttingDown
+		default:
+		}
+
+		active, err := s.cfg.GetBlockHash(int64(height))
+		if err != nil {
+			return nil, err
+		}
+		if *active == *hash {
+			log.Debugf("Processing block height=%d hash=%s",
+				height, hash)
+
+			return block, nil
+		}
+
+		log.Infof("Block %s at height %d was replaced by %s while "+
+			"it was fetched, scanning the new one", hash, height,
+			active)
+	}
+}
+
+// quitOr returns ErrShuttingDown if the scanner is stopping, since a fetch
+// that failed then was most likely cancelled by the stop, and err otherwise.
+func (s *UtxoScanner) quitOr(err error) error {
+	select {
+	case <-s.quit:
+		return ErrShuttingDown
+	default:
+		return err
+	}
 }

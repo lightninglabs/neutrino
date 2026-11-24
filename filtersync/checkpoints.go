@@ -69,6 +69,34 @@ func MinCheckpointHeight(checkpoints map[string][]*chainhash.Hash) uint32 {
 	return minHeight
 }
 
+// CheckpointsForStop returns the replies in byPeer that have exactly one
+// checkpoint per interval up to stopHeight, which is what an honest peer
+// serves for that stop block. Everything downstream indexes a list by
+// checkpoint interval, so a reply of any other length is dropped here rather
+// than being compared with the others: a short one would otherwise be taken
+// as agreement and then underflow the batch count when the headers are
+// fetched.
+func CheckpointsForStop(byPeer map[string][]*chainhash.Hash,
+	stopHeight uint32) map[string][]*chainhash.Hash {
+
+	want := int(stopHeight / wire.CFCheckptInterval)
+
+	kept := make(map[string][]*chainhash.Hash, len(byPeer))
+	for peer, cps := range byPeer {
+		if len(cps) != want {
+			log.Warnf("Ignoring cfcheckpt reply from %v with %d "+
+				"checkpoints, want %d for stop height %d",
+				peer, len(cps), want, stopHeight)
+
+			continue
+		}
+
+		kept[peer] = cps
+	}
+
+	return kept
+}
+
 // VerifyCheckpoint verifies that a CFHeaders message matches the passed
 // checkpoints. It assumes everything else has been checked, including filter
 // type and stop hash matches, and returns true if matching and false if not.

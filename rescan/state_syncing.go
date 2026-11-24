@@ -2,7 +2,10 @@ package rescan
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/lightninglabs/neutrino/headerfs"
 )
 
 // StateSyncing is the historical catch-up state. It scans the blocks above
@@ -26,7 +29,21 @@ type StateSyncing struct {
 	// scan, so reaching the tip again does not report it twice. It is set
 	// when Current falls back to Syncing, and clear after a rewind.
 	finished bool
+
+	// parentWaits counts the steps in a row that found the cursor
+	// orphaned with its parent already gone from the store. That is the
+	// normal state for a moment during a deep reorg: the rollback removes
+	// the headers before it queues their disconnects. Any disconnect
+	// builds a fresh state with it reset.
+	parentWaits int
 }
+
+// maxParentWaits is how many steps in a row Syncing waits for the
+// disconnects of a deep reorg before it ends the rescan. It is more than one
+// because retry timers aren't deduplicated: a timer armed for an earlier
+// cursor of the same reorg can fire on the current one early, well before a
+// full retry interval has passed for it.
+const maxParentWaits = 3
 
 // ProcessEvent handles events in the Syncing state. On ProcessNextBlockEvent,
 // it scans the next block and emits a ContinueOutbox to continue.
@@ -87,9 +104,13 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
 		return nil, err
 	}
 
+	// A reorg can leave the cursor above the tip, or on a block that is no
+	// longer active, without a disconnect for it ever reaching this state:
+	// one that lands before the actor subscribes has nothing to deliver it
+	// to. Waiting for a disconnect would then retry forever, so we step off
+	// the orphan ourselves, the same way a disconnect would.
 	if cur.CurStamp.Height > bestBlock.Height {
-		return nil, fmt.Errorf("scanned height %d exceeds tip %d",
-			cur.CurStamp.Height, bestBlock.Height)
+		return s.stepOffOrphan(env)
 	}
 
 	// A historical fetch can race a reorg. Never advance from an orphaned
@@ -101,8 +122,7 @@ func (s *StateSyncing) processNextBlock(ctx context.Context,
 		return nil, err
 	}
 	if active.BlockHash() != cur.CurStamp.Hash {
-		return nil, fmt.Errorf("scanned %s at height %d is no longer "+
-			"active", cur.CurStamp.Hash, cur.CurStamp.Height)
+		return s.stepOffOrphan(env)
 	}
 
 	if cur.CurStamp.Height == bestBlock.Height {
@@ -157,3 +177,65 @@ func (s *StateSyncing) IsTerminal() bool { return false }
 //
 // NOTE: This is part of the RescanState interface.
 func (s *StateSyncing) String() string { return "Syncing" }
+
+// stepOffOrphan moves the cursor from a block that is no longer on the active
+// chain to its parent, and reports the block as disconnected, as a disconnect
+// notification for it would have. If the parent is orphaned too, the next
+// step moves off it in turn, until the cursor reaches the fork point.
+//
+// A rollback removes the orphaned headers from the store before it queues
+// their disconnects, so during a reorg more than one block deep the parent
+// can be gone while the disconnects that will move the cursor are still on
+// their way. We wait a few retry intervals for them. If the parent is still
+// gone after that, the disconnects aren't coming (the reorg landed before the
+// actor subscribed), and we end the rescan with an error rather than guess
+// which blocks to report as disconnected.
+func (s *StateSyncing) stepOffOrphan(env *Environment) (*StateTransition,
+	error) {
+
+	cur := s.Cursor
+	parent, parentHeight, err := env.header(&cur.CurHeader.PrevBlock)
+	if err == nil && int32(parentHeight) != cur.CurStamp.Height-1 {
+		err = fmt.Errorf("parent at height %d, want %d", parentHeight,
+			cur.CurStamp.Height-1)
+	}
+	if err != nil {
+		var storeErr *HeaderStoreError
+		if s.parentWaits < maxParentWaits &&
+			!errors.As(err, &storeErr) {
+
+			return transition(&StateSyncing{
+				Cursor:      cur,
+				finished:    s.finished,
+				parentWaits: s.parentWaits + 1,
+			}, WaitOutbox{}), nil
+		}
+
+		return nil, &HeaderStoreError{Err: fmt.Errorf("scanned block "+
+			"%s at height %d is no longer active, and its parent "+
+			"%s can't be read: %w", cur.CurStamp.Hash,
+			cur.CurStamp.Height, cur.CurHeader.PrevBlock, err)}
+	}
+
+	log.Infof("Rescan cursor %s at height %d is no longer active, "+
+		"moving back to its parent", cur.CurStamp.Hash,
+		cur.CurStamp.Height)
+
+	header := cur.CurHeader
+	undone := BlockDisconnectedOutbox{
+		Hash:   cur.CurStamp.Hash,
+		Height: cur.CurStamp.Height,
+		Header: &header,
+	}
+
+	cur.CurStamp = headerfs.BlockStamp{
+		Hash:   parent.BlockHash(),
+		Height: int32(parentHeight),
+	}
+	cur.CurHeader = *parent
+
+	return transition(&StateSyncing{
+		Cursor:   cur,
+		finished: s.finished,
+	}, undone, ContinueOutbox{}), nil
+}

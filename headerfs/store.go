@@ -554,6 +554,14 @@ func (h *blockHeaderStore) WriteHeaders(hdrs ...BlockHeader) error {
 		return err
 	}
 
+	// The headers must be durable before the index points at them. The
+	// index commit is fsynced, so without this a power loss can leave a
+	// durable index tip over file records that never reached the disk,
+	// which come back zeroed or missing.
+	if err := h.file.Sync(); err != nil {
+		return h.rollbackAppend(len(hdrs), err)
+	}
+
 	// Once those are written, we'll then collate all the headers into
 	// headerEntry instances so we can write them all into the index in a
 	// single atomic batch.
@@ -1064,6 +1072,12 @@ func (f *filterHeaderStore) WriteHeaders(hdrs ...FilterHeader) error {
 	// entire batch in a single write call.
 	if err := f.appendRaw(headerBuf.Bytes()); err != nil {
 		return err
+	}
+
+	// As with the block headers, the new filter headers must be durable
+	// before the index tip moves over them.
+	if err := f.file.Sync(); err != nil {
+		return f.rollbackAppend(len(hdrs), err)
 	}
 
 	// As the block headers should already be written, we only need to

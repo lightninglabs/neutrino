@@ -34,6 +34,10 @@ type RescanActorResp interface {
 // after a failed step or while Initializing waits for the chain.
 type processNextBlockMsg struct {
 	lndactor.BaseMessage
+
+	// retry is set when a retry timer sent the message, rather than a
+	// continuation.
+	retry bool
 }
 
 func (*processNextBlockMsg) MessageType() string {

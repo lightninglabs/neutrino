@@ -153,11 +153,14 @@ func (b *Broadcaster) broadcastHandler(sub *blockntfns.Subscription) {
 			return
 		}
 
-		// Make a copy of the current set of transactions to hand to
-		// the goroutine.
-		txs := make(map[chainhash.Hash]*wire.MsgTx)
+		// Snapshot the current set of transactions to hand to the
+		// goroutine. The map is copied since the handler keeps
+		// mutating it, but the transactions themselves are shared:
+		// each one is a private copy taken by Broadcast that nothing
+		// writes to once it's been stored.
+		txs := make(map[chainhash.Hash]*wire.MsgTx, len(transactions))
 		for k, v := range transactions {
-			txs[k] = v.Copy()
+			txs[k] = v
 		}
 
 		b.wg.Add(1)
@@ -294,7 +297,16 @@ func (b *Broadcaster) rebroadcast(txs map[chainhash.Hash]*wire.MsgTx,
 // given transaction. An error won't be returned if the transaction already
 // exists within the mempool. Any transaction broadcast through this method will
 // be rebroadcast upon every change of the tip of the chain.
+//
+// The broadcaster keeps its own copy of the transaction, so the caller is free
+// to modify or reuse tx once this method returns.
 func (b *Broadcaster) Broadcast(tx *wire.MsgTx) error {
+	// Take a deep copy on the caller's goroutine. The broadcaster holds on
+	// to the transaction and serializes it from other goroutines for as
+	// long as it stays unconfirmed, so it must never share the caller's
+	// pointer.
+	tx = tx.Copy()
+
 	errChan := make(chan error, 1)
 
 	select {
@@ -316,6 +328,12 @@ func (b *Broadcaster) Broadcast(tx *wire.MsgTx) error {
 
 // MarkAsConfirmed is used to tell the broadcaster that a transaction has been
 // confirmed and that it is no longer necessary to rebroadcast this transaction.
+//
+// Once the broadcaster has been stopped, this is a no-op, so callers that
+// outlive the broadcaster (such as a rescan) are never blocked by it.
 func (b *Broadcaster) MarkAsConfirmed(txHash chainhash.Hash) {
-	b.confChan <- txHash
+	select {
+	case b.confChan <- txHash:
+	case <-b.quit:
+	}
 }

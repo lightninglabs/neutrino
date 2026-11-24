@@ -129,6 +129,13 @@ const (
 	dstFaultShutdown
 	dstFaultRTT
 	dstFaultReorg
+
+	// dstFaultCheckpointFork lets a peer answer a request that starts on
+	// a checkpoint, which is where the durable tip sits, with a fork from
+	// the block below it that stops short of the next checkpoint. The fork
+	// is PoW valid and heavier than the one honest block above its parent,
+	// so only the checkpoint the tip sits on stops it.
+	dstFaultCheckpointFork
 )
 
 // dstConfig is the decoded swarm configuration of one seed.
@@ -420,6 +427,22 @@ func (d *dstRun) params() chaincfg.Params {
 		}}
 	}
 	return params
+}
+
+// isCheckpoint reports whether height is one of the run's checkpoints, above
+// genesis.
+func (d *dstRun) isCheckpoint(height uint32) bool {
+	if height == 0 {
+		return false
+	}
+	params := d.params()
+	for _, cp := range params.Checkpoints {
+		if uint32(cp.Height) == height {
+			return true
+		}
+	}
+
+	return false
 }
 
 // headerConfig returns the headersync policy for the run's mode.
@@ -729,8 +752,20 @@ const (
 	dstReplyKinds
 )
 
+// dstReplyCheckpointFork answers a request that starts on a checkpoint with a
+// fork from the block below it, as many headers long as the request. That
+// rewrites the checkpoint and stops one block short of the request's stop, so
+// with checkpoints at every other height it never reaches the next one. It
+// sits outside the kinds the byzantine ops draw from, so saved seeds keep
+// their replies.
+const dstReplyCheckpointFork = dstReplyKinds
+
 // String returns a short reply kind name.
 func (k dstReplyKind) String() string {
+	if k == dstReplyCheckpointFork {
+		return "checkpoint_fork"
+	}
+
 	return [...]string{
 		"honest", "corrupt", "partial", "empty", "overlong",
 		"reorder", "fork", "bad_time", "bad_bits", "gap",
@@ -796,6 +831,10 @@ func (d *dstRun) answer(request dstHeaderRequest,
 			headers = fixture.badTime[request.start][:count]
 		case dstReplyBadBits:
 			headers = fixture.badBits[request.start][:count]
+		case dstReplyCheckpointFork:
+			if d.isCheckpoint(request.start) {
+				headers = fixture.fork[request.start-1][:count]
+			}
 		}
 	}
 
@@ -936,6 +975,12 @@ func (d *dstRun) step(value byte) {
 		}
 		label += " reply=" + kind.String()
 		d.reply(slot, kind)
+
+	case op == 9 && d.enabled(dstFaultCheckpointFork) &&
+		!d.cfg.mode.discovery():
+
+		label += " reply=" + dstReplyCheckpointFork.String()
+		d.reply(slot, dstReplyCheckpointFork)
 
 	case op == 12 && d.enabled(dstFaultRestart):
 		d.restart()
@@ -1248,6 +1293,11 @@ var dstCorpus = [][]byte{
 	{1, 255, 255, 9, 15, 15}, {1, 255, 255, 9 + 16*4, 15},
 	{1, 255, 255, 12, 0, 15}, {3, 255, 255, 0, 12, 15},
 	{1, 255, 255, 0, 13}, {3, 255, 255, 14, 14 + 16, 15},
+
+	// A peer forks one block below the checkpoint the tip sits on, in
+	// the serial and a checkpointed multi-peer mode.
+	{0x0f, 0x00, 0x08, 0, 1, 2, 9, 9 + 16, 9 + 32, 0, 1, 2},
+	{0, 0x00, 0x08, 0, 1, 2, 9, 9 + 16, 9 + 32, 0, 1, 2},
 }
 
 // dstRegressionSeeds are swarm seeds that found bugs, in hex. Each one is

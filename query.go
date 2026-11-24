@@ -952,14 +952,14 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	txHash := tx.TxHash()
 	inv := newTransactionInv(tx)
 
-	// We'll gather all the peers who replied to our query, along with
-	// the ones who rejected it and their reason for rejecting it. We'll use
-	// this to determine whether our transaction was actually rejected. The
-	// broadcast serializes calls to the response handler, so these maps
-	// need no locking.
-	replies := make(map[string]struct{})
-	rejections := make(map[string]*pushtx.BroadcastError)
-	rejectCodes := make(map[pushtx.BroadcastErrorCode]int)
+	// outcomes holds, for each peer that asked for the transaction, the
+	// reject it sent back, or nil if it sent none. A peer only gets an
+	// entry when it requests the transaction, so a reject from a peer
+	// that never asked for it has nowhere to be counted, a peer is sent
+	// the transaction at most once, and only its first reject counts.
+	// The broadcast serializes calls to the response handler, so the map
+	// needs no locking.
+	outcomes := make(map[string]*pushtx.BroadcastError)
 
 	// Send the inv to all peers and listen for getdata and reject
 	// messages.
@@ -970,41 +970,33 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				resp wire.Message,
 				ctl *querysyncwm.BroadcastControl) {
 
+				addr := peer.Addr()
 				switch response := resp.(type) {
 				// A peer has replied with a GetData message, so
-				// we'll send them the transaction.
+				// we'll send them the transaction, once.
 				case *wire.MsgGetData:
-					for _, vec := range response.InvList {
-						if vec.Hash != txHash {
-							continue
-						}
-
-						peer.QueueMessageWithEncoding(
-							tx, nil, qo.encoding,
-						)
-
-						// Peers might send the INV
-						// request multiple times, we
-						// need to de-duplicate them
-						// using a map.
-						replies[peer.Addr()] =
-							struct{}{}
-
-						// Okay, so the peer responded
-						// with an INV message, and we
-						// sent out the TX. If we never
-						// hear anything back from the
-						// peer it means they accepted
-						// the tx. If we get a reject,
-						// things are clear as well. But
-						// what if they are just slow to
-						// respond? We'll give them
-						// another bit of time to
-						// respond.
-						ctl.PeerDoneAfter(
-							qo.rejectTimeout,
-						)
+					if _, ok := outcomes[addr]; ok {
+						return
 					}
+					found := invListHas(
+						response.InvList, txHash,
+					)
+					if !found {
+						return
+					}
+					outcomes[addr] = nil
+
+					peer.QueueMessageWithEncoding(
+						tx, nil, qo.encoding,
+					)
+
+					// If we never hear anything back from
+					// the peer it means they accepted the
+					// tx. If we get a reject, things are
+					// clear as well. But what if they are
+					// just slow to respond? We'll give them
+					// another bit of time to respond.
+					ctl.PeerDoneAfter(qo.rejectTimeout)
 
 				// A peer has rejected our transaction for
 				// whatever reason. Rather than returning to the
@@ -1014,23 +1006,26 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 				case *wire.MsgReject:
 					// Ensure this rejection is for the
 					// transaction we're attempting to
-					// broadcast.
+					// broadcast, and comes from a peer we
+					// sent it to.
 					if response.Hash != txHash {
 						return
 					}
+					prev, requested := outcomes[addr]
+					if !requested || prev != nil {
+						return
+					}
 
-					addr := peer.Addr()
 					broadcastErr :=
 						pushtx.ParseBroadcastError(
 							response, addr,
 						)
-					rejections[addr] = broadcastErr
-					rejectCodes[broadcastErr.Code]++
+					outcomes[addr] = broadcastErr
 
 					log.Debugf("Transaction %v rejected "+
 						"by peer %v: code = %v, "+
-						"reason = %q", txHash,
-						peer.Addr(), broadcastErr.Code,
+						"reason = %q", txHash, addr,
+						broadcastErr.Code,
 						broadcastErr.Reason)
 
 					// A reject message is final, so we can
@@ -1055,10 +1050,21 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 		return err
 	}
 
+	// Tally the outcomes. Every reject counted here is from a peer we sent
+	// the transaction to.
+	rejections := make(map[string]*pushtx.BroadcastError)
+	rejectCodes := make(map[pushtx.BroadcastErrorCode]int)
+	for addr, broadcastErr := range outcomes {
+		if broadcastErr != nil {
+			rejections[addr] = broadcastErr
+			rejectCodes[broadcastErr.Code]++
+		}
+	}
+
 	// If none of our peers replied to our query, we'll avoid returning an
 	// error as the reliable broadcaster will take care of broadcasting this
 	// transaction upon every block connected/disconnected.
-	if len(replies) == 0 {
+	if len(outcomes) == 0 {
 		log.Debugf("No peers replied to inv message for transaction %v",
 			txHash)
 		return nil
@@ -1081,9 +1087,9 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// If all of our peers who replied to our query also rejected our
 	// transaction, we'll deem that there was actually something wrong with
 	// it, so we'll return the most rejected error between all of our peers.
-	log.Debugf("Got replies from %d peers and %d rejections", len(replies),
-		len(rejections))
-	if len(replies) == len(rejections) {
+	log.Debugf("Got replies from %d peers and %d rejections",
+		len(outcomes), len(rejections))
+	if len(outcomes) == len(rejections) {
 		log.Warnf("All peers rejected transaction %v checking errors",
 			txHash)
 
@@ -1096,6 +1102,23 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 			if count > mostRejectedCount {
 				mostRejectedCount = count
 				mostRejectedCode = code
+			}
+		}
+
+		// A peer's claim that the transaction is already confirmed
+		// can't be checked here, and a single peer can make it (the
+		// only one that asks for a transaction the others already
+		// hold), so we don't pass it on as a verdict: the broadcaster
+		// would stop rebroadcasting the transaction and the wallet
+		// would drop it. We report it as known to the network instead,
+		// which keeps it rebroadcast until a rescan sees it confirm on
+		// our own chain and calls MarkAsConfirmed.
+		if mostRejectedCode == pushtx.Confirmed {
+			return &pushtx.BroadcastError{
+				Code: pushtx.Mempool,
+				Reason: fmt.Sprintf("peers report transaction "+
+					"%v confirmed: %v", txHash,
+					firstRejectWithCode(pushtx.Confirmed)),
 			}
 		}
 
@@ -1113,7 +1136,7 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	// this TX is probably invalid.
 	if len(rejections) > 0 {
 		numInvalid := float32(rejectCodes[pushtx.Invalid])
-		numPeersResponded := float32(len(replies))
+		numPeersResponded := float32(len(outcomes))
 
 		log.Debugf("Of %d peers that replied, %d think the TX is "+
 			"invalid", numPeersResponded, numInvalid)
@@ -1131,4 +1154,15 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 	}
 
 	return nil
+}
+
+// invListHas reports whether invList announces or requests hash.
+func invListHas(invList []*wire.InvVect, hash chainhash.Hash) bool {
+	for _, vec := range invList {
+		if vec.Hash == hash {
+			return true
+		}
+	}
+
+	return false
 }

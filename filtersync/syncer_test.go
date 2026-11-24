@@ -24,10 +24,12 @@ var (
 	// errTest is the error the failing rounds report.
 	errTest = errors.New("test error")
 
-	// cp1, cp2 and cp3 are the checkpoints the test peers serve.
+	// cp1 through cp5 are the checkpoints the test peers serve.
 	cp1 = hashOf(1)
 	cp2 = hashOf(2)
 	cp3 = hashOf(3)
+	cp4 = hashOf(4)
+	cp5 = hashOf(5)
 
 	// tipHash is the block header tip of the test passes.
 	tipHash = *hashOf(100)
@@ -133,6 +135,30 @@ func startedAtTip(height uint32) []step {
 			phase: PhaseFetchingCheckpoints,
 		},
 	}
+}
+
+// startedBelowBlockCheckpoint is startedAtTip for a Syncer whose block
+// checkpoint sits above the tip, so the checkpoints are fetched up to that
+// block checkpoint instead of the tip.
+func startedBelowBlockCheckpoint(height uint32) []step {
+	steps := startedAtTip(height)
+	steps[2].effects = []Effect{
+		PollQuit{},
+		FetchCheckpoints{
+			FilterType: wire.GCSFilterRegular,
+			StopHash:   *cpHash,
+		},
+	}
+
+	return steps
+}
+
+// newSyncerWithCheckpointAbove returns a Syncer whose block checkpoint is at
+// five checkpoint intervals, above every tip the tests below read.
+func newSyncerWithCheckpointAbove() *Syncer {
+	return newTestSyncer(chaincfg.Checkpoint{
+		Height: 5 * int32(interval), Hash: cpHash,
+	})
 }
 
 // TestSyncerStartAndTipRead covers the lag wait, the tip read retry and the
@@ -257,22 +283,21 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 	t.Run("checkpoints are capped at the tip", func(t *testing.T) {
 		t.Parallel()
 
-		steps := append(startedAtTip(height), []step{
+		// The checkpoints are fetched up to the block checkpoint, so
+		// each list has five entries, and only the two below the tip
+		// can be checked against the store.
+		all := hashes{cp1, cp2, cp3, cp4, cp5}
+		steps := append(startedBelowBlockCheckpoint(height), []step{
 			{
-				name: "three checkpoints, two below the tip",
+				name: "five checkpoints, two below the tip",
 				event: CheckpointsFetched{
-					ByPeer: peerLists{
-						"a": {cp1, cp2, cp3},
-						"b": {cp1, cp2},
-						"c": {cp1},
-					},
+					ByPeer: peerLists{"a": all, "b": all},
 				},
 				effects: []Effect{ResolveConflict{
 					FilterType: wire.GCSFilterRegular,
 					Checkpoints: peerLists{
 						"a": {cp1, cp2},
 						"b": {cp1, cp2},
-						"c": {cp1},
 					},
 				}},
 				phase: PhaseResolvingConflict,
@@ -289,16 +314,71 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				phase: PhaseFetchingCheckpointed,
 			},
 		}...)
+		runSteps(t, newSyncerWithCheckpointAbove(), steps)
+	})
+
+	t.Run("replies of the wrong length are dropped", func(t *testing.T) {
+		t.Parallel()
+
+		// The tip is at two intervals and five, so an honest peer
+		// serves exactly two checkpoints. A longer or shorter reply
+		// never reaches the resolver.
+		steps := append(startedAtTip(height), []step{
+			{
+				name: "one honest reply, one long, two short",
+				event: CheckpointsFetched{
+					ByPeer: peerLists{
+						"a": {cp1, cp2},
+						"b": {cp1, cp2, cp3},
+						"c": {cp1},
+						"d": {},
+					},
+				},
+				effects: []Effect{ResolveConflict{
+					FilterType: wire.GCSFilterRegular,
+					Checkpoints: peerLists{
+						"a": {cp1, cp2},
+					},
+				}},
+				phase: PhaseResolvingConflict,
+			},
+		}...)
 		runSteps(t, newTestSyncer(), steps)
 	})
+
+	t.Run("only wrong length replies retries the fetch",
+		func(t *testing.T) {
+			t.Parallel()
+
+			steps := append(startedAtTip(height), []step{
+				{
+					name: "every reply is short",
+					event: CheckpointsFetched{
+						ByPeer: peerLists{"a": {cp1}},
+					},
+					effects: []Effect{
+						RetryAfter{testRetryDelay},
+					},
+					phase: PhaseRetrying,
+				},
+				{
+					name:    "retry fetches again",
+					event:   RetryElapsed{},
+					effects: []Effect{PollQuit{}, fetch},
+					phase:   PhaseFetchingCheckpoints,
+				},
+			}...)
+			runSteps(t, newTestSyncer(), steps)
+		})
 
 	t.Run("unresolved conflict retries", func(t *testing.T) {
 		t.Parallel()
 
-		byPeer := peerLists{
-			"a": {cp1, cp2, cp3},
-			"b": {cp1, cp2, cp3},
-		}
+		// The lists reach the block checkpoint above the tip, so they
+		// still cover it on the retry and are resolved again rather
+		// than fetched again.
+		all := hashes{cp1, cp2, cp3, cp4, cp5}
+		byPeer := peerLists{"a": all, "b": all}
 		resolve := ResolveConflict{
 			FilterType: wire.GCSFilterRegular,
 			Checkpoints: peerLists{
@@ -306,7 +386,7 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				"b": {cp1, cp2},
 			},
 		}
-		steps := append(startedAtTip(height), []step{
+		steps := append(startedBelowBlockCheckpoint(height), []step{
 			{
 				name:    "checkpoints cover the tip",
 				event:   CheckpointsFetched{ByPeer: byPeer},
@@ -338,44 +418,83 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				phase:   PhaseResolvingConflict,
 			},
 		}...)
-		runSteps(t, newTestSyncer(), steps)
+		runSteps(t, newSyncerWithCheckpointAbove(), steps)
 	})
 
-	t.Run("short checkpoints are fetched again", func(t *testing.T) {
+	t.Run("same height tip replacement fetches again", func(t *testing.T) {
 		t.Parallel()
 
-		// A peer whose list ends below the tip makes the minimum
-		// checkpoint height fall below the tip, so the checkpoints are
-		// fetched again after the retry.
-		steps := append(startedAtTip(height), []step{
+		// The tip sits exactly on an interval, so the lists
+		// cover it. A new pass at the same height but a
+		// different tip hash must not reuse lists fetched for
+		// the replaced block.
+		at := 2 * interval
+		lists := peerLists{
+			"a": {cp1, cp2},
+			"b": {cp1, cp2},
+		}
+		newTip := *hashOf(101)
+		steps := append(startedAtTip(at), []step{
 			{
-				name: "shortest list ends below the tip",
+				name: "checkpoints fetched",
 				event: CheckpointsFetched{
-					ByPeer: peerLists{
-						"a": {cp1, cp2, cp3},
-						"b": {cp1},
-					},
+					ByPeer: lists,
 				},
 				effects: []Effect{ResolveConflict{
-					FilterType: wire.GCSFilterRegular,
-					Checkpoints: peerLists{
-						"a": {cp1, cp2},
-						"b": {cp1},
-					},
+					FilterType:  wire.GCSFilterRegular,
+					Checkpoints: lists,
 				}},
 				phase: PhaseResolvingConflict,
 			},
 			{
-				name:    "no agreement",
-				event:   ConflictResolved{},
-				effects: []Effect{RetryAfter{testRetryDelay}},
-				phase:   PhaseRetrying,
+				name: "agreement",
+				event: ConflictResolved{
+					Good: hashes{cp1, cp2},
+				},
+				effects: []Effect{FetchCheckpointed{
+					FilterType:  wire.GCSFilterRegular,
+					Checkpoints: hashes{cp1, cp2},
+				}},
+				phase: PhaseFetchingCheckpointed,
 			},
 			{
-				name:    "retry fetches again",
+				name:  "fetch failed",
+				event: CheckpointedFetched{Err: errTest},
+				effects: []Effect{
+					RetryAfter{testRetryDelay},
+				},
+				phase: PhaseRetrying,
+			},
+			{
+				name:    "retry waits for the headers",
 				event:   RetryElapsed{},
-				effects: []Effect{PollQuit{}, fetch},
-				phase:   PhaseFetchingCheckpoints,
+				effects: []Effect{WaitForTips{WaitLagOrSynced}},
+				phase:   PhaseWaitingForHeaders,
+			},
+			{
+				name:    "lag reached",
+				event:   TipsChanged{},
+				effects: []Effect{ReadBlockTip{}},
+				phase:   PhaseReadingTip,
+			},
+			{
+				name: "replaced tip fetches again",
+				event: BlockTipRead{
+					Hash:   newTip,
+					Height: at,
+					Tips: chainstore.Tips{
+						BlockHeight: at,
+					},
+				},
+				effects: []Effect{
+					PollQuit{},
+					FetchCheckpoints{
+						FilterType: wire.
+							GCSFilterRegular,
+						StopHash: newTip,
+					},
+				},
+				phase: PhaseFetchingCheckpoints,
 			},
 		}...)
 		runSteps(t, newTestSyncer(), steps)
@@ -384,14 +503,19 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 	t.Run("next pass reuses the checkpoints", func(t *testing.T) {
 		t.Parallel()
 
+		// The lists are fetched up to the block checkpoint above the
+		// tip, so a later pass whose tip is still below it reuses
+		// them.
 		byPeer := peerLists{
-			"a": {cp1, cp2, cp3},
+			"a": {cp1, cp2, cp3, cp4, cp5},
 		}
 		resolveAll := ResolveConflict{
-			FilterType:  wire.GCSFilterRegular,
-			Checkpoints: byPeer,
+			FilterType: wire.GCSFilterRegular,
+			Checkpoints: peerLists{
+				"a": {cp1, cp2, cp3},
+			},
 		}
-		steps := append(startedAtTip(height), []step{
+		steps := append(startedBelowBlockCheckpoint(height), []step{
 			{
 				name:  "checkpoints fetched",
 				event: CheckpointsFetched{ByPeer: byPeer},
@@ -445,7 +569,7 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 		steps[len(steps)-1].name = "unexpected event is dropped"
 		steps[len(steps)-1].effects = nil
 		steps[len(steps)-1].phase = PhaseResolvingConflict
-		runSteps(t, newTestSyncer(), steps)
+		runSteps(t, newSyncerWithCheckpointAbove(), steps)
 	})
 }
 

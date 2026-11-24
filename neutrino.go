@@ -170,8 +170,11 @@ type ServerPeer struct {
 	// from the peer. This allows broadcast to multiple subscribers at
 	// once, allowing for multiple queries to be going to multiple peers at
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
-	// The sends on these channels WILL NOT block; any messages the channel
-	// can't accept will be dropped silently.
+	// Each message is sent to every subscriber in turn from the peer's
+	// read loop, which blocks until the subscriber takes it, cancels, or
+	// the peer or the service goes away. A subscriber that falls behind
+	// therefore slows only this peer's reads, rather than leaving a
+	// goroutine and a message behind for every message the peer sends.
 	recvSubscribers map[msgSubscription]struct{}
 	mtxSubscribers  sync.RWMutex
 }
@@ -229,22 +232,17 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
+	//
+	// Missing service bits are a property of this one endpoint, not
+	// misbehaviour, so we don't ban: a ban covers every port at the
+	// address, and would also cut off a compatible node next to this one
+	// (two bitcoinds on one host, say) for the whole ban duration.
+	// Recording the services in the address manager is enough to keep
+	// discovery from picking this peer again, as it only picks addresses
+	// that advertise the services we need.
 	peerServices := sp.Services()
-	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
-		peerServices&wire.SFNodeCF != wire.SFNodeCF {
-
-		peerAddr := sp.Addr()
-		err := sp.server.BanPeer(peerAddr, banman.NoCompactFilters)
-		if err != nil {
-			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
-		}
-
-		// Disconnect the peer even though BanPeer attempts to do so
-		// because it has yet to be added.
-		sp.Disconnect()
-
-		return nil
-	}
+	compatible := peerServices&wire.SFNodeWitness == wire.SFNodeWitness &&
+		peerServices&wire.SFNodeCF == wire.SFNodeCF
 
 	// Update the address manager with the advertised services for outbound
 	// connections in case they have changed. This is not done for inbound
@@ -254,6 +252,18 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// connecting to discovered peers.
 	if !sp.Inbound() {
 		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
+	}
+
+	if !compatible {
+		// A peer the user configured is retried, so say why it keeps
+		// being dropped where they'll see it.
+		logf := log.Debugf
+		if sp.persistent {
+			logf = log.Warnf
+		}
+		logf("Disconnecting peer %v, services %v lack witness or "+
+			"compact filter support", sp.Addr(), peerServices)
+		sp.Disconnect()
 	}
 
 	return nil
@@ -447,27 +457,26 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
 
-	// Send a message to each subscriber. Each message gets its own
-	// goroutine to prevent blocking on the mutex lock.
-	// TODO: Flood control.
+	// Send the message to each subscriber in turn, in the order the peer
+	// sent them. We copy the set first so the lock isn't held while we
+	// wait on a subscriber, and leave removing cancelled subscriptions to
+	// their cancel closure, which holds the write lock.
 	sp.mtxSubscribers.RLock()
-	defer sp.mtxSubscribers.RUnlock()
+	subscribers := make([]msgSubscription, 0, len(sp.recvSubscribers))
 	for subscription := range sp.recvSubscribers {
-		// Quickly determine if this subscription has been canceled, if
-		// so delete it.
-		select {
-		case <-subscription.quitChan:
-			delete(sp.recvSubscribers, subscription)
-			continue
-		default:
-		}
+		subscribers = append(subscribers, subscription)
+	}
+	sp.mtxSubscribers.RUnlock()
 
-		go func(subscription msgSubscription) {
-			select {
-			case <-subscription.quitChan:
-			case subscription.msgChan <- msg:
-			}
-		}(subscription)
+	for _, subscription := range subscribers {
+		select {
+		case subscription.msgChan <- msg:
+		case <-subscription.quitChan:
+		case <-sp.quit:
+			return
+		case <-sp.server.quit:
+			return
+		}
 	}
 }
 
@@ -481,8 +490,8 @@ var _ querysyncwm.Peer = (*ServerPeer)(nil)
 //
 // NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
-	// We won't have to buffer this channel, since we'll always send on it
-	// from a new goroutine.
+	// The channel is unbuffered: OnRead waits for the subscriber to take
+	// each message, which pushes back on the peer instead of queueing.
 	msgChan := make(chan wire.Message)
 	quitChan := make(chan struct{})
 
@@ -497,6 +506,10 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 
 	return msgChan, func() {
 		close(quitChan)
+
+		sp.mtxSubscribers.Lock()
+		delete(sp.recvSubscribers, sub)
+		sp.mtxSubscribers.Unlock()
 	}
 }
 
@@ -726,6 +739,10 @@ type ChainService struct { // nolint:maligned
 	nameResolver func(string) ([]net.IP, error)
 	dialer       func(net.Addr) (net.Conn, error)
 
+	// connectOnly is set when the service only connects to the peers in
+	// Config.ConnectPeers, with no address discovery.
+	connectOnly bool
+
 	broadcastTimeout time.Duration
 }
 
@@ -797,6 +814,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		userAgentVersion:  UserAgentVersion,
 		nameResolver:      nameResolver,
 		dialer:            dialer,
+		connectOnly:       len(cfg.ConnectPeers) > 0,
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
@@ -917,6 +935,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		return nil, err
 	}
 
+	err = rollBackZeroedFilterTip(s.BlockHeaders, s.RegFilterHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("unable to repair filter header "+
+			"tip: %w", err)
+	}
+
 	bm, err := newBlockManager(&blockManagerCfg{
 		ChainParams:      s.chainParams,
 		BlockHeaders:     s.BlockHeaders,
@@ -1020,7 +1044,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RetryDuration:  ConnectionRetryInterval,
 		TargetOutbound: uint32(TargetOutbound),
 		OnConnection:   s.outboundPeerConnected,
-		Dial:           dialer,
+		Dial:           dialUntilQuit(dialer, s.quit),
 	}
 	if len(cfg.ConnectPeers) == 0 {
 		cmgrCfg.GetNewAddress = newAddressFunc
@@ -1086,8 +1110,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			// peer.
 			var tcpAddr net.Addr
 			for {
+				// The lookup goes through the caller's
+				// resolver, which can be slow (Tor, say),
+				// and this goroutine is one Stop waits on.
 				var err error
-				tcpAddr, err = s.addrStringToNetAddr(addr)
+				tcpAddr, err = untilQuit(
+					s.quit, func() (net.Addr, error) {
+						return s.addrStringToNetAddr(
+							addr,
+						)
+					}, nil,
+				)
+				if errors.Is(err, ErrShuttingDown) {
+					return
+				}
 				if err != nil {
 					log.Warnf("unable to lookup IP for "+
 						"%v: %v", addr, err)
@@ -1357,7 +1393,11 @@ func (s *ChainService) peerHandler() {
 		outboundGroups:  make(map[string]int),
 	}
 
-	if !DisableDNSSeed {
+	// With a fixed set of peers there's no discovery, so nothing would
+	// use the seeded addresses. We skip the lookups too, as btcd does
+	// with --connect, so a connect-only node doesn't reveal itself to the
+	// DNS seeders or their resolvers.
+	if !DisableDNSSeed && !s.connectOnly {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddressV2) {
@@ -2027,3 +2067,153 @@ func (o *onionAddr) Network() string {
 
 // Ensure onionAddr implements the net.Addr interface.
 var _ net.Addr = (*onionAddr)(nil)
+
+// dialUntilQuit wraps dial so that a pending dial returns as soon as quit is
+// closed, rather than when the underlying dial gives up. The connection
+// manager dials synchronously from goroutines that Stop waits on, and a dial
+// through a proxy can take minutes to time out, so without this an
+// unreachable peer would hold up shutdown for that long (lnd#7349).
+//
+// The underlying dial keeps running in the background until it returns, and
+// any connection it makes after quit has closed is closed right away.
+func dialUntilQuit(dial func(net.Addr) (net.Conn, error),
+	quit <-chan struct{}) func(net.Addr) (net.Conn, error) {
+
+	return func(addr net.Addr) (net.Conn, error) {
+		return untilQuit(
+			quit, func() (net.Conn, error) { return dial(addr) },
+			func(conn net.Conn) {
+				if conn != nil {
+					_ = conn.Close()
+				}
+			},
+		)
+	}
+}
+
+// untilQuit runs call and returns its result, or ErrShuttingDown as soon as
+// quit is closed if call is still running then. For calls that can't be
+// cancelled (a dial, a name lookup through a proxy) but run in goroutines
+// Stop waits on. call keeps running in the background until it returns, and
+// a result it produces after quit has closed is passed to discard, if set.
+func untilQuit[T any](quit <-chan struct{}, call func() (T, error),
+	discard func(T)) (T, error) {
+
+	type result struct {
+		val T
+		err error
+	}
+
+	// The channel is unbuffered, so once the caller has given up, the
+	// call's goroutine can't hand its result over and discards it.
+	resultChan := make(chan result)
+	go func() {
+		val, err := call()
+		select {
+		case resultChan <- result{val: val, err: err}:
+		case <-quit:
+			if err == nil && discard != nil {
+				discard(val)
+			}
+		}
+	}()
+
+	select {
+	case res := <-resultChan:
+		return res.val, res.err
+
+	case <-quit:
+		var zero T
+		return zero, ErrShuttingDown
+	}
+}
+
+// corruptStoreHint says how to recover from header stores the start up checks
+// find damaged beyond repair.
+const corruptStoreHint = "the header stores were likely damaged by an " +
+	"unclean shutdown, remove the chain data (block_headers.bin, " +
+	"reg_filter_headers.bin and neutrino.db) to sync it again"
+
+// rollBackZeroedFilterTip rolls the filter header store back past any
+// all-zero headers at its tip. A filter header is a hash, so an all-zero one
+// is never real: it's what a flat file holds when a power loss drops records
+// the index already points at (neutrino#451), and it can be carried over into
+// the SQL store by the legacy import. Left in place, the un-checkpointed
+// cfheader sync checks every peer's PrevFilterHeader against it and bans them
+// all. Rolling back just re-fetches the lost headers.
+//
+// The same power loss can zero the block header at the tip too. That one
+// can't be rolled back the same way, as its parent hash is gone with it, so
+// we refuse to start with an error that says how to recover rather than sync
+// from a tip whose hash the index doesn't know.
+func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
+	filters headerfs.FilterHeaderStore) error {
+
+	blockTip, blockHeight, err := blocks.ChainTip()
+	if err != nil {
+		return err
+	}
+	if blockHeight > 0 {
+		// The tip has to link to the header below it. A zeroed record
+		// never does, and checking the link rather than the index
+		// also catches one the legacy SQL import carried over, as the
+		// import keys each row by the hash of whatever bytes it read.
+		parent, err := blocks.FetchHeaderByHeight(blockHeight - 1)
+		if err != nil {
+			return err
+		}
+		if blockTip.PrevBlock != parent.BlockHash() {
+			return fmt.Errorf("block header tip at height %d is "+
+				"corrupt: %s", blockHeight, corruptStoreHint)
+		}
+	}
+
+	var rolledBack uint32
+	for {
+		tip, height, err := filters.ChainTip()
+		if err != nil {
+			return err
+		}
+		if *tip != (chainhash.Hash{}) || height == 0 {
+			break
+		}
+		if rolledBack == 0 {
+			log.Infof("Filter header tip at height %d is zeroed, "+
+				"rolling back to the last good header", height)
+		}
+
+		parent, err := blocks.FetchHeaderByHeight(height - 1)
+		if err != nil {
+			return err
+		}
+		parentHash := parent.BlockHash()
+
+		// The same power loss can also zero the block headers below
+		// the tip, in which case the parent read back isn't a real
+		// block. Rolling back onto it would make the filter tip point
+		// at a block the index doesn't know, and the store would then
+		// fail to open on every start. Refuse instead, so the store is
+		// left as it is.
+		parentHeight, err := blocks.HeightFromHash(&parentHash)
+		if err != nil || parentHeight != height-1 {
+			return fmt.Errorf("block header at height %d is "+
+				"corrupt, unable to roll back the zeroed "+
+				"filter header at height %d: %s", height-1,
+				height, corruptStoreHint)
+		}
+
+		_, err = filters.RollbackLastBlock(&parentHash)
+		if err != nil {
+			return err
+		}
+		rolledBack++
+	}
+
+	if rolledBack > 0 {
+		log.Warnf("Rolled back %d zeroed filter headers at the tip of "+
+			"the filter header store, they'll be fetched again",
+			rolledBack)
+	}
+
+	return nil
+}

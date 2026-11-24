@@ -20,12 +20,10 @@ func VerifyBasicBlockFilter(filter *gcs.Filter, block *btcutil.Block) (int,
 		key             = builder.DeriveKey(block.Hash())
 	)
 	for idx, tx := range block.Transactions() {
-		// Skip coinbase transaction.
-		if idx == 0 {
-			continue
-		}
-
-		// Check outputs first.
+		// Check outputs first. BIP-158 includes the coinbase's output
+		// scripts like any other, so a filter that leaves out a
+		// coinbase payout is as invalid as one that leaves out any
+		// other output.
 		for outIdx, txOut := range tx.MsgTx().TxOut {
 			switch {
 			// If the script itself is blank, then we'll skip this
@@ -83,6 +81,12 @@ func VerifyBasicBlockFilter(filter *gcs.Filter, block *btcutil.Block) (int,
 					block.Hash(), tx.Hash(), outIdx,
 					txOut.PkScript)
 			}
+		}
+
+		// The coinbase spends nothing, so it has no input scripts to
+		// check.
+		if idx == 0 {
+			continue
 		}
 
 		// Now we can go through all inputs and check that the filter

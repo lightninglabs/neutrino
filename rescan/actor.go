@@ -202,6 +202,12 @@ type RescanActor struct {
 	// touches it.
 	continuationPending bool
 
+	// retryPending is set while a retry timer is armed, so at most one is
+	// pending. Without it every retry or wait step arms another timer,
+	// and the extra ones fire early on whatever state the FSM is in by
+	// then. Only the actor goroutine touches it.
+	retryPending bool
+
 	// requests counts the AddWatchAddrs and CurrentState calls in flight.
 	// A syncing or rewinding turn ends its batch early while it is not
 	// zero, so a request waits for at most one block.

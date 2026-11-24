@@ -31,7 +31,11 @@ func (a *RescanActor) Receive(_ context.Context,
 
 	switch m := msg.(type) {
 	case *processNextBlockMsg:
-		a.continuationPending = false
+		if m.retry {
+			a.retryPending = false
+		} else {
+			a.continuationPending = false
+		}
 		return a.handleContinuation()
 
 	case *blockConnectedMsg:
@@ -177,6 +181,13 @@ func (a *RescanActor) scheduleRetry() {
 		return
 	}
 
+	// One armed timer is enough: when it fires, the FSM takes its next
+	// step from whatever state it's in then.
+	if a.retryPending {
+		return
+	}
+	a.retryPending = true
+
 	a.asyncWG.Add(1)
 	go func() {
 		defer a.asyncWG.Done()
@@ -191,7 +202,7 @@ func (a *RescanActor) scheduleRetry() {
 		case <-timer.C:
 		}
 
-		a.ref.Tell(a.ctx, &processNextBlockMsg{})
+		a.ref.Tell(a.ctx, &processNextBlockMsg{retry: true})
 	}()
 }
 

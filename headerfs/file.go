@@ -54,6 +54,20 @@ func (h *headerStore) appendRaw(header []byte) error {
 	return nil
 }
 
+// rollbackAppend truncates the numHeaders records just appended to the flat
+// file, after a failure that happened before the index was updated, and
+// returns the failure along with any truncation error.
+func (h *headerStore) rollbackAppend(numHeaders int, cause error) error {
+	truncateErr := h.truncateHeaders(uint32(numHeaders), h.indexType)
+	if truncateErr != nil {
+		return fmt.Errorf("unable to sync %s header file: %w, "+
+			"rollback error: %v", h.indexType, cause, truncateErr)
+	}
+
+	return fmt.Errorf("unable to sync %s header file: %w", h.indexType,
+		cause)
+}
+
 // readRaw reads a raw header from disk from a particular seek distance. The
 // amount of bytes read past the seek distance is determined by the specified
 // header type.

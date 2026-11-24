@@ -139,6 +139,17 @@ type Syncer struct {
 	// not fetch them again.
 	allCheckpoints map[string][]*chainhash.Hash
 
+	// checkpointsStop is the stop hash allCheckpoints were fetched for.
+	// A cached list only answers for the block it was fetched up to, so a
+	// tip replaced at the same height must fetch them again.
+	checkpointsStop chainhash.Hash
+
+	// fetchStopHash and fetchStopHeight are the stop block of the
+	// FetchCheckpoints in flight. A peer's reply is only kept if it has
+	// exactly one entry per checkpoint interval up to this height.
+	fetchStopHash   chainhash.Hash
+	fetchStopHeight uint32
+
 	// goodCheckpoints are the checkpoints the peers and the store agreed
 	// on in the current pass. They are reset at the start of each pass.
 	goodCheckpoints []*chainhash.Hash
@@ -302,27 +313,32 @@ func (s *Syncer) stepCheckpointLoop() []Effect {
 		return s.fetchCheckpointed()
 	}
 
+	// Start by getting the filter checkpoints up to the height of our
+	// block header chain. If we have a chain checkpoint that is past this
+	// height, we use that instead. We do this so we don't have to fetch
+	// all filter checkpoints each time our block header chain advances.
+	// TODO(halseth): fetch filter checkpoints up to the best block of the
+	// connected peers.
+	bestHeight := s.lastHeight
+	bestHash := s.lastHash
+	if bestHeight < uint32(s.lastCp.Height) {
+		bestHeight = uint32(s.lastCp.Height)
+		bestHash = *s.lastCp.Hash
+	}
+
 	// If the height now exceeds the height at which we fetched the
-	// checkpoints last time, we must query our peers again.
-	if MinCheckpointHeight(s.allCheckpoints) < s.lastHeight {
-		// Start by getting the filter checkpoints up to the height of
-		// our block header chain. If we have a chain checkpoint that is
-		// past this height, we use that instead. We do this so we don't
-		// have to fetch all filter checkpoints each time our block
-		// header chain advances.
-		// TODO(halseth): fetch filter checkpoints up to the best block
-		// of the connected peers.
-		bestHeight := s.lastHeight
-		bestHash := s.lastHash
-		if bestHeight < uint32(s.lastCp.Height) {
-			bestHeight = uint32(s.lastCp.Height)
-			bestHash = *s.lastCp.Hash
-		}
+	// checkpoints last time, or they were fetched for a different stop
+	// block (a tip replaced at the same height), we must query our peers
+	// again.
+	if MinCheckpointHeight(s.allCheckpoints) < s.lastHeight ||
+		s.checkpointsStop != bestHash {
 
 		log.Debugf("Getting filter checkpoints up to height=%v, "+
 			"hash=%v", bestHeight, bestHash)
 
 		s.phase = PhaseFetchingCheckpoints
+		s.fetchStopHash = bestHash
+		s.fetchStopHeight = bestHeight
 
 		return []Effect{
 			PollQuit{},
@@ -339,7 +355,8 @@ func (s *Syncer) stepCheckpointLoop() []Effect {
 // handleCheckpointsFetched records the checkpoints the peers served and
 // resolves them, or retries the fetch when no peer answered.
 func (s *Syncer) handleCheckpointsFetched(e CheckpointsFetched) []Effect {
-	s.allCheckpoints = e.ByPeer
+	s.allCheckpoints = CheckpointsForStop(e.ByPeer, s.fetchStopHeight)
+	s.checkpointsStop = s.fetchStopHash
 	if len(s.allCheckpoints) == 0 {
 		log.Warnf("Unable to fetch set of candidate checkpoints, " +
 			"trying again...")
