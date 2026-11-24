@@ -2123,6 +2123,12 @@ func untilQuit[T any](quit <-chan struct{}, call func() (T, error),
 	}
 }
 
+// corruptStoreHint says how to recover from header stores the start up checks
+// find damaged beyond repair.
+const corruptStoreHint = "the header stores were likely damaged by an " +
+	"unclean shutdown, remove the chain data (block_headers.bin, " +
+	"reg_filter_headers.bin and neutrino.db) to sync it again"
+
 // rollBackZeroedFilterTip rolls the filter header store back past any
 // all-zero headers at its tip. A filter header is a hash, so an all-zero one
 // is never real: it's what a flat file holds when a power loss drops records
@@ -2130,8 +2136,26 @@ func untilQuit[T any](quit <-chan struct{}, call func() (T, error),
 // the SQL store by the legacy import. Left in place, the un-checkpointed
 // cfheader sync checks every peer's PrevFilterHeader against it and bans them
 // all. Rolling back just re-fetches the lost headers.
+//
+// The same power loss can zero the block header at the tip too. That one
+// can't be rolled back the same way, as its parent hash is gone with it, so
+// we refuse to start with an error that says how to recover rather than sync
+// from a tip whose hash the index doesn't know.
 func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
 	filters headerfs.FilterHeaderStore) error {
+
+	blockTip, blockHeight, err := blocks.ChainTip()
+	if err != nil {
+		return err
+	}
+	if blockHeight > 0 {
+		blockHash := blockTip.BlockHash()
+		height, err := blocks.HeightFromHash(&blockHash)
+		if err != nil || height != blockHeight {
+			return fmt.Errorf("block header tip at height %d is "+
+				"corrupt: %s", blockHeight, corruptStoreHint)
+		}
+	}
 
 	var rolledBack uint32
 	for {
@@ -2141,6 +2165,10 @@ func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
 		}
 		if *tip != (chainhash.Hash{}) || height == 0 {
 			break
+		}
+		if rolledBack == 0 {
+			log.Infof("Filter header tip at height %d is zeroed, "+
+				"rolling back to the last good header", height)
 		}
 
 		parent, err := blocks.FetchHeaderByHeight(height - 1)
@@ -2159,7 +2187,8 @@ func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
 		if err != nil || parentHeight != height-1 {
 			return fmt.Errorf("block header at height %d is "+
 				"corrupt, unable to roll back the zeroed "+
-				"filter header at height %d", height-1, height)
+				"filter header at height %d: %s", height-1,
+				height, corruptStoreHint)
 		}
 
 		_, err = filters.RollbackLastBlock(&parentHash)

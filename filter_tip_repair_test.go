@@ -168,3 +168,53 @@ func TestZeroedFilterTipCorruptParent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), height)
 }
+
+// TestZeroedBlockTipRefusesToStart checks that a zeroed block header at the
+// tip of the block store, which the filter repair can't roll back, stops the
+// start up with an error that says how to recover.
+func TestZeroedBlockTipRefusesToStart(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
+		true, time.Second*10, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	params := chaincfg.SimNetParams
+	blocks, err := headerfs.NewBlockHeaderStore(dataDir, db, &params)
+	require.NoError(t, err)
+	filters, err := headerfs.NewFilterHeaderStore(
+		dataDir, db, headerfs.RegularFilter, &params, nil,
+	)
+	require.NoError(t, err)
+
+	prev := params.GenesisBlock.Header
+	for height := uint32(1); height <= 2; height++ {
+		header := wire.BlockHeader{
+			Version:   prev.Version,
+			PrevBlock: prev.BlockHash(),
+			Timestamp: prev.Timestamp.Add(time.Minute),
+			Bits:      prev.Bits,
+		}
+		require.NoError(t, blocks.WriteHeaders(headerfs.BlockHeader{
+			BlockHeader: &header, Height: height,
+		}))
+		prev = header
+	}
+
+	// Zero the block header at the tip, height 2, in the flat file.
+	blockFile, err := os.OpenFile(
+		filepath.Join(dataDir, "block_headers.bin"), os.O_RDWR, 0644,
+	)
+	require.NoError(t, err)
+	_, err = blockFile.WriteAt(make([]byte, 80), 160)
+	require.NoError(t, err)
+	require.NoError(t, blockFile.Close())
+
+	err = rollBackZeroedFilterTip(blocks, filters)
+	require.ErrorContains(t, err, "block header tip at height 2 is corrupt")
+	require.ErrorContains(t, err, "block_headers.bin")
+}
