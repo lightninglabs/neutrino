@@ -8,6 +8,7 @@ import (
 	"github.com/lightninglabs/neutrino/pushtx"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/stretchr/testify/require"
+	"pgregory.net/rapid"
 )
 
 const (
@@ -33,6 +34,18 @@ const (
 	// peerRejectsInvalid requests the transaction and then rejects it as
 	// invalid.
 	peerRejectsInvalid
+
+	// peerRejectsUnasked rejects the transaction as invalid without ever
+	// asking for it.
+	peerRejectsUnasked
+
+	// peerRejectsConfirmed requests the transaction and then claims it is
+	// already in the chain.
+	peerRejectsConfirmed
+
+	// peerRequestsRepeatedly asks for the transaction in one getdata
+	// with the same vector many times over, then in a second getdata.
+	peerRequestsRepeatedly
 )
 
 // TestSendTransactionRejectSemantics exercises how the per-peer outcomes of a
@@ -53,12 +66,30 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 	)
 	reject.Hash = txHash
 
+	confirmed := wire.NewMsgReject(
+		wire.CmdTx, wire.RejectDuplicate, "transaction already exists",
+	)
+	confirmed.Hash = txHash
+
+	repeated := wire.NewMsgGetData()
+	for i := 0; i < 50; i++ {
+		require.NoError(t, repeated.AddInvVect(
+			wire.NewInvVect(wire.InvTypeTx, &txHash),
+		))
+	}
+
 	script := func(b peerBehavior) []wire.Message {
 		switch b {
 		case peerAccepts:
 			return []wire.Message{getData}
 		case peerRejectsInvalid:
 			return []wire.Message{getData, reject}
+		case peerRejectsUnasked:
+			return []wire.Message{reject}
+		case peerRejectsConfirmed:
+			return []wire.Message{getData, confirmed}
+		case peerRequestsRepeatedly:
+			return []wire.Message{repeated, getData}
 		default:
 			return nil
 		}
@@ -68,7 +99,12 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 		name      string
 		peers     []peerBehavior
 		wantErr   bool
+		wantCode  pushtx.BroadcastErrorCode
 		wantTxFor int
+
+		// wantQueued, if set, is how many messages each peer that
+		// got the transaction was sent: the inv and one tx.
+		wantQueued int
 	}{{
 		name:  "no peers",
 		peers: nil,
@@ -100,6 +136,26 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 		},
 		wantErr:   true,
 		wantTxFor: 3,
+	}, {
+		// A reject only counts from a peer we sent the transaction to,
+		// so one peer can't pair its reject with an honest peer's
+		// silent acceptance.
+		name:      "unasked reject is ignored",
+		peers:     []peerBehavior{peerAccepts, peerRejectsUnasked},
+		wantTxFor: 1,
+	}, {
+		// A confirmed claim from the only peer that asked for the
+		// transaction is reported as known, not as confirmed.
+		name:      "confirmed claim is not a verdict",
+		peers:     []peerBehavior{peerRejectsConfirmed, peerSilent},
+		wantErr:   true,
+		wantCode:  pushtx.Mempool,
+		wantTxFor: 1,
+	}, {
+		name:       "repeated requests get one tx",
+		peers:      []peerBehavior{peerRequestsRepeatedly},
+		wantTxFor:  1,
+		wantQueued: 2,
 	}}
 
 	for _, tc := range testCases {
@@ -142,7 +198,11 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 			if tc.wantErr {
 				var bErr *pushtx.BroadcastError
 				require.ErrorAs(t, err, &bErr)
-				require.Equal(t, pushtx.Invalid, bErr.Code)
+				wantCode := tc.wantCode
+				if wantCode == 0 {
+					wantCode = pushtx.Invalid
+				}
+				require.Equal(t, wantCode, bErr.Code)
 			} else {
 				require.NoError(t, err)
 			}
@@ -160,6 +220,12 @@ func TestSendTransactionRejectSemantics(t *testing.T) {
 			for _, p := range peers {
 				if p.numQueued() > 1 {
 					gotTx++
+					if tc.wantQueued != 0 {
+						require.Equal(
+							t, tc.wantQueued,
+							p.numQueued(),
+						)
+					}
 				}
 			}
 			require.Equal(t, tc.wantTxFor, gotTx)
@@ -198,4 +264,96 @@ func TestOnPeerUnresponsiveQuarantines(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("peer was not quarantined")
 	}
+}
+
+// TestSendTransactionOutcomeProperty checks, for any mix of peer behaviors,
+// that the broadcast verdict depends only on the peers that asked for the
+// transaction: it is Invalid exactly when every one of them rejected it as
+// invalid, or at least the invalid threshold did, and each of them was sent
+// the transaction once however often it asked.
+func TestSendTransactionOutcomeProperty(t *testing.T) {
+	t.Parallel()
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{Value: 1, PkScript: []byte{0x51}})
+	txHash := tx.TxHash()
+
+	getData := wire.NewMsgGetData()
+	require.NoError(t, getData.AddInvVect(
+		wire.NewInvVect(wire.InvTypeTx, &txHash),
+	))
+	repeated := wire.NewMsgGetData()
+	for i := 0; i < 5; i++ {
+		require.NoError(t, repeated.AddInvVect(
+			wire.NewInvVect(wire.InvTypeTx, &txHash),
+		))
+	}
+	reject := wire.NewMsgReject(
+		wire.CmdTx, wire.RejectInvalid, "bad-txns",
+	)
+	reject.Hash = txHash
+
+	rapid.Check(t, func(rt *rapid.T) {
+		behaviors := rapid.SliceOfN(rapid.SampledFrom([]peerBehavior{
+			peerAccepts, peerRejectsInvalid, peerRejectsUnasked,
+			peerRequestsRepeatedly,
+		}), 1, 5).Draw(rt, "peers")
+
+		scripts := make(map[string][]wire.Message)
+		var requesters, invalid int
+		for i, b := range behaviors {
+			var msgs []wire.Message
+			switch b {
+			case peerAccepts:
+				msgs = []wire.Message{getData}
+				requesters++
+			case peerRejectsInvalid:
+				msgs = []wire.Message{getData, reject}
+				requesters++
+				invalid++
+			case peerRejectsUnasked:
+				msgs = []wire.Message{reject}
+			case peerRequestsRepeatedly:
+				msgs = []wire.Message{repeated, getData}
+				requesters++
+			}
+			scripts[string(rune('a'+i))+":8333"] = msgs
+		}
+
+		peers := newScriptedPeers(scripts)
+		wm := querysyncwm.NewWorkManager(&querysyncwm.Config{
+			Peers: func() []querysyncwm.Peer {
+				out := make([]querysyncwm.Peer, len(peers))
+				for i, p := range peers {
+					out[i] = p
+				}
+
+				return out
+			},
+		})
+		s := &ChainService{
+			workManager:      wm,
+			broadcastTimeout: sendTxTestTimeout,
+		}
+		// A reject has to cross two goroutine hops within the reject
+		// timeout, so this test gives it more room than the table
+		// above, to stay steady on a loaded machine.
+		err := s.sendTransaction(tx, RejectTimeout(sendTxTestTimeout))
+
+		wantInvalid := requesters > 0 && (invalid == requesters ||
+			float32(invalid)/float32(requesters) >=
+				defaultQueryOptions().invalidTxThreshold)
+		if wantInvalid {
+			var bErr *pushtx.BroadcastError
+			require.ErrorAs(rt, err, &bErr)
+			require.Equal(rt, pushtx.Invalid, bErr.Code)
+		} else {
+			require.NoError(rt, err)
+		}
+
+		// Every peer gets the inv, and a requester gets one tx.
+		for _, p := range peers {
+			require.LessOrEqual(rt, p.numQueued(), 2)
+		}
+	})
 }
