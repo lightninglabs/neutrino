@@ -124,6 +124,18 @@ const (
 	// header reads by height fail. The rescan must end with a
 	// HeaderStoreError, reported once, and deliver nothing more.
 	dstFaultStoreFail
+
+	// dstFaultStartOrphan reorgs out the start block inside the first
+	// successful Subscribe, before it registers, so no disconnect for it
+	// ever reaches the rescan. The scan must notice the orphan itself,
+	// report it disconnected and follow the new branch.
+	dstFaultStartOrphan
+
+	// dstFaultInitOrphan reorgs out the start block, and announces it,
+	// on the first IsCurrent call, while the rescan waits in
+	// Initializing for a chain that is not yet current. The disconnect
+	// must be applied there, and reported once the chain is current.
+	dstFaultInitOrphan
 )
 
 // dstSlowFetch is how long a filter fetch takes under dstFaultSlowBatch.
@@ -276,6 +288,27 @@ func (d *dstRun) armStartFaults() {
 			d.w.announceReorg(old, branch)
 		}
 	}
+
+	// The start-orphan faults replace the start block itself, so they
+	// need a parent to fork from.
+	canOrphanStart := d.start.height > 0
+	if d.enabled(dstFaultStartOrphan) && canOrphanStart {
+		prev := s.onSubscribe
+		s.onSubscribe = func() {
+			if prev != nil {
+				prev()
+			}
+			d.orphanStart()
+		}
+	}
+	if d.enabled(dstFaultInitOrphan) && canOrphanStart {
+		s.notCurrent = max(s.notCurrent, 2)
+		s.notCurrentArmed = true
+		s.onIsCurrent = func() {
+			old, branch := d.orphanStart()
+			d.announceWhileBusy(old, branch)
+		}
+	}
 	if d.enabled(dstFaultHistReorg | dstFaultDeepReorg) {
 		fork := d.start.height + 3
 		if d.enabled(dstFaultDeepReorg) {
@@ -296,6 +329,14 @@ func (d *dstRun) armStartFaults() {
 			return headerfs.ErrHashNotFound
 		}
 	}
+}
+
+// orphanStart replaces the start block and every block above it with a new
+// branch of the same length, and returns the orphaned and the new blocks. It
+// announces nothing.
+func (d *dstRun) orphanStart() ([]*dstBlock, []*dstBlock) {
+	fork := d.start.height - 1
+	return d.w.reorg(fork, int(d.w.tip().height-fork))
 }
 
 // announceWhileBusy announces a reorg from inside a fault hook, on the
@@ -885,6 +926,9 @@ var dstCorpus = [][]byte{
 	{11, 0xff, 1, 0x10, 0x00, 0x01, 0x01, 0x12, 0x03, 0x07},
 	{12, 0x50, 0, 0x22, 0x00, 0x00, 0x01},
 	{15, 0xff, 0xff, 0x00, 0x08, 0x10, 0x02, 0x03, 0x01, 0x01, 0x01},
+	{8, 0x00, 0x40, 0x00, 0x01},
+	{9, 0x00, 0x80, 0x12, 0x00},
+	{10, 0x00, 0xc0, 0x00, 0x01, 0x01},
 }
 
 // dstRegressionSeeds are seeds that found bugs, in hex. TestRescanDST

@@ -116,7 +116,7 @@ func newDSTTruth(w *dstWorld, start *dstBlock, startTime time.Time,
 		w:             w,
 		fx:            w.fx,
 		startTime:     startTime,
-		stack:         []*dstBlock{start},
+		stack:         ancestry(start),
 		scripts:       make(map[string]int),
 		outpoints:     make(map[wire.OutPoint]int),
 		live:          make(map[chainhash.Hash]bool),
@@ -129,6 +129,20 @@ func newDSTTruth(w *dstWorld, start *dstBlock, startTime time.Time,
 		o.scripts[string(script)] = 0
 	}
 	return o
+}
+
+// ancestry returns start and every block below it, from the lowest up. The
+// scan counts the start block as delivered, and a reorg of the start block
+// pops it like any other, so the oracle holds its ancestors too.
+func ancestry(start *dstBlock) []*dstBlock {
+	var blocks []*dstBlock
+	for b := start; b != nil; b = b.parent {
+		blocks = append(blocks, b)
+	}
+	for i, j := 0, len(blocks)-1; i < j; i, j = i+1, j-1 {
+		blocks[i], blocks[j] = blocks[j], blocks[i]
+	}
+	return blocks
 }
 
 // fail records the first violation of an invariant. The caller holds mu.

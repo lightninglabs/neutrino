@@ -547,6 +547,10 @@ type dstSource struct {
 	// before the subscription registers.
 	onSubscribe func()
 
+	// onIsCurrent runs once, inside the next IsCurrent call, before it
+	// answers.
+	onIsCurrent func()
+
 	// onFilter and onHeader run inside each filter fetch and each header
 	// lookup by hash. A non-nil error fails the call.
 	onFilter func(*dstBlock) error
@@ -776,6 +780,14 @@ func (s *dstSource) MarkAsConfirmed(chainhash.Hash) {}
 // IsCurrent is part of the ChainSource interface. It reports false for the
 // first notCurrent calls, as a chain service still syncing does.
 func (s *dstSource) IsCurrent() bool {
+	s.mu.Lock()
+	hook := s.onIsCurrent
+	s.onIsCurrent = nil
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
