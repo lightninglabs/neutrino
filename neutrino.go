@@ -1511,11 +1511,13 @@ out:
 			s.handleQuery(state, qmsg)
 
 		case <-s.quit:
-			// Disconnect all peers on server shutdown.
-			state.forAllPeers(func(sp *ServerPeer) {
+			// Disconnect all peers on server shutdown, those
+			// still in their handshake as well, so none of their
+			// connections outlive the service.
+			for _, sp := range state.peers {
 				log.Tracef("Shutdown peer %s", sp)
 				sp.Disconnect()
-			})
+			}
 			break out
 		}
 	}
@@ -1960,6 +1962,10 @@ func (s *ChainService) handlePeerConnected(state *peerState,
 	sp.connReq = c
 	state.peers[key] = sp
 	sp.AssociateConnection(conn)
+
+	// Stop waits for the peer to be done. The peer handler runs under
+	// s.wg, so this Add comes before Stop's Wait returns.
+	s.wg.Add(1)
 	go s.peerDoneHandler(sp)
 }
 
@@ -1990,6 +1996,8 @@ func (s *ChainService) dialPeer(
 // peerDoneHandler handles peer disconnects by notifying the server that it's
 // done along with other performing other desirable cleanup.
 func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
+	defer s.wg.Done()
+
 	sp.WaitForDisconnect()
 
 	select {
