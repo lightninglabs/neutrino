@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"context"
 	"net"
 	"path/filepath"
 	"sync"
@@ -49,36 +50,36 @@ const (
 // pipe, with a fake node on the other end, and the network counts dials and
 // the connections still open.
 type testPeerNet struct {
-	t *testing.T
+	t require.TestingT
 
 	mu          sync.Mutex
 	modes       map[string]dialMode
 	holds       map[string]chan struct{}
 	gates       map[string]chan struct{}
+	delays      map[string]time.Duration
 	dials       map[string]int
 	inFlight    map[string]int
 	maxInFlight map[string]int
+	nodes       map[net.Conn]struct{}
 
 	// open counts the connections whose node end hasn't seen the
 	// service close them.
 	open atomic.Int64
-
-	// dialed receives the address of each dial as it starts.
-	dialed chan string
 }
 
 // newTestPeerNet returns a network that refuses every dial until told
 // otherwise.
-func newTestPeerNet(t *testing.T) *testPeerNet {
+func newTestPeerNet(t require.TestingT) *testPeerNet {
 	return &testPeerNet{
 		t:           t,
 		modes:       make(map[string]dialMode),
 		holds:       make(map[string]chan struct{}),
 		gates:       make(map[string]chan struct{}),
+		delays:      make(map[string]time.Duration),
 		dials:       make(map[string]int),
 		inFlight:    make(map[string]int),
 		maxInFlight: make(map[string]int),
-		dialed:      make(chan string, 1000),
+		nodes:       make(map[net.Conn]struct{}),
 	}
 }
 
@@ -88,6 +89,14 @@ func (n *testPeerNet) setMode(addr string, mode dialMode) {
 	defer n.mu.Unlock()
 
 	n.modes[addr] = mode
+}
+
+// setDelay makes dials to addr take the given time from now on.
+func (n *testPeerNet) setDelay(addr string, delay time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.delays[addr] = delay
 }
 
 // hold makes dials to addr wait until the returned function is called.
@@ -145,16 +154,13 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 	n.inFlight[key]++
 	n.maxInFlight[key] = max(n.maxInFlight[key], n.inFlight[key])
 	hold := n.holds[key]
+	delay := n.delays[key]
 	n.mu.Unlock()
-
-	select {
-	case n.dialed <- key:
-	default:
-	}
 
 	if hold != nil {
 		<-hold
 	}
+	time.Sleep(delay)
 
 	n.mu.Lock()
 	n.inFlight[key]--
@@ -168,6 +174,9 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 
 	local, remote := net.Pipe()
 	n.open.Add(1)
+	n.mu.Lock()
+	n.nodes[remote] = struct{}{}
+	n.mu.Unlock()
 	go n.runNode(remote, mode, gate)
 
 	return local, nil
@@ -178,8 +187,14 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 	gate <-chan struct{}) {
 
-	defer n.open.Add(-1)
-	defer conn.Close()
+	defer func() {
+		n.mu.Lock()
+		delete(n.nodes, conn)
+		n.mu.Unlock()
+
+		_ = conn.Close()
+		n.open.Add(-1)
+	}()
 
 	if mode == dialHangUp {
 		return
@@ -224,10 +239,34 @@ func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 	}
 
 	for {
-		_, _, err := wire.ReadMessage(conn, pver, params)
+		msg, _, err := wire.ReadMessage(conn, pver, params)
 		if err != nil {
 			return
 		}
+
+		// A serving node has no headers past genesis. Without an
+		// answer, header sync would see the peer stall, and
+		// quarantine and disconnect it. The reply is written aside,
+		// since the service may be writing to us at the same time.
+		_, ok := msg.(*wire.MsgGetHeaders)
+		if mode == dialServe && ok {
+			go func() {
+				_ = wire.WriteMessage(
+					conn, wire.NewMsgHeaders(), pver,
+					params,
+				)
+			}()
+		}
+	}
+}
+
+// hangUpAll closes every connection from the node end.
+func (n *testPeerNet) hangUpAll() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for conn := range n.nodes {
+		_ = conn.Close()
 	}
 }
 
@@ -263,14 +302,33 @@ func testResolver(host string) ([]net.IP, error) {
 	return []net.IP{ip}, nil
 }
 
-// newTestService starts a service on the test network, with testPeerAddr as
-// its permanent peer, and stops it when the test is over.
-func newTestService(t *testing.T, n *testPeerNet) *ChainService {
+// testEnv is what a test service needs of a test, which both a testing.T
+// and a rapid.T provide.
+type testEnv interface {
+	require.TestingT
+	Cleanup(func())
+	Context() context.Context
+}
+
+// useTestRetryInterval sets the retry interval of services made from now on
+// until the test is over.
+func useTestRetryInterval(t *testing.T) {
 	oldRetry := ConnectionRetryInterval
 	ConnectionRetryInterval = testRetryInterval
 	t.Cleanup(func() { ConnectionRetryInterval = oldRetry })
+}
 
-	dir := t.TempDir()
+// newTestService starts a service on the test network, with testPeerAddr as
+// its permanent peer, and stops it when the test is over.
+func newTestService(t *testing.T, n *testPeerNet) *ChainService {
+	useTestRetryInterval(t)
+
+	return startTestService(t, t.TempDir(), n)
+}
+
+// startTestService starts a service in dir on the test network, with
+// testPeerAddr as its permanent peer, and stops it when the test is over.
+func startTestService(t testEnv, dir string, n *testPeerNet) *ChainService {
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(dir, "neutrino.db"), true,
 		10*time.Second, false,
@@ -294,17 +352,15 @@ func newTestService(t *testing.T, n *testPeerNet) *ChainService {
 }
 
 // waitForDial waits until addr is dialed.
-func waitForDial(t *testing.T, n *testPeerNet, addr string) {
-	t.Helper()
-
+func waitForDial(t require.TestingT, n *testPeerNet, addr string) {
 	require.Eventually(t, func() bool {
 		return n.dialCount(addr) > 0
 	}, 5*time.Second, time.Millisecond, "%v never dialed", addr)
 }
 
 // waitForPeer waits until the service has a connected peer at addr.
-func waitForPeer(t *testing.T, s *ChainService, addr string) *ServerPeer {
-	t.Helper()
+func waitForPeer(t require.TestingT, s *ChainService,
+	addr string) *ServerPeer {
 
 	var sp *ServerPeer
 	require.Eventually(t, func() bool {
