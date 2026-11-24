@@ -266,7 +266,8 @@ func blockFilterMatches(chain ChainSource, ro *rescanOptions,
 	// expect more calls to follow for the subsequent filters. To speed up
 	// the fetching, we make an optimistic batch query.
 	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular, OptimisticBatch(),
+		*blockHash, wire.GCSFilterRegular,
+		append([]QueryOption{OptimisticBatch()}, ro.queryOptions...)...,
 	)
 	if err != nil {
 		if err == headerfs.ErrHashNotFound {

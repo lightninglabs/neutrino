@@ -429,9 +429,12 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 		if len(newReqs) == 0 {
 			options.watchList = reporter.filterEntries
 
+			options.queryOptions = []QueryOption{
+				CancelQuery(s.quit),
+			}
 			match, err := s.cfg.BlockFilterMatches(options, hash)
 			if err != nil {
-				return nil, err
+				return nil, s.quitOr(err)
 			}
 
 			// If still no match is found, we have no reason to
@@ -464,9 +467,11 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 
 		log.Debugf("Fetching block height=%d hash=%s", height, hash)
 
-		block, err := s.cfg.GetBlock(*hash)
+		// The fetch is bound to the scanner's quit, so Stop doesn't
+		// wait for a query that can take until its timeout.
+		block, err := s.cfg.GetBlock(*hash, CancelQuery(s.quit))
 		if err != nil {
-			return nil, err
+			return nil, s.quitOr(err)
 		}
 
 		// Check again to see if the utxoscanner has been signaled to
@@ -491,5 +496,16 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 		log.Infof("Block %s at height %d was replaced by %s while "+
 			"it was fetched, scanning the new one", hash, height,
 			active)
+	}
+}
+
+// quitOr returns ErrShuttingDown if the scanner is stopping, since a fetch
+// that failed then was most likely cancelled by the stop, and err otherwise.
+func (s *UtxoScanner) quitOr(err error) error {
+	select {
+	case <-s.quit:
+		return ErrShuttingDown
+	default:
+		return err
 	}
 }

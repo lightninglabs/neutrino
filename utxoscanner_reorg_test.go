@@ -251,3 +251,59 @@ func TestUtxoScannerRechecksSkippedBlock(t *testing.T) {
 		"that replaced a skipped one")
 	require.Equal(t, spend.TxHash(), report.SpendingTx.TxHash())
 }
+
+// TestUtxoScannerStopCancelsFetch checks that stopping the scanner cancels a
+// block fetch in flight, rather than waiting for the query to time out, and
+// that the request is told the scanner is shutting down.
+func TestUtxoScannerStopCancelsFetch(t *testing.T) {
+	t.Parallel()
+
+	created := wire.NewMsgTx(2)
+	created.AddTxOut(wire.NewTxOut(5000, []byte{0x51}))
+	outpoint := wire.OutPoint{Hash: created.TxHash()}
+
+	chain := newSwapChain(1)
+	chain.add(1, &wire.MsgBlock{
+		Header:       wire.BlockHeader{Nonce: 1},
+		Transactions: []*wire.MsgTx{created},
+	})
+
+	// The fetch blocks until its query is cancelled.
+	cfg := chain.config()
+	fetching := make(chan struct{})
+	cfg.GetBlock = func(_ chainhash.Hash,
+		opts ...QueryOption) (*btcutil.Block, error) {
+
+		qo := defaultQueryOptions()
+		qo.applyQueryOptions(opts...)
+		close(fetching)
+
+		select {
+		case <-qo.cancelChan:
+			return nil, errors.New("query cancelled")
+		case <-time.After(time.Minute):
+			return nil, errors.New("query timed out")
+		}
+	}
+
+	scanner := NewUtxoScanner(cfg)
+	require.NoError(t, scanner.Start())
+	req, err := scanner.Enqueue(&InputWithScript{
+		OutPoint: outpoint,
+		PkScript: []byte{0x51},
+	}, 1, nil)
+	require.NoError(t, err)
+	<-fetching
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- scanner.Stop() }()
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop waited for the fetch in flight")
+	}
+
+	_, err = req.Result(nil)
+	require.ErrorIs(t, err, ErrShuttingDown)
+}
