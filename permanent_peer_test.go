@@ -294,3 +294,39 @@ func TestReAddPermanentPeerWhileItShutsDown(t *testing.T) {
 		}, 10*time.Second, 5*time.Millisecond)
 	}
 }
+
+// TestPeerLookupAddressForms checks that PeerByAddr and DisconnectNodeByAddr
+// match a peer by its resolved address, and that DisconnectNodeByAddr finds
+// any peer, so a permanent peer is disconnected and then reconnected.
+func TestPeerLookupAddressForms(t *testing.T) {
+	// peer.test resolves to 127.0.0.3, and simnet's default port is
+	// 18555.
+	const resolved = "127.0.0.3:18555"
+
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	n.setMode(resolved, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode("peer.test", false))
+	sp := waitForPeer(t, s, resolved)
+	for _, addr := range []string{"peer.test", "peer.test:18555",
+		"127.0.0.3"} {
+
+		require.Same(t, sp, s.PeerByAddr(addr), addr)
+	}
+
+	require.NoError(t, s.DisconnectNodeByAddr("peer.test"))
+	require.Eventually(t, func() bool {
+		return s.PeerByAddr(resolved) == nil
+	}, 5*time.Second, time.Millisecond)
+	require.Error(t, s.DisconnectNodeByAddr("peer.test"))
+
+	// The permanent peer is found by its IP alone, and comes back.
+	permanent := waitForPeer(t, s, testPeerAddr)
+	require.NoError(t, s.DisconnectNodeByAddr("127.0.0.1"))
+	require.Eventually(t, func() bool {
+		next := s.PeerByAddr(testPeerAddr)
+		return next != nil && next != permanent
+	}, 10*time.Second, 5*time.Millisecond)
+}

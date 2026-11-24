@@ -11,7 +11,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/connmgr"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 )
@@ -180,26 +179,22 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		msg.reply <- peers
 
 	case disconnectNodeMsg:
-		// Check outbound peers.
-		found := disconnectPeer(state.outboundPeers, msg.cmp, func(sp *ServerPeer) {
-			// Keep group counts ok since we remove from
-			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-		})
-		if found {
-			// If there are multiple outbound connections to the same
-			// ip:port, continue disconnecting them all until no such
-			// peers are found.
-			for found {
-				found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *ServerPeer) {
-					state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-				})
+		// We search every peer, those in their handshake as well.
+		// There's at most one per address.
+		found := false
+		for _, sp := range state.peers {
+			if msg.cmp(sp) {
+				dropPeer(state, sp)
+				sp.Disconnect()
+				found = true
 			}
-			msg.reply <- nil
-			return
 		}
 
-		msg.reply <- errors.New("peer not found")
+		if found {
+			msg.reply <- nil
+		} else {
+			msg.reply <- errors.New("peer not found")
+		}
 
 	case forAllPeersMsg:
 		// TODO: Remove this when it's unnecessary due to wider use of
@@ -384,38 +379,56 @@ func (s *ChainService) eligiblePeers() []querysyncwm.Peer {
 	return peers
 }
 
-// DisconnectNodeByAddr disconnects a peer by target address. Both outbound and
-// inbound nodes will be searched for the target node. An error message will
-// be returned if the peer was not found.
+// DisconnectNodeByAddr disconnects a peer by target address. The address is
+// matched the way ConnectNode resolves it, and every peer is searched, those
+// still in their handshake as well. A permanent peer is reconnected. An error
+// message will be returned if the peer was not found.
 func (s *ChainService) DisconnectNodeByAddr(addr string) error {
-	replyChan := make(chan error)
+	key := s.lookupKey(addr)
+
+	return s.disconnectNode(func(sp *ServerPeer) bool {
+		return sp.key() == key
+	})
+}
+
+// DisconnectNodeByID disconnects a peer by target node id. Every peer is
+// searched, those still in their handshake as well. An error message will be
+// returned if the peer was not found.
+func (s *ChainService) DisconnectNodeByID(id int32) error {
+	return s.disconnectNode(func(sp *ServerPeer) bool {
+		return sp.ID() == id
+	})
+}
+
+// disconnectNode hands a disconnection to the peer handler and returns its
+// reply.
+func (s *ChainService) disconnectNode(cmp func(*ServerPeer) bool) error {
+	reply := make(chan error, 1)
 
 	select {
-	case s.query <- disconnectNodeMsg{
-		cmp:   func(sp *ServerPeer) bool { return sp.Addr() == addr },
-		reply: replyChan,
-	}:
-		return <-replyChan
+	case s.query <- disconnectNodeMsg{cmp: cmp, reply: reply}:
+	case <-s.quit:
+		return nil
+	}
+
+	select {
+	case err := <-reply:
+		return err
 	case <-s.quit:
 		return nil
 	}
 }
 
-// DisconnectNodeByID disconnects a peer by target node id. Both outbound and
-// inbound nodes will be searched for the target node. An error message will be
-// returned if the peer was not found.
-func (s *ChainService) DisconnectNodeByID(id int32) error {
-	replyChan := make(chan error)
-
-	select {
-	case s.query <- disconnectNodeMsg{
-		cmp:   func(sp *ServerPeer) bool { return sp.ID() == id },
-		reply: replyChan,
-	}:
-		return <-replyChan
-	case <-s.quit:
-		return nil
+// lookupKey returns the key of a peer address given by a caller, resolved the
+// way ConnectNode resolves it. If it can't be resolved, the string itself is
+// the key, which still matches a peer whose resolved address it is.
+func (s *ChainService) lookupKey(addr string) peerKey {
+	netAddr, err := s.addrStringToNetAddr(addr)
+	if err != nil {
+		return peerKey(addr)
 	}
+
+	return keyOf(netAddr)
 }
 
 // RemoveNodeByAddr removes a peer from the list of persistent peers if

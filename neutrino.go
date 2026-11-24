@@ -1573,9 +1573,14 @@ func (s *ChainService) addrStringToNetAddr(addr string) (net.Addr, error) {
 	}
 
 	// Attempt to look up an IP address associated with the parsed host.
-	ips, err := s.nameResolver(host)
-	if err != nil {
-		return nil, err
+	// An IP address is its own, which saves a lookup through a resolver
+	// that may be slow.
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		ips, err = s.nameResolver(host)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(ips) == 0 {
@@ -1828,32 +1833,6 @@ func dropPeer(state *peerState, sp *ServerPeer) {
 
 		log.Debugf("Removed peer %s", sp)
 	}
-}
-
-// disconnectPeer attempts to drop the connection of a targeted peer in the
-// passed peer list. Targets are identified via usage of the passed
-// `compareFunc`, which should return `true` if the passed peer is the target
-// peer. This function returns true on success and false if the peer is unable
-// to be located. If the peer is found, and the passed callback: `whenFound'
-// isn't nil, we call it with the peer as the argument before it is removed
-// from the peerList, and is disconnected from the server.
-func disconnectPeer(peerList map[int32]*ServerPeer,
-	compareFunc func(*ServerPeer) bool, whenFound func(*ServerPeer)) bool {
-
-	for addr, peer := range peerList {
-		if compareFunc(peer) {
-			if whenFound != nil {
-				whenFound(peer)
-			}
-
-			// This is ok because we are not continuing
-			// to iterate so won't corrupt the loop.
-			delete(peerList, addr)
-			peer.Disconnect()
-			return true
-		}
-	}
-	return false
 }
 
 // SendTransaction broadcasts the transaction to all currently active peers so
@@ -2245,10 +2224,12 @@ func (s *ChainService) IsCurrent() bool {
 }
 
 // PeerByAddr lets the caller look up a peer address in the service's peer
-// table, if connected to that peer address.
+// table, if connected to that peer address. The address is matched the way
+// ConnectNode resolves it.
 func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
+	key := s.lookupKey(addr)
 	for _, peer := range s.Peers() {
-		if peer.Addr() == addr {
+		if peer.key() == key {
 			return peer
 		}
 	}
