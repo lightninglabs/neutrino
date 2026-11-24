@@ -266,7 +266,6 @@ func (s *Syncer) Handle(event Event) []Effect {
 // interval behind the block headers, before we actually start to sync the set
 // of cfheaders.
 func (s *Syncer) waitForHeaders(tips chainstore.Tips) []Effect {
-	s.goodCheckpoints = nil
 	s.phase = PhaseWaitingForHeaders
 
 	log.Infof("Waiting for more block headers, then will start "+

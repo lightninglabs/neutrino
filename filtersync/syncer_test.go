@@ -661,10 +661,17 @@ func TestSyncerRetryFollowsReplacedTip(t *testing.T) {
 			phase: PhaseFetchingCheckpointed,
 		},
 	}
-	failed := step{
-		name:    "round fails",
-		effects: []Effect{RetryAfter{testRetryDelay}},
-		phase:   PhaseRetrying,
+	// failedBy returns the step that fails the round with event. Each
+	// subtest builds its own, as they run in parallel.
+	failedBy := func(event Event) []step {
+		failed := step{
+			name:    "round fails",
+			event:   event,
+			effects: []Effect{RetryAfter{testRetryDelay}},
+			phase:   PhaseRetrying,
+		}
+
+		return append([]step{failed}, afterFailure...)
 	}
 
 	t.Run("empty fetch", func(t *testing.T) {
@@ -673,8 +680,7 @@ func TestSyncerRetryFollowsReplacedTip(t *testing.T) {
 		s := newTestSyncer()
 		runSteps(t, s, startedAtTip(height))
 
-		failed.event = CheckpointsFetched{}
-		runSteps(t, s, append([]step{failed}, afterFailure...))
+		runSteps(t, s, failedBy(CheckpointsFetched{}))
 	})
 
 	t.Run("unresolved conflict", func(t *testing.T) {
@@ -687,8 +693,7 @@ func TestSyncerRetryFollowsReplacedTip(t *testing.T) {
 		}})
 		require.Equal(t, PhaseResolvingConflict, s.Phase())
 
-		failed.event = ConflictResolved{Err: errTest}
-		runSteps(t, s, append([]step{failed}, afterFailure...))
+		runSteps(t, s, failedBy(ConflictResolved{Err: errTest}))
 	})
 }
 
@@ -769,6 +774,10 @@ func TestSyncerCheckpointedFetched(t *testing.T) {
 			effects: []Effect{WaitForTips{WaitLagOrSynced}},
 			phase:   PhaseWaitingForHeaders,
 		}})
+
+		// The next pass's tip read drops the agreed checkpoints.
+		s.Handle(TipsChanged{})
+		s.Handle(tipRead(interval))
 		require.Nil(t, s.goodCheckpoints)
 	})
 
