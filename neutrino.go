@@ -255,9 +255,14 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	}
 
 	if !compatible {
-		log.Debugf("Disconnecting peer %v, services %v lack "+
-			"witness or compact filter support", sp.Addr(),
-			peerServices)
+		// A peer the user configured is retried, so say why it keeps
+		// being dropped where they'll see it.
+		logf := log.Debugf
+		if sp.persistent {
+			logf = log.Warnf
+		}
+		logf("Disconnecting peer %v, services %v lack witness or "+
+			"compact filter support", sp.Addr(), peerServices)
 		sp.Disconnect()
 	}
 
