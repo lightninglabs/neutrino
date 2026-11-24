@@ -24,6 +24,7 @@ import (
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/chainstore"
+	"github.com/lightninglabs/neutrino/filtersync"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/headerlist"
 	"github.com/lightninglabs/neutrino/headersync"
@@ -1027,9 +1028,9 @@ func TestBlockManagerInitialInterval(t *testing.T) {
 		bm.wg.Add(1)
 		go bm.blockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
-		bm.cfSync.getCheckpointedCFHeaders(
-			headers.checkpoints, cfStore, wire.GCSFilterRegular,
-		)
+		require.NoError(t, fetchCheckpointedAtTip(
+			bm.cfSync, headers.checkpoints, cfStore,
+		))
 
 		// Finally make sure the filter header tip is what we expect.
 		tip, tipHeight, err := cfStore.ChainTip()
@@ -1258,10 +1259,29 @@ func TestBlockManagerInvalidInterval(t *testing.T) {
 		bm.wg.Add(1)
 		go bm.blockHandler()
 		t.Cleanup(func() { require.NoError(t, bm.Stop()) })
-		bm.cfSync.getCheckpointedCFHeaders(
-			headers.checkpoints, cfStore, wire.GCSFilterRegular,
-		)
+		require.NoError(t, fetchCheckpointedAtTip(
+			bm.cfSync, headers.checkpoints, cfStore,
+		))
 	}
+}
+
+// fetchCheckpointedAtTip runs the checkpointed fetch for checkpoints, bound
+// to the current block header tip, as the Syncer does for a pass that reads
+// that tip.
+func fetchCheckpointedAtTip(c *cfHeaderSync, checkpoints []*chainhash.Hash,
+	store headerfs.FilterHeaderStore) error {
+
+	tip, height, err := c.cfg.BlockHeaders.ChainTip()
+	if err != nil {
+		return err
+	}
+
+	return c.getCheckpointedCFHeaders(filtersync.FetchCheckpointed{
+		FilterType:  wire.GCSFilterRegular,
+		Checkpoints: checkpoints,
+		TipHash:     tip.BlockHash(),
+		TipHeight:   height,
+	}, store)
 }
 
 func assertBadPeers(expBad map[string]struct{}, badPeers []string) error {

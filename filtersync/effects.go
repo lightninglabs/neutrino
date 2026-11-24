@@ -96,6 +96,16 @@ type FetchCheckpointed struct {
 	// Checkpoints are the agreed checkpoints. They are empty when the
 	// chain is shorter than one checkpoint interval.
 	Checkpoints []*chainhash.Hash
+
+	// TipHash and TipHeight are the block header tip of the pass. The
+	// Checkpoints were served for the chain that ends at this block (or
+	// at a block checkpoint above it, which the same chain must reach),
+	// so they only hold while it is still in the block header store at
+	// TipHeight. If it was replaced, the run loop fails the fetch without
+	// blaming any peer, as an honest reply for the new chain can't match
+	// them.
+	TipHash   chainhash.Hash
+	TipHeight uint32
 }
 
 func (FetchCheckpointed) syncEffect() {}

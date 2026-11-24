@@ -139,9 +139,7 @@ func (c *cfHeaderSync) runFilterSyncEffect(
 		return filtersync.ConflictResolved{Good: good, Err: err}
 
 	case filtersync.FetchCheckpointed:
-		err := c.getCheckpointedCFHeaders(
-			e.Checkpoints, store, e.FilterType,
-		)
+		err := c.getCheckpointedCFHeaders(e, store)
 		if err != nil {
 			return filtersync.CheckpointedFetched{Err: err}
 		}
@@ -413,8 +411,17 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 // matches the checkpoints up to the tip of the store. A store or response
 // error is returned rather than panicking, since a transient SQL failure must
 // not crash the host process; the caller retries.
-func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
+//
+// The checkpoints were served for the chain that ends at fetch.TipHash, and a
+// response that doesn't match them gets its peer banned. So every query must
+// stop at a block of that chain: if the tip was replaced, an honest peer
+// answers the queries for the new chain with headers that can't match, and
+// we'd ban it for that.
+func (c *cfHeaderSync) getCheckpointedCFHeaders(
+	fetch filtersync.FetchCheckpointed,
+	store headerfs.FilterHeaderStore) error {
+
+	checkpoints, fType := fetch.Checkpoints, fetch.FilterType
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
@@ -520,6 +527,15 @@ func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
 		_, err := c.submitCFHeaderReconciliation()
+		return err
+	}
+
+	// The stop hashes were read by height, so they're only on the chain
+	// the checkpoints were served for if the pass's tip is still at its
+	// height now that we've read them all. A reorg below the tip before
+	// or during the reads replaces it. This doesn't catch a reorg that
+	// is undone again before this read, which we accept.
+	if err := c.checkFetchTip(fetch); err != nil {
 		return err
 	}
 
@@ -738,6 +754,24 @@ func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 				"for %d checkpoints", len(checkpoints))
 			break
 		}
+	}
+
+	return nil
+}
+
+// checkFetchTip returns an error if the block header tip a checkpointed fetch
+// was planned against is no longer in the block header store at its height.
+func (c *cfHeaderSync) checkFetchTip(fetch filtersync.FetchCheckpointed) error {
+	header, err := c.cfg.BlockHeaders.FetchHeaderByHeight(fetch.TipHeight)
+	if err != nil {
+		return fmt.Errorf("unable to read block header at height %d "+
+			"to check the checkpoints' tip: %w", fetch.TipHeight,
+			err)
+	}
+	if header.BlockHash() != fetch.TipHash {
+		return fmt.Errorf("block header tip %v at height %d the "+
+			"checkpoints were fetched for was replaced by %v",
+			fetch.TipHash, fetch.TipHeight, header.BlockHash())
 	}
 
 	return nil

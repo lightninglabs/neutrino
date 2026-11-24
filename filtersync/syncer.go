@@ -84,8 +84,12 @@ const (
 	// resumeWaitForHeaders starts a new pass from the wait for headers.
 	resumeWaitForHeaders resumePoint = iota
 
-	// resumeCheckpointLoop runs the next step of the checkpoint loop.
-	resumeCheckpointLoop
+	// resumeReadTip reads the block header tip again, then runs the next
+	// step of the checkpoint loop from it. A retry inside the loop must
+	// not reuse the tip the pass started from: a reorg during the delay
+	// would leave every later fetch asking for a stop block no peer
+	// serves any more.
+	resumeReadTip
 
 	// resumeWaitAtTip goes back to waiting at the tip.
 	resumeWaitAtTip
@@ -290,6 +294,9 @@ func (s *Syncer) handleBlockTipRead(e BlockTipRead) []Effect {
 		return s.retryAfter(resumeWaitForHeaders)
 	}
 
+	// Agreed checkpoints only answer for the tip they were agreed under,
+	// so none outlive a new tip read.
+	s.goodCheckpoints = nil
 	s.lastHash = e.Hash
 	s.lastHeight = e.Height
 
@@ -361,7 +368,7 @@ func (s *Syncer) handleCheckpointsFetched(e CheckpointsFetched) []Effect {
 		log.Warnf("Unable to fetch set of candidate checkpoints, " +
 			"trying again...")
 
-		return s.retryAfter(resumeCheckpointLoop)
+		return s.retryAfter(resumeReadTip)
 	}
 
 	return s.resolveConflict()
@@ -400,20 +407,24 @@ func (s *Syncer) handleConflictResolved(e ConflictResolved) []Effect {
 
 	s.goodCheckpoints = e.Good
 	if len(s.goodCheckpoints) == 0 {
-		return s.retryAfter(resumeCheckpointLoop)
+		return s.retryAfter(resumeReadTip)
 	}
 
 	return s.stepCheckpointLoop()
 }
 
 // fetchCheckpointed gets all the headers up to the last known good
-// checkpoint.
+// checkpoint. The checkpoints only answer for the chain they were fetched
+// for, which stepCheckpointLoop made the chain of the pass's tip, so the
+// fetch carries that tip for the run loop to check against the store.
 func (s *Syncer) fetchCheckpointed() []Effect {
 	s.phase = PhaseFetchingCheckpointed
 
 	return []Effect{FetchCheckpointed{
 		FilterType:  s.fType,
 		Checkpoints: s.goodCheckpoints,
+		TipHash:     s.lastHash,
+		TipHeight:   s.lastHeight,
 	}}
 }
 
@@ -476,8 +487,9 @@ func (s *Syncer) handleRetryElapsed(e RetryElapsed) []Effect {
 	case resumeWaitForHeaders:
 		return s.waitForHeaders(e.Tips)
 
-	case resumeCheckpointLoop:
-		return s.stepCheckpointLoop()
+	case resumeReadTip:
+		s.phase = PhaseReadingTip
+		return []Effect{ReadBlockTip{}}
 
 	default:
 		return append([]Effect{PollQuit{}}, s.waitAtTip()...)
