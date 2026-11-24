@@ -734,6 +734,10 @@ type ChainService struct { // nolint:maligned
 	nameResolver func(string) ([]net.IP, error)
 	dialer       func(net.Addr) (net.Conn, error)
 
+	// connectOnly is set when the service only connects to the peers in
+	// Config.ConnectPeers, with no address discovery.
+	connectOnly bool
+
 	broadcastTimeout time.Duration
 }
 
@@ -805,6 +809,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		userAgentVersion:  UserAgentVersion,
 		nameResolver:      nameResolver,
 		dialer:            dialer,
+		connectOnly:       len(cfg.ConnectPeers) > 0,
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
@@ -1371,7 +1376,11 @@ func (s *ChainService) peerHandler() {
 		outboundGroups:  make(map[string]int),
 	}
 
-	if !DisableDNSSeed {
+	// With a fixed set of peers there's no discovery, so nothing would
+	// use the seeded addresses. We skip the lookups too, as btcd does
+	// with --connect, so a connect-only node doesn't reveal itself to the
+	// DNS seeders or their resolvers.
+	if !DisableDNSSeed && !s.connectOnly {
 		// Add peers discovered through DNS to the address manager.
 		connmgr.SeedFromDNS(&s.chainParams, RequiredServices,
 			s.nameResolver, func(addrs []*wire.NetAddressV2) {
