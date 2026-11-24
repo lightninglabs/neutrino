@@ -229,22 +229,17 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// Check to see if the peer supports the latest protocol version and
 	// service bits required to service us. If not, then we'll disconnect
 	// so we can find compatible peers.
+	//
+	// Missing service bits are a property of this one endpoint, not
+	// misbehaviour, so we don't ban: a ban covers every port at the
+	// address, and would also cut off a compatible node next to this one
+	// (two bitcoinds on one host, say) for the whole ban duration.
+	// Recording the services in the address manager is enough to keep
+	// discovery from picking this peer again, as it only picks addresses
+	// that advertise the services we need.
 	peerServices := sp.Services()
-	if peerServices&wire.SFNodeWitness != wire.SFNodeWitness ||
-		peerServices&wire.SFNodeCF != wire.SFNodeCF {
-
-		peerAddr := sp.Addr()
-		err := sp.server.BanPeer(peerAddr, banman.NoCompactFilters)
-		if err != nil {
-			log.Errorf("Unable to ban peer %v: %v", peerAddr, err)
-		}
-
-		// Disconnect the peer even though BanPeer attempts to do so
-		// because it has yet to be added.
-		sp.Disconnect()
-
-		return nil
-	}
+	compatible := peerServices&wire.SFNodeWitness == wire.SFNodeWitness &&
+		peerServices&wire.SFNodeCF == wire.SFNodeCF
 
 	// Update the address manager with the advertised services for outbound
 	// connections in case they have changed. This is not done for inbound
@@ -254,6 +249,13 @@ func (sp *ServerPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	// connecting to discovered peers.
 	if !sp.Inbound() {
 		sp.server.addrManager.SetServices(sp.NA(), msg.Services)
+	}
+
+	if !compatible {
+		log.Debugf("Disconnecting peer %v, services %v lack "+
+			"witness or compact filter support", sp.Addr(),
+			peerServices)
+		sp.Disconnect()
 	}
 
 	return nil
