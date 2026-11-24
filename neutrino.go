@@ -1105,8 +1105,20 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			// peer.
 			var tcpAddr net.Addr
 			for {
+				// The lookup goes through the caller's resolver,
+				// which can be slow (Tor, say), and this
+				// goroutine is one Stop waits on.
 				var err error
-				tcpAddr, err = s.addrStringToNetAddr(addr)
+				tcpAddr, err = untilQuit(
+					s.quit, func() (net.Addr, error) {
+						return s.addrStringToNetAddr(
+							addr,
+						)
+					}, nil,
+				)
+				if errors.Is(err, ErrShuttingDown) {
+					return
+				}
 				if err != nil {
 					log.Warnf("unable to lookup IP for "+
 						"%v: %v", addr, err)
@@ -2062,35 +2074,52 @@ var _ net.Addr = (*onionAddr)(nil)
 func dialUntilQuit(dial func(net.Addr) (net.Conn, error),
 	quit <-chan struct{}) func(net.Addr) (net.Conn, error) {
 
-	type dialResult struct {
-		conn net.Conn
-		err  error
+	return func(addr net.Addr) (net.Conn, error) {
+		return untilQuit(
+			quit, func() (net.Conn, error) { return dial(addr) },
+			func(conn net.Conn) {
+				if conn != nil {
+					_ = conn.Close()
+				}
+			},
+		)
+	}
+}
+
+// untilQuit runs call and returns its result, or ErrShuttingDown as soon as
+// quit is closed if call is still running then. For calls that can't be
+// cancelled (a dial, a name lookup through a proxy) but run in goroutines
+// Stop waits on. call keeps running in the background until it returns, and
+// a result it produces after quit has closed is passed to discard, if set.
+func untilQuit[T any](quit <-chan struct{}, call func() (T, error),
+	discard func(T)) (T, error) {
+
+	type result struct {
+		val T
+		err error
 	}
 
-	return func(addr net.Addr) (net.Conn, error) {
-		// The channel is buffered so the dial goroutine can always
-		// deliver its result and exit, even if nobody is left to
-		// receive it.
-		resultChan := make(chan dialResult, 1)
-		go func() {
-			conn, err := dial(addr)
-			resultChan <- dialResult{conn: conn, err: err}
-		}()
-
+	// The channel is unbuffered, so once the caller has given up, the
+	// call's goroutine can't hand its result over and discards it.
+	resultChan := make(chan result)
+	go func() {
+		val, err := call()
 		select {
-		case res := <-resultChan:
-			return res.conn, res.err
-
+		case resultChan <- result{val: val, err: err}:
 		case <-quit:
-			go func() {
-				res := <-resultChan
-				if res.conn != nil {
-					_ = res.conn.Close()
-				}
-			}()
-
-			return nil, ErrShuttingDown
+			if err == nil && discard != nil {
+				discard(val)
+			}
 		}
+	}()
+
+	select {
+	case res := <-resultChan:
+		return res.val, res.err
+
+	case <-quit:
+		var zero T
+		return zero, ErrShuttingDown
 	}
 }
 
