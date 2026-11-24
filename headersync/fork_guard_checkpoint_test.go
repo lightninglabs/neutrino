@@ -384,7 +384,6 @@ func TestSerialForkGuardKeepsCheckpointAtTip(t *testing.T) {
 func requireDisconnected(t *testing.T, effects []DriverEffect) {
 	t.Helper()
 
-	require.Contains(
-		t, effects, DriverEffect(DisconnectTipPeer{PeerID: checkpointPeer}),
-	)
+	disconnect := DisconnectTipPeer{PeerID: checkpointPeer}
+	require.Contains(t, effects, DriverEffect(disconnect))
 }

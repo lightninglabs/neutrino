@@ -978,7 +978,10 @@ func (s *ChainService) sendTransaction(tx *wire.MsgTx, options ...QueryOption) e
 					if _, ok := outcomes[addr]; ok {
 						return
 					}
-					if !invListHas(response.InvList, txHash) {
+					found := invListHas(
+						response.InvList, txHash,
+					)
+					if !found {
 						return
 					}
 					outcomes[addr] = nil

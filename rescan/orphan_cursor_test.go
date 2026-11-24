@@ -1,7 +1,6 @@
 package rescan
 
 import (
-	"errors"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -248,7 +247,7 @@ func TestOrphanWithMissingParentEndsRescan(t *testing.T) {
 	_, err := next.ProcessEvent(t.Context(), ProcessNextBlockEvent{}, env)
 
 	var storeErr *HeaderStoreError
-	require.True(t, errors.As(err, &storeErr), "got %v", err)
+	require.ErrorAs(t, err, &storeErr)
 }
 
 // TestDeepReorgDisconnectsArriveAfterWait checks the order a deep reorg runs
@@ -272,7 +271,9 @@ func TestDeepReorgDisconnectsArriveAfterWait(t *testing.T) {
 	chain.mu.Unlock()
 
 	state := &StateSyncing{Cursor: Cursor{
-		CurStamp:  headerfs.BlockStamp{Hash: best.Hash, Height: best.Height},
+		CurStamp: headerfs.BlockStamp{
+			Hash: best.Hash, Height: best.Height,
+		},
 		CurHeader: cur,
 	}}
 	env := &Environment{Chain: chain}

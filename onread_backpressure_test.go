@@ -39,7 +39,7 @@ func TestOnReadBackpressure(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("flood still blocked after the subscription was cancelled")
+		t.Fatal("flood still blocked after the subscription ended")
 	}
 
 	sp.mtxSubscribers.RLock()

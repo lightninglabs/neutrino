@@ -119,7 +119,7 @@ func runScan(t *testing.T, cfg *UtxoScannerConfig, outpoint wire.OutPoint,
 	defer timer.Stop()
 
 	report, err := req.Result(cancel)
-	require.False(t, errors.Is(err, ErrGetUtxoCancelled),
+	require.NotErrorIs(t, err, ErrGetUtxoCancelled,
 		"the scanner never answered")
 
 	return report, err

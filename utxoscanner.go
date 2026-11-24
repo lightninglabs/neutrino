@@ -315,7 +315,9 @@ scanToEnd:
 		// then try and fetch them.
 		newReqs := s.dequeueAtHeight(height)
 
-		block, err := s.fetchActiveBlock(reporter, options, height, newReqs)
+		block, err := s.fetchActiveBlock(
+			reporter, options, height, newReqs,
+		)
 		if err != nil {
 			// The requests taken for this height aren't in the
 			// reporter yet, so FailRemaining wouldn't reach them.

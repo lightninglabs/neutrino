@@ -421,85 +421,84 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 		runSteps(t, newSyncerWithCheckpointAbove(), steps)
 	})
 
-	t.Run("same height tip replacement fetches again",
-		func(t *testing.T) {
-			t.Parallel()
+	t.Run("same height tip replacement fetches again", func(t *testing.T) {
+		t.Parallel()
 
-			// The tip sits exactly on an interval, so the lists
-			// cover it. A new pass at the same height but a
-			// different tip hash must not reuse lists fetched for
-			// the replaced block.
-			at := 2 * interval
-			lists := peerLists{
-				"a": {cp1, cp2},
-				"b": {cp1, cp2},
-			}
-			newTip := *hashOf(101)
-			steps := append(startedAtTip(at), []step{
-				{
-					name: "checkpoints fetched",
-					event: CheckpointsFetched{
-						ByPeer: lists,
+		// The tip sits exactly on an interval, so the lists
+		// cover it. A new pass at the same height but a
+		// different tip hash must not reuse lists fetched for
+		// the replaced block.
+		at := 2 * interval
+		lists := peerLists{
+			"a": {cp1, cp2},
+			"b": {cp1, cp2},
+		}
+		newTip := *hashOf(101)
+		steps := append(startedAtTip(at), []step{
+			{
+				name: "checkpoints fetched",
+				event: CheckpointsFetched{
+					ByPeer: lists,
+				},
+				effects: []Effect{ResolveConflict{
+					FilterType:  wire.GCSFilterRegular,
+					Checkpoints: lists,
+				}},
+				phase: PhaseResolvingConflict,
+			},
+			{
+				name: "agreement",
+				event: ConflictResolved{
+					Good: hashes{cp1, cp2},
+				},
+				effects: []Effect{FetchCheckpointed{
+					FilterType:  wire.GCSFilterRegular,
+					Checkpoints: hashes{cp1, cp2},
+				}},
+				phase: PhaseFetchingCheckpointed,
+			},
+			{
+				name:  "fetch failed",
+				event: CheckpointedFetched{Err: errTest},
+				effects: []Effect{
+					RetryAfter{testRetryDelay},
+				},
+				phase: PhaseRetrying,
+			},
+			{
+				name:    "retry waits for the headers",
+				event:   RetryElapsed{},
+				effects: []Effect{WaitForTips{WaitLagOrSynced}},
+				phase:   PhaseWaitingForHeaders,
+			},
+			{
+				name:    "lag reached",
+				event:   TipsChanged{},
+				effects: []Effect{ReadBlockTip{}},
+				phase:   PhaseReadingTip,
+			},
+			{
+				name: "replaced tip fetches again",
+				event: BlockTipRead{
+					Hash:   newTip,
+					Height: at,
+					Tips: chainstore.Tips{
+						BlockHeight: at,
 					},
-					effects: []Effect{ResolveConflict{
-						FilterType:  wire.GCSFilterRegular,
-						Checkpoints: lists,
-					}},
-					phase: PhaseResolvingConflict,
 				},
-				{
-					name: "agreement",
-					event: ConflictResolved{
-						Good: hashes{cp1, cp2},
+				effects: []Effect{
+					PollQuit{},
+					FetchCheckpoints{
+						FilterType: wire.
+							GCSFilterRegular,
+						StopHash: newTip,
 					},
-					effects: []Effect{FetchCheckpointed{
-						FilterType:  wire.GCSFilterRegular,
-						Checkpoints: hashes{cp1, cp2},
-					}},
-					phase: PhaseFetchingCheckpointed,
 				},
-				{
-					name:  "fetch failed",
-					event: CheckpointedFetched{Err: errTest},
-					effects: []Effect{
-						RetryAfter{testRetryDelay},
-					},
-					phase: PhaseRetrying,
-				},
-				{
-					name:    "retry waits for the headers",
-					event:   RetryElapsed{},
-					effects: []Effect{WaitForTips{WaitLagOrSynced}},
-					phase:   PhaseWaitingForHeaders,
-				},
-				{
-					name:    "lag reached",
-					event:   TipsChanged{},
-					effects: []Effect{ReadBlockTip{}},
-					phase:   PhaseReadingTip,
-				},
-				{
-					name: "replaced tip fetches again",
-					event: BlockTipRead{
-						Hash:   newTip,
-						Height: at,
-						Tips: chainstore.Tips{
-							BlockHeight: at,
-						},
-					},
-					effects: []Effect{
-						PollQuit{},
-						FetchCheckpoints{
-							FilterType: wire.
-								GCSFilterRegular,
-							StopHash: newTip,
-						},
-					},
-					phase: PhaseFetchingCheckpoints,
-				},
-			}...)
-			runSteps(t, newTestSyncer(), steps)
-		})
+				phase: PhaseFetchingCheckpoints,
+			},
+		}...)
+		runSteps(t, newTestSyncer(), steps)
+	})
 
 	t.Run("next pass reuses the checkpoints", func(t *testing.T) {
 		t.Parallel()

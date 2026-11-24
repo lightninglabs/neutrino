@@ -1110,9 +1110,9 @@ func NewChainService(cfg Config) (*ChainService, error) {
 			// peer.
 			var tcpAddr net.Addr
 			for {
-				// The lookup goes through the caller's resolver,
-				// which can be slow (Tor, say), and this
-				// goroutine is one Stop waits on.
+				// The lookup goes through the caller's
+				// resolver, which can be slow (Tor, say),
+				// and this goroutine is one Stop waits on.
 				var err error
 				tcpAddr, err = untilQuit(
 					s.quit, func() (net.Addr, error) {
