@@ -1,7 +1,6 @@
 package neutrino
 
 import (
-	"runtime"
 	"testing"
 	"time"
 
@@ -17,7 +16,6 @@ func TestOnReadBackpressure(t *testing.T) {
 	_, cancel := sp.SubscribeRecvMsg()
 
 	const flood = 1000
-	before := runtime.NumGoroutine()
 
 	done := make(chan struct{})
 	go func() {
@@ -27,15 +25,14 @@ func TestOnReadBackpressure(t *testing.T) {
 		}
 	}()
 
-	// The reader is held at the first message, so the flood can't finish
-	// and no goroutine per message piles up. The bound leaves room for
-	// stragglers from other tests while staying far below one per message.
+	// The reader is held at the first message, so the flood can't finish.
+	// Handing each message to its own goroutine would let it finish at
+	// once.
 	select {
 	case <-done:
 		t.Fatal("flood finished against a subscriber that never reads")
 	case <-time.After(100 * time.Millisecond):
 	}
-	require.Less(t, runtime.NumGoroutine(), before+flood/2)
 
 	// Cancelling the subscription lets the reads go on.
 	cancel()

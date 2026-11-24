@@ -21,10 +21,6 @@ func TestConnectOnlySkipsDNSSeeds(t *testing.T) {
 
 	params := chaincfg.TestNet3Params
 	require.NotEmpty(t, params.DNSSeeds)
-	seeds := make(map[string]bool)
-	for _, seed := range params.DNSSeeds {
-		seeds[seed.Host] = true
-	}
 
 	var (
 		mu      sync.Mutex
@@ -57,9 +53,12 @@ func TestConnectOnlySkipsDNSSeeds(t *testing.T) {
 	// issued its lookups.
 	time.Sleep(500 * time.Millisecond)
 
+	// The only lookup allowed is the configured peer's own address. Seeds
+	// that serve filters are looked up under a service-bit prefix, so
+	// matching against the seed list alone would miss them.
 	mu.Lock()
 	defer mu.Unlock()
 	for _, host := range lookups {
-		require.False(t, seeds[host], "looked up DNS seed %v", host)
+		require.Equal(t, "127.0.0.1", host, "looked up %v", host)
 	}
 }

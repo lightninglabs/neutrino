@@ -300,8 +300,11 @@ func TestSendTransactionOutcomeProperty(t *testing.T) {
 		}), 1, 5).Draw(rt, "peers")
 
 		scripts := make(map[string][]wire.Message)
+		requested := make(map[string]bool)
 		var requesters, invalid int
 		for i, b := range behaviors {
+			addr := string(rune('a'+i)) + ":8333"
+			requested[addr] = b != peerRejectsUnasked
 			var msgs []wire.Message
 			switch b {
 			case peerAccepts:
@@ -317,7 +320,7 @@ func TestSendTransactionOutcomeProperty(t *testing.T) {
 				msgs = []wire.Message{repeated, getData}
 				requesters++
 			}
-			scripts[string(rune('a'+i))+":8333"] = msgs
+			scripts[addr] = msgs
 		}
 
 		peers := newScriptedPeers(scripts)
@@ -351,9 +354,13 @@ func TestSendTransactionOutcomeProperty(t *testing.T) {
 			require.NoError(rt, err)
 		}
 
-		// Every peer gets the inv, and a requester gets one tx.
+		// Every peer gets the inv, and a requester gets the tx once.
 		for _, p := range peers {
-			require.LessOrEqual(rt, p.numQueued(), 2)
+			want := 1
+			if requested[p.Addr()] {
+				want = 2
+			}
+			require.Equal(rt, want, p.numQueued(), p.Addr())
 		}
 	})
 }
