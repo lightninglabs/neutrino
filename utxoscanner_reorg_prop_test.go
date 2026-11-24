@@ -144,24 +144,29 @@ func TestUtxoScannerReorgProperty(t *testing.T) {
 			return len(chain.blocks[*hash].Transactions) > 1, nil
 		}
 
-		report, err := runScan(t, cfg, outpoint, 1)
+		report, err := runScan(t, cfg, outpoint)
 		require.NoError(rt, err)
 
-		// The answer is for the chain as it ended up: the old branch
-		// if the reorg never landed, the new one if it did. The one
+		// The answer is for the chain the reorg left. The one
 		// exception is a spend in an old block the scanner processed
 		// before the reorg landed: it was answered then, and no
-		// scanner can take an answer back.
+		// scanner can take an answer back. The scan may not have
+		// reached the reorg yet when that answer arrives, so only an
+		// answer that came after it can show the reorg landed.
+		final := old
+		if old.spendAt == 0 || old.spendAt >= reorgAt {
+			chain.mu.Lock()
+			landed := chain.canonical[tip] != oldHashes[tip]
+			chain.mu.Unlock()
+			require.True(rt, landed, "answered before the reorg "+
+				"landed")
+
+			final = replacement
+		}
+
 		chain.mu.Lock()
-		landed := chain.canonical[tip] != oldHashes[tip]
 		birthHash := chain.canonical[1]
 		chain.mu.Unlock()
-		require.True(rt, landed, "the reorg never landed")
-
-		final := replacement
-		if old.spendAt != 0 && old.spendAt < reorgAt {
-			final = old
-		}
 
 		if !final.creates {
 			require.Nil(rt, report, "reported an output the "+
@@ -240,7 +245,7 @@ func TestUtxoScannerReorgBelowCursor(t *testing.T) {
 			return nil
 		}
 
-		report, err := runScan(t, chain.config(), outpoint, 1)
+		report, err := runScan(t, chain.config(), outpoint)
 		require.NoError(t, err)
 		require.NotNil(t, report)
 		require.NotNil(t, report.SpendingTx, "missed the spend in "+
@@ -274,7 +279,7 @@ func TestUtxoScannerReorgBelowCursor(t *testing.T) {
 			return nil
 		}
 
-		report, err := runScan(t, chain.config(), outpoint, 1)
+		report, err := runScan(t, chain.config(), outpoint)
 		require.NoError(t, err)
 		require.Nil(t, report, "reported an output the active chain "+
 			"doesn't create")
