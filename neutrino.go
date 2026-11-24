@@ -810,6 +810,10 @@ type ChainService struct { // nolint:maligned
 	nameResolver func(string) ([]net.IP, error)
 	dialer       func(net.Addr) (net.Conn, error)
 
+	// conns holds every connection we have dialed until it's closed, so
+	// that Stop can close those the connection manager drops.
+	conns connSet
+
 	// connectOnly is set when the service only connects to the peers in
 	// Config.ConnectPeers, with no address discovery.
 	connectOnly bool
@@ -1974,6 +1978,7 @@ func (s *ChainService) handlePeerConnected(state *peerState,
 // registered it, when ending it there has no effect, and the manager then
 // dials it and keeps retrying. The manager has registered a request by the
 // time it dials it, so we end a removed request here instead of dialing.
+// Every connection we dial is also tracked in s.conns, until it's closed.
 func (s *ChainService) dialPeer(
 	dial func(net.Addr) (net.Conn, error)) func(net.Addr) (net.Conn,
 	error) {
@@ -1981,7 +1986,7 @@ func (s *ChainService) dialPeer(
 	return func(addr net.Addr) (net.Conn, error) {
 		pr, ok := addr.(*permanentReq)
 		if !ok {
-			return dial(addr)
+			return s.conns.track(dial(addr))
 		}
 
 		if pr.removed.Load() {
@@ -1989,7 +1994,67 @@ func (s *ChainService) dialPeer(
 			return nil, errPeerRemoved
 		}
 
-		return dial(pr.Addr)
+		return s.conns.track(dial(pr.Addr))
+	}
+}
+
+// connSet holds open connections, so they can all be closed at once.
+type connSet struct {
+	mtx    sync.Mutex
+	conns  map[*setConn]struct{}
+	closed bool
+}
+
+// setConn is a connection in a connSet, which leaves the set when it's
+// closed.
+type setConn struct {
+	net.Conn
+	set *connSet
+}
+
+// Close closes the connection and takes it out of its set.
+func (c *setConn) Close() error {
+	c.set.mtx.Lock()
+	delete(c.set.conns, c)
+	c.set.mtx.Unlock()
+
+	return c.Conn.Close()
+}
+
+// track adds the result of a dial to the set. A connection made once the set
+// has been closed is closed right away.
+func (cs *connSet) track(conn net.Conn, err error) (net.Conn, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	if cs.closed {
+		_ = conn.Close()
+		return nil, ErrShuttingDown
+	}
+
+	if cs.conns == nil {
+		cs.conns = make(map[*setConn]struct{})
+	}
+	c := &setConn{Conn: conn, set: cs}
+	cs.conns[c] = struct{}{}
+
+	return c, nil
+}
+
+// closeAll closes every connection in the set, and any added later.
+func (cs *connSet) closeAll() {
+	cs.mtx.Lock()
+	cs.closed = true
+	conns := cs.conns
+	cs.conns = nil
+	cs.mtx.Unlock()
+
+	for c := range conns {
+		_ = c.Conn.Close()
 	}
 }
 
@@ -2144,6 +2209,11 @@ func (s *ChainService) Stop() error {
 	// Signal the remaining goroutines to quit.
 	close(s.quit)
 	s.wg.Wait()
+
+	// The connection manager drops a connection whose dial finished
+	// while it was stopping, without closing it, so we close any
+	// connection still open now that every peer is done.
+	s.conns.closeAll()
 
 	// Release the SQL backend connection if one was opened. This must
 	// happen after all background goroutines exit so no one is using
