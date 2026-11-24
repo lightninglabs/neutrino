@@ -160,8 +160,10 @@ func TestZeroedFilterTipCorruptParent(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, blockFile.Close())
 
+	// The block tip no longer links to the zeroed header below it, so the
+	// start up check refuses before the filter repair gets to it.
 	err = rollBackZeroedFilterTip(blocks, filters)
-	require.ErrorContains(t, err, "block header at height 1 is corrupt")
+	require.ErrorContains(t, err, "block header tip at height 2 is corrupt")
 
 	// The filter store is left untouched.
 	_, height, err := filters.ChainTip()

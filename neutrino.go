@@ -2154,9 +2154,15 @@ func rollBackZeroedFilterTip(blocks headerfs.BlockHeaderStore,
 		return err
 	}
 	if blockHeight > 0 {
-		blockHash := blockTip.BlockHash()
-		height, err := blocks.HeightFromHash(&blockHash)
-		if err != nil || height != blockHeight {
+		// The tip has to link to the header below it. A zeroed record
+		// never does, and checking the link rather than the index
+		// also catches one the legacy SQL import carried over, as the
+		// import keys each row by the hash of whatever bytes it read.
+		parent, err := blocks.FetchHeaderByHeight(blockHeight - 1)
+		if err != nil {
+			return err
+		}
+		if blockTip.PrevBlock != parent.BlockHash() {
 			return fmt.Errorf("block header tip at height %d is "+
 				"corrupt: %s", blockHeight, corruptStoreHint)
 		}
