@@ -8,6 +8,7 @@ package neutrino
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -811,9 +812,26 @@ func (c *cfHeaderSync) submitCFHeaders(
 	return &hash, reply.Filter.FilterHeight, nil
 }
 
-// resolveConflict finds the correct checkpoint information, rewinds the header
-// store if it's incorrect, and bans any peers giving us incorrect header
-// information.
+// errStoreDisagreesWithPeers is returned by resolveConflict when every peer
+// serves the same checkpoint, but the filter header store holds a different
+// header at its height.
+var errStoreDisagreesWithPeers = errors.New("filter header store " +
+	"disagrees with the checkpoint every peer serves")
+
+// resolveConflict finds the correct checkpoint information and bans any peers
+// giving us incorrect header information. It never changes the store.
+//
+// If the peers all agree on a checkpoint that the store disagrees with, no
+// peer is at fault and no header query can settle it, so it returns
+// errStoreDisagreesWithPeers, and the Syncer retries in case a later set of
+// peers sides with the store. We don't rewind the store to the peers'
+// checkpoints: a filter header only reaches the store once it matched the
+// checkpoints or every peer at the time agreed on it, so a store that every
+// peer now disagrees with was fed by earlier peers that lied, or a record was
+// damaged on disk. A rewind would disconnect and reconnect every block above
+// the checkpoint on the word of the current peers alone, which would let an
+// eclipse attacker rewrite filter headers we already verified. The error says
+// how to recover by hand instead.
 func (c *cfHeaderSync) resolveConflict(
 	checkpoints map[string][]*chainhash.Hash,
 	store headerfs.FilterHeaderStore, fType wire.FilterType) (
@@ -872,6 +890,10 @@ func (c *cfHeaderSync) resolveConflict(
 		"Detected mismatch at index=%v for checkpoints!!!",
 		heightDiff,
 	)
+
+	if err := storeMismatch(checkpoints, heightDiff, store); err != nil {
+		return nil, err
+	}
 
 	// Delete any responses that have fewer checkpoints than where we see a
 	// mismatch.
@@ -939,9 +961,53 @@ func (c *cfHeaderSync) resolveConflict(
 		}
 	}
 
+	// The peers left may now all agree, with each other but not with the
+	// store.
+	if err := storeMismatch(checkpoints, heightDiff, store); err != nil {
+		return nil, err
+	}
+
 	// Otherwise, return an error and allow the loop which calls this
 	// function to call it again with the new set of peers.
 	return nil, fmt.Errorf("got mismatched checkpoints")
+}
+
+// storeMismatch returns errStoreDisagreesWithPeers if every list that reaches
+// index idx holds the same checkpoint there. CheckCFCheckptSanity reports the
+// first index where the peers differ from each other or from the store, so
+// when they agree with each other at idx, it's the store that differs.
+func storeMismatch(checkpoints map[string][]*chainhash.Hash, idx int,
+	store headerfs.FilterHeaderStore) error {
+
+	var agreed *chainhash.Hash
+	for _, cps := range checkpoints {
+		if idx >= len(cps) {
+			continue
+		}
+		if agreed == nil {
+			agreed = cps[idx]
+			continue
+		}
+		if *agreed != *cps[idx] {
+			return nil
+		}
+	}
+	if agreed == nil {
+		return nil
+	}
+
+	height := uint32(idx+1) * wire.CFCheckptInterval
+	stored, err := store.FetchHeaderByHeight(height)
+	if err != nil {
+		return err
+	}
+
+	return fmt.Errorf("%w: the store holds %v at height %d, while %d "+
+		"peers serve %v. If this persists with other peers, the "+
+		"filter headers were written from peers that lied or were "+
+		"damaged on disk: remove the filter header store to sync it "+
+		"again", errStoreDisagreesWithPeers, stored, height,
+		len(checkpoints), agreed)
 }
 
 // resolveCFHeaderMismatches removes conflicting peers before advancing to the

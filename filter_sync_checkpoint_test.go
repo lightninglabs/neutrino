@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/filtersync"
+	"github.com/lightninglabs/neutrino/headerfs"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/stretchr/testify/require"
 )
@@ -106,4 +107,62 @@ func TestCheckpointedFetchRefusesReplacedTip(t *testing.T) {
 	_, height, err := cfStore.ChainTip()
 	require.NoError(t, err)
 	require.Zero(t, height)
+}
+
+// TestResolveConflictReportsStoreMismatch puts a wrong filter header in the
+// store at the first checkpoint height, while every peer serves the honest
+// checkpoints. No peer is at fault, so none may be banned or dropped, the
+// store must be left as it is, and the error must say that it's the store
+// the peers disagree with rather than a conflict among the peers.
+func TestResolveConflictReportsStoreMismatch(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, cfStore, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	genesisBlockHeader, _, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	headers, err := generateHeaders(
+		genesisBlockHeader, genesisFilterHeader, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, hdrStore.WriteHeaders(headers.blockHeaders[1:]...))
+
+	// The store holds the honest headers up to the first checkpoint, but
+	// a wrong one at the checkpoint itself.
+	bad := chainhash.Hash{0xba, 0xd}
+	cf := make([]headerfs.FilterHeader, wire.CFCheckptInterval)
+	copy(cf, headers.cfHeaders[1:wire.CFCheckptInterval+1])
+	cf[len(cf)-1].FilterHash = bad
+	require.NoError(t, cfStore.WriteHeaders(cf...))
+	require.NoError(t, bm.ResetHeaderState())
+
+	var acted []string
+	bm.cfg.BanPeer = func(addr string, _ banman.Reason) error {
+		acted = append(acted, "ban "+addr)
+		return nil
+	}
+	bm.cfg.DisconnectPeer = func(addr string) error {
+		acted = append(acted, "disconnect "+addr)
+		return nil
+	}
+	bm.cfg.Broadcaster = newScriptedBroadcaster(nil)
+
+	cps := headers.checkpoints
+	good, err := bm.cfSync.resolveConflict(
+		map[string][]*chainhash.Hash{
+			"10.0.0.1:8333": cps, "10.0.0.2:8333": cps,
+		}, cfStore, wire.GCSFilterRegular,
+	)
+	require.ErrorIs(t, err, errStoreDisagreesWithPeers)
+	require.ErrorContains(t, err, bad.String())
+	require.Empty(t, good)
+	require.Empty(t, acted)
+
+	tip, height, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(wire.CFCheckptInterval), height)
+	require.Equal(t, bad, *tip)
 }
