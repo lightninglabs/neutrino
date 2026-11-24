@@ -170,8 +170,11 @@ type ServerPeer struct {
 	// from the peer. This allows broadcast to multiple subscribers at
 	// once, allowing for multiple queries to be going to multiple peers at
 	// any one time. The mutex is for subscribe/unsubscribe functionality.
-	// The sends on these channels WILL NOT block; any messages the channel
-	// can't accept will be dropped silently.
+	// Each message is sent to every subscriber in turn from the peer's
+	// read loop, which blocks until the subscriber takes it, cancels, or
+	// the peer or the service goes away. A subscriber that falls behind
+	// therefore slows only this peer's reads, rather than leaving a
+	// goroutine and a message behind for every message the peer sends.
 	recvSubscribers map[msgSubscription]struct{}
 	mtxSubscribers  sync.RWMutex
 }
@@ -449,27 +452,26 @@ func (sp *ServerPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
 
-	// Send a message to each subscriber. Each message gets its own
-	// goroutine to prevent blocking on the mutex lock.
-	// TODO: Flood control.
+	// Send the message to each subscriber in turn, in the order the peer
+	// sent them. We copy the set first so the lock isn't held while we
+	// wait on a subscriber, and leave removing cancelled subscriptions to
+	// their cancel closure, which holds the write lock.
 	sp.mtxSubscribers.RLock()
-	defer sp.mtxSubscribers.RUnlock()
+	subscribers := make([]msgSubscription, 0, len(sp.recvSubscribers))
 	for subscription := range sp.recvSubscribers {
-		// Quickly determine if this subscription has been canceled, if
-		// so delete it.
-		select {
-		case <-subscription.quitChan:
-			delete(sp.recvSubscribers, subscription)
-			continue
-		default:
-		}
+		subscribers = append(subscribers, subscription)
+	}
+	sp.mtxSubscribers.RUnlock()
 
-		go func(subscription msgSubscription) {
-			select {
-			case <-subscription.quitChan:
-			case subscription.msgChan <- msg:
-			}
-		}(subscription)
+	for _, subscription := range subscribers {
+		select {
+		case subscription.msgChan <- msg:
+		case <-subscription.quitChan:
+		case <-sp.quit:
+			return
+		case <-sp.server.quit:
+			return
+		}
 	}
 }
 
@@ -483,8 +485,8 @@ var _ querysyncwm.Peer = (*ServerPeer)(nil)
 //
 // NOTE: Part of the querysyncwm.Peer interface.
 func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
-	// We won't have to buffer this channel, since we'll always send on it
-	// from a new goroutine.
+	// The channel is unbuffered: OnRead waits for the subscriber to take
+	// each message, which pushes back on the peer instead of queueing.
 	msgChan := make(chan wire.Message)
 	quitChan := make(chan struct{})
 
@@ -499,6 +501,10 @@ func (sp *ServerPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
 
 	return msgChan, func() {
 		close(quitChan)
+
+		sp.mtxSubscribers.Lock()
+		delete(sp.recvSubscribers, sub)
+		sp.mtxSubscribers.Unlock()
 	}
 }
 
