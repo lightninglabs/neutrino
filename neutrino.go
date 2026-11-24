@@ -2186,6 +2186,20 @@ func rollBackZeroedFilterHeaders(blocks headerfs.BlockHeaderStore,
 				"corrupt: %s", blockHeight, corruptStoreHint)
 		}
 
+		// A record torn after its prev hash still links, but its hash
+		// is one the flat file's index has never seen. The SQL store
+		// keys each row by the hash of its own bytes, so this always
+		// holds there. A torn tip the legacy import carried over is
+		// left to the header sync, which we expect to replace it as a
+		// one block reorg, since it has no more work than the real
+		// block and the real chain continues past it.
+		tipHash := blockTip.BlockHash()
+		height, err := blocks.HeightFromHash(&tipHash)
+		if err != nil || height != blockHeight {
+			return fmt.Errorf("block header tip at height %d is "+
+				"not in the index (%v): %s", blockHeight, err,
+				corruptStoreHint)
+		}
 	}
 
 	lowest, err := lowestZeroedFilterHeader(blocks, filters)
