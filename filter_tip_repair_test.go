@@ -285,7 +285,7 @@ func testZeroedFilterBelowTipRolledBack(t *testing.T, useSQL bool) {
 	tip, height, err := service.RegFilterHeaders.ChainTip()
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), height)
-	require.Equal(t, chainhash.Hash{1}, *tip)
+	require.Equal(t, chainhash.Hash{1, 1}, *tip)
 
 	// The block headers are left alone.
 	_, blockHeight, err := service.BlockHeaders.ChainTip()
@@ -335,7 +335,7 @@ func TestTornBlockTipRefusesToStart(t *testing.T) {
 }
 
 // writeRepairChain writes n blocks above genesis to fresh flat file stores in
-// dataDir, each with a nonzero filter header whose first byte is its height.
+// dataDir, each with a nonzero filter header that starts with its height.
 func writeRepairChain(t *testing.T, dataDir string, db walletdb.DB,
 	params *chaincfg.Params, n uint32) {
 
@@ -348,6 +348,12 @@ func writeRepairChain(t *testing.T, dataDir string, db walletdb.DB,
 	)
 	require.NoError(t, err)
 
+	// Each store write is fsynced, so the chain goes in one batch per
+	// store.
+	var (
+		blockBatch  []headerfs.BlockHeader
+		filterBatch []headerfs.FilterHeader
+	)
 	prev := params.GenesisBlock.Header
 	for height := uint32(1); height <= n; height++ {
 		header := wire.BlockHeader{
@@ -358,14 +364,16 @@ func writeRepairChain(t *testing.T, dataDir string, db walletdb.DB,
 			Bits:       prev.Bits,
 			Nonce:      height,
 		}
-		require.NoError(t, blocks.WriteHeaders(headerfs.BlockHeader{
+		blockBatch = append(blockBatch, headerfs.BlockHeader{
 			BlockHeader: &header, Height: height,
-		}))
-		require.NoError(t, filters.WriteHeaders(headerfs.FilterHeader{
+		})
+		filterBatch = append(filterBatch, headerfs.FilterHeader{
 			HeaderHash: header.BlockHash(),
-			FilterHash: chainhash.Hash{byte(height)},
+			FilterHash: chainhash.Hash{byte(height), 1},
 			Height:     height,
-		}))
+		})
 		prev = header
 	}
+	require.NoError(t, blocks.WriteHeaders(blockBatch...))
+	require.NoError(t, filters.WriteHeaders(filterBatch...))
 }

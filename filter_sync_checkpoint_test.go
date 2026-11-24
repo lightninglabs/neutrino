@@ -166,3 +166,85 @@ func TestResolveConflictReportsStoreMismatch(t *testing.T) {
 	require.Equal(t, uint32(wire.CFCheckptInterval), height)
 	require.Equal(t, bad, *tip)
 }
+
+// TestCheckpointedFetchReorgDuringQuery reorgs the block store below the
+// first checkpoint after the checkpointed fetch has checked its tip and sent
+// its queries. The peers answer for the chain the queries were built from,
+// which matches the checkpoints, so nobody may be banned, and the chain store
+// must refuse to write headers for blocks it no longer holds. This is the
+// window the tip check can't close, and it must fail safe.
+func TestCheckpointedFetchReorgDuringQuery(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, cfStore, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	genesisBlockHeader, _, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	headers, err := generateHeaders(
+		genesisBlockHeader, genesisFilterHeader, nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, hdrStore.WriteHeaders(headers.blockHeaders[1:]...))
+	require.NoError(t, bm.ResetHeaderState())
+
+	var (
+		mu     sync.Mutex
+		banned []string
+	)
+	bm.cfg.BanPeer = func(addr string, _ banman.Reason) error {
+		mu.Lock()
+		defer mu.Unlock()
+		banned = append(banned, addr)
+		return nil
+	}
+
+	const forkHeight = wire.CFCheckptInterval / 2
+	bm.cfg.QueryDispatcher.(*mockDispatcher).query = func(
+		requests []*querysyncwm.Request,
+		_ ...querysyncwm.QueryOption) chan error {
+
+		// The reorg lands once the queries are out. The fixture's
+		// headers don't link by hash, so we cut the block store back
+		// directly rather than through the chain store's rollback.
+		_, tip, err := hdrStore.ChainTip()
+		require.NoError(t, err)
+		_, err = hdrStore.RollbackBlockHeaders(tip - forkHeight)
+		require.NoError(t, err)
+
+		var msgs []wire.Message
+		for _, q := range requests {
+			msgs = append(msgs, q.Req)
+		}
+		responses, err := generateResponses(msgs, headers)
+		require.NoError(t, err)
+
+		errChan := make(chan error, 1)
+		go func() {
+			for i := range requests {
+				resp := *responses[i]
+				requests[i].HandleResp(msgs[i], &resp, "honest")
+			}
+			errChan <- nil
+		}()
+
+		return errChan
+	}
+
+	bm.wg.Add(1)
+	go bm.blockHandler()
+	t.Cleanup(func() { require.NoError(t, bm.Stop()) })
+
+	err = fetchCheckpointedAtTip(bm.cfSync, headers.checkpoints, cfStore)
+	require.Error(t, err)
+
+	mu.Lock()
+	require.Empty(t, banned)
+	mu.Unlock()
+
+	_, height, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	require.LessOrEqual(t, height, uint32(forkHeight))
+}
