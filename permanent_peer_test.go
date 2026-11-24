@@ -181,3 +181,66 @@ func TestRemovePermanentPeerDuringHandshake(t *testing.T) {
 	n.requireNoMoreDials(testPeerAddr)
 	require.Empty(t, s.Peers())
 }
+
+// TestConnectNodeMakesOneOffPeerPermanent checks that ConnectNode(addr, true)
+// for a connected one-off peer makes it permanent, keeping its connection,
+// rather than dialing the peer again and dropping the duplicate connection
+// over and over.
+func TestConnectNodeMakesOneOffPeerPermanent(t *testing.T) {
+	const addr = "127.0.0.2:18555"
+
+	n := newTestPeerNet(t)
+	n.setMode(addr, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode(addr, false))
+	sp := waitForPeer(t, s, addr)
+
+	require.NoError(t, s.ConnectNode(addr, true))
+	require.Error(t, s.ConnectNode(addr, true))
+	n.requireNoMoreDials(addr)
+	require.Equal(t, 1, n.dialCount(addr))
+	require.Same(t, sp, s.PeerByAddr(addr))
+
+	// Once its connection is lost, the peer is reconnected as a
+	// permanent one.
+	sp.Disconnect()
+	require.Eventually(t, func() bool {
+		next := s.PeerByAddr(addr)
+		return next != nil && next != sp
+	}, 10*time.Second, 5*time.Millisecond)
+	require.Equal(t, 2, n.dialCount(addr))
+
+	require.NoError(t, s.RemoveNodeByAddr(addr))
+	n.requireNoMoreDials(addr)
+	require.Empty(t, s.Peers())
+}
+
+// TestPermanentPeerTakesPlaceOfOneOffPeer checks that a permanent peer that
+// connects while we're at MaxPeers takes the place of a one-off peer, rather
+// than being refused and redialed over and over.
+func TestPermanentPeerTakesPlaceOfOneOffPeer(t *testing.T) {
+	const oneOff = "127.0.0.2:18555"
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 1
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	n.setMode(oneOff, dialServe)
+	s := newTestService(t, n)
+
+	// The permanent peer is unreachable until the one-off peer fills
+	// the only place.
+	require.NoError(t, s.ConnectNode(oneOff, false))
+	waitForPeer(t, s, oneOff)
+	n.setMode(testPeerAddr, dialServe)
+
+	waitForPeer(t, s, testPeerAddr)
+	n.requireNoMoreDials(testPeerAddr)
+	require.Nil(t, s.PeerByAddr(oneOff))
+	require.Len(t, s.Peers(), 1)
+
+	// There's no room for more permanent peers.
+	require.Error(t, s.ConnectNode(oneOff, true))
+}

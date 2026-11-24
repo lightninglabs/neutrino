@@ -1642,13 +1642,17 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// TODO: Check for max peers from a single IP.
 
-	// Limit max number of total peers.
-	if state.Count() >= MaxPeers {
+	// Limit max number of total peers. A permanent peer is one we were
+	// asked to keep, so it takes the place of a one-off peer instead:
+	// were it refused, its request would retry, and be refused again,
+	// for as long as we're full. There is a one-off peer to evict, since
+	// there are at most MaxPeers permanent peers, this one among them.
+	if state.Count() >= MaxPeers &&
+		(!sp.persistent || !evictOneOffPeer(state)) {
+
 		log.Infof("Max peers reached [%d] - disconnecting peer %s",
 			MaxPeers, sp)
 		sp.Disconnect()
-		// TODO: how to handle permanent peers here?
-		// they should be rescheduled.
 		return false
 	}
 
@@ -1762,9 +1766,39 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	}
 
 	s.connManager.Remove(sp.connReq.ID())
+
+	// A one-off peer made permanent while it was connected hands its
+	// address over to its permanent request now. No permanent request
+	// for the address can have started while the one-off peer held it,
+	// since one-off connections to a permanent peer are refused.
+	if pr, ok := state.permanent[key]; ok {
+		go s.connManager.Connect(pr.req)
+		return
+	}
+
 	if state.Count() < MaxPeers {
 		go s.connManager.NewConnReq()
 	}
+}
+
+// evictOneOffPeer disconnects a one-off outbound peer to make room for a
+// permanent one. It returns false if there's none to evict.
+func evictOneOffPeer(state *peerState) bool {
+	for _, sp := range state.outboundPeers {
+		// A one-off peer that has been made permanent is kept.
+		if _, ok := state.permanent[sp.key()]; ok {
+			continue
+		}
+
+		log.Infof("Disconnecting peer %s to make room for a "+
+			"permanent peer", sp)
+		dropPeer(state, sp)
+		sp.Disconnect()
+
+		return true
+	}
+
+	return false
 }
 
 // dropPeer takes the peer out of the added peers if it's among them, that is,

@@ -218,29 +218,46 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 func (s *ChainService) handleConnectNode(state *peerState,
 	msg connectNodeMsg) error {
 
-	// Limit max number of total peers.
-	if state.Count() >= MaxPeers {
-		return errors.New("max peers reached")
-	}
-
 	key := keyOf(msg.addr)
 	if _, ok := state.permanent[key]; ok {
 		return errors.New("peer exists as a permanent peer")
 	}
 
 	if !msg.permanent {
+		// Limit max number of total peers.
+		if state.Count() >= MaxPeers {
+			return errors.New("max peers reached")
+		}
 		if _, ok := state.peers[key]; ok {
 			return errors.New("peer already connected")
 		}
 
-		// TODO: if too many, nuke a non-perm peer.
 		go s.connManager.Connect(&connmgr.ConnReq{Addr: msg.addr})
 
 		return nil
 	}
 
+	// Permanent peers are limited by their own number, since one that
+	// connects while we're full takes the place of a one-off peer. See
+	// handleAddPeerMsg.
+	if len(state.permanent) >= MaxPeers {
+		return errors.New("max peers reached")
+	}
+
 	pr := newPermanentReq(msg.addr)
 	state.permanent[key] = pr
+
+	// If we have a one-off peer at the address, it becomes our permanent
+	// peer there: its request starts once the current connection ends,
+	// in handleDonePeerMsg. A connection made before then would be
+	// refused as a second peer at the address, and a permanent request
+	// would retry it, and have it refused, for as long as the one-off
+	// peer stays.
+	if _, ok := state.peers[key]; ok {
+		log.Infof("Peer %v is now a permanent peer", msg.addr)
+		return nil
+	}
+
 	go s.connManager.Connect(pr.req)
 
 	return nil
@@ -443,7 +460,9 @@ func (s *ChainService) removeNode(msg removeNodeMsg) error {
 
 // ConnectNode adds `addr' as a new outbound peer. If permanent is true then the
 // peer will be persistent and reconnect if the connection is lost.
-// It is an error to call this with an already existing peer.
+// It is an error to call this with an already existing peer, except that a
+// one-off peer can be made permanent: it keeps its current connection, and
+// is reconnected like any permanent peer once that connection is lost.
 func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 	netAddr, err := s.addrStringToNetAddr(addr)
 	if err != nil {
