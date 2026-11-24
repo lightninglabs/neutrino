@@ -8,6 +8,7 @@ package neutrino
 
 import (
 	"errors"
+	"net"
 	"time"
 
 	"github.com/btcsuite/btcd/addrmgr"
@@ -51,14 +52,23 @@ type disconnectNodeMsg struct {
 }
 
 type connectNodeMsg struct {
-	addr      string
+	addr      net.Addr
 	permanent bool
 	reply     chan error
 }
 
+// removeNodeMsg removes a permanent peer, given by its key or, if cmp is
+// set, by the peer cmp matches.
 type removeNodeMsg struct {
+	key   peerKey
 	cmp   func(*ServerPeer) bool
 	reply chan error
+}
+
+// peerConnectedMsg hands a new outbound connection to the peer handler.
+type peerConnectedMsg struct {
+	req  *connmgr.ConnReq
+	conn net.Conn
 }
 
 type forAllPeersMsg struct {
@@ -130,55 +140,27 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		})
 
 	case connectNodeMsg:
-		// TODO: duplicate oneshots?
-		// Limit max number of total peers.
-		if state.Count() >= MaxPeers {
-			msg.reply <- errors.New("max peers reached")
-			return
-		}
-		for _, peer := range state.persistentPeers {
-			if peer.Addr() == msg.addr {
-				if msg.permanent {
-					msg.reply <- errors.New("peer already connected")
-				} else {
-					msg.reply <- errors.New("peer exists as a permanent peer")
-				}
-				return
-			}
-		}
-
-		netAddr, err := s.addrStringToNetAddr(msg.addr)
-		if err != nil {
-			msg.reply <- err
-			return
-		}
-
-		// TODO: if too many, nuke a non-perm peer.
-		go s.connManager.Connect(&connmgr.ConnReq{
-			Addr:      netAddr,
-			Permanent: msg.permanent,
-		})
-		msg.reply <- nil
+		msg.reply <- s.handleConnectNode(state, msg)
 
 	case removeNodeMsg:
-		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *ServerPeer) {
-			// Keep group counts ok since we remove from
-			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-
-			// End the connection request too. It's permanent,
-			// so a disconnect alone would just have the
-			// connection manager dial the peer again.
-			if sp.connReq != nil {
-				s.connManager.Remove(sp.connReq.ID())
+		key := msg.key
+		if msg.cmp != nil {
+			for k, sp := range state.peers {
+				if msg.cmp(sp) {
+					key = k
+					break
+				}
 			}
-		})
+		}
 
-		if found {
+		if s.removePermanentPeer(state, key) {
 			msg.reply <- nil
 		} else {
 			msg.reply <- errors.New("peer not found")
 		}
+
+	case peerConnectedMsg:
+		s.handlePeerConnected(state, msg.req, msg.conn)
 
 	case getOutboundGroup:
 		count, ok := state.outboundGroups[msg.key]
@@ -228,6 +210,71 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
 	}
+}
+
+// handleConnectNode starts a connection to a resolved address. A permanent
+// one is recorded in the state, which keeps one permanent request per
+// address. It is invoked from the peerHandler goroutine.
+func (s *ChainService) handleConnectNode(state *peerState,
+	msg connectNodeMsg) error {
+
+	// Limit max number of total peers.
+	if state.Count() >= MaxPeers {
+		return errors.New("max peers reached")
+	}
+
+	key := keyOf(msg.addr)
+	if _, ok := state.permanent[key]; ok {
+		return errors.New("peer exists as a permanent peer")
+	}
+
+	if !msg.permanent {
+		if _, ok := state.peers[key]; ok {
+			return errors.New("peer already connected")
+		}
+
+		// TODO: if too many, nuke a non-perm peer.
+		go s.connManager.Connect(&connmgr.ConnReq{Addr: msg.addr})
+
+		return nil
+	}
+
+	pr := newPermanentReq(msg.addr)
+	state.permanent[key] = pr
+	go s.connManager.Connect(pr.req)
+
+	return nil
+}
+
+// removePermanentPeer removes the permanent peer with the given key, ending
+// its request and disconnecting it, wherever it is in its life: connected, in
+// its handshake, dialing or waiting to retry. It returns false if there is no
+// permanent peer with the key. It is invoked from the peerHandler goroutine.
+func (s *ChainService) removePermanentPeer(state *peerState,
+	key peerKey) bool {
+
+	pr, ok := state.permanent[key]
+	if !ok {
+		return false
+	}
+	delete(state.permanent, key)
+
+	// The flag is set before we read the request's ID, so a request the
+	// connection manager hasn't given an ID yet sees the flag when it's
+	// dialed, and is ended then.
+	pr.removed.Store(true)
+	if id := pr.req.ID(); id != 0 {
+		s.connManager.Remove(id)
+	}
+
+	// The peer stays in state.peers until it's done, so no other peer
+	// can take its address while it shuts down.
+	if sp, ok := state.peers[key]; ok {
+		dropPeer(state, sp)
+		sp.Disconnect()
+	}
+
+	return true
 }
 
 // ConnectedCount returns the number of currently connected peers.
@@ -355,32 +402,40 @@ func (s *ChainService) DisconnectNodeByID(id int32) error {
 }
 
 // RemoveNodeByAddr removes a peer from the list of persistent peers if
-// present. An error will be returned if the peer was not found.
+// present, whether it's connected or not, and disconnects it. The address is
+// resolved the way ConnectNode resolves it, so a peer can be removed by the
+// same string it was added with. An error will be returned if the peer was
+// not found.
 func (s *ChainService) RemoveNodeByAddr(addr string) error {
-	replyChan := make(chan error)
-
-	select {
-	case s.query <- removeNodeMsg{
-		cmp:   func(sp *ServerPeer) bool { return sp.Addr() == addr },
-		reply: replyChan,
-	}:
-		return <-replyChan
-	case <-s.quit:
-		return nil
+	netAddr, err := s.addrStringToNetAddr(addr)
+	if err != nil {
+		return err
 	}
+
+	return s.removeNode(removeNodeMsg{key: keyOf(netAddr)})
 }
 
 // RemoveNodeByID removes a peer by node ID from the list of persistent peers
 // if present. An error will be returned if the peer was not found.
 func (s *ChainService) RemoveNodeByID(id int32) error {
-	replyChan := make(chan error)
+	return s.removeNode(removeNodeMsg{
+		cmp: func(sp *ServerPeer) bool { return sp.ID() == id },
+	})
+}
+
+// removeNode hands a removal to the peer handler and returns its reply.
+func (s *ChainService) removeNode(msg removeNodeMsg) error {
+	msg.reply = make(chan error, 1)
 
 	select {
-	case s.query <- removeNodeMsg{
-		cmp:   func(sp *ServerPeer) bool { return sp.ID() == id },
-		reply: replyChan,
-	}:
-		return <-replyChan
+	case s.query <- msg:
+	case <-s.quit:
+		return nil
+	}
+
+	select {
+	case err := <-msg.reply:
+		return err
 	case <-s.quit:
 		return nil
 	}
@@ -390,15 +445,32 @@ func (s *ChainService) RemoveNodeByID(id int32) error {
 // peer will be persistent and reconnect if the connection is lost.
 // It is an error to call this with an already existing peer.
 func (s *ChainService) ConnectNode(addr string, permanent bool) error {
-	replyChan := make(chan error)
+	netAddr, err := s.addrStringToNetAddr(addr)
+	if err != nil {
+		return err
+	}
+
+	return s.connectNode(netAddr, permanent)
+}
+
+// connectNode hands a connection to a resolved address to the peer handler
+// and returns its reply.
+func (s *ChainService) connectNode(addr net.Addr, permanent bool) error {
+	reply := make(chan error, 1)
 
 	select {
 	case s.query <- connectNodeMsg{
 		addr:      addr,
 		permanent: permanent,
-		reply:     replyChan,
+		reply:     reply,
 	}:
-		return <-replyChan
+	case <-s.quit:
+		return nil
+	}
+
+	select {
+	case err := <-reply:
+		return err
 	case <-s.quit:
 		return nil
 	}
