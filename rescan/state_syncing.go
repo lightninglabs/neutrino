@@ -30,13 +30,20 @@ type StateSyncing struct {
 	// when Current falls back to Syncing, and clear after a rewind.
 	finished bool
 
-	// parentMissing records that the last step found the cursor
+	// parentWaits counts the steps in a row that found the cursor
 	// orphaned with its parent already gone from the store. That is the
 	// normal state for a moment during a deep reorg: the rollback removes
 	// the headers before it queues their disconnects. Any disconnect
-	// builds a fresh state without it.
-	parentMissing bool
+	// builds a fresh state with it reset.
+	parentWaits int
 }
+
+// maxParentWaits is how many steps in a row Syncing waits for the
+// disconnects of a deep reorg before it ends the rescan. It is more than one
+// because retry timers aren't deduplicated: a timer armed for an earlier
+// cursor of the same reorg can fire on the current one early, well before a
+// full retry interval has passed for it.
+const maxParentWaits = 3
 
 // ProcessEvent handles events in the Syncing state. On ProcessNextBlockEvent,
 // it scans the next block and emits a ContinueOutbox to continue.
@@ -179,8 +186,8 @@ func (s *StateSyncing) String() string { return "Syncing" }
 // A rollback removes the orphaned headers from the store before it queues
 // their disconnects, so during a reorg more than one block deep the parent
 // can be gone while the disconnects that will move the cursor are still on
-// their way. We wait one retry interval for them. If the parent is still gone
-// after that, the disconnects aren't coming (the reorg landed before the
+// their way. We wait a few retry intervals for them. If the parent is still
+// gone after that, the disconnects aren't coming (the reorg landed before the
 // actor subscribed), and we end the rescan with an error rather than guess
 // which blocks to report as disconnected.
 func (s *StateSyncing) stepOffOrphan(env *Environment) (*StateTransition,
@@ -194,11 +201,13 @@ func (s *StateSyncing) stepOffOrphan(env *Environment) (*StateTransition,
 	}
 	if err != nil {
 		var storeErr *HeaderStoreError
-		if !s.parentMissing && !errors.As(err, &storeErr) {
+		if s.parentWaits < maxParentWaits &&
+			!errors.As(err, &storeErr) {
+
 			return transition(&StateSyncing{
-				Cursor:        cur,
-				finished:      s.finished,
-				parentMissing: true,
+				Cursor:      cur,
+				finished:    s.finished,
+				parentWaits: s.parentWaits + 1,
 			}, WaitOutbox{}), nil
 		}
 

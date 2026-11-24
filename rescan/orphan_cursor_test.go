@@ -87,70 +87,69 @@ func TestRescanStepsOffOrphanedStartBlock(t *testing.T) {
 	// block orphaned before the subscription can only be stepped off when
 	// its parent is still active, a reorg one block deep. Deeper ones end
 	// the rescan, see TestOrphanWithMissingParentEndsRescan.
-	for _, depth := range []int32{1} {
-		synctest.Test(t, func(t *testing.T) {
-			chain := &dstChain{
-				mockChainWithTxs: newMockChainWithTxs(4),
-			}
-			best, err := chain.BestBlock()
-			require.NoError(t, err)
+	const depth = int32(1)
+	synctest.Test(t, func(t *testing.T) {
+		chain := &dstChain{
+			mockChainWithTxs: newMockChainWithTxs(4),
+		}
+		best, err := chain.BestBlock()
+		require.NoError(t, err)
 
-			chain.mu.Lock()
-			startHeader := *chain.blockHeaders[best.Hash]
-			newTip := reorgAbove(
-				t, chain.mockChainWithTxs, best.Height-depth,
-				best.Height,
-			)
-			chain.mu.Unlock()
+		chain.mu.Lock()
+		startHeader := *chain.blockHeaders[best.Hash]
+		newTip := reorgAbove(
+			t, chain.mockChainWithTxs, best.Height-depth,
+			best.Height,
+		)
+		chain.mu.Unlock()
 
-			addr, err := address.NewAddressPubKeyHash(
-				make([]byte, 20), &chaincfg.MainNetParams,
-			)
-			require.NoError(t, err)
+		addr, err := address.NewAddressPubKeyHash(
+			make([]byte, 20), &chaincfg.MainNetParams,
+		)
+		require.NoError(t, err)
 
-			var connects, disconnects atomic.Int32
-			actor := mustNewRescanActor(t, ActorConfig{
-				Chain:         chain,
-				StartStamp:    *best,
-				StartHeader:   startHeader,
-				WatchAddrs:    []address.Address{addr},
-				RetryInterval: 100 * time.Millisecond,
-				Callbacks: Callbacks{
-					OnBlockConnected: func(*chainhash.Hash,
-						int32, time.Time) {
+		var connects, disconnects atomic.Int32
+		actor := mustNewRescanActor(t, ActorConfig{
+			Chain:         chain,
+			StartStamp:    *best,
+			StartHeader:   startHeader,
+			WatchAddrs:    []address.Address{addr},
+			RetryInterval: 100 * time.Millisecond,
+			Callbacks: Callbacks{
+				OnBlockConnected: func(*chainhash.Hash,
+					int32, time.Time) {
 
-						connects.Add(1)
-					},
-					OnBlockDisconnected: func(
-						*chainhash.Hash, int32,
-						time.Time) {
-
-						disconnects.Add(1)
-					},
+					connects.Add(1)
 				},
-			})
-			actor.Start()
-			t.Cleanup(func() {
-				actor.Stop()
-				actor.WaitForShutdown()
-			})
+				OnBlockDisconnected: func(
+					*chainhash.Hash, int32,
+					time.Time) {
 
-			// A handful of retry intervals is more than enough
-			// for a rescan that notices the orphan.
-			for i := 0; i < 5; i++ {
-				time.Sleep(100 * time.Millisecond)
-				synctest.Wait()
-			}
-
-			state, err := actor.CurrentState(t.Context())
-			require.NoError(t, err)
-			current, ok := state.(*StateCurrent)
-			require.True(t, ok, "rescan is %v, not Current", state)
-			require.Equal(t, newTip, current.CurStamp.Hash)
-			require.Equal(t, depth, disconnects.Load())
-			require.Equal(t, depth, connects.Load())
+					disconnects.Add(1)
+				},
+			},
 		})
-	}
+		actor.Start()
+		t.Cleanup(func() {
+			actor.Stop()
+			actor.WaitForShutdown()
+		})
+
+		// A handful of retry intervals is more than enough
+		// for a rescan that notices the orphan.
+		for i := 0; i < 5; i++ {
+			time.Sleep(100 * time.Millisecond)
+			synctest.Wait()
+		}
+
+		state, err := actor.CurrentState(t.Context())
+		require.NoError(t, err)
+		current, ok := state.(*StateCurrent)
+		require.True(t, ok, "rescan is %v, not Current", state)
+		require.Equal(t, newTip, current.CurStamp.Hash)
+		require.Equal(t, depth, disconnects.Load())
+		require.Equal(t, depth, connects.Load())
+	})
 }
 
 // TestInitializingFollowsStartBlockDisconnect checks that a disconnect of the
@@ -228,20 +227,25 @@ func TestOrphanWithMissingParentEndsRescan(t *testing.T) {
 	}}
 	env := &Environment{Chain: chain}
 
-	// The first step waits, as the disconnects of a deep reorg can still
-	// be on their way.
-	tr, err := state.ProcessEvent(t.Context(), ProcessNextBlockEvent{}, env)
-	require.NoError(t, err)
-	require.Equal(t, []OutboxEvent{WaitOutbox{}}, outboxOf(tr))
-	waiting, ok := tr.NextState.(*StateSyncing)
-	require.True(t, ok)
-	require.Equal(t, state.Cursor, waiting.Cursor)
+	// The first steps wait, as the disconnects of a deep reorg can still
+	// be on their way, and a retry armed for an earlier cursor can fire
+	// early.
+	var next RescanState = state
+	for i := 0; i < maxParentWaits; i++ {
+		tr, err := next.ProcessEvent(
+			t.Context(), ProcessNextBlockEvent{}, env,
+		)
+		require.NoError(t, err)
+		require.Equal(t, []OutboxEvent{WaitOutbox{}}, outboxOf(tr))
+		waiting, ok := tr.NextState.(*StateSyncing)
+		require.True(t, ok)
+		require.Equal(t, state.Cursor, waiting.Cursor)
+		next = waiting
+	}
 
 	// A disconnect in the meantime would have moved the cursor. With none,
-	// the second step ends the rescan.
-	_, err = waiting.ProcessEvent(
-		t.Context(), ProcessNextBlockEvent{}, env,
-	)
+	// the next step ends the rescan.
+	_, err := next.ProcessEvent(t.Context(), ProcessNextBlockEvent{}, env)
 
 	var storeErr *HeaderStoreError
 	require.True(t, errors.As(err, &storeErr), "got %v", err)
