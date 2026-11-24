@@ -165,6 +165,13 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			// Keep group counts ok since we remove from
 			// the list now.
 			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+
+			// End the connection request too. It's permanent,
+			// so a disconnect alone would just have the
+			// connection manager dial the peer again.
+			if sp.connReq != nil {
+				s.connManager.Remove(sp.connReq.ID())
+			}
 		})
 
 		if found {
