@@ -238,7 +238,7 @@ func TestCheckpointedFetchReorgDuringQuery(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, bm.Stop()) })
 
 	err = fetchCheckpointedAtTip(bm.cfSync, headers.checkpoints, cfStore)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "couldn't write cfheaders")
 
 	mu.Lock()
 	require.Empty(t, banned)
@@ -247,4 +247,57 @@ func TestCheckpointedFetchReorgDuringQuery(t *testing.T) {
 	_, height, err := cfStore.ChainTip()
 	require.NoError(t, err)
 	require.LessOrEqual(t, height, uint32(forkHeight))
+}
+
+// TestResolveConflictBelowBlockTip has two peers disagree at a checkpoint
+// above the block header tip, as after a reorg that shortened the chain. The
+// follow-up cfheaders query can't be planned then, and that local failure
+// must come back as an error, not as peers that didn't answer: dropping them
+// would disconnect every peer that served checkpoints.
+func TestResolveConflictBelowBlockTip(t *testing.T) {
+	t.Parallel()
+
+	bm, hdrStore, cfStore, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	genesisBlockHeader, _, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	headers, err := generateHeaders(
+		genesisBlockHeader, genesisFilterHeader, nil,
+	)
+	require.NoError(t, err)
+
+	// The block tip sits between the second and third checkpoints.
+	tip := 2*wire.CFCheckptInterval + wire.CFCheckptInterval/2
+	require.NoError(t, hdrStore.WriteHeaders(
+		headers.blockHeaders[1:tip+1]...,
+	))
+	require.NoError(t, bm.ResetHeaderState())
+
+	var acted []string
+	bm.cfg.BanPeer = func(addr string, _ banman.Reason) error {
+		acted = append(acted, "ban "+addr)
+		return nil
+	}
+	bm.cfg.DisconnectPeer = func(addr string) error {
+		acted = append(acted, "disconnect "+addr)
+		return nil
+	}
+	bm.cfg.Broadcaster = newScriptedBroadcaster(nil)
+
+	// The lists agree on the first three checkpoints and differ at the
+	// fourth, so the follow-up query starts above the block tip.
+	cps := headers.checkpoints
+	other := chainhash.Hash{0x0f}
+	good, err := bm.cfSync.resolveConflict(
+		map[string][]*chainhash.Hash{
+			"10.0.0.1:8333": cps[:4],
+			"10.0.0.2:8333": {cps[0], cps[1], cps[2], &other},
+		}, cfStore, wire.GCSFilterRegular,
+	)
+	require.ErrorContains(t, err, "below the cfheaders query")
+	require.Empty(t, good)
+	require.Empty(t, acted)
 }

@@ -432,7 +432,10 @@ func TestCFHeadersCollectsHonestConflict(t *testing.T) {
 		BlockHeaders: store,
 		Broadcaster:  newScriptedBroadcaster(scripts),
 	}}
-	headers, count := cf.getCFHeadersForAllPeers(1, wire.GCSFilterRegular)
+	headers, count, err := cf.getCFHeadersForAllPeers(
+		1, wire.GCSFilterRegular,
+	)
+	require.NoError(t, err)
 	require.Equal(t, 1, count)
 	require.Len(t, headers, 4)
 	require.NotEqual(t,

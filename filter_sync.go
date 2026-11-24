@@ -912,7 +912,12 @@ func (c *cfHeaderSync) resolveConflict(
 	// TODO(halseth): check if peer serves headers that matches its
 	// checkpoints
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
-	headers, numHeaders := c.getCFHeadersForAllPeers(startHeight, fType)
+	headers, numHeaders, err := c.getCFHeadersForAllPeers(
+		startHeight, fType,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Make sure we're working off the same baseline. Otherwise, we want to
 	// go back and get checkpoints again.
@@ -1202,23 +1207,33 @@ func (c *cfHeaderSync) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
 // returns a map of responses from all peers. The second return value is the
-// number for cfheaders in each response.
+// number for cfheaders in each response. A local failure to plan the query
+// is returned as an error, so the caller can't take it for peers that didn't
+// answer.
 func (c *cfHeaderSync) getCFHeadersForAllPeers(height uint32,
-	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int) {
+	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int, error) {
 
 	// Get the header we expect at either the tip of the block header store
 	// or at the end of the maximum-size response message, whichever is
 	// larger.
 	stopHeader, stopHeight, err := c.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		return nil, 0
+		return nil, 0, err
+	}
+
+	// A reorg can take the block tip below the height the checkpoints
+	// disagree at, and there's nothing to query until we catch up again.
+	if stopHeight < height {
+		return nil, 0, fmt.Errorf("block header tip at height %d is "+
+			"below the cfheaders query at height %d", stopHeight,
+			height)
 	}
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
 		stopHeader, err = c.cfg.BlockHeaders.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
 		)
 		if err != nil {
-			return nil, 0
+			return nil, 0, err
 		}
 
 		// We'll make sure we also update our stopHeight so we know how
@@ -1226,9 +1241,11 @@ func (c *cfHeaderSync) getCFHeadersForAllPeers(height uint32,
 		stopHeight = height + wire.MaxCFHeadersPerMsg - 1
 	}
 
-	return c.getCFHeadersForAllPeersAt(
+	headers, numHeaders := c.getCFHeadersForAllPeersAt(
 		height, fType, stopHeader.BlockHash(), stopHeight,
 	)
+
+	return headers, numHeaders, nil
 }
 
 // getCFHeadersForAllPeersAt queries an already selected stop block.
