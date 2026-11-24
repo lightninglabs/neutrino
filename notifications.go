@@ -247,14 +247,18 @@ func (s *ChainService) handleConnectNode(state *peerState,
 	pr := newPermanentReq(msg.addr)
 	state.permanent[key] = pr
 
-	// If we have a one-off peer at the address, it becomes our permanent
-	// peer there: its request starts once the current connection ends,
-	// in handleDonePeerMsg. A connection made before then would be
-	// refused as a second peer at the address, and a permanent request
-	// would retry it, and have it refused, for as long as the one-off
-	// peer stays.
-	if _, ok := state.peers[key]; ok {
-		log.Infof("Peer %v is now a permanent peer", msg.addr)
+	// If we still have a peer at the address, a one-off peer or a
+	// removed permanent one that's shutting down, the request starts
+	// once that peer's connection ends, in handleDonePeerMsg. A one-off
+	// peer thereby becomes our permanent peer in place. A connection
+	// made before then would be refused as a second peer at the
+	// address, and a permanent request would retry it, and have it
+	// refused, for as long as the other peer stays.
+	if sp, ok := state.peers[key]; ok {
+		if !sp.persistent {
+			log.Infof("Peer %v is now a permanent peer", sp)
+		}
+
 		return nil
 	}
 

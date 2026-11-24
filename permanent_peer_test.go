@@ -244,3 +244,23 @@ func TestPermanentPeerTakesPlaceOfOneOffPeer(t *testing.T) {
 	// There's no room for more permanent peers.
 	require.Error(t, s.ConnectNode(oneOff, true))
 }
+
+// TestReAddPermanentPeerWhileItShutsDown checks that a permanent peer added
+// again right after its removal, while its old connection may still be
+// shutting down, connects once the old peer is gone.
+func TestReAddPermanentPeerWhileItShutsDown(t *testing.T) {
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := newTestService(t, n)
+
+	for range 5 {
+		sp := waitForPeer(t, s, testPeerAddr)
+		require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+		require.NoError(t, s.ConnectNode(testPeerAddr, true))
+
+		require.Eventually(t, func() bool {
+			next := s.PeerByAddr(testPeerAddr)
+			return next != nil && next != sp
+		}, 10*time.Second, 5*time.Millisecond)
+	}
+}

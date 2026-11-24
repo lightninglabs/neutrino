@@ -1753,32 +1753,32 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 	delete(state.peers, key)
 	dropPeer(state, sp)
 
-	// Only request a new connection if the peer being disconnected is not
-	// persistent and we still need more peer connections. There's no need
-	// to do so if the peer is persistent since the connection manager will
-	// attempt to reconnect. A permanent peer that has been removed had its
-	// request ended then, so there's nothing left to do for it.
-	if sp.persistent {
-		pr, ok := state.permanent[key]
-		if ok && pr.req == sp.connReq {
-			s.connManager.Disconnect(sp.connReq.ID())
-		}
-
+	// The connection manager reconnects a permanent peer on its own.
+	pr, permanent := state.permanent[key]
+	if permanent && pr.req == sp.connReq {
+		s.connManager.Disconnect(sp.connReq.ID())
 		return
 	}
 
-	s.connManager.Remove(sp.connReq.ID())
+	// A one-off peer's request ends with it. A removed permanent peer
+	// had its request ended on removal.
+	if !sp.persistent {
+		s.connManager.Remove(sp.connReq.ID())
+	}
 
-	// A one-off peer made permanent while it was connected hands its
-	// address over to its permanent request now. No permanent request
-	// for the address can have started while the one-off peer held it,
-	// since one-off connections to a permanent peer are refused.
-	if pr, ok := state.permanent[key]; ok {
+	// A permanent request held back while this peer had its address,
+	// because this was a one-off peer made permanent or a removed
+	// permanent peer added again, starts now. Its request can't have
+	// started before, since we admit one peer per address, and refuse
+	// one-off connections to a permanent peer's address.
+	if permanent {
 		go s.connManager.Connect(pr.req)
 		return
 	}
 
-	if state.Count() < MaxPeers {
+	// Only request a new connection if the peer being disconnected is not
+	// persistent and we still need more peer connections.
+	if !sp.persistent && state.Count() < MaxPeers {
 		go s.connManager.NewConnReq()
 	}
 }
