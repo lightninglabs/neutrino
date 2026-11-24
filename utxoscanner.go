@@ -284,7 +284,18 @@ func (s *UtxoScanner) scanFromHeight(initHeight uint32) error {
 	// scan.
 	bestStamp, err := s.cfg.BestSnapshot()
 	if err != nil {
+		s.pause()
 		return err
+	}
+
+	// Nothing can be scanned for a request that starts above the tip
+	// until the tip reaches it, which happens while the filter headers
+	// catch up, and after a reorg sends a batch back to a birth height
+	// above the fork. The request stays queued, so without a pause the
+	// batch manager would come straight back here.
+	if initHeight > uint32(bestStamp.Height) {
+		s.pause()
+		return nil
 	}
 
 	var (
@@ -298,6 +309,11 @@ func (s *UtxoScanner) scanFromHeight(initHeight uint32) error {
 
 	reporter := newBatchSpendReporter()
 	options := defaultRescanOptions()
+
+	// prev is the block the scan settled on at the height below the one
+	// being scanned. It's unset until the first height of the batch is
+	// done.
+	var prev *chainhash.Hash
 
 scanToEnd:
 	// Scan forward through the blockchain and look for any transactions that
@@ -315,7 +331,7 @@ scanToEnd:
 		// then try and fetch them.
 		newReqs := s.dequeueAtHeight(height)
 
-		block, err := s.fetchActiveBlock(
+		hash, block, err := s.fetchActiveBlock(
 			reporter, options, height, newReqs,
 		)
 		if err != nil {
@@ -327,6 +343,35 @@ scanToEnd:
 
 			return reporter.FailRemaining(err)
 		}
+
+		// fetchActiveBlock only checks this height. A reorg more
+		// than one block deep can also have replaced blocks we
+		// already scanned or skipped, whose replacements could
+		// spend, or not create, what we watch. Every reorg that
+		// reaches below this height replaces the block right below
+		// it, so we check that one is still the block we settled on
+		// there. This checks each block is still active, not that
+		// it links to the next: a sequence of reorgs that swaps
+		// back and forth between two branches within one height
+		// could pass, which we don't guard against.
+		if prev != nil {
+			replaced, err := s.replaced(height-1, prev)
+			if err != nil {
+				for _, req := range newReqs {
+					req.deliver(nil, err)
+				}
+
+				return reporter.FailRemaining(err)
+			}
+			if replaced {
+				s.requeue(append(reporter.takeRemaining(),
+					newReqs...))
+
+				return nil
+			}
+		}
+		prev = hash
+
 		if block == nil {
 			reporter.NotifyProgress(height)
 			continue
@@ -404,9 +449,9 @@ func (pq *GetUtxoRequestPQ) IsEmpty() bool {
 	return pq.Len() == 0
 }
 
-// fetchActiveBlock returns the block at height that the scan must process,
-// or nil if the block can be skipped: no request starts in it and its filter
-// matches nothing we watch.
+// fetchActiveBlock returns the hash of the active block at height, together
+// with the block if the scan must process it, or a nil block if it can be
+// skipped: no request starts in it and its filter matches nothing we watch.
 //
 // The block is fetched, or its filter matched, by the hash the height
 // resolved to beforehand, so a reorg in between can leave us looking at a
@@ -417,12 +462,12 @@ func (pq *GetUtxoRequestPQ) IsEmpty() bool {
 // height with the new one.
 func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 	options *rescanOptions, height uint32,
-	newReqs []*GetUtxoRequest) (*btcutil.Block, error) {
+	newReqs []*GetUtxoRequest) (*chainhash.Hash, *btcutil.Block, error) {
 
 	for {
 		hash, err := s.cfg.GetBlockHash(int64(height))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		// If an outpoint is created in this block, then fetch it
@@ -436,7 +481,7 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 			}
 			match, err := s.cfg.BlockFilterMatches(options, hash)
 			if err != nil {
-				return nil, s.quitOr(err)
+				return nil, nil, s.quitOr(err)
 			}
 
 			// If still no match is found, we have no reason to
@@ -448,10 +493,10 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 					int64(height),
 				)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if *active == *hash {
-					return nil, nil
+					return hash, nil, nil
 				}
 
 				continue
@@ -463,7 +508,7 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 		// before performing an expensive operation.
 		select {
 		case <-s.quit:
-			return nil, ErrShuttingDown
+			return nil, nil, ErrShuttingDown
 		default:
 		}
 
@@ -473,32 +518,75 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 		// wait for a query that can take until its timeout.
 		block, err := s.cfg.GetBlock(*hash, CancelQuery(s.quit))
 		if err != nil {
-			return nil, s.quitOr(err)
+			return nil, nil, s.quitOr(err)
 		}
 
 		// Check again to see if the utxoscanner has been signaled to
 		// exit.
 		select {
 		case <-s.quit:
-			return nil, ErrShuttingDown
+			return nil, nil, ErrShuttingDown
 		default:
 		}
 
 		active, err := s.cfg.GetBlockHash(int64(height))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if *active == *hash {
 			log.Debugf("Processing block height=%d hash=%s",
 				height, hash)
 
-			return block, nil
+			return hash, block, nil
 		}
 
 		log.Infof("Block %s at height %d was replaced by %s while "+
 			"it was fetched, scanning the new one", hash, height,
 			active)
 	}
+}
+
+// tipPollInterval is how long the scanner waits before it looks at the tip
+// again, when the lowest queued request starts above it or the tip can't be
+// read.
+const tipPollInterval = time.Second
+
+// pause waits tipPollInterval, or until the scanner is stopped.
+func (s *UtxoScanner) pause() {
+	select {
+	case <-time.After(tipPollInterval):
+	case <-s.quit:
+	}
+}
+
+// replaced reports whether the active block at height is no longer the one
+// the scan settled on there.
+func (s *UtxoScanner) replaced(height uint32,
+	scanned *chainhash.Hash) (bool, error) {
+
+	active, err := s.cfg.GetBlockHash(int64(height))
+	if err != nil {
+		return false, err
+	}
+	if *active == *scanned {
+		return false, nil
+	}
+
+	log.Infof("Block %s at height %d was replaced by %s during a utxo "+
+		"scan, scanning again from the lowest birth height", scanned,
+		height, active)
+
+	return true, nil
+}
+
+// requeue puts requests that haven't been answered back in the queue, so the
+// next batch scans them again from their birth heights.
+func (s *UtxoScanner) requeue(reqs []*GetUtxoRequest) {
+	s.cv.L.Lock()
+	for _, req := range reqs {
+		heap.Push(&s.pq, req)
+	}
+	s.cv.L.Unlock()
 }
 
 // quitOr returns ErrShuttingDown if the scanner is stopping, since a fetch
