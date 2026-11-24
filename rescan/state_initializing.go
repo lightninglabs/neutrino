@@ -18,6 +18,9 @@ import (
 // no error, so filter fetches are batched against a settled header chain and
 // the scan does not report finished at a tip that is still moving.
 //
+// A disconnect of the start block moves the start back to its parent. It is
+// reported when the first scan starts, as nothing is reported before then.
+//
 // It leaves on ProcessNextBlockEvent once the chain is ready, to Syncing, or
 // to Rewinding when a buffered update asked to rewind, and on StopEvent to
 // Terminal.
@@ -28,6 +31,11 @@ type StateInitializing struct {
 	// rewinds records the rewinds below the start that updates asked
 	// for before scanning began.
 	rewinds rewindPlan
+
+	// undone holds the disconnects of start blocks that a reorg undid
+	// before scanning began. Nothing is reported before the chain is
+	// ready, so they're reported when the first scan starts.
+	undone []OutboxEvent
 }
 
 // ProcessEvent handles events in the Initializing state.
@@ -58,7 +66,12 @@ func (s *StateInitializing) ProcessEvent(
 		if len(s.rewinds) > 0 {
 			next = newRewinding(s.Cursor, s.rewinds)
 		}
-		return transition(next, ContinueOutbox{}), nil
+		outbox := append(
+			append([]OutboxEvent(nil), s.undone...),
+			ContinueOutbox{},
+		)
+
+		return transition(next, outbox...), nil
 
 	case AddWatchAddrsEvent:
 		// Buffer addresses into the watch state.
@@ -75,6 +88,26 @@ func (s *StateInitializing) ProcessEvent(
 		return transition(&StateInitializing{
 			Cursor:  cursor,
 			rewinds: rewinds,
+			undone:  s.undone,
+		}), nil
+
+	case BlockDisconnectedEvent:
+		// The start block counts as scanned, so a disconnect of it
+		// moves the start back, and is reported once the first scan
+		// starts. Dropping it would leave that scan to start from an
+		// orphan.
+		cursor, undone, ok := s.disconnect(&e)
+		if !ok {
+			return transition(s), nil
+		}
+
+		return transition(&StateInitializing{
+			Cursor:  cursor,
+			rewinds: s.rewinds,
+			undone: append(
+				append([]OutboxEvent(nil), s.undone...),
+				undone,
+			),
 		}), nil
 
 	case StopEvent:
