@@ -1200,8 +1200,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					return
 				}
 				if err != nil {
-					log.Warnf("unable to lookup IP for "+
-						"%v: %v", addr, err)
+					log.Warnf("Unable to look up "+
+						"configured peer %v, "+
+						"retrying in %v: %v", addr,
+						ConnectionRetryInterval, err)
 
 					select {
 					// Try again in 5 seconds.
@@ -1215,10 +1217,12 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				break
 			}
 
+			// The only error is a peer given twice, which is
+			// already being connected to.
 			err := s.connectNode(tcpAddr, true)
 			if err != nil {
-				log.Warnf("Unable to add permanent peer %v: %v",
-					addr, err)
+				log.Warnf("Configured peer %v (%v) not added "+
+					"again: %v", addr, tcpAddr, err)
 			}
 		}()
 	}
@@ -1534,12 +1538,7 @@ cleanup:
 		case <-s.newPeers:
 		case <-s.donePeers:
 		case <-s.peerHeightsUpdate:
-		case msg := <-s.query:
-			// A connection handed to us now has no peer to own
-			// it, so we close it here.
-			if msg, ok := msg.(peerConnectedMsg); ok {
-				_ = msg.conn.Close()
-			}
+		case <-s.query:
 		default:
 			break cleanup
 		}
@@ -1649,17 +1648,26 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 	// TODO: Check for max peers from a single IP.
 
 	// Limit max number of total peers. A permanent peer is one we were
-	// asked to keep, so it takes the place of a one-off peer instead:
-	// were it refused, its request would retry, and be refused again,
-	// for as long as we're full. There is a one-off peer to evict, since
-	// there are at most MaxPeers permanent peers, this one among them.
-	if state.Count() >= MaxPeers &&
-		(!sp.persistent || !evictOneOffPeer(state)) {
+	// asked to keep, so it's never refused: were it refused, its request
+	// would retry, and be refused again, for as long as we're full.
+	// Instead it takes the place of a one-off peer, or, with only
+	// permanent peers left, goes above MaxPeers, the way Bitcoin Core
+	// keeps separate slots for the nodes it's told to add. Neither can
+	// loop: an evicted one-off peer isn't replaced while we're full, and
+	// a permanent peer evicts no other permanent peer.
+	if state.Count() >= MaxPeers {
+		if !sp.persistent {
+			log.Infof("Max peers reached [%d] - disconnecting "+
+				"peer %s", MaxPeers, sp)
+			sp.Disconnect()
+			return false
+		}
 
-		log.Infof("Max peers reached [%d] - disconnecting peer %s",
-			MaxPeers, sp)
-		sp.Disconnect()
-		return false
+		if !evictOneOffPeer(state) {
+			log.Infof("Max peers reached [%d] - keeping "+
+				"permanent peer %s above the limit",
+				MaxPeers, sp)
+		}
 	}
 
 	// Add the new peer and start it.

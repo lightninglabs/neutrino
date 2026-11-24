@@ -237,13 +237,9 @@ func (s *ChainService) handleConnectNode(state *peerState,
 		return nil
 	}
 
-	// Permanent peers are limited by their own number, since one that
-	// connects while we're full takes the place of a one-off peer. See
-	// handleAddPeerMsg.
-	if len(state.permanent) >= MaxPeers {
-		return errors.New("max peers reached")
-	}
-
+	// Permanent peers aren't limited by MaxPeers: one that connects
+	// while we're full takes the place of a one-off peer, or goes above
+	// MaxPeers if there's none. See handleAddPeerMsg.
 	pr := newPermanentReq(msg.addr)
 	state.permanent[key] = pr
 

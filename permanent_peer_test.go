@@ -241,8 +241,38 @@ func TestPermanentPeerTakesPlaceOfOneOffPeer(t *testing.T) {
 	require.Nil(t, s.PeerByAddr(oneOff))
 	require.Len(t, s.Peers(), 1)
 
-	// There's no room for more permanent peers.
-	require.Error(t, s.ConnectNode(oneOff, true))
+	// With no one-off peer left, another permanent peer goes above
+	// MaxPeers.
+	require.NoError(t, s.ConnectNode(oneOff, true))
+	waitForPeer(t, s, oneOff)
+	n.requireNoMoreDials(oneOff)
+	require.Len(t, s.Peers(), 2)
+}
+
+// TestPermanentPeersAboveMaxPeers checks that every configured peer is
+// connected to and kept, even when there are more of them than MaxPeers.
+func TestPermanentPeersAboveMaxPeers(t *testing.T) {
+	others := []string{"127.0.0.2:18555", "127.0.0.3:18555"}
+	all := append([]string{testPeerAddr}, others...)
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 1
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	for _, addr := range all {
+		n.setMode(addr, dialServe)
+	}
+	s := newTestService(t, n, others...)
+
+	for _, addr := range all {
+		waitForPeer(t, s, addr)
+	}
+	for _, addr := range all {
+		n.requireNoMoreDials(addr)
+		require.Equal(t, 1, n.dialCount(addr), addr)
+	}
+	require.Len(t, s.Peers(), len(all))
 }
 
 // TestReAddPermanentPeerWhileItShutsDown checks that a permanent peer added

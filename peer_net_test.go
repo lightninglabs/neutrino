@@ -318,17 +318,23 @@ func useTestRetryInterval(t *testing.T) {
 	t.Cleanup(func() { ConnectionRetryInterval = oldRetry })
 }
 
-// newTestService starts a service on the test network, with testPeerAddr as
-// its permanent peer, and stops it when the test is over.
-func newTestService(t *testing.T, n *testPeerNet) *ChainService {
+// newTestService starts a service on the test network, with testPeerAddr and
+// any others given as its configured peers, and stops it when the test is
+// over.
+func newTestService(t *testing.T, n *testPeerNet,
+	others ...string) *ChainService {
+
 	useTestRetryInterval(t)
 
-	return startTestService(t, t.TempDir(), n)
+	return startTestService(t, t.TempDir(), n, others...)
 }
 
 // startTestService starts a service in dir on the test network, with
-// testPeerAddr as its permanent peer, and stops it when the test is over.
-func startTestService(t testEnv, dir string, n *testPeerNet) *ChainService {
+// testPeerAddr and any others given as its configured peers, and stops it
+// when the test is over.
+func startTestService(t testEnv, dir string, n *testPeerNet,
+	others ...string) *ChainService {
+
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(dir, "neutrino.db"), true,
 		10*time.Second, false,
@@ -340,7 +346,7 @@ func startTestService(t testEnv, dir string, n *testPeerNet) *ChainService {
 		DataDir:      dir,
 		Database:     db,
 		ChainParams:  chaincfg.SimNetParams,
-		ConnectPeers: []string{testPeerAddr},
+		ConnectPeers: append([]string{testPeerAddr}, others...),
 		Dialer:       n.dial,
 		NameResolver: testResolver,
 	})
