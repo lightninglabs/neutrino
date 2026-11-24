@@ -142,11 +142,12 @@ func ProgressHandler(
 }
 
 // StartBlock specifies the start block. The hash is checked first; if there's
-// no such hash (zero hash avoids lookup), the height is checked next. If the
-// height is 0 or the start block isn't specified, starts from the genesis
-// block. This block is assumed to already be known, and no notifications will
-// be sent for this block. The rescan uses the latter of StartBlock and
-// StartTime.
+// no such hash (zero hash avoids lookup), the height is checked next, and if
+// the height is 0 or isn't known either, the rescan starts from the genesis
+// block. If StartBlock isn't given at all, the rescan starts from the current
+// best block, so it only reports blocks connected from then on. This block is
+// assumed to already be known, and no notifications will be sent for this
+// block. The rescan uses the latter of StartBlock and StartTime.
 func StartBlock(startBlock *headerfs.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.startBlock = startBlock
