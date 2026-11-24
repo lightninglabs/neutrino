@@ -407,10 +407,11 @@ func (d *Driver) locateFork(event TipHeaders, blockHeader *wire.BlockHeader,
 	}
 
 	// We've found a branch we weren't aware of. If the
-	// branch is earlier than the latest synchronized
+	// branch forks below the latest synchronized
 	// checkpoint, it's invalid and we need to disconnect
-	// the reporting peer.
-	prevCheckpoint := d.tip.FindPreviousCheckpoint(prevNode.Height)
+	// the reporting peer. That includes a checkpoint the
+	// tip sits on exactly: the branch would replace it.
+	prevCheckpoint := d.tip.CheckpointAtOrBelow(prevNode.Height)
 	if backHeight < uint32(prevCheckpoint.Height) {
 		log.Errorf("Attempt at a reorg earlier than "+
 			"a "+

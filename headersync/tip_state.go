@@ -195,6 +195,15 @@ func (t *TipState) FindPreviousCheckpoint(height int32) *chaincfg.Checkpoint {
 	return prevCheckpoint
 }
 
+// CheckpointAtOrBelow returns the last checkpoint at or below the passed
+// height, or a checkpoint matching the genesis block when there is none. A
+// header at a checkpoint height is fixed once the chain has reached it, so a
+// fork guard must count the checkpoint the tip sits on, which
+// FindPreviousCheckpoint, being strictly below, leaves out.
+func (t *TipState) CheckpointAtOrBelow(height int32) *chaincfg.Checkpoint {
+	return t.FindPreviousCheckpoint(height + 1)
+}
+
 // CheckHeader validates a header against the validation cache. Its parent is
 // prevHeader at prevHeight.
 func (t *TipState) CheckHeader(header *wire.BlockHeader, prevHeight int32,
