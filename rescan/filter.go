@@ -201,6 +201,14 @@ func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 			"peer: %v", curStamp.Height, curStamp.Hash, err)
 	}
 
+	txs, matches, ws := extractBlockMatches(block, ws)
+	return txs, matches, ws, nil
+}
+
+// extractBlockMatches applies an already checked block to the watch state.
+func extractBlockMatches(block *btcutil.Block, ws WatchState) (
+	[]*btcutil.Tx, []TxMatch, WatchState) {
+
 	// The per-transaction callbacks get the same block details the
 	// legacy rescan built, including the height the block was fetched
 	// with.
@@ -240,5 +248,5 @@ func ExtractBlockMatches(ctx context.Context, chain ChainSource,
 		})
 	}
 
-	return relevantTxs, matches, ws, nil
+	return relevantTxs, matches, ws
 }

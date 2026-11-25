@@ -30,6 +30,7 @@ import (
 	"github.com/lightninglabs/neutrino/chainsync"
 	"github.com/lightninglabs/neutrino/chanutils"
 	"github.com/lightninglabs/neutrino/filterdb"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/lightninglabs/neutrino/pushtx"
 	"github.com/lightninglabs/neutrino/querysync"
@@ -667,6 +668,10 @@ type Config struct {
 	// instead.
 	NameResolver func(host string) ([]net.IP, error)
 
+	// BlockMatcher selects candidate blocks for rescans and GetUtxo.
+	// A nil matcher uses BIP158 basic filters.
+	BlockMatcher filtermatch.BlockMatcher
+
 	// FilterCacheSize indicates the size (in bytes) of filters the cache will
 	// hold in memory at most.
 	FilterCacheSize uint64
@@ -775,6 +780,7 @@ type ChainService struct { // nolint:maligned
 	BlockHeaders     headerfs.BlockHeaderStore
 	RegFilterHeaders headerfs.FilterHeaderStore
 	persistToDisk    bool
+	blockMatcher     filtermatch.BlockMatcher
 
 	headersImport *HeadersImportConfig
 
@@ -1156,19 +1162,15 @@ func NewChainService(cfg Config) (*ChainService, error) {
 	}
 	s.connManager = cmgr
 
+	s.blockMatcher = cfg.BlockMatcher
+	if s.blockMatcher == nil {
+		s.blockMatcher = basicMatcher(s.GetCFilter)
+	}
 	s.utxoScanner = NewUtxoScanner(&UtxoScannerConfig{
 		BestSnapshot: s.BestBlock,
 		GetBlockHash: s.GetBlockHash,
 		GetBlock:     s.GetBlock,
-		BlockFilterMatches: func(ro *rescanOptions,
-			blockHash *chainhash.Hash) (bool, error) {
-
-			matches, _, err := blockFilterMatches(
-				&RescanChainSource{&s}, ro, blockHash,
-			)
-
-			return matches, err
-		},
+		BlockMatcher: s.blockMatcher,
 	})
 
 	s.broadcaster = pushtx.NewBroadcaster(&pushtx.Config{
@@ -2398,6 +2400,11 @@ type RescanChainSource struct {
 // A compile-time check to ensure that RescanChainSource implements the
 // rescan.ChainSource interface.
 var _ ChainSource = (*RescanChainSource)(nil)
+
+// BlockMatcher returns the service's matcher for wallet rescans.
+func (s *RescanChainSource) BlockMatcher() filtermatch.BlockMatcher {
+	return s.blockMatcher
+}
 
 // GetBlockHeaderByHeight returns the header of the block with the given height.
 func (s *RescanChainSource) GetBlockHeaderByHeight(

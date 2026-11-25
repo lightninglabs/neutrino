@@ -2,12 +2,15 @@ package neutrino
 
 import (
 	"container/heap"
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -43,7 +46,7 @@ type GetUtxoRequest struct {
 	// what gets cached in result.
 	mu sync.Mutex
 
-	quit chan struct{}
+	quit <-chan struct{}
 }
 
 // deliver tries to deliver the report or error to any subscribers. If
@@ -89,8 +92,12 @@ type UtxoScannerConfig struct {
 	// GetBlockHash returns the block hash at given height in main chain.
 	GetBlockHash func(height int64) (*chainhash.Hash, error)
 
+	// BlockMatcher selects and verifies blocks searched for spends.
+	BlockMatcher filtermatch.BlockMatcher
+
 	// BlockFilterMatches checks the cfilter for the block hash for matches
-	// against the rescan options.
+	// against the rescan options. Deprecated: use BlockMatcher.
+	// Used only when BlockMatcher is nil.
 	BlockFilterMatches func(ro *rescanOptions, blockHash *chainhash.Hash) (bool, error)
 
 	// GetBlock fetches a block from the p2p network.
@@ -114,16 +121,19 @@ type UtxoScanner struct {
 	cv *sync.Cond
 
 	wg       sync.WaitGroup
-	quit     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	shutdown chan struct{}
 }
 
 // NewUtxoScanner creates a new instance of UtxoScanner using the given chain
 // interface.
 func NewUtxoScanner(cfg *UtxoScannerConfig) *UtxoScanner {
+	ctx, cancel := context.WithCancel(context.Background())
 	scanner := &UtxoScanner{
 		cfg:      cfg,
-		quit:     make(chan struct{}),
+		ctx:      ctx,
+		cancel:   cancel,
 		shutdown: make(chan struct{}),
 	}
 	scanner.cv = sync.NewCond(&scanner.mu)
@@ -149,7 +159,7 @@ func (s *UtxoScanner) Stop() error {
 		return nil
 	}
 
-	close(s.quit)
+	s.cancel()
 
 batchShutdown:
 	for {
@@ -184,12 +194,12 @@ func (s *UtxoScanner) Enqueue(input *InputWithScript,
 		BirthHeight: birthHeight,
 		resultChan:  make(chan *getUtxoResult, 1),
 		onProgress:  progressHandler,
-		quit:        s.quit,
+		quit:        s.ctx.Done(),
 	}
 
 	s.cv.L.Lock()
 	select {
-	case <-s.quit:
+	case <-s.ctx.Done():
 		s.cv.L.Unlock()
 		return nil, ErrShuttingDown
 	default:
@@ -226,7 +236,7 @@ func (s *UtxoScanner) batchManager() {
 			s.cv.Wait()
 
 			select {
-			case <-s.quit:
+			case <-s.ctx.Done():
 				s.cv.L.Unlock()
 				return
 			default:
@@ -239,7 +249,7 @@ func (s *UtxoScanner) batchManager() {
 		// Break out now before starting a scan if a shutdown was
 		// requested.
 		select {
-		case <-s.quit:
+		case <-s.ctx.Done():
 			return
 		default:
 		}
@@ -308,7 +318,6 @@ func (s *UtxoScanner) scanFromHeight(initHeight uint32) error {
 	)
 
 	reporter := newBatchSpendReporter()
-	options := defaultRescanOptions()
 
 	// prev is the block the scan settled on at the height below the one
 	// being scanned. It's unset until the first height of the batch is
@@ -322,7 +331,7 @@ scanToEnd:
 		// Before beginning to scan this height, check to see if the
 		// utxoscanner has been signaled to exit.
 		select {
-		case <-s.quit:
+		case <-s.ctx.Done():
 			return reporter.FailRemaining(ErrShuttingDown)
 		default:
 		}
@@ -332,7 +341,7 @@ scanToEnd:
 		newReqs := s.dequeueAtHeight(height)
 
 		hash, block, err := s.fetchActiveBlock(
-			reporter, options, height, newReqs,
+			reporter, height, newReqs,
 		)
 		if err != nil {
 			// The requests taken for this height aren't in the
@@ -461,7 +470,7 @@ func (pq *GetUtxoRequestPQ) IsEmpty() bool {
 // have decided, and if the active block changed, start over at the same
 // height with the new one.
 func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
-	options *rescanOptions, height uint32,
+	height uint32,
 	newReqs []*GetUtxoRequest) (*chainhash.Hash, *btcutil.Block, error) {
 
 	for {
@@ -470,61 +479,32 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 			return nil, nil, err
 		}
 
-		// If an outpoint is created in this block, then fetch it
-		// regardless. Otherwise check to see if the filter matches
-		// any of our watched outpoints.
-		if len(newReqs) == 0 {
-			options.watchList = reporter.filterEntries
-
-			options.queryOptions = []QueryOption{
-				CancelQuery(s.quit),
-			}
-			match, err := s.cfg.BlockFilterMatches(options, hash)
-			if err != nil {
-				return nil, nil, s.quitOr(err)
-			}
-
-			// If still no match is found, we have no reason to
-			// fetch this block, as long as it is still the active
-			// one: a block that replaced it may spend what we
-			// watch.
-			if !match {
-				active, err := s.cfg.GetBlockHash(
-					int64(height),
-				)
-				if err != nil {
-					return nil, nil, err
-				}
-				if *active == *hash {
-					return hash, nil, nil
-				}
-
-				continue
-			}
+		var block *btcutil.Block
+		if len(newReqs) > 0 {
+			// A birth block is required even for an empty watch list.
+			block, err = s.getBlock(s.ctx, *hash)
+		} else {
+			block, err = s.matchBlock(*hash, reporter.filterEntries)
 		}
-
-		// Before fetching the block, check to see if the utxoscanner
-		// has been signaled to exit so that we can exit the rescan
-		// before performing an expensive operation.
-		select {
-		case <-s.quit:
-			return nil, nil, ErrShuttingDown
-		default:
-		}
-
-		log.Debugf("Fetching block height=%d hash=%s", height, hash)
-
-		// The fetch is bound to the scanner's quit, so Stop doesn't
-		// wait for a query that can take until its timeout.
-		block, err := s.cfg.GetBlock(*hash, CancelQuery(s.quit))
 		if err != nil {
+			// A rollback may have removed the filter before the
+			// lookup. Retry only if the active hash really changed.
+			if errors.Is(err, headerfs.ErrHashNotFound) {
+				changed, readErr := s.replaced(height, hash)
+				if readErr != nil {
+					return nil, nil, s.quitOr(readErr)
+				}
+				if changed {
+					continue
+				}
+			}
 			return nil, nil, s.quitOr(err)
 		}
 
 		// Check again to see if the utxoscanner has been signaled to
 		// exit.
 		select {
-		case <-s.quit:
+		case <-s.ctx.Done():
 			return nil, nil, ErrShuttingDown
 		default:
 		}
@@ -546,6 +526,46 @@ func (s *UtxoScanner) fetchActiveBlock(reporter *batchSpendReporter,
 	}
 }
 
+// getBlock binds the block query to the lifetime of the scan.
+func (s *UtxoScanner) getBlock(ctx context.Context, hash chainhash.Hash) (
+	*btcutil.Block, error) {
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	block, err := s.cfg.GetBlock(hash, CancelQuery(ctx.Done()))
+	if err == nil && block == nil {
+		return nil, errors.New("missing requested block")
+	}
+	return block, err
+}
+
+// matchBlock keeps the legacy predicate available to standalone scanners.
+// The chain service always supplies the same matcher used by wallet rescans.
+func (s *UtxoScanner) matchBlock(hash chainhash.Hash, scripts [][]byte) (
+	*btcutil.Block, error) {
+
+	if s.cfg.BlockMatcher != nil {
+		return filtermatch.FetchMatchingBlock(
+			s.ctx, s.cfg.BlockMatcher, hash, scripts, true,
+			s.getBlock,
+		)
+	}
+
+	options := &rescanOptions{
+		watchList:    scripts,
+		queryOptions: []QueryOption{CancelQuery(s.ctx.Done())},
+	}
+	if s.cfg.BlockFilterMatches == nil {
+		return nil, errors.New("utxo scanner requires a block matcher")
+	}
+	hit, err := s.cfg.BlockFilterMatches(options, &hash)
+	if err != nil || !hit {
+		return nil, err
+	}
+	return s.getBlock(s.ctx, hash)
+}
+
 // tipPollInterval is how long the scanner waits before it looks at the tip
 // again, when the lowest queued request starts above it or the tip can't be
 // read.
@@ -555,7 +575,7 @@ const tipPollInterval = time.Second
 func (s *UtxoScanner) pause() {
 	select {
 	case <-time.After(tipPollInterval):
-	case <-s.quit:
+	case <-s.ctx.Done():
 	}
 }
 
@@ -593,7 +613,7 @@ func (s *UtxoScanner) requeue(reqs []*GetUtxoRequest) {
 // that failed then was most likely cancelled by the stop, and err otherwise.
 func (s *UtxoScanner) quitOr(err error) error {
 	select {
-	case <-s.quit:
+	case <-s.ctx.Done():
 		return ErrShuttingDown
 	default:
 		return err

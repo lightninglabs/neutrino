@@ -1,8 +1,10 @@
 package rescan
 
 import (
+	"errors"
 	"time"
 
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -13,7 +15,11 @@ import (
 type Environment struct {
 	// Chain provides access to block headers, filters, blocks, and
 	// subscriptions.
-	Chain ChainSource
+	Chain ScanChain
+
+	// BlockMatcher selects and verifies candidate blocks. A nil matcher
+	// uses the basic filters supplied by Chain.
+	BlockMatcher filtermatch.BlockMatcher
 
 	// StartTime is the wallet birthday. Blocks before this time are
 	// skipped during scanning (only headers are advanced without filter
@@ -23,6 +29,19 @@ type Environment struct {
 	// EndBlock is the block the scan stops at. The zero value never
 	// matches, so the scan follows the chain until it is stopped.
 	EndBlock headerfs.BlockStamp
+}
+
+// matcher also supplies the default for callers driving FSM states directly.
+func (e *Environment) matcher() (filtermatch.BlockMatcher, error) {
+	if e.BlockMatcher != nil {
+		return e.BlockMatcher, nil
+	}
+	chain, ok := e.Chain.(ChainSource)
+	if !ok {
+		return nil, errors.New("rescan requires a block matcher or a basic filter source")
+	}
+	basic := filtermatch.BasicFilterSource(chain.GetCFilter)
+	return filtermatch.NewBlockMatcher(basic), nil
 }
 
 // reachedEnd reports whether the cursor at stamp has reached the end block.
