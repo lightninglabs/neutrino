@@ -12,6 +12,7 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	querysyncwm "github.com/lightninglabs/neutrino/querysync/workmanager"
 	"github.com/stretchr/testify/require"
+	"pgregory.net/rapid"
 )
 
 // TestCheckpointedFetchRefusesReplacedTip models a reorg that lands while a
@@ -300,4 +301,172 @@ func TestResolveConflictBelowBlockTip(t *testing.T) {
 	require.ErrorContains(t, err, "below the cfheaders query")
 	require.Empty(t, good)
 	require.Empty(t, acted)
+}
+
+// TestUncheckpointedFetchWrongStoreTip puts a wrong, nonzero filter header at
+// the tip of the store while every peer is honest. Each reply's
+// PrevFilterHeader then differs from our tip, which is evidence against our
+// store and not against any peer, so no peer may be banned, the store must
+// stay as it is and the error must say that the store disagrees with the
+// peers. When one peer agrees with our tip, the others are still banned.
+func TestUncheckpointedFetchWrongStoreTip(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		storeWrong bool
+	}{
+		{name: "store tip wrong", storeWrong: true},
+		{name: "one peer wrong", storeWrong: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			testUncheckpointedFetchWrongStoreTip(
+				t, test.storeWrong,
+			)
+		})
+	}
+}
+
+func testUncheckpointedFetchWrongStoreTip(t *testing.T, storeWrong bool) {
+	bm, hdrStore, cfStore, err := setupBlockManager(t)
+	require.NoError(t, err)
+
+	genesisBlockHeader, _, err := hdrStore.ChainTip()
+	require.NoError(t, err)
+	genesisFilterHeader, _, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	headers, err := generateHeaders(
+		genesisBlockHeader, genesisFilterHeader, nil,
+	)
+	require.NoError(t, err)
+
+	// Ten blocks, and filter headers up to height five.
+	const blockTip, filterTip = 10, 5
+	require.NoError(t, hdrStore.WriteHeaders(
+		headers.blockHeaders[1:blockTip+1]...,
+	))
+	cf := make([]headerfs.FilterHeader, filterTip)
+	copy(cf, headers.cfHeaders[1:filterTip+1])
+	bad := chainhash.Hash{0xba, 0xd}
+	if storeWrong {
+		cf[filterTip-1].FilterHash = bad
+	}
+	require.NoError(t, cfStore.WriteHeaders(cf...))
+	require.NoError(t, bm.ResetHeaderState())
+
+	// The honest reply covers the blocks above the filter tip.
+	honest := &wire.MsgCFHeaders{
+		FilterType:       wire.GCSFilterRegular,
+		StopHash:         headers.blockHeaders[blockTip].BlockHash(),
+		PrevFilterHeader: headers.cfHeaders[filterTip].FilterHash,
+	}
+	for h := filterTip + 1; h <= blockTip; h++ {
+		honest.FilterHashes = append(
+			honest.FilterHashes, &headers.filterHashes[h],
+		)
+	}
+	liar := *honest
+	liar.PrevFilterHeader = bad
+	scripts := map[string][]wire.Message{
+		"10.0.0.1:8333": {honest}, "10.0.0.2:8333": {honest},
+	}
+	if !storeWrong {
+		scripts["10.0.0.3:8333"] = []wire.Message{&liar}
+	}
+	bm.cfg.Broadcaster = newScriptedBroadcaster(scripts)
+
+	var (
+		mu     sync.Mutex
+		banned []string
+	)
+	bm.cfg.BanPeer = func(addr string, _ banman.Reason) error {
+		mu.Lock()
+		defer mu.Unlock()
+		banned = append(banned, addr)
+		return nil
+	}
+
+	// The honest headers get written when a peer agrees with our tip,
+	// which sends a connected notification for each.
+	go func() {
+		for {
+			select {
+			case <-bm.blockNtfnChan:
+			case <-bm.quit:
+				return
+			}
+		}
+	}()
+	bm.wg.Add(1)
+	go bm.blockHandler()
+	t.Cleanup(func() { require.NoError(t, bm.Stop()) })
+
+	err = bm.cfSync.getUncheckpointedCFHeaders(wire.GCSFilterRegular)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !storeWrong {
+		require.NoError(t, err)
+		require.Equal(t, []string{"10.0.0.3:8333"}, banned)
+		return
+	}
+	require.ErrorIs(t, err, errStoreDisagreesWithPeers)
+	require.ErrorContains(t, err, bad.String())
+	require.Empty(t, banned)
+
+	tip, height, err := cfStore.ChainTip()
+	require.NoError(t, err)
+	require.Equal(t, uint32(filterTip), height)
+	require.Equal(t, bad, *tip)
+}
+
+// TestCheckPrevFilterHeadersBlamesOnEvidence checks, for any set of replies,
+// that a peer is only blamed for its PrevFilterHeader when another peer
+// agrees with our filter tip, that a peer agreeing with our tip is never
+// blamed, and that replies which all agree with each other but not with our
+// tip report the store.
+func TestCheckPrevFilterHeadersBlamesOnEvidence(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		tip := chainhash.Hash{1}
+		headers := make(map[string]*wire.MsgCFHeaders)
+		numPeers := rapid.IntRange(1, 6).Draw(t, "peers")
+		for i := 0; i < numPeers; i++ {
+			// Prev 0 is our tip, the others are other headers.
+			prev := rapid.IntRange(0, 2).Draw(t, "prev")
+			prevHash := chainhash.Hash{byte(prev + 1)}
+			headers[string(rune('a'+i))] = &wire.MsgCFHeaders{
+				PrevFilterHeader: prevHash,
+			}
+		}
+
+		agreeing, served := 0, make(map[chainhash.Hash]bool)
+		for _, msg := range headers {
+			if msg.PrevFilterHeader == tip {
+				agreeing++
+			}
+			served[msg.PrevFilterHeader] = true
+		}
+
+		wrong, err := checkPrevFilterHeaders(headers, tip, 7)
+		for _, peer := range wrong {
+			require.NotEqual(t, tip, headers[peer].PrevFilterHeader)
+		}
+		switch {
+		case agreeing > 0:
+			require.NoError(t, err)
+			require.Len(t, wrong, numPeers-agreeing)
+
+		case len(served) == 1:
+			require.ErrorIs(t, err, errStoreDisagreesWithPeers)
+			require.Empty(t, wrong)
+
+		default:
+			require.Error(t, err)
+			require.Empty(t, wrong)
+		}
+	})
 }

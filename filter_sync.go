@@ -238,19 +238,18 @@ func (c *cfHeaderSync) getUncheckpointedCFHeaders(
 		startHeight, fType, snapshot.StopHash, snapshot.StopHeight,
 	)
 
-	// Ban any peer that responds with the wrong prev filter header.
-	for peer, msg := range headers {
-		if msg.PrevFilterHeader != filterTip {
-			err := c.cfg.BanPeer(peer, banman.InvalidFilterHeader)
-			if err != nil {
-				log.Errorf(
-					"Unable to ban peer %v: %v",
-					peer,
-					err,
-				)
-			}
-			delete(headers, peer)
+	// Ban any peer that responds with the wrong prev filter header, as
+	// long as some other peer shows that our tip is right.
+	wrong, err := checkPrevFilterHeaders(headers, filterTip, filtHeight)
+	if err != nil {
+		return err
+	}
+	for _, peer := range wrong {
+		err := c.cfg.BanPeer(peer, banman.InvalidFilterHeader)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peer, err)
 		}
+		delete(headers, peer)
 	}
 
 	if len(headers) == 0 {
@@ -812,11 +811,11 @@ func (c *cfHeaderSync) submitCFHeaders(
 	return &hash, reply.Filter.FilterHeight, nil
 }
 
-// errStoreDisagreesWithPeers is returned by resolveConflict when every peer
-// serves the same checkpoint, but the filter header store holds a different
-// header at its height.
+// errStoreDisagreesWithPeers is returned when every peer serves the same
+// filter header, as a checkpoint or as the PrevFilterHeader of a cfheaders
+// reply, but the filter header store holds a different one at its height.
 var errStoreDisagreesWithPeers = errors.New("filter header store " +
-	"disagrees with the checkpoint every peer serves")
+	"disagrees with every peer")
 
 // resolveConflict finds the correct checkpoint information and bans any peers
 // giving us incorrect header information. It never changes the store.
@@ -1007,12 +1006,60 @@ func storeMismatch(checkpoints map[string][]*chainhash.Hash, idx int,
 		return err
 	}
 
+	return storeMismatchErr(*stored, height, *agreed, len(checkpoints))
+}
+
+// storeMismatchErr returns errStoreDisagreesWithPeers for a store that holds
+// stored at height, where every one of the peers that answered serves served.
+func storeMismatchErr(stored chainhash.Hash, height uint32,
+	served chainhash.Hash, peers int) error {
+
 	return fmt.Errorf("%w: the store holds %v at height %d, while %d "+
 		"peers serve %v. If this persists with other peers, the "+
 		"filter headers were written from peers that lied or were "+
 		"damaged on disk: remove the filter header store to sync it "+
-		"again", errStoreDisagreesWithPeers, stored, height,
-		len(checkpoints), agreed)
+		"again", errStoreDisagreesWithPeers, stored, height, peers,
+		served)
+}
+
+// checkPrevFilterHeaders decides what a set of cfheaders replies that start
+// right above our filter tip says about the peers. A reply whose
+// PrevFilterHeader isn't our tip only proves the peer wrong if some other peer
+// agrees with our tip. If none does, the evidence is against our store, not
+// against any peer, so we blame nobody: when the replies all agree with each
+// other, we return errStoreDisagreesWithPeers, as resolveConflict does for
+// checkpoints, and otherwise a plain error so the caller retries. It returns
+// the peers to ban, which is empty unless some peer agrees with our tip.
+func checkPrevFilterHeaders(headers map[string]*wire.MsgCFHeaders,
+	filterTip chainhash.Hash, filterHeight uint32) ([]string, error) {
+
+	var (
+		wrong  []string
+		agreed bool
+	)
+	for peer, msg := range headers {
+		if msg.PrevFilterHeader == filterTip {
+			agreed = true
+			continue
+		}
+		wrong = append(wrong, peer)
+	}
+	if agreed || len(wrong) == 0 {
+		return wrong, nil
+	}
+
+	served := headers[wrong[0]].PrevFilterHeader
+	for _, peer := range wrong[1:] {
+		if headers[peer].PrevFilterHeader != served {
+			return nil, fmt.Errorf("no peer agrees with filter "+
+				"tip %v at height %d, and the peers disagree "+
+				"with each other", filterTip, filterHeight)
+		}
+	}
+
+	return nil, storeMismatchErr(
+		filterTip, filterHeight, served, len(wrong),
+	)
 }
 
 // resolveCFHeaderMismatches removes conflicting peers before advancing to the
