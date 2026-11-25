@@ -2,6 +2,8 @@ package neutrino
 
 import (
 	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -90,12 +92,15 @@ func TestPermanentPeerProperties(t *testing.T) {
 	}
 	useTestRetryInterval(t)
 
+	base := t.TempDir()
+	checks := 0
 	rapid.Check(t, func(rt *rapid.T) {
-		dir, err := os.MkdirTemp(t.TempDir(), "")
-		require.NoError(rt, err)
+		checks++
+		dir := filepath.Join(base, strconv.Itoa(checks))
+		require.NoError(rt, os.Mkdir(dir, 0o700))
 
 		n := newTestPeerNet(rt)
-		s := startTestService(rt, dir, n)
+		s := startTestService(rt, dir, n, connectTo())
 		m := &peerModel{
 			s:         s,
 			n:         n,
@@ -222,17 +227,23 @@ func TestPermanentPeerProperties(t *testing.T) {
 			n.setMode(addr, mode)
 			n.setDelay(addr, 0)
 		}
+		// A peer on a connection we hung up may still be listed for
+		// a moment, but no longer reports itself connected.
 		n.hangUpAll()
-		for _, addr := range peerAddrs {
-			if m.permanent[addr] {
-				waitForPeer(rt, s, addr)
+		require.Eventually(rt, func() bool {
+			for _, addr := range peerAddrs {
+				if !m.permanent[addr] {
+					continue
+				}
+
+				sp := s.PeerByAddr(addr)
+				if sp == nil || !sp.Connected() {
+					return false
+				}
 			}
-		}
-		for _, addr := range peerAddrs {
-			if m.permanent[addr] {
-				require.NotNil(rt, s.PeerByAddr(addr))
-			}
-		}
+
+			return true
+		}, 20*time.Second, 5*time.Millisecond)
 		// A one-off dial from the last steps may still be landing,
 		// so we wait for the dials to settle before we look.
 		totalDials := func() int {

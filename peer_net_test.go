@@ -60,7 +60,7 @@ type testPeerNet struct {
 	dials       map[string]int
 	inFlight    map[string]int
 	maxInFlight map[string]int
-	nodes       map[net.Conn]struct{}
+	nodes       map[net.Conn]*testConn
 
 	// open counts the connections the service hasn't closed its end
 	// of.
@@ -79,7 +79,7 @@ func newTestPeerNet(t require.TestingT) *testPeerNet {
 		dials:       make(map[string]int),
 		inFlight:    make(map[string]int),
 		maxInFlight: make(map[string]int),
-		nodes:       make(map[net.Conn]struct{}),
+		nodes:       make(map[net.Conn]*testConn),
 	}
 }
 
@@ -176,7 +176,7 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 	local := &testConn{Conn: pipe, open: &n.open}
 	n.open.Add(1)
 	n.mu.Lock()
-	n.nodes[remote] = struct{}{}
+	n.nodes[remote] = local
 	n.mu.Unlock()
 	go n.runNode(remote, mode, gate)
 
@@ -201,7 +201,7 @@ func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 	}
 
 	params := chaincfg.SimNetParams.Net
-	pver := uint32(wire.AddrV2Version)
+	pver := wire.AddrV2Version
 
 	if mode == dialServe {
 		// Take the service's version, then answer with ours and a
@@ -266,25 +266,42 @@ func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 type testConn struct {
 	net.Conn
 
-	open *atomic.Int64
-	once sync.Once
+	open   *atomic.Int64
+	once   sync.Once
+	closed atomic.Bool
 }
 
 // Close closes the connection, and counts it as closed once.
 func (c *testConn) Close() error {
-	c.once.Do(func() { c.open.Add(-1) })
+	c.once.Do(func() {
+		c.closed.Store(true)
+		c.open.Add(-1)
+	})
 
 	return c.Conn.Close()
 }
 
-// hangUpAll closes every connection from the node end.
+// hangUpAll closes every connection from the node end, and waits for the
+// service to close its end of each. A peer on one of them has been told to
+// disconnect by then, so it no longer reports itself connected.
 func (n *testPeerNet) hangUpAll() {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	for conn := range n.nodes {
-		_ = conn.Close()
+	locals := make([]*testConn, 0, len(n.nodes))
+	for remote, local := range n.nodes {
+		_ = remote.Close()
+		locals = append(locals, local)
 	}
+	n.mu.Unlock()
+
+	require.Eventually(n.t, func() bool {
+		for _, local := range locals {
+			if !local.closed.Load() {
+				return false
+			}
+		}
+
+		return true
+	}, 10*time.Second, time.Millisecond, "hung up connections left open")
 }
 
 // requireNoOpenConns checks that the service has closed every connection it
@@ -306,8 +323,7 @@ func (n *testPeerNet) requireNoMoreDials(addr string) {
 
 // testResolver resolves the test hostnames, and IP addresses to themselves.
 func testResolver(host string) ([]net.IP, error) {
-	switch host {
-	case "peer.test":
+	if host == "peer.test" {
 		return []net.IP{net.IPv4(127, 0, 0, 3)}, nil
 	}
 
@@ -343,14 +359,21 @@ func newTestService(t *testing.T, n *testPeerNet,
 
 	useTestRetryInterval(t)
 
-	return startTestService(t, t.TempDir(), n, others...)
+	return startTestService(t, t.TempDir(), n, connectTo(others...))
 }
 
-// startTestService starts a service in dir on the test network, with
-// testPeerAddr and any others given as its configured peers, and stops it
-// when the test is over.
+// connectTo configures a service to connect to testPeerAddr and the others
+// given, and only to them.
+func connectTo(others ...string) func(*Config) {
+	return func(cfg *Config) {
+		cfg.ConnectPeers = append([]string{testPeerAddr}, others...)
+	}
+}
+
+// startTestService starts a service in dir on the test network, with its
+// peers set by configure, and stops it when the test is over.
 func startTestService(t testEnv, dir string, n *testPeerNet,
-	others ...string) *ChainService {
+	configure func(*Config)) *ChainService {
 
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(dir, "neutrino.db"), true,
@@ -359,14 +382,16 @@ func startTestService(t testEnv, dir string, n *testPeerNet,
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	s, err := NewChainService(Config{
+	cfg := Config{
 		DataDir:      dir,
 		Database:     db,
 		ChainParams:  chaincfg.SimNetParams,
-		ConnectPeers: append([]string{testPeerAddr}, others...),
 		Dialer:       n.dial,
 		NameResolver: testResolver,
-	})
+	}
+	configure(&cfg)
+
+	s, err := NewChainService(cfg)
 	require.NoError(t, err)
 	require.NoError(t, s.Start(t.Context()))
 	t.Cleanup(func() { _ = s.Stop() })

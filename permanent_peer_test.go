@@ -323,11 +323,13 @@ func TestPeerLookupAddressForms(t *testing.T) {
 		require.Same(t, sp, s.PeerByAddr(addr), addr)
 	}
 
+	// The peer is no longer found once it's done, which may take a
+	// moment after it's gone from the connected peers.
 	require.NoError(t, s.DisconnectNodeByAddr("peer.test"))
 	require.Eventually(t, func() bool {
-		return s.PeerByAddr(resolved) == nil
+		return s.PeerByAddr(resolved) == nil &&
+			s.DisconnectNodeByAddr("peer.test") != nil
 	}, 5*time.Second, time.Millisecond)
-	require.Error(t, s.DisconnectNodeByAddr("peer.test"))
 
 	// The permanent peer is found by its IP alone, and comes back.
 	permanent := waitForPeer(t, s, testPeerAddr)
