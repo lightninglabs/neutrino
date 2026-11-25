@@ -95,7 +95,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			if !sp.Connected() {
 				return
 			}
-			if s.peerQuarantined(sp.Addr(), now) {
+			if s.quarantine.active(sp.Addr(), now) {
 				return
 			}
 			peers = append(peers, sp)
@@ -113,7 +113,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 			if !sp.Connected() {
 				return
 			}
-			if s.peerQuarantined(sp.Addr(), now) {
+			if s.quarantine.active(sp.Addr(), now) {
 				return
 			}
 			peerChan <- sp
@@ -129,7 +129,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		}
 
 	case quarantinePeerMsg:
-		s.trackPeerQuarantine(msg.addr, msg.until)
+		s.quarantine.add(msg.addr, msg.until)
 		state.forAllPeers(func(sp *ServerPeer) {
 			if sp.Addr() == msg.addr {
 				sp.Disconnect()

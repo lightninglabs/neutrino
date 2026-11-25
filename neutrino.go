@@ -167,7 +167,8 @@ func (sp *ServerPeer) key() peerKey {
 var errPeerRemoved = errors.New("permanent peer removed")
 
 // errPeerBanned and errPeerQuarantined are returned by the dial function for
-// a peer that is banned or quarantined.
+// a peer that is banned or quarantined, and errGroupTaken for a peer we found
+// ourselves in an outbound group we already have a dial or a peer in.
 var (
 	errPeerBanned      = errors.New("peer is banned")
 	errPeerQuarantined = errors.New("peer is quarantined")
@@ -1076,6 +1077,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
+				// Skip quarantined peers too, which we'd
+				// refuse to dial.
+				now := time.Now()
+				if s.quarantine.active(addrString, now) {
+					continue
+				}
+
 				// Skip any addresses that correspond to our set
 				// of currently connected peers.
 				if _, ok := connectedPeers[addrString]; ok {
@@ -1379,14 +1387,6 @@ func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
 		case <-s.quit:
 		}
 	}()
-}
-
-func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {
-	s.quarantine.add(addr, until)
-}
-
-func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
-	return s.quarantine.active(addr, now)
 }
 
 // peerQuarantine records which peer addresses are quarantined, and until
@@ -1696,7 +1696,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		sp.Disconnect()
 		return false
 	}
-	if s.peerQuarantined(sp.Addr(), time.Now()) {
+	if s.quarantine.active(sp.Addr(), time.Now()) {
 		sp.Disconnect()
 		return false
 	}
