@@ -77,7 +77,7 @@ type SubscriptionEvent struct {
 	Height uint32
 }
 
-var _ neutrino.ChainSource = (*MockChain)(nil)
+var _ neutrino.BasicChainSource = (*MockChain)(nil)
 
 // NewMockChain creates a linear chain with the requested number of blocks.
 func NewMockChain(numBlocks int) *MockChain {

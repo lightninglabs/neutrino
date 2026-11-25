@@ -2392,14 +2392,14 @@ func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
 }
 
 // RescanChainSource is a wrapper type around the ChainService struct that will
-// be used to satisfy the rescan.ChainSource interface.
+// be used to satisfy the BIP158 rescan source interface.
 type RescanChainSource struct {
 	*ChainService
 }
 
 // A compile-time check to ensure that RescanChainSource implements the
-// rescan.ChainSource interface.
-var _ ChainSource = (*RescanChainSource)(nil)
+// BasicChainSource interface.
+var _ BasicChainSource = (*RescanChainSource)(nil)
 
 // BlockMatcher returns the service's matcher for wallet rescans.
 func (s *RescanChainSource) BlockMatcher() filtermatch.BlockMatcher {

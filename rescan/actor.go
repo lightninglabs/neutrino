@@ -100,8 +100,7 @@ type Callbacks struct {
 
 // ActorConfig configures a new RescanActor.
 type ActorConfig struct {
-	// Chain provides access to headers, filters, blocks, and
-	// subscriptions.
+	// Chain provides access to headers, blocks and subscriptions.
 	Chain ScanChain
 
 	// BlockMatcher selects and verifies candidate blocks. A nil matcher

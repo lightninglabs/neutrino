@@ -37,7 +37,7 @@ type ScanSource interface {
 	ChainParams() chaincfg.Params
 
 	// BestBlock retrieves the most recent block's height and hash where we
-	// have both the header and filter header ready.
+	// can scan. A basic-filter source has both headers ready at this height.
 	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the block with the given
@@ -64,19 +64,18 @@ type ScanSource interface {
 	IsCurrent() bool
 }
 
-// ChainSource is the original compact-filter-backed rescan source.
-type ChainSource interface {
+// ChainSource supplies filters of one representation in addition to chain
+// data. F is chosen by the provider. The BIP158 source uses *gcs.Filter.
+// A matcher that obtains its evidence elsewhere needs only ScanSource.
+type ChainSource[F any] interface {
 	ScanSource
 
-	// GetFilterHeaderByHeight returns the filter header of the block with
-	// the given height. The rescan no longer calls it.
-	GetFilterHeaderByHeight(uint32) (*chainhash.Hash, error)
-
-	// GetCFilter returns the filter of the given type for the block with
-	// the given hash.
-	GetCFilter(chainhash.Hash,
-		wire.FilterType, ...QueryOption) (*gcs.Filter, error)
+	// GetCFilter retrieves the requested filter for the given block.
+	GetCFilter(chainhash.Hash, wire.FilterType, ...QueryOption) (F, error)
 }
+
+// BasicChainSource supplies the BIP158 filters used by NewRescan.
+type BasicChainSource = ChainSource[*gcs.Filter]
 
 // ScanProgressHandler is used in rescanOptions to update the caller with the
 // rescan progress.
@@ -535,7 +534,7 @@ type Rescan struct { // nolint:maligned
 }
 
 // NewRescan returns a wallet rescan backed by chain's compact filters.
-func NewRescan(chain ChainSource, options ...RescanOption) *Rescan {
+func NewRescan(chain BasicChainSource, options ...RescanOption) *Rescan {
 	var matcher filtermatch.BlockMatcher
 	if src, ok := chain.(interface {
 		BlockMatcher() filtermatch.BlockMatcher
@@ -545,12 +544,18 @@ func NewRescan(chain ChainSource, options ...RescanOption) *Rescan {
 	if matcher == nil {
 		matcher = basicMatcher(chain.GetCFilter)
 	}
-	return NewRescanWithMatcher(chain, matcher, options...)
+	return newRescan(chain, matcher, options...)
 }
 
-// NewRescanWithMatcher scans chain with the supplied block matcher. The
-// chain supplies headers and blocks independently of the filter backend.
-func NewRescanWithMatcher(chain ScanSource, matcher filtermatch.BlockMatcher,
+// NewRescanWithMatcher scans chain with the supplied backend. F ties the
+// backend's candidates to their verifier. Chain access does not depend on F.
+func NewRescanWithMatcher[F any](chain ScanSource, backend filtermatch.Backend[F],
+	options ...RescanOption) *Rescan {
+
+	return newRescan(chain, filtermatch.NewBlockMatcher(backend), options...)
+}
+
+func newRescan(chain ScanSource, matcher filtermatch.BlockMatcher,
 	options ...RescanOption) *Rescan {
 
 	return &Rescan{

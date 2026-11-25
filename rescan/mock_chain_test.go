@@ -32,7 +32,7 @@ type mockChainSource struct {
 	ntfnChan chan blockntfns.BlockNtfn
 }
 
-var _ ChainSource = (*mockChainSource)(nil)
+var _ BasicChainSource = (*mockChainSource)(nil)
 
 // newMockChain creates a mock chain with numBlocks blocks starting from
 // genesis. All blocks have empty filters (no matching transactions).

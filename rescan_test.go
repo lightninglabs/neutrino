@@ -45,7 +45,7 @@ type mockChainSource struct {
 	subscribeOverride     func(uint32) (*blockntfns.Subscription, error)
 }
 
-var _ ChainSource = (*mockChainSource)(nil)
+var _ BasicChainSource = (*mockChainSource)(nil)
 
 // newMockChainSource creates a new mock chain backed by numBlocks.
 func newMockChainSource(numBlocks int) *mockChainSource {

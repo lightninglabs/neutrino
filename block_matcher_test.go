@@ -15,6 +15,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testHashFilter wire.FilterType = 0xfe
+
+// hashFilterChain has the same chain operations as the basic implementation,
+// but returns a block hash as test evidence. It has no filter-header method.
+type hashFilterChain struct{ ScanSource }
+
+func (hashFilterChain) GetCFilter(hash chainhash.Hash, typ wire.FilterType,
+	_ ...QueryOption) (chainhash.Hash, error) {
+
+	if typ != testHashFilter {
+		return chainhash.Hash{}, errors.New("unsupported test filter type")
+	}
+	return hash, nil
+}
+
+var _ ChainSource[chainhash.Hash] = hashFilterChain{}
+
 // hashBackend uses a block hash as its match evidence.
 type hashBackend struct {
 	match  func(chainhash.Hash, [][]byte, bool) (filtermatch.Decision[chainhash.Hash], error)
@@ -40,6 +57,7 @@ func TestRescanWithMatcher(t *testing.T) {
 	chain.blocksQueried = make(chan chainhash.Hash, 2)
 	var events []string
 	var queries int
+	var src ChainSource[chainhash.Hash] = hashFilterChain{chain}
 	backend := hashBackend{
 		match: func(hash chainhash.Hash, scripts [][]byte, batch bool) (
 			filtermatch.Decision[chainhash.Hash], error) {
@@ -52,7 +70,8 @@ func TestRescanWithMatcher(t *testing.T) {
 			if queries == 1 {
 				return filtermatch.Skip[chainhash.Hash](), nil
 			}
-			return filtermatch.Candidate(hash), nil
+			evidence, err := src.GetCFilter(hash, testHashFilter)
+			return filtermatch.Candidate(evidence), err
 		},
 		verify: func(hash chainhash.Hash, block *btcutil.Block) error {
 			if *block.Hash() != hash {
@@ -62,9 +81,7 @@ func TestRescanWithMatcher(t *testing.T) {
 			return nil
 		},
 	}
-	// Embedding ScanSource hides the concrete mock's GetCFilter method.
-	src := struct{ ScanSource }{chain}
-	r := NewRescanWithMatcher(src, filtermatch.NewBlockMatcher(backend),
+	r := NewRescanWithMatcher(src, backend,
 		StartBlock(&headerfs.BlockStamp{}),
 		EndBlock(&headerfs.BlockStamp{Height: 2}),
 		WatchInputs(*makeTestInputWithScript()),

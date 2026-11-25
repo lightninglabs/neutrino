@@ -13,8 +13,7 @@ import (
 // state, the Cursor and its watch list, lives in the state structs and is
 // carried forward through state transitions.
 type Environment struct {
-	// Chain provides access to block headers, filters, blocks, and
-	// subscriptions.
+	// Chain provides access to headers, blocks and subscriptions.
 	Chain ScanChain
 
 	// BlockMatcher selects and verifies candidate blocks. A nil matcher
@@ -36,7 +35,7 @@ func (e *Environment) matcher() (filtermatch.BlockMatcher, error) {
 	if e.BlockMatcher != nil {
 		return e.BlockMatcher, nil
 	}
-	chain, ok := e.Chain.(ChainSource)
+	chain, ok := e.Chain.(BasicChainSource)
 	if !ok {
 		return nil, errors.New("rescan requires a block matcher or a basic filter source")
 	}

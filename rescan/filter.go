@@ -156,7 +156,7 @@ func (ws *WatchState) watchesScript(script []byte) bool {
 // FetchAndMatchFilter fetches the compact filter for the given block hash
 // and checks it against the watch list. Returns the match result and the
 // filter (for potential later use in block extraction).
-func FetchAndMatchFilter(ctx context.Context, chain ChainSource,
+func FetchAndMatchFilter(ctx context.Context, chain BasicChainSource,
 	blockHash *chainhash.Hash, watchList [][]byte,
 	batch bool) (bool, *gcs.Filter, error) {
 
@@ -180,7 +180,7 @@ func FetchAndMatchFilter(ctx context.Context, chain ChainSource,
 // with new inputs discovered from matching outputs (so future spends are
 // also watched). Returns the relevant transactions, why each matched, and
 // the updated watch state.
-func ExtractBlockMatches(ctx context.Context, chain ChainSource,
+func ExtractBlockMatches(ctx context.Context, chain ScanChain,
 	curStamp *headerfs.BlockStamp, filter *gcs.Filter,
 	ws WatchState) ([]*btcutil.Tx, []TxMatch, WatchState, error) {
 

@@ -14,8 +14,8 @@ import (
 // ScanChain supplies chain data and notifications independently of the
 // filter format used to select blocks.
 type ScanChain interface {
-	// BestBlock returns the most recent block for which both the header
-	// and the filter header are stored.
+	// BestBlock returns the latest block ready to scan. A basic-filter
+	// source has both the block header and the filter header at this tip.
 	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the active block at
@@ -48,14 +48,17 @@ type ScanChain interface {
 	MarkAsConfirmed(txHash chainhash.Hash)
 }
 
-// ChainSource is a ScanChain that also supplies BIP158 filters.
-type ChainSource interface {
+// ChainSource extends chain access with a provider-selected filter type.
+type ChainSource[F any] interface {
 	ScanChain
 
-	// GetCFilter fetches the regular compact filter of the block with the
+	// GetCFilter fetches the filter of the block with the
 	// given hash. batch asks for the filters of the following blocks in
 	// the same query, since a historical scan fetches them next. The fetch
 	// returns early, with an error, once ctx is done.
 	GetCFilter(ctx context.Context, hash chainhash.Hash,
-		batch bool) (*gcs.Filter, error)
+		batch bool) (F, error)
 }
+
+// BasicChainSource is the BIP158 source used by the default matcher.
+type BasicChainSource = ChainSource[*gcs.Filter]
