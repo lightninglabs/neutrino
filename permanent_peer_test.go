@@ -426,3 +426,39 @@ func TestPermanentPeerKeepsSyncPeer(t *testing.T) {
 	}, quietPeriod, testRetryInterval/2)
 	require.Len(t, s.Peers(), 2)
 }
+
+// TestUnbanPermanentPeerReconnects checks that unbanning a permanent peer
+// dials it right away, rather than when its request, which backs off while
+// the peer is banned, would next retry.
+func TestUnbanPermanentPeerReconnects(t *testing.T) {
+	// The retry interval is long enough here for the backoff to be
+	// told apart from an immediate dial.
+	const retry = 500 * time.Millisecond
+
+	oldRetry, oldBan := ConnectionRetryInterval, BanDuration
+	ConnectionRetryInterval, BanDuration = retry, time.Hour
+	t.Cleanup(func() {
+		ConnectionRetryInterval, BanDuration = oldRetry, oldBan
+	})
+
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := startTestService(t, t.TempDir(), n, connectTo())
+	sp := waitForPeer(t, s, testPeerAddr)
+
+	require.NoError(t, s.BanPeer(testPeerAddr, banman.NoCompactFilters))
+	require.Eventually(t, func() bool {
+		return !sp.Connected()
+	}, 5*time.Second, time.Millisecond)
+
+	// The request retries after one interval, is refused, and next
+	// retries two intervals after that. Unbanning in between dials the
+	// peer at once, where the request alone would wait until then.
+	time.Sleep(retry * 3 / 2)
+	dials := n.dialCount(testPeerAddr)
+	require.NoError(t, s.UnbanPeer(testPeerAddr, true))
+	require.Eventually(t, func() bool {
+		return n.dialCount(testPeerAddr) > dials
+	}, retry/2, time.Millisecond)
+	waitForPeer(t, s, testPeerAddr)
+}

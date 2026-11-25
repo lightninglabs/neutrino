@@ -45,9 +45,12 @@ type disconnectNodeMsg struct {
 	reply chan error
 }
 
+// connectNodeMsg connects to an address. If restart is set and the address
+// is a permanent peer's, its request is restarted instead.
 type connectNodeMsg struct {
 	addr      net.Addr
 	permanent bool
+	restart   bool
 	reply     chan error
 }
 
@@ -201,8 +204,20 @@ func (s *ChainService) handleConnectNode(state *peerState,
 	msg connectNodeMsg) error {
 
 	key := keyOf(msg.addr)
-	if _, ok := state.permanent[key]; ok {
-		return errors.New("peer exists as a permanent peer")
+	if pr, ok := state.permanent[key]; ok {
+		if !msg.restart {
+			return errors.New("peer exists as a permanent peer")
+		}
+
+		// A request with no peer is dialing or waiting to retry,
+		// so we start it over without the backoff it has built up.
+		// One with a peer, or held back for one, has nothing to
+		// wait for.
+		if _, ok := state.peers[key]; !ok {
+			s.restartPermanentReq(state, key, pr)
+		}
+
+		return nil
 	}
 
 	if !msg.permanent {
@@ -257,14 +272,7 @@ func (s *ChainService) removePermanentPeer(state *peerState,
 		return false
 	}
 	delete(state.permanent, key)
-
-	// The flag is set before we read the request's ID, so a request the
-	// connection manager hasn't given an ID yet sees the flag when it's
-	// dialed, and is ended then.
-	pr.removed.Store(true)
-	if id := pr.req.ID(); id != 0 {
-		s.connManager.Remove(id)
-	}
+	s.endPermanentReq(pr)
 
 	// The peer stays in state.peers until it's done, so no other peer
 	// can take its address while it shuts down.
@@ -274,6 +282,30 @@ func (s *ChainService) removePermanentPeer(state *peerState,
 	}
 
 	return true
+}
+
+// endPermanentReq ends a permanent request with the connection manager.
+func (s *ChainService) endPermanentReq(pr *permanentReq) {
+	// The flag is set before we read the request's ID, so a request the
+	// connection manager hasn't given an ID yet sees the flag when it's
+	// dialed, and is ended then.
+	pr.removed.Store(true)
+	if id := pr.req.ID(); id != 0 {
+		s.connManager.Remove(id)
+	}
+}
+
+// restartPermanentReq replaces a permanent request with a new one for the
+// same address, which the connection manager dials right away. The old
+// request's backoff goes with it.
+func (s *ChainService) restartPermanentReq(state *peerState, key peerKey,
+	pr *permanentReq) {
+
+	s.endPermanentReq(pr)
+
+	next := newPermanentReq(pr.Addr)
+	state.permanent[key] = next
+	go s.connManager.Connect(next.req)
 }
 
 // ConnectedCount returns the number of currently connected peers.
@@ -463,20 +495,20 @@ func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 		return err
 	}
 
-	return s.connectNode(netAddr, permanent)
+	return s.connectNode(connectNodeMsg{
+		addr:      netAddr,
+		permanent: permanent,
+	})
 }
 
 // connectNode hands a connection to a resolved address to the peer handler
 // and returns its reply.
-func (s *ChainService) connectNode(addr net.Addr, permanent bool) error {
+func (s *ChainService) connectNode(msg connectNodeMsg) error {
 	reply := make(chan error, 1)
+	msg.reply = reply
 
 	select {
-	case s.query <- connectNodeMsg{
-		addr:      addr,
-		permanent: permanent,
-		reply:     reply,
-	}:
+	case s.query <- msg:
 	case <-s.quit:
 		return nil
 	}

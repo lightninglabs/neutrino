@@ -1232,7 +1232,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 			// The only error is a peer given twice, which is
 			// already being connected to.
-			err := s.connectNode(tcpAddr, true)
+			err := s.connectNode(connectNodeMsg{
+				addr:      tcpAddr,
+				permanent: true,
+			})
 			if err != nil {
 				log.Warnf("Configured peer %v (%v) not added "+
 					"again: %v", addr, tcpAddr, err)
@@ -1444,7 +1447,19 @@ func (s *ChainService) UnbanPeer(addr string, parmanent bool) error {
 		return fmt.Errorf("unable to unban peer: %v", err)
 	}
 
-	return s.ConnectNode(addr, parmanent)
+	// A permanent peer's request has been refused its dials while the
+	// peer was banned, and has backed off for up to five minutes. We
+	// restart it, so the peer is dialed now.
+	netAddr, err := s.addrStringToNetAddr(addr)
+	if err != nil {
+		return err
+	}
+
+	return s.connectNode(connectNodeMsg{
+		addr:      netAddr,
+		permanent: parmanent,
+		restart:   true,
+	})
 }
 
 // IsBanned returns true if the peer is banned, and false otherwise.
