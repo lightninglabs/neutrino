@@ -209,11 +209,17 @@ func TestPermanentPeerProperties(t *testing.T) {
 			return
 		}
 
-		// With every node answering, every permanent peer connects,
-		// once any handshakes in flight are cut short, and then
-		// isn't dialed again.
+		// With the nodes of permanent peers answering, and every
+		// other dial refused, every permanent peer connects once any
+		// handshakes in flight are cut short. Then no address is
+		// dialed again: a request left behind for a removed peer
+		// would keep retrying its refused dials.
 		for _, addr := range peerAddrs {
-			n.setMode(addr, dialServe)
+			mode := dialRefuse
+			if m.permanent[addr] {
+				mode = dialServe
+			}
+			n.setMode(addr, mode)
 			n.setDelay(addr, 0)
 		}
 		n.hangUpAll()
@@ -227,16 +233,31 @@ func TestPermanentPeerProperties(t *testing.T) {
 				require.NotNil(rt, s.PeerByAddr(addr))
 			}
 		}
+		// A one-off dial from the last steps may still be landing,
+		// so we wait for the dials to settle before we look.
+		totalDials := func() int {
+			total := 0
+			for _, addr := range peerAddrs {
+				total += n.dialCount(addr)
+			}
+
+			return total
+		}
+		require.Eventually(rt, func() bool {
+			before := totalDials()
+			time.Sleep(2 * testRetryInterval)
+
+			return totalDials() == before
+		}, 5*time.Second, time.Millisecond)
+
 		before := make(map[string]int)
 		for _, addr := range peerAddrs {
 			before[addr] = n.dialCount(addr)
 		}
-		time.Sleep(quietPeriod)
+		time.Sleep(5 * testRetryInterval)
 		for _, addr := range peerAddrs {
-			if m.permanent[addr] {
-				require.Equal(rt, before[addr],
-					n.dialCount(addr), addr)
-			}
+			require.Equal(rt, before[addr], n.dialCount(addr),
+				addr)
 		}
 		m.check(rt)
 

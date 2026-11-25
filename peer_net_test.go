@@ -62,8 +62,8 @@ type testPeerNet struct {
 	maxInFlight map[string]int
 	nodes       map[net.Conn]struct{}
 
-	// open counts the connections whose node end hasn't seen the
-	// service close them.
+	// open counts the connections the service hasn't closed its end
+	// of.
 	open atomic.Int64
 }
 
@@ -172,7 +172,8 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 		return nil, net.ErrClosed
 	}
 
-	local, remote := net.Pipe()
+	pipe, remote := net.Pipe()
+	local := &testConn{Conn: pipe, open: &n.open}
 	n.open.Add(1)
 	n.mu.Lock()
 	n.nodes[remote] = struct{}{}
@@ -193,7 +194,6 @@ func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 		n.mu.Unlock()
 
 		_ = conn.Close()
-		n.open.Add(-1)
 	}()
 
 	if mode == dialHangUp {
@@ -258,6 +258,23 @@ func (n *testPeerNet) runNode(conn net.Conn, mode dialMode,
 			}()
 		}
 	}
+}
+
+// testConn is the service's end of a test connection. Closing it is what
+// counts it as closed: a node hanging up doesn't, so a connection the
+// service fails to close after its node is gone shows up as open.
+type testConn struct {
+	net.Conn
+
+	open *atomic.Int64
+	once sync.Once
+}
+
+// Close closes the connection, and counts it as closed once.
+func (c *testConn) Close() error {
+	c.once.Do(func() { c.open.Add(-1) })
+
+	return c.Conn.Close()
 }
 
 // hangUpAll closes every connection from the node end.

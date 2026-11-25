@@ -67,11 +67,17 @@ func TestRemovePermanentPeerJustAdded(t *testing.T) {
 		require.NoError(t, s.RemoveNodeByAddr(addr))
 	}
 
-	// Each request is dialed at most once. One that kept its retries
-	// would be dialed every retry interval.
-	require.Never(t, func() bool {
-		return n.dialCount(addr) > 20
-	}, quietPeriod, testRetryInterval/2)
+	// A dial already under way when its request was removed may land a
+	// little later. Once those have, the address isn't dialed again. A
+	// request that kept its retries would be dialed again within a few
+	// retry intervals.
+	require.Eventually(t, func() bool {
+		before := n.dialCount(addr)
+		time.Sleep(2 * testRetryInterval)
+
+		return n.dialCount(addr) == before
+	}, 5*time.Second, time.Millisecond)
+	n.requireNoMoreDials(addr)
 }
 
 // TestRemovePermanentPeerConnected checks that removing a connected
