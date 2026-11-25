@@ -1,0 +1,466 @@
+package neutrino
+
+import (
+	"testing"
+	"time"
+
+	"github.com/lightninglabs/neutrino/banman"
+	"github.com/stretchr/testify/require"
+)
+
+// TestRemovePermanentPeerNotConnected checks that a permanent peer can be
+// removed while it isn't connected, whether its dials fail, its connections
+// drop right away, or its handshake never finishes, and that it isn't dialed
+// again once removed.
+func TestRemovePermanentPeerNotConnected(t *testing.T) {
+	modes := map[string]dialMode{
+		"dial fails":       dialRefuse,
+		"connection drops": dialHangUp,
+		"handshake stalls": dialSilent,
+	}
+	for name, mode := range modes {
+		t.Run(name, func(t *testing.T) {
+			n := newTestPeerNet(t)
+			n.setMode(testPeerAddr, mode)
+			s := newTestService(t, n)
+
+			waitForDial(t, n)
+
+			require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+			n.requireNoMoreDials(testPeerAddr)
+			n.requireNoOpenConns()
+			require.Empty(t, s.Peers())
+
+			// The peer is gone, so removing it again fails.
+			require.Error(t, s.RemoveNodeByAddr(testPeerAddr))
+		})
+	}
+}
+
+// TestRemovePermanentPeerDuringDial checks that removing a permanent peer
+// whose dial is in flight ends its request: once the dial fails, the peer
+// isn't dialed again.
+func TestRemovePermanentPeerDuringDial(t *testing.T) {
+	n := newTestPeerNet(t)
+	release := n.hold(testPeerAddr)
+	t.Cleanup(release)
+	s := newTestService(t, n)
+
+	waitForDial(t, n)
+	require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+	release()
+
+	n.requireNoMoreDials(testPeerAddr)
+	require.Equal(t, 1, n.dialCount(testPeerAddr))
+}
+
+// TestRemovePermanentPeerJustAdded checks that a permanent peer removed right
+// after it's added, possibly before the connection manager has registered its
+// request, is dialed at most once, by a dial already under way.
+func TestRemovePermanentPeerJustAdded(t *testing.T) {
+	const addr = "127.0.0.2:18555"
+
+	n := newTestPeerNet(t)
+	s := newTestService(t, n)
+
+	for range 20 {
+		require.NoError(t, s.ConnectNode(addr, true))
+		require.NoError(t, s.RemoveNodeByAddr(addr))
+	}
+
+	// A dial already under way when its request was removed may land a
+	// little later. Once those have, the address isn't dialed again. A
+	// request that kept its retries would be dialed again within a few
+	// retry intervals.
+	require.Eventually(t, func() bool {
+		before := n.dialCount(addr)
+		time.Sleep(2 * testRetryInterval)
+
+		return n.dialCount(addr) == before
+	}, 5*time.Second, time.Millisecond)
+	n.requireNoMoreDials(addr)
+}
+
+// TestRemovePermanentPeerConnected checks that removing a connected
+// permanent peer disconnects it for good.
+func TestRemovePermanentPeerConnected(t *testing.T) {
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := newTestService(t, n)
+
+	waitForPeer(t, s, testPeerAddr)
+	require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+
+	n.requireNoMoreDials(testPeerAddr)
+	n.requireNoOpenConns()
+	require.Empty(t, s.Peers())
+	require.Equal(t, 1, n.dialCount(testPeerAddr))
+}
+
+// TestRemovePermanentPeerByID checks that a connected permanent peer can be
+// removed by its ID.
+func TestRemovePermanentPeerByID(t *testing.T) {
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := newTestService(t, n)
+
+	sp := waitForPeer(t, s, testPeerAddr)
+	require.NoError(t, s.RemoveNodeByID(sp.ID()))
+
+	n.requireNoMoreDials(testPeerAddr)
+	n.requireNoOpenConns()
+	require.Error(t, s.RemoveNodeByAddr(testPeerAddr))
+}
+
+// TestConnectNodeRejectsDuplicatePermanentPeer checks that while a permanent
+// peer's dial is in flight, ConnectNode refuses to add the address again, so
+// there's only ever one dial to it.
+func TestConnectNodeRejectsDuplicatePermanentPeer(t *testing.T) {
+	n := newTestPeerNet(t)
+	release := n.hold(testPeerAddr)
+	t.Cleanup(release)
+	s := newTestService(t, n)
+
+	waitForDial(t, n)
+	require.Error(t, s.ConnectNode(testPeerAddr, true))
+	require.Error(t, s.ConnectNode(testPeerAddr, false))
+
+	// Give a second dial time to start, were there one.
+	require.Never(t, func() bool {
+		return n.maxConcurrentDials() > 1
+	}, quietPeriod, testRetryInterval/2)
+}
+
+// TestPermanentPeerAddressForms checks that a permanent peer is matched by
+// its resolved address, so a hostname, its IP, and an address with or
+// without the default port all name the same peer.
+func TestPermanentPeerAddressForms(t *testing.T) {
+	// peer.test resolves to 127.0.0.3, and simnet's default port is
+	// 18555.
+	const resolved = "127.0.0.3:18555"
+
+	n := newTestPeerNet(t)
+	n.setMode(resolved, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode("peer.test", true))
+	waitForPeer(t, s, resolved)
+
+	for _, addr := range []string{
+		"peer.test", "peer.test:18555", "127.0.0.3", resolved,
+	} {
+		require.Error(t, s.ConnectNode(addr, true), addr)
+	}
+
+	require.NoError(t, s.RemoveNodeByAddr("peer.test:18555"))
+	n.requireNoMoreDials(resolved)
+	require.Equal(t, 1, n.dialCount(resolved))
+
+	// An onion address gets the default port too, and its name is
+	// case insensitive.
+	const onion = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twa" +
+		"gswzczad.onion"
+	require.NoError(t, s.ConnectNode(onion, true))
+	require.Error(t, s.ConnectNode(
+		"DUCKDUCKGOGG42XJOC72X3SJASOWOARFBGCMVFIMAFTT6TWAGSWZ"+
+			"CZAD.onion:18555", true,
+	))
+	require.NoError(t, s.RemoveNodeByAddr(onion+":18555"))
+}
+
+// TestRemovePermanentPeerDuringHandshake checks that a permanent peer removed
+// while its handshake is in flight doesn't join once the handshake finishes.
+func TestRemovePermanentPeerDuringHandshake(t *testing.T) {
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	answer := n.gate()
+	t.Cleanup(answer)
+	s := newTestService(t, n)
+
+	require.Eventually(t, func() bool {
+		return n.open.Load() == 1
+	}, 5*time.Second, time.Millisecond)
+
+	require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+	answer()
+
+	n.requireNoOpenConns()
+	n.requireNoMoreDials(testPeerAddr)
+	require.Empty(t, s.Peers())
+}
+
+// TestConnectNodeMakesOneOffPeerPermanent checks that ConnectNode(addr, true)
+// for a connected one-off peer makes it permanent, keeping its connection,
+// rather than dialing the peer again and dropping the duplicate connection
+// over and over.
+func TestConnectNodeMakesOneOffPeerPermanent(t *testing.T) {
+	const addr = "127.0.0.2:18555"
+
+	n := newTestPeerNet(t)
+	n.setMode(addr, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode(addr, false))
+	sp := waitForPeer(t, s, addr)
+
+	require.NoError(t, s.ConnectNode(addr, true))
+	require.Error(t, s.ConnectNode(addr, true))
+	n.requireNoMoreDials(addr)
+	require.Equal(t, 1, n.dialCount(addr))
+	require.Same(t, sp, s.PeerByAddr(addr))
+
+	// Once its connection is lost, the peer is reconnected as a
+	// permanent one.
+	sp.Disconnect()
+	require.Eventually(t, func() bool {
+		next := s.PeerByAddr(addr)
+		return next != nil && next != sp
+	}, 10*time.Second, 5*time.Millisecond)
+	require.Equal(t, 2, n.dialCount(addr))
+
+	require.NoError(t, s.RemoveNodeByAddr(addr))
+	n.requireNoMoreDials(addr)
+	require.Empty(t, s.Peers())
+}
+
+// TestPermanentPeerTakesPlaceOfOneOffPeer checks that a permanent peer that
+// connects while we're at MaxPeers takes the place of a one-off peer, the
+// newest one that isn't the sync peer, rather than being refused and
+// redialed over and over.
+func TestPermanentPeerTakesPlaceOfOneOffPeer(t *testing.T) {
+	const (
+		first  = "127.0.0.2:18555"
+		second = "127.0.0.3:18555"
+	)
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 2
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	n.setMode(first, dialServe)
+	n.setMode(second, dialServe)
+	s := newTestService(t, n)
+
+	// The permanent peer is unreachable until the one-off peers fill
+	// both places. The first becomes the sync peer.
+	require.NoError(t, s.ConnectNode(first, false))
+	syncPeer := waitForPeer(t, s, first)
+	require.Eventually(t, func() bool {
+		return s.blockManager.SyncPeer() == syncPeer
+	}, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, s.ConnectNode(second, false))
+	waitForPeer(t, s, second)
+	n.setMode(testPeerAddr, dialServe)
+
+	waitForPeer(t, s, testPeerAddr)
+	n.requireNoMoreDials(testPeerAddr)
+	require.Nil(t, s.PeerByAddr(second))
+	require.Same(t, syncPeer, s.PeerByAddr(first))
+	require.Len(t, s.Peers(), 2)
+
+	// Another permanent peer goes above MaxPeers rather than evict the
+	// sync peer.
+	require.NoError(t, s.ConnectNode(second, true))
+	waitForPeer(t, s, second)
+	n.requireNoMoreDials(second)
+	require.Len(t, s.Peers(), 3)
+}
+
+// TestPermanentPeersAboveMaxPeers checks that every configured peer is
+// connected to and kept, even when there are more of them than MaxPeers.
+func TestPermanentPeersAboveMaxPeers(t *testing.T) {
+	others := []string{"127.0.0.2:18555", "127.0.0.3:18555"}
+	all := append([]string{testPeerAddr}, others...)
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 1
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	for _, addr := range all {
+		n.setMode(addr, dialServe)
+	}
+	s := newTestService(t, n, others...)
+
+	for _, addr := range all {
+		waitForPeer(t, s, addr)
+	}
+	for _, addr := range all {
+		n.requireNoMoreDials(addr)
+		require.Equal(t, 1, n.dialCount(addr), addr)
+	}
+	require.Len(t, s.Peers(), len(all))
+}
+
+// TestReAddPermanentPeerWhileItShutsDown checks that a permanent peer added
+// again right after its removal, while its old connection may still be
+// shutting down, connects once the old peer is gone.
+func TestReAddPermanentPeerWhileItShutsDown(t *testing.T) {
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := newTestService(t, n)
+
+	for range 5 {
+		sp := waitForPeer(t, s, testPeerAddr)
+		require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
+		require.NoError(t, s.ConnectNode(testPeerAddr, true))
+
+		require.Eventually(t, func() bool {
+			next := s.PeerByAddr(testPeerAddr)
+			return next != nil && next != sp
+		}, 10*time.Second, 5*time.Millisecond)
+	}
+}
+
+// TestPeerLookupAddressForms checks that PeerByAddr and DisconnectNodeByAddr
+// match a peer by its resolved address, and that DisconnectNodeByAddr finds
+// any peer, so a permanent peer is disconnected and then reconnected.
+func TestPeerLookupAddressForms(t *testing.T) {
+	// peer.test resolves to 127.0.0.3, and simnet's default port is
+	// 18555.
+	const resolved = "127.0.0.3:18555"
+
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	n.setMode(resolved, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode("peer.test", false))
+	sp := waitForPeer(t, s, resolved)
+	forms := []string{"peer.test", "peer.test:18555", "127.0.0.3"}
+	for _, addr := range forms {
+		require.Same(t, sp, s.PeerByAddr(addr), addr)
+	}
+
+	// The peer is no longer found once it's done, which may take a
+	// moment after it's gone from the connected peers.
+	require.NoError(t, s.DisconnectNodeByAddr("peer.test"))
+	require.Eventually(t, func() bool {
+		return s.PeerByAddr(resolved) == nil &&
+			s.DisconnectNodeByAddr("peer.test") != nil
+	}, 5*time.Second, time.Millisecond)
+
+	// The permanent peer is found by its IP alone, and comes back.
+	permanent := waitForPeer(t, s, testPeerAddr)
+	require.NoError(t, s.DisconnectNodeByAddr("127.0.0.1"))
+	require.Eventually(t, func() bool {
+		next := s.PeerByAddr(testPeerAddr)
+		return next != nil && next != permanent
+	}, 10*time.Second, 5*time.Millisecond)
+}
+
+// TestPermanentPeerWaitsOutBan checks that a permanent peer that is banned,
+// or quarantined, isn't dialed while that lasts, rather than being dialed and
+// dropped every retry interval, and is connected again once it's over.
+func TestPermanentPeerWaitsOutBan(t *testing.T) {
+	// The ban store keeps whole seconds, so a ban may end up to a
+	// second early, and lasts at least two seconds here.
+	const length = 3 * time.Second
+
+	// Each case either bans the peer or quarantines it.
+	tests := map[string]bool{
+		"banned":      true,
+		"quarantined": false,
+	}
+	for name, ban := range tests {
+		t.Run(name, func(t *testing.T) {
+			oldBan := BanDuration
+			BanDuration = length
+			t.Cleanup(func() { BanDuration = oldBan })
+
+			n := newTestPeerNet(t)
+			n.setMode(testPeerAddr, dialServe)
+			s := newTestService(t, n)
+			sp := waitForPeer(t, s, testPeerAddr)
+
+			if ban {
+				err := s.BanPeer(
+					testPeerAddr, banman.NoCompactFilters,
+				)
+				require.NoError(t, err)
+			} else {
+				s.QuarantinePeer(testPeerAddr, length)
+			}
+			require.Eventually(t, func() bool {
+				return !sp.Connected()
+			}, 5*time.Second, time.Millisecond)
+
+			// A dial made while the peer is excluded would be
+			// dropped, so there's none until it's over.
+			dials := n.dialCount(testPeerAddr)
+			require.Never(t, func() bool {
+				return n.dialCount(testPeerAddr) != dials
+			}, 1500*time.Millisecond, testRetryInterval/2)
+
+			require.Eventually(t, func() bool {
+				next := s.PeerByAddr(testPeerAddr)
+				return next != nil && next != sp
+			}, 10*time.Second, 5*time.Millisecond)
+		})
+	}
+}
+
+// TestPermanentPeerKeepsSyncPeer checks that a permanent peer that connects
+// while we're full doesn't evict the sync peer, and goes above MaxPeers if
+// the sync peer is the only one-off peer.
+func TestPermanentPeerKeepsSyncPeer(t *testing.T) {
+	const oneOff = "127.0.0.2:18555"
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 1
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	n.setMode(oneOff, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode(oneOff, false))
+	sp := waitForPeer(t, s, oneOff)
+	require.Eventually(t, func() bool {
+		return s.blockManager.SyncPeer() == sp
+	}, 10*time.Second, 5*time.Millisecond)
+
+	n.setMode(testPeerAddr, dialServe)
+	waitForPeer(t, s, testPeerAddr)
+	require.Never(t, func() bool {
+		return !sp.Connected()
+	}, quietPeriod, testRetryInterval/2)
+	require.Len(t, s.Peers(), 2)
+}
+
+// TestUnbanPermanentPeerReconnects checks that unbanning a permanent peer
+// dials it right away, rather than when its request, which backs off while
+// the peer is banned, would next retry.
+func TestUnbanPermanentPeerReconnects(t *testing.T) {
+	// The retry interval is long enough here for the backoff to be
+	// told apart from an immediate dial.
+	const retry = 500 * time.Millisecond
+
+	oldRetry, oldBan := ConnectionRetryInterval, BanDuration
+	ConnectionRetryInterval, BanDuration = retry, time.Hour
+	t.Cleanup(func() {
+		ConnectionRetryInterval, BanDuration = oldRetry, oldBan
+	})
+
+	n := newTestPeerNet(t)
+	n.setMode(testPeerAddr, dialServe)
+	s := startTestService(t, t.TempDir(), n, connectTo())
+	sp := waitForPeer(t, s, testPeerAddr)
+
+	require.NoError(t, s.BanPeer(testPeerAddr, banman.NoCompactFilters))
+	require.Eventually(t, func() bool {
+		return !sp.Connected()
+	}, 5*time.Second, time.Millisecond)
+
+	// The request retries after one interval, is refused, and next
+	// retries two intervals after that. Unbanning in between dials the
+	// peer at once, where the request alone would wait until then.
+	time.Sleep(retry * 3 / 2)
+	dials := n.dialCount(testPeerAddr)
+	require.NoError(t, s.UnbanPeer(testPeerAddr, true))
+	require.Eventually(t, func() bool {
+		return n.dialCount(testPeerAddr) > dials
+	}, retry/2, time.Millisecond)
+	waitForPeer(t, s, testPeerAddr)
+}

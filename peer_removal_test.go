@@ -49,10 +49,10 @@ func TestRemovePersistentPeerEndsItsRequest(t *testing.T) {
 	require.NoError(t, err)
 	s := &ChainService{connManager: cm}
 	sp := &ServerPeer{Peer: p, persistent: true, connReq: req}
-	state := &peerState{
-		persistentPeers: map[int32]*ServerPeer{sp.ID(): sp},
-		outboundGroups:  make(map[string]int),
-	}
+	state := newPeerState()
+	state.persistentPeers[sp.ID()] = sp
+	state.peers[sp.key()] = sp
+	state.permanent[sp.key()] = &permanentReq{Addr: req.Addr, req: req}
 
 	reply := make(chan error, 1)
 	s.handleQuery(state, removeNodeMsg{

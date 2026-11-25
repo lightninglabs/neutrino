@@ -120,7 +120,85 @@ type updatePeerHeightsMsg struct {
 type peerState struct {
 	outboundPeers   map[int32]*ServerPeer
 	persistentPeers map[int32]*ServerPeer
-	outboundGroups  map[string]int
+
+	// peers holds every peer we have a connection to, from the moment
+	// the connection is made until the peer is done, so it includes
+	// peers that are still in their handshake. There is at most one
+	// peer per address.
+	peers map[peerKey]*ServerPeer
+
+	// permanent holds the request of every permanent peer, whether it's
+	// connected, dialing, or waiting to retry. It is the one record of
+	// which addresses we keep a connection to, so adding, finding and
+	// removing a permanent peer all go through it.
+	permanent map[peerKey]*permanentReq
+}
+
+// newPeerState returns an empty peerState.
+func newPeerState() *peerState {
+	return &peerState{
+		persistentPeers: make(map[int32]*ServerPeer),
+		outboundPeers:   make(map[int32]*ServerPeer),
+		peers:           make(map[peerKey]*ServerPeer),
+		permanent:       make(map[peerKey]*permanentReq),
+	}
+}
+
+// peerKey identifies a peer by the resolved address we dial, an ip:port or
+// an onion host:port. A hostname and its IP, or an address with and without
+// the default port, give the same key, so requests and peers are matched by
+// it rather than by the string a caller passed in.
+type peerKey string
+
+// keyOf returns the key of a resolved address, as returned by
+// addrStringToNetAddr.
+func keyOf(addr net.Addr) peerKey {
+	return peerKey(addr.String())
+}
+
+// key returns the peer's key. All of our peers are outbound, and an outbound
+// peer's Addr is the string of the address we dialed.
+func (sp *ServerPeer) key() peerKey {
+	return peerKey(sp.Addr())
+}
+
+// errPeerRemoved is returned by the dial function for the request of a
+// permanent peer that has been removed.
+var errPeerRemoved = errors.New("permanent peer removed")
+
+// errPeerBanned and errPeerQuarantined are returned by the dial function for
+// a peer that is banned or quarantined, and errGroupTaken for a peer we found
+// ourselves in an outbound group we already have a dial or a peer in.
+var (
+	errPeerBanned      = errors.New("peer is banned")
+	errPeerQuarantined = errors.New("peer is quarantined")
+	errGroupTaken      = errors.New("outbound group already taken")
+)
+
+// permanentReq is the connection request of a permanent peer. It is also the
+// request's address: the connection manager redials a permanent request on
+// its own after every failure, passing its address to the dial function each
+// time, which lets the dial function see that a request has been removed and
+// end it rather than dial.
+type permanentReq struct {
+	// Addr is the resolved address of the peer.
+	net.Addr
+
+	// req is the request we give the connection manager. Its Addr is
+	// this permanentReq.
+	req *connmgr.ConnReq
+
+	// removed is set once the peer is removed, before the request is
+	// ended.
+	removed atomic.Bool
+}
+
+// newPermanentReq returns a permanent request for the resolved address.
+func newPermanentReq(addr net.Addr) *permanentReq {
+	pr := &permanentReq{Addr: addr}
+	pr.req = &connmgr.ConnReq{Addr: pr, Permanent: true}
+
+	return pr
 }
 
 // Count returns the count of all known peers.
@@ -723,7 +801,10 @@ type ChainService struct { // nolint:maligned
 	sqlBackend           *sqldb.Backend
 	workManager          querysyncwm.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
-	queryPeerQuarantine  map[string]time.Time
+
+	// quarantine holds the peers excluded from queries for a while. The
+	// peer handler writes it, and the dial function reads it as well.
+	quarantine peerQuarantine
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -738,6 +819,10 @@ type ChainService struct { // nolint:maligned
 
 	nameResolver func(string) ([]net.IP, error)
 	dialer       func(net.Addr) (net.Conn, error)
+
+	// conns holds every connection we have dialed until it's closed, so
+	// that Stop can close those the connection manager drops.
+	conns connSet
 
 	// connectOnly is set when the service only connects to the peers in
 	// Config.ConnectPeers, with no address discovery.
@@ -818,9 +903,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
-		queryPeerQuarantine: make(
-			map[string]time.Time,
-		),
 	}
 	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
 		ConnectedPeers:     s.ConnectedPeers,
@@ -995,6 +1077,13 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					continue
 				}
 
+				// Skip quarantined peers too, which we'd
+				// refuse to dial.
+				now := time.Now()
+				if s.quarantine.active(addrString, now) {
+					continue
+				}
+
 				// Skip any addresses that correspond to our set
 				// of currently connected peers.
 				if _, ok := connectedPeers[addrString]; ok {
@@ -1033,7 +1122,14 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 				// Mark an attempt for the valid address.
 				s.addrManager.Attempt(addr.NetAddress())
-				return s.addrStringToNetAddr(addrString)
+				netAddr, err := s.addrStringToNetAddr(
+					addrString,
+				)
+				if err != nil {
+					return nil, err
+				}
+
+				return &discoveredAddr{Addr: netAddr}, nil
 			}
 
 			return nil, errors.New("no valid connect address")
@@ -1044,7 +1140,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		RetryDuration:  ConnectionRetryInterval,
 		TargetOutbound: uint32(TargetOutbound),
 		OnConnection:   s.outboundPeerConnected,
-		Dial:           dialUntilQuit(dialer, s.quit),
+		Dial:           s.dialPeer(dialUntilQuit(dialer, s.quit)),
 	}
 	if len(cfg.ConnectPeers) == 0 {
 		cmgrCfg.GetNewAddress = newAddressFunc
@@ -1125,8 +1221,10 @@ func NewChainService(cfg Config) (*ChainService, error) {
 					return
 				}
 				if err != nil {
-					log.Warnf("unable to lookup IP for "+
-						"%v: %v", addr, err)
+					log.Warnf("Unable to look up "+
+						"configured peer %v, "+
+						"retrying in %v: %v", addr,
+						ConnectionRetryInterval, err)
 
 					select {
 					// Try again in 5 seconds.
@@ -1140,10 +1238,16 @@ func NewChainService(cfg Config) (*ChainService, error) {
 				break
 			}
 
-			s.connManager.Connect(&connmgr.ConnReq{
-				Addr:      tcpAddr,
-				Permanent: true,
+			// The only error is a peer given twice, which is
+			// already being connected to.
+			err := s.connectNode(connectNodeMsg{
+				addr:      tcpAddr,
+				permanent: true,
 			})
+			if err != nil {
+				log.Warnf("Configured peer %v (%v) not added "+
+					"again: %v", addr, tcpAddr, err)
+			}
 		}()
 	}
 
@@ -1285,22 +1389,37 @@ func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
 	}()
 }
 
-func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {
-	if s.queryPeerQuarantine == nil {
-		s.queryPeerQuarantine = make(map[string]time.Time)
+// peerQuarantine records which peer addresses are quarantined, and until
+// when. It is safe for concurrent use.
+type peerQuarantine struct {
+	mtx   sync.Mutex
+	until map[string]time.Time
+}
+
+// add quarantines addr until the given time, unless it's quarantined for
+// longer already.
+func (q *peerQuarantine) add(addr string, until time.Time) {
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
+
+	if q.until == nil {
+		q.until = make(map[string]time.Time)
 	}
 
-	if current, ok := s.queryPeerQuarantine[addr]; ok &&
-		current.After(until) {
-
+	if current, ok := q.until[addr]; ok && current.After(until) {
 		return
 	}
 
-	s.queryPeerQuarantine[addr] = until
+	q.until[addr] = until
 }
 
-func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
-	until, ok := s.queryPeerQuarantine[addr]
+// active returns whether addr is quarantined at the given time, and forgets
+// a quarantine that has expired.
+func (q *peerQuarantine) active(addr string, now time.Time) bool {
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
+
+	until, ok := q.until[addr]
 	if !ok {
 		return false
 	}
@@ -1309,7 +1428,7 @@ func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
 		return true
 	}
 
-	delete(s.queryPeerQuarantine, addr)
+	delete(q.until, addr)
 	return false
 }
 
@@ -1328,7 +1447,19 @@ func (s *ChainService) UnbanPeer(addr string, parmanent bool) error {
 		return fmt.Errorf("unable to unban peer: %v", err)
 	}
 
-	return s.ConnectNode(addr, parmanent)
+	// A permanent peer's request has been refused its dials while the
+	// peer was banned, and has backed off for up to five minutes. We
+	// restart it, so the peer is dialed now.
+	netAddr, err := s.addrStringToNetAddr(addr)
+	if err != nil {
+		return err
+	}
+
+	return s.connectNode(connectNodeMsg{
+		addr:      netAddr,
+		permanent: parmanent,
+		restart:   true,
+	})
 }
 
 // IsBanned returns true if the peer is banned, and false otherwise.
@@ -1387,11 +1518,7 @@ func (s *ChainService) NetTotals() (uint64, uint64) {
 // peers to and from the server, banning peers, and broadcasting messages to
 // peers.  It must be run in a goroutine.
 func (s *ChainService) peerHandler() {
-	state := &peerState{
-		persistentPeers: make(map[int32]*ServerPeer),
-		outboundPeers:   make(map[int32]*ServerPeer),
-		outboundGroups:  make(map[string]int),
-	}
+	state := newPeerState()
 
 	// With a fixed set of peers there's no discovery, so nothing would
 	// use the seeded addresses. We skip the lookups too, as btcd does
@@ -1443,11 +1570,13 @@ out:
 			s.handleQuery(state, qmsg)
 
 		case <-s.quit:
-			// Disconnect all peers on server shutdown.
-			state.forAllPeers(func(sp *ServerPeer) {
+			// Disconnect all peers on server shutdown, those
+			// still in their handshake as well, so none of their
+			// connections outlive the service.
+			for _, sp := range state.peers {
 				log.Tracef("Shutdown peer %s", sp)
 				sp.Disconnect()
-			})
+			}
 			break out
 		}
 	}
@@ -1486,15 +1615,23 @@ func (s *ChainService) addrStringToNetAddr(addr string) (net.Addr, error) {
 	}
 
 	// Tor addresses cannot be resolved to an IP, so just return onionAddr
-	// instead.
+	// instead. Like a resolved IP address, it always has a port, the
+	// default one if none was given, and onion names are case
+	// insensitive, so one onion peer gives one address string.
+	host = strings.ToLower(host)
 	if strings.HasSuffix(host, ".onion") {
-		return &onionAddr{addr: addr}, nil
+		return &onionAddr{addr: net.JoinHostPort(host, strPort)}, nil
 	}
 
 	// Attempt to look up an IP address associated with the parsed host.
-	ips, err := s.nameResolver(host)
-	if err != nil {
-		return nil, err
+	// An IP address is its own, which saves a lookup through a resolver
+	// that may be slow.
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		ips, err = s.nameResolver(host)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(ips) == 0 {
@@ -1559,26 +1696,38 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 		sp.Disconnect()
 		return false
 	}
-	if s.peerQuarantined(sp.Addr(), time.Now()) {
+	if s.quarantine.active(sp.Addr(), time.Now()) {
 		sp.Disconnect()
 		return false
 	}
 
 	// TODO: Check for max peers from a single IP.
 
-	// Limit max number of total peers.
+	// Limit max number of total peers. A permanent peer is one we were
+	// asked to keep, so it's never refused: were it refused, its request
+	// would retry, and be refused again, for as long as we're full.
+	// Instead it takes the place of a one-off peer, or, with only
+	// permanent peers left, goes above MaxPeers, the way Bitcoin Core
+	// keeps separate slots for the nodes it's told to add. Neither can
+	// loop: an evicted one-off peer isn't replaced while we're full, and
+	// a permanent peer evicts no other permanent peer.
 	if state.Count() >= MaxPeers {
-		log.Infof("Max peers reached [%d] - disconnecting peer %s",
-			MaxPeers, sp)
-		sp.Disconnect()
-		// TODO: how to handle permanent peers here?
-		// they should be rescheduled.
-		return false
+		if !sp.persistent {
+			log.Infof("Max peers reached [%d] - disconnecting "+
+				"peer %s", MaxPeers, sp)
+			sp.Disconnect()
+			return false
+		}
+
+		if !s.evictOneOffPeer(state) {
+			log.Infof("Max peers reached [%d] - keeping "+
+				"permanent peer %s above the limit",
+				MaxPeers, sp)
+		}
 	}
 
 	// Add the new peer and start it.
 	log.Debugf("New peer %s", sp)
-	state.outboundGroups[addrmgr.GroupKey(sp.NA())]++
 	if sp.persistent {
 		state.persistentPeers[sp.ID()] = sp
 	} else {
@@ -1667,60 +1816,85 @@ func (s *ChainService) notifyConnectedPeer(
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
 // invoked from the peerHandler goroutine.
 func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
-	// If the peer is being tracked internally, i.e., we received their
-	// VerAck, we'll need to remove them.
-	var list map[int32]*ServerPeer
-	if sp.persistent {
-		list = state.persistentPeers
-	} else {
-		list = state.outboundPeers
-	}
-	if _, ok := list[sp.ID()]; ok {
-		state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
-		delete(list, sp.ID())
+	key := sp.key()
+	delete(state.peers, key)
+	dropPeer(state, sp)
 
-		log.Debugf("Removed peer %s", sp)
-	}
-
-	// Only request a new connection if the peer being disconnected is not
-	// persistent and we still need more peer connections. There's no need
-	// to do so if the peer is persistent since the connection manager will
-	// attempt to reconnect.
-	if sp.persistent {
+	// The connection manager reconnects a permanent peer on its own.
+	pr, permanent := state.permanent[key]
+	if permanent && pr.req == sp.connReq {
 		s.connManager.Disconnect(sp.connReq.ID())
 		return
 	}
 
-	s.connManager.Remove(sp.connReq.ID())
-	if state.Count() < MaxPeers {
+	// A one-off peer's request ends with it. A removed permanent peer
+	// had its request ended on removal.
+	if !sp.persistent {
+		s.connManager.Remove(sp.connReq.ID())
+	}
+
+	// A permanent request held back while this peer had its address,
+	// because this was a one-off peer made permanent or a removed
+	// permanent peer added again, starts now. Its request can't have
+	// started before, since we admit one peer per address, and refuse
+	// one-off connections to a permanent peer's address.
+	if permanent {
+		go s.connManager.Connect(pr.req)
+		return
+	}
+
+	// Only request a new connection if the peer being disconnected is not
+	// persistent and we still need more peer connections.
+	if !sp.persistent && state.Count() < MaxPeers {
 		go s.connManager.NewConnReq()
 	}
 }
 
-// disconnectPeer attempts to drop the connection of a targeted peer in the
-// passed peer list. Targets are identified via usage of the passed
-// `compareFunc`, which should return `true` if the passed peer is the target
-// peer. This function returns true on success and false if the peer is unable
-// to be located. If the peer is found, and the passed callback: `whenFound'
-// isn't nil, we call it with the peer as the argument before it is removed
-// from the peerList, and is disconnected from the server.
-func disconnectPeer(peerList map[int32]*ServerPeer,
-	compareFunc func(*ServerPeer) bool, whenFound func(*ServerPeer)) bool {
+// evictOneOffPeer disconnects a one-off outbound peer to make room for a
+// permanent one. It returns false if there's none to evict. The sync peer
+// is kept, since losing it would stall header sync until another is picked,
+// and of the others the newest one goes, as the one we know least about.
+func (s *ChainService) evictOneOffPeer(state *peerState) bool {
+	syncPeer := s.blockManager.SyncPeer()
 
-	for addr, peer := range peerList {
-		if compareFunc(peer) {
-			if whenFound != nil {
-				whenFound(peer)
-			}
+	var newest *ServerPeer
+	for _, sp := range state.outboundPeers {
+		// A one-off peer that has been made permanent is kept.
+		if _, ok := state.permanent[sp.key()]; ok {
+			continue
+		}
+		if sp == syncPeer {
+			continue
+		}
 
-			// This is ok because we are not continuing
-			// to iterate so won't corrupt the loop.
-			delete(peerList, addr)
-			peer.Disconnect()
-			return true
+		if newest == nil || sp.ID() > newest.ID() {
+			newest = sp
 		}
 	}
-	return false
+	if newest == nil {
+		return false
+	}
+
+	log.Infof("Disconnecting peer %s to make room for a permanent peer",
+		newest)
+	dropPeer(state, newest)
+	newest.Disconnect()
+
+	return true
+}
+
+// dropPeer takes the peer out of the added peers if it's among them, that is,
+// if we received its verack.
+func dropPeer(state *peerState, sp *ServerPeer) {
+	list := state.outboundPeers
+	if sp.persistent {
+		list = state.persistentPeers
+	}
+	if _, ok := list[sp.ID()]; ok {
+		delete(list, sp.ID())
+
+		log.Debugf("Removed peer %s", sp)
+	}
 }
 
 // SendTransaction broadcasts the transaction to all currently active peers so
@@ -1766,26 +1940,54 @@ func NewPeerConfig(sp *ServerPeer) *peer.Config {
 }
 
 // outboundPeerConnected is invoked by the connection manager when a new
-// outbound connection is established.  It initializes a new outbound server
-// peer instance, associates it with the relevant state such as the connection
-// request instance and the connection itself, and finally notifies the address
-// manager of the attempt.
+// outbound connection is established. It hands the connection to the peer
+// handler, which starts a server peer on it in handlePeerConnected, since
+// the peer handler holds the peers and the permanent requests that decide
+// whether we keep the connection.
 func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
+	select {
+	case s.query <- peerConnectedMsg{req: c, conn: conn}:
+	case <-s.quit:
+		_ = conn.Close()
+	}
+}
+
+// handlePeerConnected starts a peer on a new outbound connection, unless we
+// have a peer at that address already or the request is no longer wanted.
+// It is invoked from the peerHandler goroutine.
+func (s *ChainService) handlePeerConnected(state *peerState,
+	c *connmgr.ConnReq, conn net.Conn) {
+
 	// In the event that we have to disconnect the peer, we'll choose the
 	// appropriate method to do so based on whether the connection request
-	// is for a persistent peer or not.
-	var disconnect func()
-	if c.Permanent {
-		disconnect = func() {
+	// is for a persistent peer or not. Either way, the connection manager
+	// closes the connection.
+	disconnect := func() {
+		if c.Permanent {
 			s.connManager.Disconnect(c.ID())
+			return
 		}
-	} else {
-		disconnect = func() {
-			// Since we're completely removing the request for this
-			// peer, we'll need to request a new one.
-			s.connManager.Remove(c.ID())
-			go s.connManager.NewConnReq()
-		}
+
+		// Since we're completely removing the request for this peer,
+		// we'll need to request a new one.
+		s.connManager.Remove(c.ID())
+		go s.connManager.NewConnReq()
+	}
+
+	key := keyOf(c.Addr)
+	pr, permanent := state.permanent[key]
+	switch {
+	// The permanent peer was removed while this connection was being
+	// made, and the removal ended its request.
+	case c.Permanent && (!permanent || pr.req != c):
+		_ = conn.Close()
+		return
+
+	// A permanent request owns its address, so a one-off connection to
+	// it would be a second peer at the address.
+	case !c.Permanent && permanent:
+		disconnect()
+		return
 	}
 
 	// If the peer is banned, then we'll disconnect them.
@@ -1797,7 +1999,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 
 	// If we're already connected to this peer, then we'll close out the new
 	// connection and keep the old.
-	if s.PeerByAddr(peerAddr) != nil {
+	if _, ok := state.peers[key]; ok {
 		disconnect()
 		return
 	}
@@ -1811,13 +2013,196 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	}
 	sp.Peer = p
 	sp.connReq = c
+	state.peers[key] = sp
 	sp.AssociateConnection(conn)
+
+	// Stop waits for the peer to be done. The peer handler runs under
+	// s.wg, so this Add comes before Stop's Wait returns.
+	s.wg.Add(1)
 	go s.peerDoneHandler(sp)
+}
+
+// dialPeer wraps the dial function given to the connection manager. A
+// permanent request may be removed before the connection manager has
+// registered it, when ending it there has no effect, and the manager then
+// dials it and keeps retrying. The manager has registered a request by the
+// time it dials it, so we end a removed request here instead of dialing.
+// Every connection we dial is also tracked in s.conns, until it's closed.
+func (s *ChainService) dialPeer(
+	dial func(net.Addr) (net.Conn, error)) func(net.Addr) (net.Conn,
+	error) {
+
+	return func(addr net.Addr) (net.Conn, error) {
+		if pr, ok := addr.(*permanentReq); ok {
+			if pr.removed.Load() {
+				s.connManager.Remove(pr.req.ID())
+				return nil, errPeerRemoved
+			}
+			addr = pr.Addr
+		}
+
+		// We'd only drop a connection to a banned or quarantined
+		// peer once it's made, and a permanent request would then
+		// retry it on the next retry interval, since the connection
+		// manager resets a request's backoff when it connects. A
+		// failed dial grows the backoff instead, so the request
+		// waits out the ban or quarantine, and dials again after.
+		peerAddr := addr.String()
+		if s.IsBanned(peerAddr) {
+			return nil, errPeerBanned
+		}
+		if s.quarantine.active(peerAddr, time.Now()) {
+			return nil, errPeerQuarantined
+		}
+
+		// A peer we found ourselves isn't dialed while we have a
+		// dial or a peer in its group. The address was picked for
+		// an empty group, but another dial may have taken the group
+		// since.
+		discovered, only := addr.(*discoveredAddr)
+		if only {
+			addr = discovered.Addr
+		}
+		group := s.groupOf(addr)
+		if !s.conns.startDial(group, only) {
+			return nil, errGroupTaken
+		}
+
+		conn, err := dial(addr)
+
+		return s.conns.track(group, conn, err)
+	}
+}
+
+// connSet holds open connections, so they can all be closed at once. It
+// also counts, for each outbound group, the dials in flight and the open
+// connections they made, from the start of the dial until the connection is
+// closed, so a dial and a peer in its handshake count as much as a
+// connected peer.
+type connSet struct {
+	mtx    sync.Mutex
+	conns  map[*setConn]struct{}
+	groups map[string]int
+	closed bool
+}
+
+// setConn is a connection in a connSet, which leaves the set when it's
+// closed.
+type setConn struct {
+	net.Conn
+	set   *connSet
+	group string
+}
+
+// Close closes the connection and takes it out of its set.
+func (c *setConn) Close() error {
+	c.set.mtx.Lock()
+	if _, ok := c.set.conns[c]; ok {
+		delete(c.set.conns, c)
+		c.set.groups[c.group]--
+	}
+	c.set.mtx.Unlock()
+
+	return c.Conn.Close()
+}
+
+// startDial counts a dial to the group, unless only is set and the group
+// has a dial or a connection already, in which case it returns false.
+func (cs *connSet) startDial(group string, only bool) bool {
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	if only && cs.groups[group] != 0 {
+		return false
+	}
+
+	if cs.groups == nil {
+		cs.groups = make(map[string]int)
+	}
+	cs.groups[group]++
+
+	return true
+}
+
+// track adds the result of a dial to the group, counted by startDial, to
+// the set. A failed dial is no longer counted, and a connection made once
+// the set has been closed is closed right away.
+func (cs *connSet) track(group string, conn net.Conn,
+	err error) (net.Conn, error) {
+
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	if err == nil && cs.closed {
+		_ = conn.Close()
+		err = ErrShuttingDown
+	}
+	if err != nil {
+		cs.groups[group]--
+		return nil, err
+	}
+
+	if cs.conns == nil {
+		cs.conns = make(map[*setConn]struct{})
+	}
+	c := &setConn{Conn: conn, set: cs, group: group}
+	cs.conns[c] = struct{}{}
+
+	return c, nil
+}
+
+// groupCount returns the number of dials and connections to the group.
+func (cs *connSet) groupCount(group string) int {
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	return cs.groups[group]
+}
+
+// closeAll closes every connection in the set, and any added later.
+func (cs *connSet) closeAll() {
+	cs.mtx.Lock()
+	cs.closed = true
+	conns := cs.conns
+	cs.conns = nil
+	cs.mtx.Unlock()
+
+	for c := range conns {
+		_ = c.Conn.Close()
+	}
+}
+
+// groupOf returns the outbound group of a resolved address.
+func (s *ChainService) groupOf(addr net.Addr) string {
+	host, portStr, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return addr.String()
+	}
+
+	na, err := s.addrManager.HostToNetAddress(host, uint16(port), 0)
+	if err != nil {
+		return addr.String()
+	}
+
+	return addrmgr.GroupKey(na)
+}
+
+// discoveredAddr is the address of a peer we found ourselves, rather than
+// one we were asked to connect to. We keep to one of those per outbound
+// group.
+type discoveredAddr struct {
+	net.Addr
 }
 
 // peerDoneHandler handles peer disconnects by notifying the server that it's
 // done along with other performing other desirable cleanup.
 func (s *ChainService) peerDoneHandler(sp *ServerPeer) {
+	defer s.wg.Done()
+
 	sp.WaitForDisconnect()
 
 	select {
@@ -1965,6 +2350,11 @@ func (s *ChainService) Stop() error {
 	close(s.quit)
 	s.wg.Wait()
 
+	// The connection manager drops a connection whose dial finished
+	// while it was stopping, without closing it, so we close any
+	// connection still open now that every peer is done.
+	s.conns.closeAll()
+
 	// Release the SQL backend connection if one was opened. This must
 	// happen after all background goroutines exit so no one is using
 	// the backend mid-shutdown.
@@ -1987,10 +2377,12 @@ func (s *ChainService) IsCurrent() bool {
 }
 
 // PeerByAddr lets the caller look up a peer address in the service's peer
-// table, if connected to that peer address.
+// table, if connected to that peer address. The address is matched the way
+// ConnectNode resolves it.
 func (s *ChainService) PeerByAddr(addr string) *ServerPeer {
+	key := s.lookupKey(addr)
 	for _, peer := range s.Peers() {
-		if peer.Addr() == addr {
+		if peer.key() == key {
 			return peer
 		}
 	}
