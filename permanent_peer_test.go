@@ -224,36 +224,47 @@ func TestConnectNodeMakesOneOffPeerPermanent(t *testing.T) {
 }
 
 // TestPermanentPeerTakesPlaceOfOneOffPeer checks that a permanent peer that
-// connects while we're at MaxPeers takes the place of a one-off peer, rather
-// than being refused and redialed over and over.
+// connects while we're at MaxPeers takes the place of a one-off peer, the
+// newest one that isn't the sync peer, rather than being refused and
+// redialed over and over.
 func TestPermanentPeerTakesPlaceOfOneOffPeer(t *testing.T) {
-	const oneOff = "127.0.0.2:18555"
+	const (
+		first  = "127.0.0.2:18555"
+		second = "127.0.0.3:18555"
+	)
 
 	oldMax, oldTarget := MaxPeers, TargetOutbound
-	MaxPeers = 1
+	MaxPeers = 2
 	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
 
 	n := newTestPeerNet(t)
-	n.setMode(oneOff, dialServe)
+	n.setMode(first, dialServe)
+	n.setMode(second, dialServe)
 	s := newTestService(t, n)
 
-	// The permanent peer is unreachable until the one-off peer fills
-	// the only place.
-	require.NoError(t, s.ConnectNode(oneOff, false))
-	waitForPeer(t, s, oneOff)
+	// The permanent peer is unreachable until the one-off peers fill
+	// both places. The first becomes the sync peer.
+	require.NoError(t, s.ConnectNode(first, false))
+	syncPeer := waitForPeer(t, s, first)
+	require.Eventually(t, func() bool {
+		return s.blockManager.SyncPeer() == syncPeer
+	}, 10*time.Second, 5*time.Millisecond)
+	require.NoError(t, s.ConnectNode(second, false))
+	waitForPeer(t, s, second)
 	n.setMode(testPeerAddr, dialServe)
 
 	waitForPeer(t, s, testPeerAddr)
 	n.requireNoMoreDials(testPeerAddr)
-	require.Nil(t, s.PeerByAddr(oneOff))
-	require.Len(t, s.Peers(), 1)
-
-	// With no one-off peer left, another permanent peer goes above
-	// MaxPeers.
-	require.NoError(t, s.ConnectNode(oneOff, true))
-	waitForPeer(t, s, oneOff)
-	n.requireNoMoreDials(oneOff)
+	require.Nil(t, s.PeerByAddr(second))
+	require.Same(t, syncPeer, s.PeerByAddr(first))
 	require.Len(t, s.Peers(), 2)
+
+	// Another permanent peer goes above MaxPeers rather than evict the
+	// sync peer.
+	require.NoError(t, s.ConnectNode(second, true))
+	waitForPeer(t, s, second)
+	n.requireNoMoreDials(second)
+	require.Len(t, s.Peers(), 3)
 }
 
 // TestPermanentPeersAboveMaxPeers checks that every configured peer is
@@ -386,4 +397,32 @@ func TestPermanentPeerWaitsOutBan(t *testing.T) {
 			}, 10*time.Second, 5*time.Millisecond)
 		})
 	}
+}
+
+// TestPermanentPeerKeepsSyncPeer checks that a permanent peer that connects
+// while we're full doesn't evict the sync peer, and goes above MaxPeers if
+// the sync peer is the only one-off peer.
+func TestPermanentPeerKeepsSyncPeer(t *testing.T) {
+	const oneOff = "127.0.0.2:18555"
+
+	oldMax, oldTarget := MaxPeers, TargetOutbound
+	MaxPeers = 1
+	t.Cleanup(func() { MaxPeers, TargetOutbound = oldMax, oldTarget })
+
+	n := newTestPeerNet(t)
+	n.setMode(oneOff, dialServe)
+	s := newTestService(t, n)
+
+	require.NoError(t, s.ConnectNode(oneOff, false))
+	sp := waitForPeer(t, s, oneOff)
+	require.Eventually(t, func() bool {
+		return s.blockManager.SyncPeer() == sp
+	}, 10*time.Second, 5*time.Millisecond)
+
+	n.setMode(testPeerAddr, dialServe)
+	waitForPeer(t, s, testPeerAddr)
+	require.Never(t, func() bool {
+		return !sp.Connected()
+	}, quietPeriod, testRetryInterval/2)
+	require.Len(t, s.Peers(), 2)
 }

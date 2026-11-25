@@ -1704,7 +1704,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 			return false
 		}
 
-		if !evictOneOffPeer(state) {
+		if !s.evictOneOffPeer(state) {
 			log.Infof("Max peers reached [%d] - keeping "+
 				"permanent peer %s above the limit",
 				MaxPeers, sp)
@@ -1836,23 +1836,36 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *ServerPeer) {
 }
 
 // evictOneOffPeer disconnects a one-off outbound peer to make room for a
-// permanent one. It returns false if there's none to evict.
-func evictOneOffPeer(state *peerState) bool {
+// permanent one. It returns false if there's none to evict. The sync peer
+// is kept, since losing it would stall header sync until another is picked,
+// and of the others the newest one goes, as the one we know least about.
+func (s *ChainService) evictOneOffPeer(state *peerState) bool {
+	syncPeer := s.blockManager.SyncPeer()
+
+	var newest *ServerPeer
 	for _, sp := range state.outboundPeers {
 		// A one-off peer that has been made permanent is kept.
 		if _, ok := state.permanent[sp.key()]; ok {
 			continue
 		}
+		if sp == syncPeer {
+			continue
+		}
 
-		log.Infof("Disconnecting peer %s to make room for a "+
-			"permanent peer", sp)
-		dropPeer(state, sp)
-		sp.Disconnect()
-
-		return true
+		if newest == nil || sp.ID() > newest.ID() {
+			newest = sp
+		}
+	}
+	if newest == nil {
+		return false
 	}
 
-	return false
+	log.Infof("Disconnecting peer %s to make room for a permanent peer",
+		newest)
+	dropPeer(state, newest)
+	newest.Disconnect()
+
+	return true
 }
 
 // dropPeer takes the peer out of the added peers if it's among them, that is,
