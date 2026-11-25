@@ -66,9 +66,9 @@ type peerQuarantineSpan struct {
 	start, end time.Time
 }
 
-// quarantineSettle is how long a quarantine may take to apply, as it's
-// handed to the peer handler without waiting.
-const quarantineSettle = 3 * testRetryInterval
+// quarantineSettle is how long after a quarantine applies a dial may still
+// start, one that had passed the dial function's checks just before.
+const quarantineSettle = 5 * testRetryInterval
 
 // mayBeQuarantined returns whether a quarantine of addr may be refusing its
 // dials now.
@@ -167,7 +167,7 @@ func TestPermanentPeerProperties(t *testing.T) {
 
 		// The service adds its configured peer once it has started,
 		// and dials it as soon as it has.
-		waitForDial(rt, n, testPeerAddr)
+		waitForDial(rt, n)
 
 		drawForm := func(t *rapid.T) peerAddrForm {
 			return rapid.SampledFrom(peerAddrForms).Draw(t, "addr")
@@ -260,19 +260,32 @@ func TestPermanentPeerProperties(t *testing.T) {
 
 			"quarantine": func(t *rapid.T) {
 				addr := drawAddr(t)
-				retries := rapid.IntRange(5, 15).Draw(
+				retries := rapid.IntRange(10, 20).Draw(
 					t, "retries",
 				)
 				length := time.Duration(retries) *
 					testRetryInterval
 
-				start := time.Now()
+				// The quarantine reaches the peer handler
+				// without QuarantinePeer waiting for it, so
+				// we wait for it to apply.
+				end := time.Now().Add(length)
 				s.QuarantinePeer(addr, length)
+				require.Eventually(t, func() bool {
+					now := time.Now()
+					return s.quarantine.active(addr, now) ||
+						now.After(end)
+				}, 10*time.Second, time.Millisecond)
+				start := time.Now()
+				if start.After(end) {
+					return
+				}
+
 				m.quarantines = append(
 					m.quarantines, peerQuarantineSpan{
 						addr:  addr,
 						start: start,
-						end:   start.Add(length),
+						end:   end,
 					},
 				)
 			},

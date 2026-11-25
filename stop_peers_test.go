@@ -37,7 +37,7 @@ func TestStopClosesConnectionDroppedByConnManager(t *testing.T) {
 	t.Cleanup(release)
 	s := newTestService(t, n)
 
-	waitForDial(t, n, testPeerAddr)
+	waitForDial(t, n)
 
 	// Stop starts by stopping the connection manager. The dial then
 	// finishes, and the manager, having stopped, drops the connection.

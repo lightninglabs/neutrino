@@ -24,7 +24,7 @@ func TestRemovePermanentPeerNotConnected(t *testing.T) {
 			n.setMode(testPeerAddr, mode)
 			s := newTestService(t, n)
 
-			waitForDial(t, n, testPeerAddr)
+			waitForDial(t, n)
 
 			require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
 			n.requireNoMoreDials(testPeerAddr)
@@ -46,7 +46,7 @@ func TestRemovePermanentPeerDuringDial(t *testing.T) {
 	t.Cleanup(release)
 	s := newTestService(t, n)
 
-	waitForDial(t, n, testPeerAddr)
+	waitForDial(t, n)
 	require.NoError(t, s.RemoveNodeByAddr(testPeerAddr))
 	release()
 
@@ -121,13 +121,13 @@ func TestConnectNodeRejectsDuplicatePermanentPeer(t *testing.T) {
 	t.Cleanup(release)
 	s := newTestService(t, n)
 
-	waitForDial(t, n, testPeerAddr)
+	waitForDial(t, n)
 	require.Error(t, s.ConnectNode(testPeerAddr, true))
 	require.Error(t, s.ConnectNode(testPeerAddr, false))
 
 	// Give a second dial time to start, were there one.
 	require.Never(t, func() bool {
-		return n.maxConcurrentDials(testPeerAddr) > 1
+		return n.maxConcurrentDials() > 1
 	}, quietPeriod, testRetryInterval/2)
 }
 
@@ -173,7 +173,7 @@ func TestPermanentPeerAddressForms(t *testing.T) {
 func TestRemovePermanentPeerDuringHandshake(t *testing.T) {
 	n := newTestPeerNet(t)
 	n.setMode(testPeerAddr, dialServe)
-	answer := n.gate(testPeerAddr)
+	answer := n.gate()
 	t.Cleanup(answer)
 	s := newTestService(t, n)
 
@@ -328,9 +328,8 @@ func TestPeerLookupAddressForms(t *testing.T) {
 
 	require.NoError(t, s.ConnectNode("peer.test", false))
 	sp := waitForPeer(t, s, resolved)
-	for _, addr := range []string{"peer.test", "peer.test:18555",
-		"127.0.0.3"} {
-
+	forms := []string{"peer.test", "peer.test:18555", "127.0.0.3"}
+	for _, addr := range forms {
 		require.Same(t, sp, s.PeerByAddr(addr), addr)
 	}
 
@@ -356,16 +355,16 @@ func TestPeerLookupAddressForms(t *testing.T) {
 // dropped every retry interval, and is connected again once it's over.
 func TestPermanentPeerWaitsOutBan(t *testing.T) {
 	// The ban store keeps whole seconds, so a ban may end up to a
-	// second early.
-	const length = 2 * time.Second
+	// second early, and lasts at least two seconds here.
+	const length = 3 * time.Second
 
-	tests := map[string]func(s *ChainService) error{
-		"banned": func(s *ChainService) error {
-			return s.BanPeer(testPeerAddr, banman.NoCompactFilters)
+	tests := map[string]func(t *testing.T, s *ChainService){
+		"banned": func(t *testing.T, s *ChainService) {
+			err := s.BanPeer(testPeerAddr, banman.NoCompactFilters)
+			require.NoError(t, err)
 		},
-		"quarantined": func(s *ChainService) error {
+		"quarantined": func(t *testing.T, s *ChainService) {
 			s.QuarantinePeer(testPeerAddr, length)
-			return nil
 		},
 	}
 	for name, exclude := range tests {
@@ -379,7 +378,7 @@ func TestPermanentPeerWaitsOutBan(t *testing.T) {
 			s := newTestService(t, n)
 			sp := waitForPeer(t, s, testPeerAddr)
 
-			require.NoError(t, exclude(s))
+			exclude(t, s)
 			require.Eventually(t, func() bool {
 				return !sp.Connected()
 			}, 5*time.Second, time.Millisecond)
@@ -389,7 +388,7 @@ func TestPermanentPeerWaitsOutBan(t *testing.T) {
 			dials := n.dialCount(testPeerAddr)
 			require.Never(t, func() bool {
 				return n.dialCount(testPeerAddr) != dials
-			}, 700*time.Millisecond, testRetryInterval/2)
+			}, 1500*time.Millisecond, testRetryInterval/2)
 
 			require.Eventually(t, func() bool {
 				next := s.PeerByAddr(testPeerAddr)

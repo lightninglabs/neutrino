@@ -23,7 +23,7 @@ func TestOutboundGroupCountsDialsAndHandshakes(t *testing.T) {
 	t.Cleanup(release)
 	s := newTestService(t, n)
 
-	waitForDial(t, n, testPeerAddr)
+	waitForDial(t, n)
 	require.Equal(t, 1, s.OutboundGroupCount(group))
 
 	// The node never answers, so the handshake stays in flight.

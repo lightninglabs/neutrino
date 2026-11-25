@@ -55,7 +55,7 @@ type testPeerNet struct {
 	mu          sync.Mutex
 	modes       map[string]dialMode
 	holds       map[string]chan struct{}
-	gates       map[string]chan struct{}
+	answers     chan struct{}
 	delays      map[string]time.Duration
 	dials       map[string]int
 	dialTimes   map[string][]time.Time
@@ -75,7 +75,6 @@ func newTestPeerNet(t require.TestingT) *testPeerNet {
 		t:           t,
 		modes:       make(map[string]dialMode),
 		holds:       make(map[string]chan struct{}),
-		gates:       make(map[string]chan struct{}),
 		delays:      make(map[string]time.Duration),
 		dials:       make(map[string]int),
 		dialTimes:   make(map[string][]time.Time),
@@ -115,14 +114,14 @@ func (n *testPeerNet) hold(addr string) func() {
 	}
 }
 
-// gate makes the nodes of connections to addr made from now on wait until
-// the returned function is called before they answer the handshake.
-func (n *testPeerNet) gate(addr string) func() {
+// gate makes the nodes of connections made from now on wait until the
+// returned function is called before they answer the handshake.
+func (n *testPeerNet) gate() func() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	open := make(chan struct{})
-	n.gates[addr] = open
+	n.answers = open
 
 	var once sync.Once
 	return func() {
@@ -154,13 +153,18 @@ func (n *testPeerNet) dialsBetween(addr string, from, to time.Time) int {
 	return count
 }
 
-// maxConcurrentDials returns the most dials to addr that were in flight at
-// once.
-func (n *testPeerNet) maxConcurrentDials(addr string) int {
+// maxConcurrentDials returns the most dials to one address that were in
+// flight at once.
+func (n *testPeerNet) maxConcurrentDials() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	return n.maxInFlight[addr]
+	most := 0
+	for _, inFlight := range n.maxInFlight {
+		most = max(most, inFlight)
+	}
+
+	return most
 }
 
 // dial is the service's dialer.
@@ -184,7 +188,7 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 	n.mu.Lock()
 	n.inFlight[key]--
 	mode := n.modes[key]
-	gate := n.gates[key]
+	gate := n.answers
 	n.mu.Unlock()
 
 	if mode == dialRefuse {
@@ -418,11 +422,11 @@ func startTestService(t testEnv, dir string, n *testPeerNet,
 	return s
 }
 
-// waitForDial waits until addr is dialed.
-func waitForDial(t require.TestingT, n *testPeerNet, addr string) {
+// waitForDial waits until the configured peer, testPeerAddr, is dialed.
+func waitForDial(t require.TestingT, n *testPeerNet) {
 	require.Eventually(t, func() bool {
-		return n.dialCount(addr) > 0
-	}, 5*time.Second, time.Millisecond, "%v never dialed", addr)
+		return n.dialCount(testPeerAddr) > 0
+	}, 5*time.Second, time.Millisecond, "configured peer never dialed")
 }
 
 // waitForPeer waits until the service has a connected peer at addr.
