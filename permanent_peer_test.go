@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightninglabs/neutrino/banman"
 	"github.com/stretchr/testify/require"
 )
 
@@ -335,4 +336,52 @@ func TestPeerLookupAddressForms(t *testing.T) {
 		next := s.PeerByAddr(testPeerAddr)
 		return next != nil && next != permanent
 	}, 10*time.Second, 5*time.Millisecond)
+}
+
+// TestPermanentPeerWaitsOutBan checks that a permanent peer that is banned,
+// or quarantined, isn't dialed while that lasts, rather than being dialed and
+// dropped every retry interval, and is connected again once it's over.
+func TestPermanentPeerWaitsOutBan(t *testing.T) {
+	// The ban store keeps whole seconds, so a ban may end up to a
+	// second early.
+	const length = 2 * time.Second
+
+	tests := map[string]func(s *ChainService) error{
+		"banned": func(s *ChainService) error {
+			return s.BanPeer(testPeerAddr, banman.NoCompactFilters)
+		},
+		"quarantined": func(s *ChainService) error {
+			s.QuarantinePeer(testPeerAddr, length)
+			return nil
+		},
+	}
+	for name, exclude := range tests {
+		t.Run(name, func(t *testing.T) {
+			oldBan := BanDuration
+			BanDuration = length
+			t.Cleanup(func() { BanDuration = oldBan })
+
+			n := newTestPeerNet(t)
+			n.setMode(testPeerAddr, dialServe)
+			s := newTestService(t, n)
+			sp := waitForPeer(t, s, testPeerAddr)
+
+			require.NoError(t, exclude(s))
+			require.Eventually(t, func() bool {
+				return !sp.Connected()
+			}, 5*time.Second, time.Millisecond)
+
+			// A dial made while the peer is excluded would be
+			// dropped, so there's none until it's over.
+			dials := n.dialCount(testPeerAddr)
+			require.Never(t, func() bool {
+				return n.dialCount(testPeerAddr) != dials
+			}, 700*time.Millisecond, testRetryInterval/2)
+
+			require.Eventually(t, func() bool {
+				next := s.PeerByAddr(testPeerAddr)
+				return next != nil && next != sp
+			}, 10*time.Second, 5*time.Millisecond)
+		})
+	}
 }

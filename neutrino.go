@@ -168,6 +168,13 @@ func (sp *ServerPeer) key() peerKey {
 // permanent peer that has been removed.
 var errPeerRemoved = errors.New("permanent peer removed")
 
+// errPeerBanned and errPeerQuarantined are returned by the dial function for
+// a peer that is banned or quarantined.
+var (
+	errPeerBanned      = errors.New("peer is banned")
+	errPeerQuarantined = errors.New("peer is quarantined")
+)
+
 // permanentReq is the connection request of a permanent peer. It is also the
 // request's address: the connection manager redials a permanent request on
 // its own after every failure, passing its address to the dial function each
@@ -794,7 +801,10 @@ type ChainService struct { // nolint:maligned
 	sqlBackend           *sqldb.Backend
 	workManager          querysyncwm.WorkManager
 	filterBatchWriter    *chanutils.BatchWriter[*filterdb.FilterData]
-	queryPeerQuarantine  map[string]time.Time
+
+	// quarantine holds the peers excluded from queries for a while. The
+	// peer handler writes it, and the dial function reads it as well.
+	quarantine peerQuarantine
 
 	// peerSubscribers is a slice of active peer subscriptions, that we
 	// will notify each time a new peer is connected.
@@ -893,9 +903,6 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		persistToDisk:     cfg.PersistToDisk,
 		broadcastTimeout:  cfg.BroadcastTimeout,
 		headersImport:     cfg.HeadersImport,
-		queryPeerQuarantine: make(
-			map[string]time.Time,
-		),
 	}
 	s.workManager = querysyncwm.NewWorkManager(&querysyncwm.Config{
 		ConnectedPeers:     s.ConnectedPeers,
@@ -1366,21 +1373,44 @@ func (s *ChainService) QuarantinePeer(addr string, duration time.Duration) {
 }
 
 func (s *ChainService) trackPeerQuarantine(addr string, until time.Time) {
-	if s.queryPeerQuarantine == nil {
-		s.queryPeerQuarantine = make(map[string]time.Time)
-	}
-
-	if current, ok := s.queryPeerQuarantine[addr]; ok &&
-		current.After(until) {
-
-		return
-	}
-
-	s.queryPeerQuarantine[addr] = until
+	s.quarantine.add(addr, until)
 }
 
 func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
-	until, ok := s.queryPeerQuarantine[addr]
+	return s.quarantine.active(addr, now)
+}
+
+// peerQuarantine records which peer addresses are quarantined, and until
+// when. It is safe for concurrent use.
+type peerQuarantine struct {
+	mtx   sync.Mutex
+	until map[string]time.Time
+}
+
+// add quarantines addr until the given time, unless it's quarantined for
+// longer already.
+func (q *peerQuarantine) add(addr string, until time.Time) {
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
+
+	if q.until == nil {
+		q.until = make(map[string]time.Time)
+	}
+
+	if current, ok := q.until[addr]; ok && current.After(until) {
+		return
+	}
+
+	q.until[addr] = until
+}
+
+// active returns whether addr is quarantined at the given time, and forgets
+// a quarantine that has expired.
+func (q *peerQuarantine) active(addr string, now time.Time) bool {
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
+
+	until, ok := q.until[addr]
 	if !ok {
 		return false
 	}
@@ -1389,7 +1419,7 @@ func (s *ChainService) peerQuarantined(addr string, now time.Time) bool {
 		return true
 	}
 
-	delete(s.queryPeerQuarantine, addr)
+	delete(q.until, addr)
 	return false
 }
 
@@ -1971,17 +2001,29 @@ func (s *ChainService) dialPeer(
 	error) {
 
 	return func(addr net.Addr) (net.Conn, error) {
-		pr, ok := addr.(*permanentReq)
-		if !ok {
-			return s.conns.track(dial(addr))
+		if pr, ok := addr.(*permanentReq); ok {
+			if pr.removed.Load() {
+				s.connManager.Remove(pr.req.ID())
+				return nil, errPeerRemoved
+			}
+			addr = pr.Addr
 		}
 
-		if pr.removed.Load() {
-			s.connManager.Remove(pr.req.ID())
-			return nil, errPeerRemoved
+		// We'd only drop a connection to a banned or quarantined
+		// peer once it's made, and a permanent request would then
+		// retry it on the next retry interval, since the connection
+		// manager resets a request's backoff when it connects. A
+		// failed dial grows the backoff instead, so the request
+		// waits out the ban or quarantine, and dials again after.
+		peerAddr := addr.String()
+		if s.IsBanned(peerAddr) {
+			return nil, errPeerBanned
+		}
+		if s.quarantine.active(peerAddr, time.Now()) {
+			return nil, errPeerQuarantined
 		}
 
-		return s.conns.track(dial(pr.Addr))
+		return s.conns.track(dial(addr))
 	}
 }
 
