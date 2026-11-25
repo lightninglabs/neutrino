@@ -345,4 +345,4 @@ func TestPropertyReorgConsistency(t *testing.T) {
 }
 
 // Ensure the mock implements ChainSource.
-var _ ChainSource = (*mockChainWithTxs)(nil)
+var _ BasicChainSource = (*mockChainWithTxs)(nil)

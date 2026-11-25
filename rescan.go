@@ -30,15 +30,14 @@ var (
 	ErrRescanExit = errors.New("rescan exited")
 )
 
-// ChainSource is an interface that's in charge of retrieving information about
-// the existing chain. A rescan adapts it to the narrower rescan.ChainSource
-// that the rescan actor scans with.
-type ChainSource interface {
+// ScanSource supplies the headers, blocks and notifications for a rescan.
+// NewRescanWithMatcher uses these operations with a caller-supplied matcher.
+type ScanSource interface {
 	// ChainParams returns the parameters of the current chain.
 	ChainParams() chaincfg.Params
 
 	// BestBlock retrieves the most recent block's height and hash where we
-	// have both the header and filter header ready.
+	// can scan. A basic-filter source has both headers ready at this height.
 	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the block with the given
@@ -50,15 +49,6 @@ type ChainSource interface {
 
 	// GetBlock returns the block with the given hash.
 	GetBlock(chainhash.Hash, ...QueryOption) (*btcutil.Block, error)
-
-	// GetFilterHeaderByHeight returns the filter header of the block with
-	// the given height. The rescan no longer calls it.
-	GetFilterHeaderByHeight(uint32) (*chainhash.Hash, error)
-
-	// GetCFilter returns the filter of the given type for the block with
-	// the given hash.
-	GetCFilter(chainhash.Hash,
-		wire.FilterType, ...QueryOption) (*gcs.Filter, error)
 
 	// Subscribe returns a block subscription that delivers block
 	// notifications in order. The bestHeight parameter can be used to
@@ -73,6 +63,19 @@ type ChainSource interface {
 	// the network is current.
 	IsCurrent() bool
 }
+
+// ChainSource supplies filters of one representation in addition to chain
+// data. F is chosen by the provider. The BIP158 source uses *gcs.Filter.
+// A matcher that obtains its evidence elsewhere needs only ScanSource.
+type ChainSource[F any] interface {
+	ScanSource
+
+	// GetCFilter retrieves the requested filter for the given block.
+	GetCFilter(chainhash.Hash, wire.FilterType, ...QueryOption) (F, error)
+}
+
+// BasicChainSource supplies the BIP158 filters used by NewRescan.
+type BasicChainSource = ChainSource[*gcs.Filter]
 
 // ScanProgressHandler is used in rescanOptions to update the caller with the
 // rescan progress.
@@ -243,69 +246,22 @@ func QuitChan(quit <-chan struct{}) RescanOption {
 	}
 }
 
-// matchBlockFilter returns whether the block filter matches the watched items.
-// If this returns false, it means the block is certainly not interesting to
-// us. This method differs from blockFilterMatches in that it expects the
-// filter to already be obtained, rather than fetching the filter from the
-// network.
-func matchBlockFilter(ro *rescanOptions, filter *gcs.Filter,
-	blockHash *chainhash.Hash) (bool, error) {
-
-	return filtermatch.MatchFilter(filter, blockHash, ro.watchList)
-}
-
-// blockFilterMatches returns whether the block filter matches the watched
-// items. If this returns false, it means the block is certainly not interesting
-// to us.
-func blockFilterMatches(chain ChainSource, ro *rescanOptions,
-	blockHash *chainhash.Hash) (bool, *gcs.Filter, error) {
-
-	// TODO(roasbeef): need to ENSURE always get filter
-
-	// The utxo scanner calls this for one block after another, so we
-	// expect more calls to follow for the subsequent filters. To speed up
-	// the fetching, we make an optimistic batch query.
-	filter, err := chain.GetCFilter(
-		*blockHash, wire.GCSFilterRegular,
-		append([]QueryOption{OptimisticBatch()}, ro.queryOptions...)...,
-	)
-	if err != nil {
-		if err == headerfs.ErrHashNotFound {
-			// Block has been reorged out from under us.
-			return false, nil, nil
-		}
-		return false, nil, err
-	}
-
-	// If we found the filter, then we'll check the items in the watch list
-	// against it.
-	if filter.N() != 0 {
-		matched, err := matchBlockFilter(ro, filter, blockHash)
-		return matched, filter, err
-	}
-
-	return false, nil, nil
-}
-
-// newRescanChain adapts chain to the rescan actor's ChainSource.
-func newRescanChain(chain ChainSource,
+// newRescanChain adapts chain to the rescan actor's ScanChain.
+func newRescanChain(chain ScanSource,
 	queryOptions []QueryOption) *rescanChain {
 
 	return &rescanChain{src: chain, queryOptions: queryOptions}
 }
 
-// rescanChain adapts a ChainSource to the narrower rescan.ChainSource that
-// the actor scans. It turns the actor's context into a CancelQuery option and
-// its batch flag into the query options the legacy rescan loop used: a
-// historical filter fetch asks for an optimistic batch, a live one for two
-// retries, and a block fetch takes the caller's QueryOptions.
+// rescanChain maps actor block fetches onto cancellable queries with the
+// caller's block query options.
 type rescanChain struct {
-	src          ChainSource
+	src          ScanSource
 	queryOptions []QueryOption
 }
 
-// A compile-time check that rescanChain implements rescan.ChainSource.
-var _ rescan.ChainSource = (*rescanChain)(nil)
+// A compile-time check that rescanChain implements rescan.ScanChain.
+var _ rescan.ScanChain = (*rescanChain)(nil)
 
 // shutdownErr returns ErrShuttingDown in place of err once the chain is a
 // ChainService that has begun to stop, so a header read that fails because
@@ -320,13 +276,13 @@ func (c *rescanChain) shutdownErr(err error) error {
 	return err
 }
 
-// BestBlock is part of the rescan.ChainSource interface.
+// BestBlock is part of the rescan.ScanChain interface.
 func (c *rescanChain) BestBlock() (*headerfs.BlockStamp, error) {
 	best, err := c.src.BestBlock()
 	return best, c.shutdownErr(err)
 }
 
-// GetBlockHeaderByHeight is part of the rescan.ChainSource interface.
+// GetBlockHeaderByHeight is part of the rescan.ScanChain interface.
 func (c *rescanChain) GetBlockHeaderByHeight(
 	height uint32) (*wire.BlockHeader, error) {
 
@@ -334,7 +290,7 @@ func (c *rescanChain) GetBlockHeaderByHeight(
 	return header, c.shutdownErr(err)
 }
 
-// GetBlockHeader is part of the rescan.ChainSource interface.
+// GetBlockHeader is part of the rescan.ScanChain interface.
 func (c *rescanChain) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
 
@@ -342,7 +298,7 @@ func (c *rescanChain) GetBlockHeader(
 	return header, height, c.shutdownErr(err)
 }
 
-// GetBlock is part of the rescan.ChainSource interface.
+// GetBlock is part of the rescan.ScanChain interface.
 func (c *rescanChain) GetBlock(ctx context.Context,
 	hash chainhash.Hash) (*btcutil.Block, error) {
 
@@ -354,33 +310,38 @@ func (c *rescanChain) GetBlock(ctx context.Context,
 	return c.src.GetBlock(hash, options...)
 }
 
-// GetCFilter is part of the rescan.ChainSource interface.
-func (c *rescanChain) GetCFilter(ctx context.Context, hash chainhash.Hash,
-	batch bool) (*gcs.Filter, error) {
+// basicMatcher maps the scan's prefetch hint and cancellation onto a
+// regular compact filter query. Block query options remain independent.
+func basicMatcher(getFilter func(chainhash.Hash, wire.FilterType,
+	...QueryOption) (*gcs.Filter, error)) filtermatch.BlockMatcher {
 
-	option := NumRetries(2)
-	if batch {
-		option = OptimisticBatch()
+	fetch := func(ctx context.Context, hash chainhash.Hash, batch bool) (
+		*gcs.Filter, error) {
+
+		option := NumRetries(2)
+		if batch {
+			option = OptimisticBatch()
+		}
+		return getFilter(
+			hash, wire.GCSFilterRegular, option, CancelQuery(ctx.Done()),
+		)
 	}
-
-	return c.src.GetCFilter(
-		hash, wire.GCSFilterRegular, option, CancelQuery(ctx.Done()),
-	)
+	return filtermatch.NewBlockMatcher(filtermatch.BasicFilterSource(fetch))
 }
 
-// Subscribe is part of the rescan.ChainSource interface.
+// Subscribe is part of the rescan.ScanChain interface.
 func (c *rescanChain) Subscribe(
 	bestHeight uint32) (*blockntfns.Subscription, error) {
 
 	return c.src.Subscribe(bestHeight)
 }
 
-// IsCurrent is part of the rescan.ChainSource interface.
+// IsCurrent is part of the rescan.ScanChain interface.
 func (c *rescanChain) IsCurrent() bool {
 	return c.src.IsCurrent()
 }
 
-// MarkAsConfirmed is part of the rescan.ChainSource interface. Like the
+// MarkAsConfirmed is part of the rescan.ScanChain interface. Like the
 // legacy rescan loop, it tells the broadcaster only when the chain is a
 // ChainService's RescanChainSource.
 func (c *rescanChain) MarkAsConfirmed(txHash chainhash.Hash) {
@@ -392,7 +353,7 @@ func (c *rescanChain) MarkAsConfirmed(txHash chainhash.Hash) {
 // newRescanConfig applies options and resolves the start and end blocks
 // against chain exactly as the legacy rescan loop did, and returns the
 // resulting actor configuration and the options it was built from.
-func newRescanConfig(chain ChainSource,
+func newRescanConfig(chain ScanSource, matcher filtermatch.BlockMatcher,
 	options ...RescanOption) (*rescan.ActorConfig, *rescanOptions, error) {
 
 	// First, we'll apply the set of default options, then serially apply
@@ -498,13 +459,14 @@ func newRescanConfig(chain ChainSource,
 	}
 
 	return &rescan.ActorConfig{
-		Chain:       newRescanChain(chain, ro.queryOptions),
-		StartStamp:  curStamp,
-		StartHeader: curHeader,
-		StartTime:   ro.startTime,
-		WatchAddrs:  ro.watchAddrs,
-		WatchInputs: matchInputs(ro.watchInputs),
-		EndBlock:    *ro.endBlock,
+		BlockMatcher: matcher,
+		Chain:        newRescanChain(chain, ro.queryOptions),
+		StartStamp:   curStamp,
+		StartHeader:  curHeader,
+		StartTime:    ro.startTime,
+		WatchAddrs:   ro.watchAddrs,
+		WatchInputs:  matchInputs(ro.watchInputs),
+		EndBlock:     *ro.endBlock,
 
 		// The legacy rescan retried a block it could not fetch after
 		// 100ms, and ended with ErrShuttingDown once the service
@@ -562,7 +524,8 @@ type Rescan struct { // nolint:maligned
 
 	options []RescanOption
 
-	chain ChainSource
+	chain   ScanSource
+	matcher filtermatch.BlockMatcher
 
 	errMtx sync.Mutex
 	err    error
@@ -570,15 +533,37 @@ type Rescan struct { // nolint:maligned
 	wg sync.WaitGroup
 }
 
-// NewRescan returns a rescan object that runs in another goroutine and has an
-// updatable filter. It returns the long-running rescan object, and a channel
-// which returns any error on termination of the rescan process.
-func NewRescan(chain ChainSource, options ...RescanOption) *Rescan {
+// NewRescan returns a wallet rescan backed by chain's compact filters.
+func NewRescan(chain BasicChainSource, options ...RescanOption) *Rescan {
+	var matcher filtermatch.BlockMatcher
+	if src, ok := chain.(interface {
+		BlockMatcher() filtermatch.BlockMatcher
+	}); ok {
+		matcher = src.BlockMatcher()
+	}
+	if matcher == nil {
+		matcher = basicMatcher(chain.GetCFilter)
+	}
+	return newRescan(chain, matcher, options...)
+}
+
+// NewRescanWithMatcher scans chain with the supplied backend. F ties the
+// backend's candidates to their verifier. Chain access does not depend on F.
+func NewRescanWithMatcher[F any](chain ScanSource, backend filtermatch.Backend[F],
+	options ...RescanOption) *Rescan {
+
+	return newRescan(chain, filtermatch.NewBlockMatcher(backend), options...)
+}
+
+func newRescan(chain ScanSource, matcher filtermatch.BlockMatcher,
+	options ...RescanOption) *Rescan {
+
 	return &Rescan{
 		running: make(chan struct{}),
 		ready:   make(chan struct{}),
 		options: options,
 		chain:   chain,
+		matcher: matcher,
 	}
 }
 
@@ -623,7 +608,7 @@ func (r *Rescan) Start() <-chan error {
 // run creates and starts the rescan actor, waits for the rescan to end, and
 // shuts the actor down. It returns why the rescan ended.
 func (r *Rescan) run() error {
-	cfg, ro, err := newRescanConfig(r.chain, r.options...)
+	cfg, ro, err := newRescanConfig(r.chain, r.matcher, r.options...)
 	if err != nil {
 		return err
 	}

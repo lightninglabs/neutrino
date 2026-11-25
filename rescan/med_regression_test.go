@@ -171,7 +171,7 @@ func TestActorUpdateDuringSlowBatch(t *testing.T) {
 }
 
 // Ensure gatedChain implements ChainSource.
-var _ ChainSource = (*gatedChain)(nil)
+var _ BasicChainSource = (*gatedChain)(nil)
 
 // TestActorUpdateBehindNotificationBacklog is a regression test: an update
 // sent while a current scan has a backlog of slow connect notifications in

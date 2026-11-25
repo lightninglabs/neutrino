@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/filtermatch"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
@@ -116,22 +117,21 @@ func (c Cursor) scanBlock(ctx context.Context, env *Environment,
 		matches     []TxMatch
 	)
 	if next.Scanning && len(next.Watch.List) > 0 {
-		matched, filter, err := FetchAndMatchFilter(
-			ctx, env.Chain, &hash, next.Watch.List, batch,
+		matcher, err := env.matcher()
+		if err != nil {
+			return c, nil, err
+		}
+		block, err := filtermatch.FetchMatchingBlock(
+			ctx, matcher, hash, next.Watch.List, batch,
+			env.Chain.GetBlock,
 		)
 		if err != nil {
 			return c, nil, err
 		}
-
-		if matched {
-			relevantTxs, matches, next.Watch, err =
-				ExtractBlockMatches(
-					ctx, env.Chain, &next.CurStamp,
-					filter, next.Watch,
-				)
-			if err != nil {
-				return c, nil, err
-			}
+		if block != nil {
+			relevantTxs, matches, next.Watch = extractBlockMatches(
+				block, next.Watch,
+			)
 		}
 	}
 

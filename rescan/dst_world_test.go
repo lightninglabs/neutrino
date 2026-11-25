@@ -592,7 +592,7 @@ func (s *dstSource) isCurrentYet() bool {
 	return s.becameCurrent || !s.notCurrentArmed
 }
 
-var _ ChainSource = (*dstSource)(nil)
+var _ BasicChainSource = (*dstSource)(nil)
 
 // clearFaults disarms every fault for the heal phase.
 func (s *dstSource) clearFaults() {

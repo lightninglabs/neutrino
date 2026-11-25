@@ -11,15 +11,11 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// ChainSource is the chain the rescan actor scans. It is narrower than the
-// neutrino package's ChainSource: the actor never names a neutrino query
-// option, so this package does not import the neutrino package, and the
-// neutrino package can run its public rescan on the actor. The neutrino
-// package adapts its own ChainSource to this one and maps the context and the
-// batch flag onto its query options.
-type ChainSource interface {
-	// BestBlock returns the most recent block for which both the header
-	// and the filter header are stored.
+// ScanChain supplies chain data and notifications independently of the
+// filter format used to select blocks.
+type ScanChain interface {
+	// BestBlock returns the latest block ready to scan. A basic-filter
+	// source has both the block header and the filter header at this tip.
 	BestBlock() (*headerfs.BlockStamp, error)
 
 	// GetBlockHeaderByHeight returns the header of the active block at
@@ -34,13 +30,6 @@ type ChainSource interface {
 	// early, with an error, once ctx is done.
 	GetBlock(ctx context.Context, hash chainhash.Hash) (*btcutil.Block,
 		error)
-
-	// GetCFilter fetches the regular compact filter of the block with the
-	// given hash. batch asks for the filters of the following blocks in
-	// the same query, since a historical scan fetches them next. The fetch
-	// returns early, with an error, once ctx is done.
-	GetCFilter(ctx context.Context, hash chainhash.Hash,
-		batch bool) (*gcs.Filter, error)
 
 	// Subscribe returns a subscription that delivers block notifications
 	// in order. A non-zero bestHeight asks for a backlog of connects for
@@ -58,3 +47,18 @@ type ChainSource interface {
 	// rescan did. A chain that broadcasts nothing does nothing.
 	MarkAsConfirmed(txHash chainhash.Hash)
 }
+
+// ChainSource extends chain access with a provider-selected filter type.
+type ChainSource[F any] interface {
+	ScanChain
+
+	// GetCFilter fetches the filter of the block with the
+	// given hash. batch asks for the filters of the following blocks in
+	// the same query, since a historical scan fetches them next. The fetch
+	// returns early, with an error, once ctx is done.
+	GetCFilter(ctx context.Context, hash chainhash.Hash,
+		batch bool) (F, error)
+}
+
+// BasicChainSource is the BIP158 source used by the default matcher.
+type BasicChainSource = ChainSource[*gcs.Filter]

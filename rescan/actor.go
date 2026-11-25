@@ -100,9 +100,12 @@ type Callbacks struct {
 
 // ActorConfig configures a new RescanActor.
 type ActorConfig struct {
-	// Chain provides access to headers, filters, blocks, and
-	// subscriptions.
-	Chain ChainSource
+	// Chain provides access to headers, blocks and subscriptions.
+	Chain ScanChain
+
+	// BlockMatcher selects and verifies candidate blocks. A nil matcher
+	// uses the basic filters supplied by Chain.
+	BlockMatcher filtermatch.BlockMatcher
 
 	// StartStamp is the block stamp to begin scanning from. It counts as
 	// already scanned, so the first block scanned is StartStamp.Height+1.
@@ -240,6 +243,17 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 		return nil, fmt.Errorf("invalid watch address: %w", err)
 	}
 
+	env := &Environment{
+		Chain:        cfg.Chain,
+		BlockMatcher: cfg.BlockMatcher,
+		StartTime:    cfg.StartTime,
+		EndBlock:     cfg.EndBlock,
+	}
+	env.BlockMatcher, err = env.matcher()
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create the FSM with initial state and immutable environment.
@@ -256,11 +270,7 @@ func NewRescanActor(cfg ActorConfig) (*RescanActor, error) {
 				cfg.StartTime,
 			),
 		}},
-		&Environment{
-			Chain:     cfg.Chain,
-			StartTime: cfg.StartTime,
-			EndBlock:  cfg.EndBlock,
-		},
+		env,
 	)
 
 	if cfg.RetryInterval <= 0 {
