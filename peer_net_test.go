@@ -58,6 +58,7 @@ type testPeerNet struct {
 	gates       map[string]chan struct{}
 	delays      map[string]time.Duration
 	dials       map[string]int
+	dialTimes   map[string][]time.Time
 	inFlight    map[string]int
 	maxInFlight map[string]int
 	nodes       map[net.Conn]*testConn
@@ -77,6 +78,7 @@ func newTestPeerNet(t require.TestingT) *testPeerNet {
 		gates:       make(map[string]chan struct{}),
 		delays:      make(map[string]time.Duration),
 		dials:       make(map[string]int),
+		dialTimes:   make(map[string][]time.Time),
 		inFlight:    make(map[string]int),
 		maxInFlight: make(map[string]int),
 		nodes:       make(map[net.Conn]*testConn),
@@ -136,6 +138,22 @@ func (n *testPeerNet) dialCount(addr string) int {
 	return n.dials[addr]
 }
 
+// dialsBetween returns how many times addr was dialed between the given
+// times.
+func (n *testPeerNet) dialsBetween(addr string, from, to time.Time) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	count := 0
+	for _, at := range n.dialTimes[addr] {
+		if at.After(from) && at.Before(to) {
+			count++
+		}
+	}
+
+	return count
+}
+
 // maxConcurrentDials returns the most dials to addr that were in flight at
 // once.
 func (n *testPeerNet) maxConcurrentDials(addr string) int {
@@ -151,6 +169,7 @@ func (n *testPeerNet) dial(addr net.Addr) (net.Conn, error) {
 
 	n.mu.Lock()
 	n.dials[key]++
+	n.dialTimes[key] = append(n.dialTimes[key], time.Now())
 	n.inFlight[key]++
 	n.maxInFlight[key] = max(n.maxInFlight[key], n.inFlight[key])
 	hold := n.holds[key]

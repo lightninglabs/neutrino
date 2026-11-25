@@ -50,7 +50,21 @@ type peerModel struct {
 	// one-off connection to it.
 	baseline map[string]int
 	budget   map[string]int
+
+	// quarantines are the quarantines applied so far.
+	quarantines []peerQuarantineSpan
 }
+
+// peerQuarantineSpan is a quarantine of an address, from when it was asked
+// for until it ends.
+type peerQuarantineSpan struct {
+	addr       string
+	start, end time.Time
+}
+
+// quarantineSettle is how long a quarantine may take to apply, as it's
+// handed to the peer handler without waiting.
+const quarantineSettle = 3 * testRetryInterval
 
 // leave records that addr is no longer a permanent peer.
 func (m *peerModel) leave(addr string) {
@@ -73,6 +87,14 @@ func (m *peerModel) check(t require.TestingT) {
 			"%v dialed while not a permanent peer", addr)
 	}
 
+	// No dial starts while an address is quarantined.
+	for _, q := range m.quarantines {
+		dials := m.n.dialsBetween(
+			q.addr, q.start.Add(quarantineSettle), q.end,
+		)
+		require.Zero(t, dials, "%v dialed while quarantined", q.addr)
+	}
+
 	seen := make(map[string]bool)
 	for _, sp := range m.s.Peers() {
 		require.False(t, seen[sp.Addr()], "two peers at %v",
@@ -81,10 +103,12 @@ func (m *peerModel) check(t require.TestingT) {
 	}
 }
 
-// TestPermanentPeerProperties runs random sequences of adding and removing
-// peers, under every form of their address, while their dials succeed, fail
-// and drop, and checks that a removed peer isn't dialed again, that there's
-// at most one peer per address, that every permanent peer ends up connected
+// TestPermanentPeerProperties runs random sequences of adding, removing and
+// quarantining peers, under every form of their address, while their dials
+// succeed, fail and drop, and checks that a removed peer isn't dialed again,
+// that a quarantined one isn't dialed while that lasts, that there's at most
+// one peer per address, that the outbound group count matches the
+// connections we hold, that every permanent peer ends up connected
 // and stays so, and that Stop leaves no connection open.
 func TestPermanentPeerProperties(t *testing.T) {
 	if testing.Short() {
@@ -190,6 +214,25 @@ func TestPermanentPeerProperties(t *testing.T) {
 				n.setDelay(drawAddr(t), delay)
 			},
 
+			"quarantine": func(t *rapid.T) {
+				addr := drawAddr(t)
+				retries := rapid.IntRange(5, 15).Draw(
+					t, "retries",
+				)
+				length := time.Duration(retries) *
+					testRetryInterval
+
+				start := time.Now()
+				s.QuarantinePeer(addr, length)
+				m.quarantines = append(
+					m.quarantines, peerQuarantineSpan{
+						addr:  addr,
+						start: start,
+						end:   start.Add(length),
+					},
+				)
+			},
+
 			"drop": func(t *rapid.T) {
 				if sp := s.PeerByAddr(drawAddr(t)); sp != nil {
 					sp.Disconnect()
@@ -271,6 +314,11 @@ func TestPermanentPeerProperties(t *testing.T) {
 				addr)
 		}
 		m.check(rt)
+
+		// With no dial in flight, the outbound group of the test
+		// addresses counts just the connections still open.
+		require.EqualValues(rt, n.open.Load(),
+			s.OutboundGroupCount("local"))
 
 		require.NoError(rt, s.Stop())
 		n.requireNoOpenConns()
