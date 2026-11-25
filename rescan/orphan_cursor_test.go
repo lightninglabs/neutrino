@@ -238,7 +238,8 @@ func TestOrphanWithMissingParentEndsRescan(t *testing.T) {
 		require.Equal(t, []OutboxEvent{WaitOutbox{}}, outboxOf(tr))
 		waiting, ok := tr.NextState.(*StateSyncing)
 		require.True(t, ok)
-		require.Equal(t, state.Cursor, waiting.Cursor)
+		require.Equal(t, state.CurStamp, waiting.CurStamp)
+		require.Equal(t, i+1, waiting.waits.n)
 		next = waiting
 	}
 

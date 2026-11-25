@@ -87,6 +87,17 @@ func (b *batchSpendReporter) FailRemaining(err error) error {
 	return err
 }
 
+// takeRemaining returns every request that hasn't been answered yet. The
+// reporter must not be used after.
+func (b *batchSpendReporter) takeRemaining() []*GetUtxoRequest {
+	var reqs []*GetUtxoRequest
+	for _, requests := range b.requests {
+		reqs = append(reqs, requests...)
+	}
+
+	return reqs
+}
+
 // notifyRequests delivers the same final response to the given requests, and
 // cleans up any remaining state for the outpoint.
 //

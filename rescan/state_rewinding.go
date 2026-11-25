@@ -105,12 +105,19 @@ func (s *StateRewinding) processRewind(
 		})
 	}
 
-	// Walk back to the previous block.
-	header, height, err := env.header(
-		&cur.CurHeader.PrevBlock,
-	)
+	// Walk back to the previous block. A deep reorg can have removed it
+	// from the store already, in which case we wait for its disconnects
+	// the same way Syncing does.
+	header, height, wait, err := cur.parent(env)
 	if err != nil {
 		return nil, err
+	}
+	if wait != nil {
+		return transition(&StateRewinding{
+			Cursor:       *wait,
+			TargetHeight: s.TargetHeight,
+			plan:         s.plan,
+		}, WaitOutbox{}), nil
 	}
 
 	cur.CurHeader = *header

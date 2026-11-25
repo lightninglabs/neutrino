@@ -98,9 +98,9 @@ func (c *swapChain) config() *UtxoScannerConfig {
 }
 
 // runScan starts a scanner over cfg, asks it about outpoint created at
-// birthHeight, and returns the result.
-func runScan(t *testing.T, cfg *UtxoScannerConfig, outpoint wire.OutPoint,
-	birthHeight uint32) (*SpendReport, error) {
+// height 1, and returns the result.
+func runScan(t *testing.T, cfg *UtxoScannerConfig,
+	outpoint wire.OutPoint) (*SpendReport, error) {
 
 	t.Helper()
 
@@ -111,7 +111,7 @@ func runScan(t *testing.T, cfg *UtxoScannerConfig, outpoint wire.OutPoint,
 	req, err := scanner.Enqueue(&InputWithScript{
 		OutPoint: outpoint,
 		PkScript: []byte{0x51},
-	}, birthHeight, nil)
+	}, 1, nil)
 	require.NoError(t, err)
 
 	cancel := make(chan struct{})
@@ -168,7 +168,7 @@ func TestUtxoScannerSkipsBlockReplacedInFlight(t *testing.T) {
 		return nil
 	}
 
-	report, err := runScan(t, chain.config(), outpoint, 1)
+	report, err := runScan(t, chain.config(), outpoint)
 	require.NoError(t, err)
 	require.NotNil(t, report)
 	require.Nil(t, report.SpendingTx, "reported a spend from a block "+
@@ -192,7 +192,7 @@ func TestUtxoScannerFailsRequestOnFetchError(t *testing.T) {
 	errFetch := errors.New("fetch failed")
 	chain.onFetch = func(chainhash.Hash) error { return errFetch }
 
-	_, err := runScan(t, chain.config(), outpoint, 1)
+	_, err := runScan(t, chain.config(), outpoint)
 	require.ErrorIs(t, err, errFetch)
 }
 
@@ -244,7 +244,7 @@ func TestUtxoScannerRechecksSkippedBlock(t *testing.T) {
 		return true, nil
 	}
 
-	report, err := runScan(t, cfg, outpoint, 1)
+	report, err := runScan(t, cfg, outpoint)
 	require.NoError(t, err)
 	require.NotNil(t, report)
 	require.NotNil(t, report.SpendingTx, "missed the spend in the block "+

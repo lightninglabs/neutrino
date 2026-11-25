@@ -2,8 +2,11 @@ package rescan
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
@@ -24,6 +27,69 @@ type Cursor struct {
 	// Scanning records whether a scanned block has passed the wallet
 	// birthday. Once set, every later block's filter is checked.
 	Scanning bool
+
+	// waits counts the steps in a row that found the parent of the
+	// cursor block missing from the store. See parent.
+	waits parentWaits
+}
+
+// parentWaits counts the steps in a row that found the parent of the block
+// hash missing from the store. The count only applies while the cursor stays
+// on that block: any move changes the cursor's hash, so the count starts over
+// without a state having to reset it, and a state rebuilt around the same
+// cursor (an update that doesn't rewind, say) keeps it.
+type parentWaits struct {
+	hash chainhash.Hash
+	n    int
+}
+
+// maxParentWaits is how many steps in a row a state waits for the
+// disconnects of a deep reorg before it ends the rescan. It is more than one
+// so that a retry timer armed for an earlier cursor of the same reorg, which
+// can fire early on the current one, doesn't end the rescan by itself.
+const maxParentWaits = 3
+
+// parent reads the parent of the cursor block, for a state that has to step
+// back from it. If the parent can't be read, it returns either a cursor to
+// wait on, with one more wait counted, or a HeaderStoreError once the
+// cursor has waited maxParentWaits steps.
+//
+// A rollback removes the orphaned headers from the store before it queues
+// their disconnects, so during a reorg more than one block deep the parent
+// can be gone while the disconnects that will move the cursor are still on
+// their way. If the parent is still gone after a few retry intervals, the
+// disconnects aren't coming (the reorg landed before the actor subscribed),
+// and we end the rescan rather than guess which blocks to report as
+// disconnected.
+func (c Cursor) parent(env *Environment) (*wire.BlockHeader, uint32, *Cursor,
+	error) {
+
+	header, height, err := env.header(&c.CurHeader.PrevBlock)
+	if err == nil && int32(height) != c.CurStamp.Height-1 {
+		err = fmt.Errorf("parent at height %d, want %d", height,
+			c.CurStamp.Height-1)
+	}
+	if err == nil {
+		return header, height, nil, nil
+	}
+
+	waits := c.waits
+	if waits.hash != c.CurStamp.Hash {
+		waits = parentWaits{hash: c.CurStamp.Hash}
+	}
+
+	var storeErr *HeaderStoreError
+	if waits.n < maxParentWaits && !errors.As(err, &storeErr) {
+		wait := c
+		wait.waits = parentWaits{hash: waits.hash, n: waits.n + 1}
+
+		return nil, 0, &wait, nil
+	}
+
+	return nil, 0, nil, &HeaderStoreError{Err: fmt.Errorf("block %s at "+
+		"height %d is no longer active, and its parent %s can't be "+
+		"read: %w", c.CurStamp.Hash, c.CurStamp.Height,
+		c.CurHeader.PrevBlock, err)}
 }
 
 // scanBlock scans header, which must extend the cursor, and returns the
