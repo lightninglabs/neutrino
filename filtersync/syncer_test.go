@@ -219,6 +219,8 @@ func TestSyncerStartAndTipRead(t *testing.T) {
 				event: tipRead(interval - 1),
 				effects: []Effect{FetchCheckpointed{
 					FilterType: wire.GCSFilterRegular,
+					TipHash:    tipHash,
+					TipHeight:  interval - 1,
 				}},
 				phase: PhaseFetchingCheckpointed,
 			},
@@ -271,8 +273,14 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				phase:   PhaseRetrying,
 			},
 			{
-				name:    "retry fetches again",
+				name:    "retry reads the tip again",
 				event:   RetryElapsed{},
+				effects: []Effect{ReadBlockTip{}},
+				phase:   PhaseReadingTip,
+			},
+			{
+				name:    "same tip fetches again",
+				event:   tipRead(height),
 				effects: []Effect{PollQuit{}, fetch},
 				phase:   PhaseFetchingCheckpoints,
 			},
@@ -310,6 +318,8 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				effects: []Effect{FetchCheckpointed{
 					FilterType:  wire.GCSFilterRegular,
 					Checkpoints: hashes{cp1, cp2},
+					TipHash:     tipHash,
+					TipHeight:   height,
 				}},
 				phase: PhaseFetchingCheckpointed,
 			},
@@ -362,8 +372,14 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 					phase: PhaseRetrying,
 				},
 				{
-					name:    "retry fetches again",
+					name:    "retry reads the tip again",
 					event:   RetryElapsed{},
+					effects: []Effect{ReadBlockTip{}},
+					phase:   PhaseReadingTip,
+				},
+				{
+					name:    "same tip fetches again",
+					event:   tipRead(height),
 					effects: []Effect{PollQuit{}, fetch},
 					phase:   PhaseFetchingCheckpoints,
 				},
@@ -400,8 +416,14 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				phase:   PhaseRetrying,
 			},
 			{
-				name:    "retry resolves the same checkpoints",
+				name:    "retry reads the tip again",
 				event:   RetryElapsed{},
+				effects: []Effect{ReadBlockTip{}},
+				phase:   PhaseReadingTip,
+			},
+			{
+				name:    "same tip resolves the same lists",
+				event:   tipRead(height),
 				effects: []Effect{PollQuit{}, resolve},
 				phase:   PhaseResolvingConflict,
 			},
@@ -412,8 +434,14 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				phase:   PhaseRetrying,
 			},
 			{
-				name:    "retry resolves again",
+				name:    "retry reads the tip once more",
 				event:   RetryElapsed{},
+				effects: []Effect{ReadBlockTip{}},
+				phase:   PhaseReadingTip,
+			},
+			{
+				name:    "same tip resolves again",
+				event:   tipRead(height),
 				effects: []Effect{PollQuit{}, resolve},
 				phase:   PhaseResolvingConflict,
 			},
@@ -454,6 +482,8 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				effects: []Effect{FetchCheckpointed{
 					FilterType:  wire.GCSFilterRegular,
 					Checkpoints: hashes{cp1, cp2},
+					TipHash:     tipHash,
+					TipHeight:   at,
 				}},
 				phase: PhaseFetchingCheckpointed,
 			},
@@ -535,6 +565,8 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 				effects: []Effect{FetchCheckpointed{
 					FilterType:  wire.GCSFilterRegular,
 					Checkpoints: hashes{cp1, cp2},
+					TipHash:     tipHash,
+					TipHeight:   height,
 				}},
 				phase: PhaseFetchingCheckpointed,
 			},
@@ -573,6 +605,98 @@ func TestSyncerCheckpointLoop(t *testing.T) {
 	})
 }
 
+// TestSyncerRetryFollowsReplacedTip checks that a retry inside the checkpoint
+// loop reads the block header tip again, so a tip replaced during the delay
+// is what the next round fetches checkpoints for and what the checkpointed
+// fetch is bound to. Reusing the tip the pass started from would ask every
+// peer for a stop block they no longer serve, forever.
+func TestSyncerRetryFollowsReplacedTip(t *testing.T) {
+	t.Parallel()
+
+	height := 2*interval + 5
+	newTip := *hashOf(101)
+	lists := peerLists{"a": {cp1, cp2}, "b": {cp1, cp2}}
+
+	// What follows the failed round is the same for every kind of
+	// failure: the retry reads the tip, finds it replaced, and the rest
+	// of the pass works off the new one.
+	afterFailure := []step{
+		{
+			name:    "retry reads the tip",
+			event:   RetryElapsed{},
+			effects: []Effect{ReadBlockTip{}},
+			phase:   PhaseReadingTip,
+		},
+		{
+			name: "replaced tip is fetched",
+			event: BlockTipRead{
+				Hash:   newTip,
+				Height: height,
+				Tips:   chainstore.Tips{BlockHeight: height},
+			},
+			effects: []Effect{PollQuit{}, FetchCheckpoints{
+				FilterType: wire.GCSFilterRegular,
+				StopHash:   newTip,
+			}},
+			phase: PhaseFetchingCheckpoints,
+		},
+		{
+			name:  "new tip's checkpoints",
+			event: CheckpointsFetched{ByPeer: lists},
+			effects: []Effect{ResolveConflict{
+				FilterType:  wire.GCSFilterRegular,
+				Checkpoints: lists,
+			}},
+			phase: PhaseResolvingConflict,
+		},
+		{
+			name:  "agreement binds the new tip",
+			event: ConflictResolved{Good: hashes{cp1, cp2}},
+			effects: []Effect{FetchCheckpointed{
+				FilterType:  wire.GCSFilterRegular,
+				Checkpoints: hashes{cp1, cp2},
+				TipHash:     newTip,
+				TipHeight:   height,
+			}},
+			phase: PhaseFetchingCheckpointed,
+		},
+	}
+	// failedBy returns the step that fails the round with event. Each
+	// subtest builds its own, as they run in parallel.
+	failedBy := func(event Event) []step {
+		failed := step{
+			name:    "round fails",
+			event:   event,
+			effects: []Effect{RetryAfter{testRetryDelay}},
+			phase:   PhaseRetrying,
+		}
+
+		return append([]step{failed}, afterFailure...)
+	}
+
+	t.Run("empty fetch", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSyncer()
+		runSteps(t, s, startedAtTip(height))
+
+		runSteps(t, s, failedBy(CheckpointsFetched{}))
+	})
+
+	t.Run("unresolved conflict", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSyncer()
+		runSteps(t, s, startedAtTip(height))
+		s.Handle(CheckpointsFetched{ByPeer: peerLists{
+			"a": {cp1, cp2}, "b": {cp1, cp3},
+		}})
+		require.Equal(t, PhaseResolvingConflict, s.Phase())
+
+		runSteps(t, s, failedBy(ConflictResolved{Err: errTest}))
+	})
+}
+
 // TestSyncerCheckpointedFetched covers each outcome of the checkpointed
 // fetch: the error retry, the loop back while headers are not synced, the
 // loop back while the filter tip still lags, and the move to the tip.
@@ -604,6 +728,8 @@ func TestSyncerCheckpointedFetched(t *testing.T) {
 				effects: []Effect{FetchCheckpointed{
 					FilterType:  wire.GCSFilterRegular,
 					Checkpoints: hashes{cp1},
+					TipHash:     tipHash,
+					TipHeight:   interval,
 				}},
 				phase: PhaseFetchingCheckpointed,
 			},
@@ -648,6 +774,10 @@ func TestSyncerCheckpointedFetched(t *testing.T) {
 			effects: []Effect{WaitForTips{WaitLagOrSynced}},
 			phase:   PhaseWaitingForHeaders,
 		}})
+
+		// The next pass's tip read drops the agreed checkpoints.
+		s.Handle(TipsChanged{})
+		s.Handle(tipRead(interval))
 		require.Nil(t, s.goodCheckpoints)
 	})
 
@@ -704,6 +834,8 @@ func TestSyncerAtTip(t *testing.T) {
 			event: tipRead(interval - 1),
 			effects: []Effect{FetchCheckpointed{
 				FilterType: wire.GCSFilterRegular,
+				TipHash:    tipHash,
+				TipHeight:  interval - 1,
 			}},
 			phase: PhaseFetchingCheckpointed,
 		},

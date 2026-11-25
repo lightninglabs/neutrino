@@ -1842,9 +1842,9 @@ func runCFHeaderLostWriteAck(t *testing.T, checkpointed, failTip bool) {
 		// Retry through the path under test: nothing is left to
 		// fetch, so it must still publish what is on disk.
 		if checkpointed {
-			require.NoError(t, bm.cfSync.getCheckpointedCFHeaders(
-				[]*chainhash.Hash{checkpoint}, store,
-				dstFilterType,
+			require.NoError(t, fetchCheckpointedAtTip(
+				bm.cfSync, []*chainhash.Hash{checkpoint},
+				store,
 			))
 		} else {
 			require.NoError(t, bm.cfSync.getUncheckpointedCFHeaders(

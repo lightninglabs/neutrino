@@ -5,6 +5,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightninglabs/neutrino/filtersync"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/require"
 )
@@ -32,8 +33,9 @@ func TestCheckpointedFetchRejectsShortCheckpoints(t *testing.T) {
 
 	// One checkpoint, while the store's tip is 870 intervals in.
 	checkpoints := []*chainhash.Hash{{}}
-	err := c.getCheckpointedCFHeaders(
-		checkpoints, store, wire.GCSFilterRegular,
-	)
+	err := c.getCheckpointedCFHeaders(filtersync.FetchCheckpointed{
+		FilterType:  wire.GCSFilterRegular,
+		Checkpoints: checkpoints,
+	}, store)
 	require.ErrorContains(t, err, "don't reach the filter header tip")
 }

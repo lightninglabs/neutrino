@@ -8,6 +8,7 @@ package neutrino
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -139,9 +140,7 @@ func (c *cfHeaderSync) runFilterSyncEffect(
 		return filtersync.ConflictResolved{Good: good, Err: err}
 
 	case filtersync.FetchCheckpointed:
-		err := c.getCheckpointedCFHeaders(
-			e.Checkpoints, store, e.FilterType,
-		)
+		err := c.getCheckpointedCFHeaders(e, store)
 		if err != nil {
 			return filtersync.CheckpointedFetched{Err: err}
 		}
@@ -239,19 +238,23 @@ func (c *cfHeaderSync) getUncheckpointedCFHeaders(
 		startHeight, fType, snapshot.StopHash, snapshot.StopHeight,
 	)
 
-	// Ban any peer that responds with the wrong prev filter header.
-	for peer, msg := range headers {
-		if msg.PrevFilterHeader != filterTip {
-			err := c.cfg.BanPeer(peer, banman.InvalidFilterHeader)
-			if err != nil {
-				log.Errorf(
-					"Unable to ban peer %v: %v",
-					peer,
-					err,
-				)
-			}
-			delete(headers, peer)
+	// Ban any peer that responds with the wrong prev filter header, as
+	// long as some other peer shows that our tip is right.
+	wrong, err := checkPrevFilterHeaders(headers, filterTip, filtHeight)
+	if errors.Is(err, errStoreDisagreesWithPeers) {
+		// The Syncer retries this quietly, so say it once here where
+		// the user will see it.
+		log.Warnf("Uncheckpointed cfheaders fetch: %v", err)
+	}
+	if err != nil {
+		return err
+	}
+	for _, peer := range wrong {
+		err := c.cfg.BanPeer(peer, banman.InvalidFilterHeader)
+		if err != nil {
+			log.Errorf("Unable to ban peer %v: %v", peer, err)
 		}
+		delete(headers, peer)
 	}
 
 	if len(headers) == 0 {
@@ -413,8 +416,17 @@ func (c *checkpointedCFHeadersQuery) handleResponse(req, resp wire.Message,
 // matches the checkpoints up to the tip of the store. A store or response
 // error is returned rather than panicking, since a transient SQL failure must
 // not crash the host process; the caller retries.
-func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
-	store headerfs.FilterHeaderStore, fType wire.FilterType) error {
+//
+// The checkpoints were served for the chain that ends at fetch.TipHash, and a
+// response that doesn't match them gets its peer banned. So every query must
+// stop at a block of that chain: if the tip was replaced, an honest peer
+// answers the queries for the new chain with headers that can't match, and
+// we'd ban it for that.
+func (c *cfHeaderSync) getCheckpointedCFHeaders(
+	fetch filtersync.FetchCheckpointed,
+	store headerfs.FilterHeaderStore) error {
+
+	checkpoints, fType := fetch.Checkpoints, fetch.FilterType
 
 	// We keep going until we've caught up the filter header store with the
 	// latest known checkpoint.
@@ -520,6 +532,15 @@ func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	batchesCount := len(queryMsgs)
 	if batchesCount == 0 {
 		_, err := c.submitCFHeaderReconciliation()
+		return err
+	}
+
+	// The stop hashes were read by height, so they're only on the chain
+	// the checkpoints were served for if the pass's tip is still at its
+	// height now that we've read them all. A reorg below the tip before
+	// or during the reads replaces it. This doesn't catch a reorg that
+	// is undone again before this read, which we accept.
+	if err := c.checkFetchTip(fetch); err != nil {
 		return err
 	}
 
@@ -743,6 +764,24 @@ func (c *cfHeaderSync) getCheckpointedCFHeaders(checkpoints []*chainhash.Hash,
 	return nil
 }
 
+// checkFetchTip returns an error if the block header tip a checkpointed fetch
+// was planned against is no longer in the block header store at its height.
+func (c *cfHeaderSync) checkFetchTip(fetch filtersync.FetchCheckpointed) error {
+	header, err := c.cfg.BlockHeaders.FetchHeaderByHeight(fetch.TipHeight)
+	if err != nil {
+		return fmt.Errorf("unable to read block header at height %d "+
+			"to check the checkpoints' tip: %w", fetch.TipHeight,
+			err)
+	}
+	if header.BlockHash() != fetch.TipHash {
+		return fmt.Errorf("block header tip %v at height %d the "+
+			"checkpoints were fetched for was replaced by %v",
+			fetch.TipHash, fetch.TipHeight, header.BlockHash())
+	}
+
+	return nil
+}
+
 // submitCFHeaderReconciliation asks the chain store actor to reconcile
 // publication and returns a filter query snapshot.
 func (c *cfHeaderSync) submitCFHeaderReconciliation() (
@@ -777,9 +816,26 @@ func (c *cfHeaderSync) submitCFHeaders(
 	return &hash, reply.Filter.FilterHeight, nil
 }
 
-// resolveConflict finds the correct checkpoint information, rewinds the header
-// store if it's incorrect, and bans any peers giving us incorrect header
-// information.
+// errStoreDisagreesWithPeers is returned when every peer serves the same
+// filter header, as a checkpoint or as the PrevFilterHeader of a cfheaders
+// reply, but the filter header store holds a different one at its height.
+var errStoreDisagreesWithPeers = errors.New("filter header store " +
+	"disagrees with every peer")
+
+// resolveConflict finds the correct checkpoint information and bans any peers
+// giving us incorrect header information. It never changes the store.
+//
+// If the peers all agree on a checkpoint that the store disagrees with, no
+// peer is at fault and no header query can settle it, so it returns
+// errStoreDisagreesWithPeers, and the Syncer retries in case a later set of
+// peers sides with the store. We don't rewind the store to the peers'
+// checkpoints: a filter header only reaches the store once it matched the
+// checkpoints or every peer at the time agreed on it, so a store that every
+// peer now disagrees with was fed by earlier peers that lied, or a record was
+// damaged on disk. A rewind would disconnect and reconnect every block above
+// the checkpoint on the word of the current peers alone, which would let an
+// eclipse attacker rewrite filter headers we already verified. The error says
+// how to recover by hand instead.
 func (c *cfHeaderSync) resolveConflict(
 	checkpoints map[string][]*chainhash.Hash,
 	store headerfs.FilterHeaderStore, fType wire.FilterType) (
@@ -839,6 +895,10 @@ func (c *cfHeaderSync) resolveConflict(
 		heightDiff,
 	)
 
+	if err := storeMismatch(checkpoints, heightDiff, store); err != nil {
+		return nil, err
+	}
+
 	// Delete any responses that have fewer checkpoints than where we see a
 	// mismatch.
 	for peer, checkpts := range checkpoints {
@@ -856,7 +916,12 @@ func (c *cfHeaderSync) resolveConflict(
 	// TODO(halseth): check if peer serves headers that matches its
 	// checkpoints
 	startHeight := uint32(heightDiff) * wire.CFCheckptInterval
-	headers, numHeaders := c.getCFHeadersForAllPeers(startHeight, fType)
+	headers, numHeaders, err := c.getCFHeadersForAllPeers(
+		startHeight, fType,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Make sure we're working off the same baseline. Otherwise, we want to
 	// go back and get checkpoints again.
@@ -905,9 +970,109 @@ func (c *cfHeaderSync) resolveConflict(
 		}
 	}
 
+	// The peers left may now all agree, with each other but not with the
+	// store.
+	if err := storeMismatch(checkpoints, heightDiff, store); err != nil {
+		return nil, err
+	}
+
 	// Otherwise, return an error and allow the loop which calls this
 	// function to call it again with the new set of peers.
 	return nil, fmt.Errorf("got mismatched checkpoints")
+}
+
+// storeMismatch returns errStoreDisagreesWithPeers if every list that reaches
+// index idx holds the same checkpoint there. CheckCFCheckptSanity reports the
+// first index where the peers differ from each other or from the store, so
+// when they agree with each other at idx, it's the store that differs.
+func storeMismatch(checkpoints map[string][]*chainhash.Hash, idx int,
+	store headerfs.FilterHeaderStore) error {
+
+	var agreed *chainhash.Hash
+	for _, cps := range checkpoints {
+		if idx >= len(cps) {
+			continue
+		}
+		if agreed == nil {
+			agreed = cps[idx]
+			continue
+		}
+		if *agreed != *cps[idx] {
+			return nil
+		}
+	}
+	if agreed == nil {
+		return nil
+	}
+
+	height := uint32(idx+1) * wire.CFCheckptInterval
+	stored, err := store.FetchHeaderByHeight(height)
+	if err != nil {
+		return err
+	}
+
+	return storeMismatchErr(*stored, height, *agreed, len(checkpoints))
+}
+
+// storeMismatchErr returns errStoreDisagreesWithPeers for a store that holds
+// stored at height, where every one of the peers that answered serves served.
+func storeMismatchErr(stored chainhash.Hash, height uint32,
+	served chainhash.Hash, peers int) error {
+
+	return fmt.Errorf("%w: the store holds %v at height %d, while %d "+
+		"peers serve %v. If this persists with other peers, the "+
+		"filter headers were written from peers that lied or were "+
+		"damaged on disk: remove the filter header store to sync it "+
+		"again", errStoreDisagreesWithPeers, stored, height, peers,
+		served)
+}
+
+// checkPrevFilterHeaders decides what a set of cfheaders replies that start
+// right above our filter tip says about the peers. A reply whose
+// PrevFilterHeader isn't our tip only proves the peer wrong if some other peer
+// agrees with our tip. If none does, the evidence is against our store, not
+// against any peer, so we blame nobody: when two or more replies all agree
+// with each other, we return errStoreDisagreesWithPeers, as resolveConflict
+// does for checkpoints, and otherwise a plain error so the caller retries. A
+// single reply is not enough to tell the user to remove their store. It
+// returns the peers to ban, which is empty unless some peer agrees with our
+// tip.
+func checkPrevFilterHeaders(headers map[string]*wire.MsgCFHeaders,
+	filterTip chainhash.Hash, filterHeight uint32) ([]string, error) {
+
+	var (
+		wrong  []string
+		agreed bool
+	)
+	for peer, msg := range headers {
+		if msg.PrevFilterHeader == filterTip {
+			agreed = true
+			continue
+		}
+		wrong = append(wrong, peer)
+	}
+	if agreed || len(wrong) == 0 {
+		return wrong, nil
+	}
+
+	if len(wrong) == 1 {
+		return nil, fmt.Errorf("the only peer that answered doesn't "+
+			"agree with filter tip %v at height %d", filterTip,
+			filterHeight)
+	}
+
+	served := headers[wrong[0]].PrevFilterHeader
+	for _, peer := range wrong[1:] {
+		if headers[peer].PrevFilterHeader != served {
+			return nil, fmt.Errorf("no peer agrees with filter "+
+				"tip %v at height %d, and the peers disagree "+
+				"with each other", filterTip, filterHeight)
+		}
+	}
+
+	return nil, storeMismatchErr(
+		filterTip, filterHeight, served, len(wrong),
+	)
 }
 
 // resolveCFHeaderMismatches removes conflicting peers before advancing to the
@@ -1102,23 +1267,33 @@ func (c *cfHeaderSync) detectBadPeers(headers map[string]*wire.MsgCFHeaders,
 
 // getCFHeadersForAllPeers runs a query for cfheaders at a specific height and
 // returns a map of responses from all peers. The second return value is the
-// number for cfheaders in each response.
+// number for cfheaders in each response. A local failure to plan the query
+// is returned as an error, so the caller can't take it for peers that didn't
+// answer.
 func (c *cfHeaderSync) getCFHeadersForAllPeers(height uint32,
-	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int) {
+	fType wire.FilterType) (map[string]*wire.MsgCFHeaders, int, error) {
 
 	// Get the header we expect at either the tip of the block header store
 	// or at the end of the maximum-size response message, whichever is
 	// larger.
 	stopHeader, stopHeight, err := c.cfg.BlockHeaders.ChainTip()
 	if err != nil {
-		return nil, 0
+		return nil, 0, err
+	}
+
+	// A reorg can take the block tip below the height the checkpoints
+	// disagree at, and there's nothing to query until we catch up again.
+	if stopHeight < height {
+		return nil, 0, fmt.Errorf("block header tip at height %d is "+
+			"below the cfheaders query at height %d", stopHeight,
+			height)
 	}
 	if stopHeight-height >= wire.MaxCFHeadersPerMsg {
 		stopHeader, err = c.cfg.BlockHeaders.FetchHeaderByHeight(
 			height + wire.MaxCFHeadersPerMsg - 1,
 		)
 		if err != nil {
-			return nil, 0
+			return nil, 0, err
 		}
 
 		// We'll make sure we also update our stopHeight so we know how
@@ -1126,9 +1301,11 @@ func (c *cfHeaderSync) getCFHeadersForAllPeers(height uint32,
 		stopHeight = height + wire.MaxCFHeadersPerMsg - 1
 	}
 
-	return c.getCFHeadersForAllPeersAt(
+	headers, numHeaders := c.getCFHeadersForAllPeersAt(
 		height, fType, stopHeader.BlockHash(), stopHeight,
 	)
+
+	return headers, numHeaders, nil
 }
 
 // getCFHeadersForAllPeersAt queries an already selected stop block.
