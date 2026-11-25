@@ -52,8 +52,7 @@ func TestStartupRepairAfterTornWrites(t *testing.T) {
 func testStartupRepairAfterTornWrites(t *testing.T, rt *rapid.T,
 	template string) {
 
-	dataDir, err := os.MkdirTemp(t.TempDir(), "repair")
-	require.NoError(rt, err)
+	dataDir := t.TempDir()
 	require.NoError(rt, os.CopyFS(dataDir, os.DirFS(template)))
 	db, err := walletdb.Open(
 		"bdb", filepath.Join(dataDir, sqldb.DefaultLegacyBoltFilename),
