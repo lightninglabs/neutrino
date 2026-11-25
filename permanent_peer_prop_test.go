@@ -41,13 +41,17 @@ type peerModel struct {
 
 	permanent map[string]bool
 
-	// oneOffs counts the one-off connections made to each address.
-	oneOffs map[string]int
+	// oneOffs counts the one-off connections made to each address, and
+	// removals the permanent peers removed from it.
+	oneOffs  map[string]int
+	removals map[string]int
 
 	// baseline is an address's dial count when it last stopped being a
 	// permanent peer, and budget is the dials it may see after that:
-	// one already under way when it was removed, and one for each
-	// one-off connection to it.
+	// one for each removal, which may have had a dial under way that
+	// lands later, and one for each one-off connection to it. A request
+	// left behind keeps retrying, which this and the end of the test
+	// see.
 	baseline map[string]int
 	budget   map[string]int
 
@@ -66,11 +70,37 @@ type peerQuarantineSpan struct {
 // handed to the peer handler without waiting.
 const quarantineSettle = 3 * testRetryInterval
 
+// mayBeQuarantined returns whether a quarantine of addr may be refusing its
+// dials now.
+func (m *peerModel) mayBeQuarantined(addr string) bool {
+	now := time.Now()
+	for _, q := range m.quarantines {
+		if q.addr == addr && now.Before(q.end.Add(quarantineSettle)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// lastQuarantineEnd returns when the last quarantine ends.
+func (m *peerModel) lastQuarantineEnd() time.Time {
+	var last time.Time
+	for _, q := range m.quarantines {
+		if q.end.After(last) {
+			last = q.end
+		}
+	}
+
+	return last
+}
+
 // leave records that addr is no longer a permanent peer.
 func (m *peerModel) leave(addr string) {
 	m.permanent[addr] = false
+	m.removals[addr]++
 	m.baseline[addr] = m.n.dialCount(addr)
-	m.budget[addr] = 1 + m.oneOffs[addr]
+	m.budget[addr] = m.removals[addr] + m.oneOffs[addr]
 }
 
 // check verifies the invariants that hold at every step: no address that
@@ -130,6 +160,7 @@ func TestPermanentPeerProperties(t *testing.T) {
 			n:         n,
 			permanent: map[string]bool{testPeerAddr: true},
 			oneOffs:   make(map[string]int),
+			removals:  make(map[string]int),
 			baseline:  make(map[string]int),
 			budget:    make(map[string]int),
 		}
@@ -161,15 +192,28 @@ func TestPermanentPeerProperties(t *testing.T) {
 
 			"connectOneOff": func(t *rapid.T) {
 				a := drawForm(t)
+				dials := n.dialCount(a.resolved)
 				err := s.ConnectNode(a.form, false)
 				if m.permanent[a.resolved] {
 					require.Error(t, err)
 					return
 				}
-				if err == nil {
-					m.oneOffs[a.resolved]++
-					m.budget[a.resolved]++
+				if err != nil {
+					return
 				}
+				m.oneOffs[a.resolved]++
+				m.budget[a.resolved]++
+
+				// The one-off connection is dialed once, so we
+				// wait for its dial rather than have it land
+				// in a later step. A quarantine may refuse the
+				// dial instead.
+				if m.mayBeQuarantined(a.resolved) {
+					return
+				}
+				require.Eventually(t, func() bool {
+					return n.dialCount(a.resolved) > dials
+				}, 10*time.Second, time.Millisecond)
 			},
 
 			"removeByAddr": func(t *rapid.T) {
@@ -287,8 +331,12 @@ func TestPermanentPeerProperties(t *testing.T) {
 
 			return true
 		}, 20*time.Second, 5*time.Millisecond)
-		// A one-off dial from the last steps may still be landing,
-		// so we wait for the dials to settle before we look.
+		// A quarantine refuses a dial only while it lasts, so we wait
+		// for the last to end, and then for the dials of the last
+		// steps to settle, before we look.
+		time.Sleep(time.Until(m.lastQuarantineEnd().Add(
+			quarantineSettle,
+		)))
 		totalDials := func() int {
 			total := 0
 			for _, addr := range peerAddrs {
