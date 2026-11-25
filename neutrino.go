@@ -120,7 +120,6 @@ type updatePeerHeightsMsg struct {
 type peerState struct {
 	outboundPeers   map[int32]*ServerPeer
 	persistentPeers map[int32]*ServerPeer
-	outboundGroups  map[string]int
 
 	// peers holds every peer we have a connection to, from the moment
 	// the connection is made until the peer is done, so it includes
@@ -140,7 +139,6 @@ func newPeerState() *peerState {
 	return &peerState{
 		persistentPeers: make(map[int32]*ServerPeer),
 		outboundPeers:   make(map[int32]*ServerPeer),
-		outboundGroups:  make(map[string]int),
 		peers:           make(map[peerKey]*ServerPeer),
 		permanent:       make(map[peerKey]*permanentReq),
 	}
@@ -173,6 +171,7 @@ var errPeerRemoved = errors.New("permanent peer removed")
 var (
 	errPeerBanned      = errors.New("peer is banned")
 	errPeerQuarantined = errors.New("peer is quarantined")
+	errGroupTaken      = errors.New("outbound group already taken")
 )
 
 // permanentReq is the connection request of a permanent peer. It is also the
@@ -1115,7 +1114,14 @@ func NewChainService(cfg Config) (*ChainService, error) {
 
 				// Mark an attempt for the valid address.
 				s.addrManager.Attempt(addr.NetAddress())
-				return s.addrStringToNetAddr(addrString)
+				netAddr, err := s.addrStringToNetAddr(
+					addrString,
+				)
+				if err != nil {
+					return nil, err
+				}
+
+				return &discoveredAddr{Addr: netAddr}, nil
 			}
 
 			return nil, errors.New("no valid connect address")
@@ -1707,7 +1713,6 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *ServerPeer) bool {
 
 	// Add the new peer and start it.
 	log.Debugf("New peer %s", sp)
-	state.outboundGroups[addrmgr.GroupKey(sp.NA())]++
 	if sp.persistent {
 		state.persistentPeers[sp.ID()] = sp
 	} else {
@@ -1858,7 +1863,6 @@ func dropPeer(state *peerState, sp *ServerPeer) {
 		list = state.persistentPeers
 	}
 	if _, ok := list[sp.ID()]; ok {
-		state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
 		delete(list, sp.ID())
 
 		log.Debugf("Removed peer %s", sp)
@@ -2023,14 +2027,34 @@ func (s *ChainService) dialPeer(
 			return nil, errPeerQuarantined
 		}
 
-		return s.conns.track(dial(addr))
+		// A peer we found ourselves isn't dialed while we have a
+		// dial or a peer in its group. The address was picked for
+		// an empty group, but another dial may have taken the group
+		// since.
+		discovered, only := addr.(*discoveredAddr)
+		if only {
+			addr = discovered.Addr
+		}
+		group := s.groupOf(addr)
+		if !s.conns.startDial(group, only) {
+			return nil, errGroupTaken
+		}
+
+		conn, err := dial(addr)
+
+		return s.conns.track(group, conn, err)
 	}
 }
 
-// connSet holds open connections, so they can all be closed at once.
+// connSet holds open connections, so they can all be closed at once. It
+// also counts, for each outbound group, the dials in flight and the open
+// connections they made, from the start of the dial until the connection is
+// closed, so a dial and a peer in its handshake count as much as a
+// connected peer.
 type connSet struct {
 	mtx    sync.Mutex
 	conns  map[*setConn]struct{}
+	groups map[string]int
 	closed bool
 }
 
@@ -2038,40 +2062,73 @@ type connSet struct {
 // closed.
 type setConn struct {
 	net.Conn
-	set *connSet
+	set   *connSet
+	group string
 }
 
 // Close closes the connection and takes it out of its set.
 func (c *setConn) Close() error {
 	c.set.mtx.Lock()
-	delete(c.set.conns, c)
+	if _, ok := c.set.conns[c]; ok {
+		delete(c.set.conns, c)
+		c.set.groups[c.group]--
+	}
 	c.set.mtx.Unlock()
 
 	return c.Conn.Close()
 }
 
-// track adds the result of a dial to the set. A connection made once the set
-// has been closed is closed right away.
-func (cs *connSet) track(conn net.Conn, err error) (net.Conn, error) {
-	if err != nil {
-		return nil, err
+// startDial counts a dial to the group, unless only is set and the group
+// has a dial or a connection already, in which case it returns false.
+func (cs *connSet) startDial(group string, only bool) bool {
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	if only && cs.groups[group] != 0 {
+		return false
 	}
+
+	if cs.groups == nil {
+		cs.groups = make(map[string]int)
+	}
+	cs.groups[group]++
+
+	return true
+}
+
+// track adds the result of a dial to the group, counted by startDial, to
+// the set. A failed dial is no longer counted, and a connection made once
+// the set has been closed is closed right away.
+func (cs *connSet) track(group string, conn net.Conn,
+	err error) (net.Conn, error) {
 
 	cs.mtx.Lock()
 	defer cs.mtx.Unlock()
 
-	if cs.closed {
+	if err == nil && cs.closed {
 		_ = conn.Close()
-		return nil, ErrShuttingDown
+		err = ErrShuttingDown
+	}
+	if err != nil {
+		cs.groups[group]--
+		return nil, err
 	}
 
 	if cs.conns == nil {
 		cs.conns = make(map[*setConn]struct{})
 	}
-	c := &setConn{Conn: conn, set: cs}
+	c := &setConn{Conn: conn, set: cs, group: group}
 	cs.conns[c] = struct{}{}
 
 	return c, nil
+}
+
+// groupCount returns the number of dials and connections to the group.
+func (cs *connSet) groupCount(group string) int {
+	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
+
+	return cs.groups[group]
 }
 
 // closeAll closes every connection in the set, and any added later.
@@ -2085,6 +2142,32 @@ func (cs *connSet) closeAll() {
 	for c := range conns {
 		_ = c.Conn.Close()
 	}
+}
+
+// groupOf returns the outbound group of a resolved address.
+func (s *ChainService) groupOf(addr net.Addr) string {
+	host, portStr, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return addr.String()
+	}
+
+	na, err := s.addrManager.HostToNetAddress(host, uint16(port), 0)
+	if err != nil {
+		return addr.String()
+	}
+
+	return addrmgr.GroupKey(na)
+}
+
+// discoveredAddr is the address of a peer we found ourselves, rather than
+// one we were asked to connect to. We keep to one of those per outbound
+// group.
+type discoveredAddr struct {
+	net.Addr
 }
 
 // peerDoneHandler handles peer disconnects by notifying the server that it's

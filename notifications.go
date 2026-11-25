@@ -36,11 +36,6 @@ type getPeersMsg struct {
 	reply chan []*ServerPeer
 }
 
-type getOutboundGroup struct {
-	key   string
-	reply chan int
-}
-
 type getAddedNodesMsg struct {
 	reply chan []*ServerPeer
 }
@@ -160,14 +155,6 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 	case peerConnectedMsg:
 		s.handlePeerConnected(state, msg.req, msg.conn)
-
-	case getOutboundGroup:
-		count, ok := state.outboundGroups[msg.key]
-		if ok {
-			msg.reply <- count
-		} else {
-			msg.reply <- 0
-		}
 
 	// Request a list of the persistent (added) peers.
 	case getAddedNodesMsg:
@@ -328,17 +315,11 @@ func (s *ChainService) ConnectedPeers() (<-chan querysyncwm.Peer, func(),
 	}
 }
 
-// OutboundGroupCount returns the number of peers connected to the given
-// outbound group key.
+// OutboundGroupCount returns the number of peers in the given outbound group
+// key, counting a peer from the start of its dial until its connection is
+// closed.
 func (s *ChainService) OutboundGroupCount(key string) int {
-	replyChan := make(chan int)
-
-	select {
-	case s.query <- getOutboundGroup{key: key, reply: replyChan}:
-		return <-replyChan
-	case <-s.quit:
-		return 0
-	}
+	return s.conns.groupCount(key)
 }
 
 // AddedNodeInfo returns an array of btcjson.GetAddedNodeInfoResult structures
