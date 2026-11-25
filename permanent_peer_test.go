@@ -358,16 +358,12 @@ func TestPermanentPeerWaitsOutBan(t *testing.T) {
 	// second early, and lasts at least two seconds here.
 	const length = 3 * time.Second
 
-	tests := map[string]func(s *ChainService) error{
-		"banned": func(s *ChainService) error {
-			return s.BanPeer(testPeerAddr, banman.NoCompactFilters)
-		},
-		"quarantined": func(s *ChainService) error {
-			s.QuarantinePeer(testPeerAddr, length)
-			return nil
-		},
+	// Each case either bans the peer or quarantines it.
+	tests := map[string]bool{
+		"banned":      true,
+		"quarantined": false,
 	}
-	for name, exclude := range tests {
+	for name, ban := range tests {
 		t.Run(name, func(t *testing.T) {
 			oldBan := BanDuration
 			BanDuration = length
@@ -378,7 +374,14 @@ func TestPermanentPeerWaitsOutBan(t *testing.T) {
 			s := newTestService(t, n)
 			sp := waitForPeer(t, s, testPeerAddr)
 
-			require.NoError(t, exclude(s))
+			if ban {
+				err := s.BanPeer(
+					testPeerAddr, banman.NoCompactFilters,
+				)
+				require.NoError(t, err)
+			} else {
+				s.QuarantinePeer(testPeerAddr, length)
+			}
 			require.Eventually(t, func() bool {
 				return !sp.Connected()
 			}, 5*time.Second, time.Millisecond)
