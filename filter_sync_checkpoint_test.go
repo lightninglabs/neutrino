@@ -425,8 +425,8 @@ func testUncheckpointedFetchWrongStoreTip(t *testing.T, storeWrong bool) {
 // TestCheckPrevFilterHeadersBlamesOnEvidence checks, for any set of replies,
 // that a peer is only blamed for its PrevFilterHeader when another peer
 // agrees with our filter tip, that a peer agreeing with our tip is never
-// blamed, and that replies which all agree with each other but not with our
-// tip report the store.
+// blamed, and that two or more replies which all agree with each other but
+// not with our tip report the store.
 func TestCheckPrevFilterHeadersBlamesOnEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -460,12 +460,13 @@ func TestCheckPrevFilterHeadersBlamesOnEvidence(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, wrong, numPeers-agreeing)
 
-		case len(served) == 1:
+		case len(served) == 1 && numPeers > 1:
 			require.ErrorIs(t, err, errStoreDisagreesWithPeers)
 			require.Empty(t, wrong)
 
 		default:
 			require.Error(t, err)
+			require.NotErrorIs(t, err, errStoreDisagreesWithPeers)
 			require.Empty(t, wrong)
 		}
 	})

@@ -241,6 +241,11 @@ func (c *cfHeaderSync) getUncheckpointedCFHeaders(
 	// Ban any peer that responds with the wrong prev filter header, as
 	// long as some other peer shows that our tip is right.
 	wrong, err := checkPrevFilterHeaders(headers, filterTip, filtHeight)
+	if errors.Is(err, errStoreDisagreesWithPeers) {
+		// The Syncer retries this quietly, so say it once here where
+		// the user will see it.
+		log.Warnf("Uncheckpointed cfheaders fetch: %v", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -1026,10 +1031,12 @@ func storeMismatchErr(stored chainhash.Hash, height uint32,
 // right above our filter tip says about the peers. A reply whose
 // PrevFilterHeader isn't our tip only proves the peer wrong if some other peer
 // agrees with our tip. If none does, the evidence is against our store, not
-// against any peer, so we blame nobody: when the replies all agree with each
-// other, we return errStoreDisagreesWithPeers, as resolveConflict does for
-// checkpoints, and otherwise a plain error so the caller retries. It returns
-// the peers to ban, which is empty unless some peer agrees with our tip.
+// against any peer, so we blame nobody: when two or more replies all agree
+// with each other, we return errStoreDisagreesWithPeers, as resolveConflict
+// does for checkpoints, and otherwise a plain error so the caller retries. A
+// single reply is not enough to tell the user to remove their store. It
+// returns the peers to ban, which is empty unless some peer agrees with our
+// tip.
 func checkPrevFilterHeaders(headers map[string]*wire.MsgCFHeaders,
 	filterTip chainhash.Hash, filterHeight uint32) ([]string, error) {
 
@@ -1046,6 +1053,12 @@ func checkPrevFilterHeaders(headers map[string]*wire.MsgCFHeaders,
 	}
 	if agreed || len(wrong) == 0 {
 		return wrong, nil
+	}
+
+	if len(wrong) == 1 {
+		return nil, fmt.Errorf("the only peer that answered doesn't "+
+			"agree with filter tip %v at height %d", filterTip,
+			filterHeight)
 	}
 
 	served := headers[wrong[0]].PrevFilterHeader
