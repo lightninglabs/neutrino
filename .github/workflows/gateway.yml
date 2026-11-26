@@ -46,12 +46,12 @@ jobs:
     env:
       GATEWAY_REVIEW_MODE: multi
     steps:
-      - uses: lightninglabs/gateway-action@a590b9838c3ba7f8a75bb137c857c4167f1690d0 # v0.7.1
+      - uses: lightninglabs/gateway-action@254f0cbd39bcf5fe7ef29120267f7e33a3f0db9b # v0.7.2
         with:
           # Pin the private runtime to an immutable commit (matches the action
           # SHA-pin above) so runtime upgrades go through a neutrino PR, not a
-          # moved tag. Without this, runtime_ref defaults to the v0.7.1 tag.
-          runtime_ref: 2c05e707a656864136fd38c83a9924f890dca529 # v0.7.1
+          # moved tag. Without this, runtime_ref defaults to the v0.7.2 tag.
+          runtime_ref: abe5c3a2149a1be17f141989b5bb0833857145e3 # gateway v0.7.2
           event_name:      ${{ github.event_name }}
           event_action:    ${{ github.event.action }}
           repo:            ${{ github.repository }}
